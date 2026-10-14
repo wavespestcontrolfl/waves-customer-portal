@@ -42,6 +42,27 @@ module.exports = {
   queue_for_adam:     { sideEffects: true, reason: 'inserts lead_agent_responses queue rows' },
   save_lead_response_report: { sideEffects: true, reason: 'inserts lead_agent_responses report rows (write path swallowed its own failure during smoke)' },
 
+  // delete_duplicate_customer's own queries live in
+  // services/duplicate-customer-delete.js and customer-empty-loser.js, not the
+  // registered customer-lifecycle-tools.js source; the readers they call are
+  // customer-dedupe.js's (duplicateWinnerFor, loserAutoBlockers,
+  // previewMergeEffects, nonFkMergeRewrites). Archive only: the commit is the
+  // customer page's delete handler. Smoke runs only the unconfirmed preview
+  // (two-step), which writes nothing.
+  delete_duplicate_customer: {
+    tables: ['customers', 'customer_properties', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews', 'customer_merge_journal', 'customer_duplicate_dismissals'],
+    columns: {
+      customers: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at', 'created_at', 'updated_at', 'account_id', 'is_primary_profile', 'referred_by_customer_id'],
+      customer_properties: ['customer_id', 'is_primary'],
+      customer_plan_rates: ['customer_id'],
+      field_credit_allocations: ['customer_id'],
+      customer_geocode_reviews: ['customer_id'],
+      customer_merge_journal: ['winner_customer_id', 'loser_customer_id'],
+      customer_duplicate_dismissals: ['customer_id_a', 'customer_id_b'],
+    },
+    reason: 'queries live in services/duplicate-customer-delete.js and customer-empty-loser.js, outside the registered tool module',
+  },
+
   // The tool's queries live in estimate-detail.js rather than the
   // registered estimate-tools.js source path. Cover its row, provenance,
   // membership, acceptance, and composer dependencies here.

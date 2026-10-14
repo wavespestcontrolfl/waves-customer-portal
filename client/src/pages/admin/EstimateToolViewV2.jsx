@@ -47,6 +47,19 @@ import {
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
+import AreaAddOnsGroup, { PerApplicationPrice } from "../../components/admin/AreaAddOnsGroup";
+import { isFootprintFreeSelection } from "../../lib/estimate-footprint";
+import {
+  areaAddOnOption,
+  pickedGrass,
+  areaAddOnRowLabel,
+  buildKnownAreas,
+  countAreaAddOns,
+  readAreaAddOnCatalog,
+  savedAreaAddOnVisit,
+  recurringDiscountApplies,
+  savedAreaAddOns,
+} from "../../lib/areaAddOns";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -54,6 +67,15 @@ import { computeProvisionalState, provisionalSummary } from "../../utils/estimat
 
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+
+// The grass list the screen offers (the Dethatching select adds "Unknown -
+// review"; a grass-bound area add-on row takes this list as it stands).
+const GRASS_CHOICES = [
+  { value: "st_augustine", label: "St. Augustine / Floratam" },
+  { value: "bermuda", label: "Bermuda" },
+  { value: "zoysia", label: "Zoysia" },
+  { value: "bahia", label: "Bahia" },
+];
 
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
@@ -734,6 +756,9 @@ const PROPERTY_FORM_FIELDS = [
   "trenchingConcretePct", "trenchingEstimateFromFootprint", "trenchingLabelConfirmed",
   "boracareSurfaceHeightFt", "preslabSqft", "preslabLabelConfirmed", "plugArea",
   "topDressArea", "fleaExteriorAreaSqFt", "fleaExteriorAreaSource", "fleaExteriorZones",
+  // Area add-on tiers follow the property's measurements, so they clear with it,
+  // and so does the one visit choice for the group.
+  "areaAddOns", "areaAddOnVisit",
   "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
   "palmNonstandardProduct", "_termiteFootprintAuto", "_suiteSizedLookup", "_suiteStoriesVerified", "_trenchingPerimeterAuto",
   "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",
@@ -1483,6 +1508,10 @@ export default function EstimateToolViewV2({
     plugArea: "",
     plugSpacing: "12",
     topDressArea: "",
+    // Area add-on treatments (GATE_AREA_ADDONS): key -> { areaSqFt, larger, grassType? },
+    // and the ONE visit for the whole group ("standalone" | "sameTripAddOn").
+    areaAddOns: {},
+    areaAddOnVisit: "standalone",
     dethatchingCleanupLevel: "none",
     dethatchingDebrisRemovalIncluded: false,
     dethatchingAccess: "easy",
@@ -1825,7 +1854,12 @@ export default function EstimateToolViewV2({
       "svcRodentGuarantee",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
+    // The host a same-visit add-on rides is a priced ONE-TIME service (the one-time accept books the add-ons; a recurring plan
+    // cannot host them yet). The rodent guarantee is a payment rider, not a visit.
+    const hasOneTimeHost = onetimeKeys.some((k) => k !== "svcRodentGuarantee" && form[k]);
+    const hasBaseService = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
+    const addOnCount = countAreaAddOns(form.areaAddOns);
+    const anySelected = hasBaseService || addOnCount > 0;
 
     return {
       recurringCount,
@@ -1837,9 +1871,13 @@ export default function EstimateToolViewV2({
       // recurringCount alone.
       totalRecurringCount: recurringCount + commercialAutoPricedCount + separateRecurringCount + commercialManualQuoteCount,
       commercialManualQuoteCount,
-      onetimeCount,
+      onetimeCount: onetimeCount + addOnCount,
       tier,
       anySelected,
+      // Any selection other than an add-on.
+      hasBaseService,
+      // A one-time service: the only host a same-visit add-on can ride.
+      hasOneTimeHost,
     };
   }, [form, rodentWaveguardPosture]);
 
@@ -1972,6 +2010,9 @@ export default function EstimateToolViewV2({
           // and the revise PUT sends form.notes back verbatim; seeding ""
           // would erase them on a service-only edit.
           notes: d.notes || "",
+          // The saved form snapshot, else the add-on list the stored request carried.
+          areaAddOns: savedAreaAddOns(d),
+          areaAddOnVisit: savedAreaAddOnVisit(d),
         };
   }
 
@@ -3178,6 +3219,9 @@ export default function EstimateToolViewV2({
   // failure / older server all keep the option hidden rather than offering
   // a control the engine would reject with a 400.
   const [bermudaSuppressionAvailable, setBermudaSuppressionAvailable] = useState(false);
+  // Area add-on catalog + availability, read from the same lawn_pricing_v2 row.
+  // Fail closed: enabled false (or a missing field) hides the whole group.
+  const [areaAddOnCatalog, setAreaAddOnCatalog] = useState({ enabled: false, items: [] });
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
   // reopened estimate that already carries bahia still shows it.
@@ -3192,6 +3236,7 @@ export default function EstimateToolViewV2({
         const row = await r.json();
         if (active) {
           setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+          setAreaAddOnCatalog(readAreaAddOnCatalog(row));
           setBahiaOffered(row?.subFeaturesAvailable?.bahiaOffered !== false);
           // Same row carries tier sellability (6x hidden 2026-09-24); a DB
           // re-enable must reach this estimator on a direct load too.
@@ -4025,6 +4070,8 @@ export default function EstimateToolViewV2({
         // The matched account — the server derives its canonical qualifying
         // families for tier + rodent setup waiver (codex #3591 r16 P1).
         existingCustomerId: existingCustomerMatch?.id || form.customerId || null,
+        // The treated property: the add-ons' yearly limits read this property's history (null = the customer's only property).
+        propertyId: form.propertyId || null,
         // The quoted address + group anchor let the server scope the TIER
         // list per property (grouped / non-primary street) while the rodent
         // setup waiver stays account-wide — the same signals the save body
@@ -4067,6 +4114,10 @@ export default function EstimateToolViewV2({
         plugArea: parseInt(form.plugArea, 10) || 0,
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
         topDressArea: Math.max(0, Math.round(Number(form.topDressArea) || 0)),
+        // Area add-ons: omitted when nothing is selected. A selection is always
+        // forwarded, like the Bermuda option, so a gate turned off mid-session
+        // is refused loudly by the server rather than dropped here.
+        ...areaAddOnOption(form.areaAddOns, areaAddOnCatalog, form.areaAddOnVisit),
         dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
         dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
         dethatchingAccess: form.dethatchingAccess || "easy",
@@ -4327,19 +4378,9 @@ export default function EstimateToolViewV2({
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
-      const bedBugOnly =
-        selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
-      const preSlabOnly =
-        selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
-      // Bora-Care is priced from attic/raw-wood sqft or surface linear ft, not
-      // the home/lot footprint, so a Bora-Care-only quote must not be gated on it.
-      const boraCareOnly =
-        selectedServices.length === 1 && selectedServices[0] === "BORACARE";
-      // Recurring foam is priced from drill points + cadence, not home/lot size,
-      // so an operator can quote it before a property lookup (or with no sqft).
-      const foamRecurringOnly =
-        selectedServices.length === 1 && selectedServices[0] === "FOAM_RECURRING";
-      if (!bedBugOnly && !preSlabOnly && !boraCareOnly && !foamRecurringOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      // Quotes priced without the home/lot footprint need no property data, so an
+      // operator can quote them before a property lookup (lib/estimate-footprint.js).
+      if (!isFootprintFreeSelection(selectedServices, form.areaAddOns) && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -4918,6 +4959,17 @@ export default function EstimateToolViewV2({
     confirmedTurfSqFt !== null ? "Confirmed" :
     aiTurfSqFt > 0 ? "Using AI" :
     lotEstimateTurfSqFt > 0 ? "Lot estimate" : "No estimate";
+  // What the area add-ons pre-fill from: the Bed Area box, and the same
+  // Treatable Lawn Area the lawn services price on.
+  const areaAddOnKnownAreas = buildKnownAreas({
+    bedSqFt: form.bedArea,
+    manualFields: form._manualFields,
+    lawnSqFt: effectiveTurfSqFt,
+    turfSource: turfDisplaySource,
+  });
+  // A grass the rep chose on this screen (the form records every field the rep
+  // edits); the untouched default grass never starts an add-on row.
+  const pickedGrassForAddOns = pickedGrass(form, GRASS_CHOICES);
   const isDethatchingStAugustine = String(form.grassType || "")
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "")
@@ -6778,13 +6830,7 @@ export default function EstimateToolViewV2({
                     <Field label="Grass Type / Track" id="estimate-grassType" className="mb-4">
                       <SelectV2
                         k="grassType"
-                        options={[
-                          { value: "st_augustine", label: "St. Augustine / Floratam" },
-                          { value: "bermuda", label: "Bermuda" },
-                          { value: "zoysia", label: "Zoysia" },
-                          { value: "bahia", label: "Bahia" },
-                          { value: "unknown", label: "Unknown - review" },
-                        ]}
+                        options={[...GRASS_CHOICES, { value: "unknown", label: "Unknown - review" }]}
                       />
                     </Field>
                     <Field label="Cleanup Level" id="estimate-dethatchingCleanupLevel" className="mb-4">
@@ -6857,6 +6903,17 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
+              <AreaAddOnsGroup
+                catalog={areaAddOnCatalog}
+                value={form.areaAddOns}
+                onChange={(next) => set("areaAddOns", next)}
+                visit={form.areaAddOnVisit}
+                onVisitChange={(next) => set("areaAddOnVisit", next)}
+                knownAreas={areaAddOnKnownAreas}
+                grassChoices={GRASS_CHOICES}
+                pickedGrass={pickedGrassForAddOns}
+                oneTimeHostSelected={livePreview.hasOneTimeHost}
+              />
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
               <CheckboxV2 k="svcWdo" label="WDO Inspection Service" />{" "}
               <CheckboxV2 k="svcTrenching" label="Termite Trenching Service" />{" "}
@@ -8802,7 +8859,7 @@ export default function EstimateToolViewV2({
                               <SectionTitle>
                                 {displayName}
                                 {E.isRecurringCustomer &&
-                                  !item.noRecurringDiscount && (
+                                  recurringDiscountApplies(item) && (
                                     <DiscBadge>-15%</DiscBadge>
                                   )}
                               </SectionTitle>{" "}
@@ -8824,10 +8881,10 @@ export default function EstimateToolViewV2({
                                           ? "Initial"
                                           : item.name === "Trapping"
                                             ? "Trapping"
-                                            : "Standalone")
+                                            : areaAddOnRowLabel(item, "Standalone"))
                                   }
                                   detail={item.detail}
-                                  price={fmtInt(item.price)}
+                                  price={<PerApplicationPrice item={item} amount={fmtInt(item.price)} />}
                                 />{" "}
                               </TierGridV2>{" "}
                               {item.service === "pest_initial_roach" &&

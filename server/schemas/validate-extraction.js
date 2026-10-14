@@ -183,7 +183,22 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // stays as short as the old one: a longer list of spam kinds (vendor cold call,
 // collections…) was measured on the reviewed call `spam-fp-callback-request` and marked
 // that genuine caller spam in 7 of 14 runs, against 2 of 12 for the old text.
-const SCHEMA_VERSION = '1.26.0';
+// 1.27.0: scheduling.callback_window_start/_end change FORM. They were `format: time`,
+// which this validator reads as a time with seconds and an offset ("14:00:00-04:00"). The
+// model wrote another form on most callback calls, the form check failed and the call went
+// to the fallback model; the one form that passed was a form the callback reader
+// (call-commitments callbackDueAt) could not turn into a due time. Both fields are now an
+// Eastern wall-clock time with an optional date and no offset. The persisted schema also
+// accepts the old offset form, so older rows still validate. No field added or removed.
+// 1.28.0: additive — caller.ani_cannot_text (optional nullable boolean) and
+// caller.text_phone_e164 (optional nullable E.164 string) in both schemas, never `required`.
+// Owner rulings 2026-10-07 (option A) and 2026-10-08 (card only): a caller whose line cannot
+// take texts (a deaf relay service, an office landline, "you can't text this one") sets the
+// flag with or without naming another number; the processor holds texts to that line and
+// files a card, and never changes a phone by itself. Distinct from caller_id_disclaimed,
+// which means the number is not the caller's own. Older payloads still validate and read
+// as "no such statement". (Cut as 1.25.0 on the branch; main took 1.25.0–1.27.0 first.)
+const SCHEMA_VERSION = '1.28.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

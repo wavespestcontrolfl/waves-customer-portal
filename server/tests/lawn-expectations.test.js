@@ -1012,13 +1012,17 @@ describe('buildLawnExpectations', () => {
         // P16: the prospect diagnostic prompt generates RESULT TIMING from the sourced rows; the prospect report's weed expectation reads the weed row.
         'services/lawn-diagnostic-prompt.js',
         'services/lawn-diagnostic-report.js',
-        // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
+        // GATE_LAWN_SPOT_TARGET: the lawn sheet's spot target lists come from the engine's own target vocabulary (TARGET_CLASS_BY_NAME), so no target name exists outside it.
+        'services/lawn-spot-target.js',
+        // P14: the v6 copy writer offers APPROVED rows' keyed sentences for selection.
         'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
         'services/service-report/lawn-progress.js',
         // GATE_LAWN_REPORT_FACTS: the finding-to-product tie reads the engine's modeLock classification (Acelepryn is preventive-locked), so a tie can never contradict the product's "What to expect" line.
         'services/service-report/lawn-report-facts.js',
+        // GATE_LAWN_REPORT_STAGE1_FIXES: the damage finding reads the engine's modeLock classification (a preventive-locked product never makes a found-and-treated card).
+        'services/service-report/lawn-report-stage1.js',
         // P16: the one shared seasonal-dip approval check (dormancy card, cross-season notes).
         'services/service-report/lawn-seasonality.js',
       ]);

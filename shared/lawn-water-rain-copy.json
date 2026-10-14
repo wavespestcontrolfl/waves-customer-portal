@@ -1,0 +1,10 @@
+{
+  "_note": "Fixed customer sentences for the lawn report rain card (GATE_LAWN_WATER_RAIN), owner-approved 2026-10-09 (advisor sections A.3 R3/R5 and A.4). {wiltSigns} is filled from shared/watering-copy.json; {target} is the card's own target label, formatted by the caller exactly as the card formats it today. Built by server/services/service-report/lawn-water-rain.js; the sensor line is printed by LawnReportV2.jsx (WaterRainSensorLine). Screened by server/tests/lawn-water-rain.test.js with the same customer-copy rules every report sentence passes.",
+  "pillLabel": "Rain covered it",
+  "covered": "Rain alone covered your lawn this week. Leave the sprinklers off until the grass shows {wiltSigns}, then run one full cycle on an allowed watering day.",
+  "surplus": "Rain and your sprinklers together put down more than your lawn can use this week. Skip a watering day rather than shortening your runs — longer runs reach the roots better than short ones.",
+  "sensorLine": "Florida law requires a rain shutoff device on an automatic sprinkler system. If yours skipped a run this week, it is working.",
+  "deficitLead": "Your weekly water is below {target}.",
+  "deficitRootCauseLead": "The lawn is simply running a little dry.",
+  "deficitAction": "If the grass shows {wiltSigns}, run one full cycle on your next allowed watering day."
+}

@@ -233,7 +233,7 @@ async function withV13CapMetadata(knex, protocol, products) {
   return clamped;
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false } = {}) {
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false, includeBermudaRemoval = false } = {}) {
   // An appointment's assigned version must not fall through to the currently
   // active protocol when that assignment can no longer be resolved.
   const assignedId = !protocolId && protocolKey ? await resolveAssignedProtocolId(knex, protocolKey, protocolVersion) : protocolId;
@@ -264,6 +264,10 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
       'pc.moa_group',
     )
     .orderBy('lpp.sort_order', 'asc');
+  // The bermuda removal rows (migration 20261006190100) belong to the lawns that
+  // asked for the step, never to the window as a whole: every reader leaves them
+  // out unless it names the account as a bermuda removal lawn.
+  if (!includeBermudaRemoval) require('./lawn-bermuda-removal').withoutBermudaRemovalRows(productsQuery, 'lpp');
   const productsRead = savepointRead(knex, () => productsQuery);
   const products = strict ? await productsRead : await productsRead.catch(() => []);
 

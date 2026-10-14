@@ -518,7 +518,7 @@ export function resolveNotificationTarget({ search, customer, properties, select
   };
 }
 
-function ProtectedRoute({ children }) {
+export function ProtectedRoute({ children }) {
   const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, refreshProperties, selectedProperty = null } = useAuth();
   const location = useLocation();
   const { targetProperty, resolvedTargetPropertyId, propertyScopedDestination, currentProfileEntries, primaryUnknown, pending } = resolveNotificationTarget({

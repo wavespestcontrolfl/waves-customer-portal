@@ -142,6 +142,12 @@ export default function MobileAppointmentDetailSheet({
   // (today: the annual-prepay switch) so the caller can refetch the row —
   // its billing lane and attached invoice both moved.
   onBillingChanged,
+  // False for a login the server refuses office actions (a technician role):
+  // hides series cancellation, Quick Move's whole-route scope, the
+  // card-request send, Edit and Book next, which /admin/dispatch/:id/status,
+  // /rain-out, POST /card-request, PUT /update-details and POST
+  // /admin/schedule answer with 403 for a non-admin.
+  adminActions = true,
 }) {
   const [note, setNote] = useState(service?.notes || '');
   const [showOutcome, setShowOutcome] = useState(false);
@@ -158,6 +164,10 @@ export default function MobileAppointmentDetailSheet({
   const [cancelScope, setCancelScope] = useState('this_only');
   const [showCustomer, setShowCustomer] = useState(false);
   const [showRainOut, setShowRainOut] = useState(false);
+  // A Quick Move that committed but stayed open on a warning: this sheet's row is
+  // now stale, so dismissing that warning closes Details too (no second move or
+  // text from the old row).
+  const rainOutCommitted = useRef(false);
   const [estimateSource, setEstimateSource] = useState(null);
   // Saved payment methods, shown inside the estimate provenance card so the
   // tech knows a card is on file before choosing how to collect.
@@ -178,6 +188,11 @@ export default function MobileAppointmentDetailSheet({
   // unmount this sheet under the operator's Done screen, and NOT firing
   // would leave this detail sheet showing the voided invoice snapshot.
   const prepaySwitchDirty = useRef(false);
+
+  // Focus starts in this full-screen sheet, not on whatever opened it behind
+  // it (a schedule row, or a Fast Complete sheet now suspended under it).
+  const closeButtonRef = useRef(null);
+  useEffect(() => { closeButtonRef.current?.focus({ preventScroll: true }); }, []);
 
   useEffect(() => {
     setCardRequestInfo(null);
@@ -473,7 +488,7 @@ export default function MobileAppointmentDetailSheet({
   // Series options only for a recurring visit — mirrors ScheduleCustomerSidebar.
   // A legacy series row can carry recurring_pattern without is_recurring; the
   // dispatch status route accepts either as series evidence, so match it.
-  const canCancelSeries = !!(service?.isRecurring || service?.recurringPattern);
+  const canCancelSeries = adminActions && !!(service?.isRecurring || service?.recurringPattern);
   const cancelAppointment = async () => {
     // Busy BEFORE the async card-hold preview — a slow preview must not
     // leave the Cancel control active for a double-tap re-entry.
@@ -538,6 +553,7 @@ export default function MobileAppointmentDetailSheet({
         style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
+          ref={closeButtonRef}
           type="button"
           onClick={saveAndClose}
           disabled={savingNote}
@@ -548,15 +564,17 @@ export default function MobileAppointmentDetailSheet({
           <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
           <span>Close</span>
         </button>
-        <button
-          type="button"
-          onClick={() => onEdit?.(service)}
-          aria-label="Edit appointment"
-          className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring"
-          style={{ height: 44, padding: '0 26px', fontSize: 15 }}
-        >
-          Edit
-        </button>
+        {adminActions && (
+          <button
+            type="button"
+            onClick={() => onEdit?.(service)}
+            aria-label="Edit appointment"
+            className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring"
+            style={{ height: 44, padding: '0 26px', fontSize: 15 }}
+          >
+            Edit
+          </button>
+        )}
       </div>
 
       <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 560 }}>
@@ -690,7 +708,7 @@ export default function MobileAppointmentDetailSheet({
             </button>
             {(() => {
               const state = cardLinkNotice || describeCardRequestState(cardRequestInfo);
-              const showSend = !cardLinkNotice && canSendCardRequest(cardRequestInfo);
+              const showSend = adminActions && !cardLinkNotice && canSendCardRequest(cardRequestInfo);
               if (!state && !showSend) return null;
               const toneClass = state?.tone === 'good'
                 ? 'text-zinc-900'
@@ -852,7 +870,7 @@ export default function MobileAppointmentDetailSheet({
           // Same handler the Customer section's button uses — one send path,
           // two entry points, so the money-gap warning can be acted on where
           // it is read instead of sending the tech hunting for the button.
-          onSendCardLink={canSendCardRequest(cardRequestInfo) && !cardLinkNotice ? sendCardRequestLink : null}
+          onSendCardLink={adminActions && canSendCardRequest(cardRequestInfo) && !cardLinkNotice ? sendCardRequestLink : null}
           sendingCardLink={cardLinkSending}
           style={{ marginTop: 12 }}
         />
@@ -1075,14 +1093,16 @@ export default function MobileAppointmentDetailSheet({
               Quick Move Appointment
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => onBookNext?.(service)}
-            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring"
-            style={{ padding: '14px 20px', fontSize: 16 }}
-          >
-            Book next appointment
-          </button>
+          {adminActions && (
+            <button
+              type="button"
+              onClick={() => onBookNext?.(service)}
+              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring"
+              style={{ padding: '14px 20px', fontSize: 16 }}
+            >
+              Book next appointment
+            </button>
+          )}
         </section>
       </div>
 
@@ -1116,8 +1136,13 @@ export default function MobileAppointmentDetailSheet({
       {showRainOut && service.id && (
         <RainOutSheet
           service={service}
-          onClose={() => setShowRainOut(false)}
+          allowRouteScope={adminActions}
+          onClose={() => {
+            setShowRainOut(false);
+            if (rainOutCommitted.current) onClose?.();
+          }}
           onDone={(result) => {
+            if (result?.movedCount > 0) rainOutCommitted.current = true;
             // Some stops moved — refresh the board regardless.
             onRescheduled?.(service);
             // Only dismiss on a clean move; a partial failure, a

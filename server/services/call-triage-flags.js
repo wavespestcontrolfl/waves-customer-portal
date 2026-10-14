@@ -85,6 +85,52 @@ function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
+// The extraction to read ani_cannot_text / text_phone_e164 from: only a VALID V2 payload speaks for
+// them. A schema_failed / normalization_failed payload is stored raw for audit but must never arm the
+// number-wide SMS hold, file the card or raise the flag, in shadow or enforce mode.
+function noTextSafeExtraction(v2Result, extraction = v2Result?.extraction) {
+  if (!extraction || v2Result?.status === 'valid') return extraction;
+  const caller = extraction.caller;
+  if (!caller || (caller.ani_cannot_text == null && caller.text_phone_e164 == null)) return extraction;
+  // The model's own callback_number_needed flag rides along: on a failed payload it can only be
+  // justified by a disclaimer (caller_id_disclaimed true); otherwise it came from the no-text claim
+  // being cleared here and must go with it, or the shadow bridge arms the hold anyway (codex r14 P1).
+  const flags = Array.isArray(extraction.triage_flags) && caller.caller_id_disclaimed !== true
+    ? extraction.triage_flags.filter((f) => f !== 'callback_number_needed') : extraction.triage_flags;
+  return { ...extraction, triage_flags: flags, caller: { ...caller, ani_cannot_text: null, text_phone_e164: null } };
+}
+
+// True only for an explicit ani_cannot_text (schema 1.28.0). One reader for the hold, the
+// card dedupe and the booking-link skip.
+function aniCannotText(caller) {
+  return !!caller && caller.ani_cannot_text === true;
+}
+
+// The card for a no-text line is text_number_differs, which carries both numbers and the
+// ask. callback_number_needed also fires for the hold, but its card would say the same
+// thing twice (and its Resolve means "this number is fine to text"), so it is dropped
+// unless the caller ALSO disclaimed the number.
+function aniCannotTextOnly(extraction) {
+  const caller = extraction?.caller;
+  // Any caller_id_disclaimed keeps the callback card: its hold rests on the ANI comparison, and its
+  // Resolve is the only release for it.
+  return aniCannotText(caller) && caller.caller_id_disclaimed !== true;
+}
+
+// The callback_number_needed flag: the caller disclaimed the number, or said the line cannot get texts.
+function callbackNumberNeeded(caller, opts) {
+  return callerIdDisclaimedNeedsCallback(caller, opts) || aniCannotText(caller);
+}
+
+// Cards this extraction does not need (see aniCannotTextOnly), and whether the bridge files the
+// callback_number_needed card for the flags it was handed.
+function noTextDroppedCards(extraction) {
+  return aniCannotTextOnly(extraction) ? ['callback_number_needed'] : [];
+}
+function callbackCardWanted(flags, extraction) {
+  return flags.includes('callback_number_needed') && !aniCannotTextOnly(extraction);
+}
+
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
 // name — don't treat these as a name↔email mismatch.
 const GENERIC_EMAIL_LOCALPARTS = new Set([
@@ -176,6 +222,78 @@ function hasNameEmailMismatch(caller = {}) {
     if (foreignSegment) return true;
   }
   return false;
+}
+
+function editDistance(a, b) {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const above = prev[j];
+      prev[j] = Math.min(above + 1, prev[j - 1] + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return prev[b.length];
+}
+
+// The model sometimes "corrects" an email that the caller only SAID so that it matches
+// the name the caller SPELLED: the transcript reads "<word> at outlook.com", the spelled
+// surname is one letter away from <word>, and the extraction carries the surname as the
+// email. hasNameEmailMismatch then sees a name and an email that agree, and the conflict
+// the transcript holds never reaches the office. On the reviewed call that showed this,
+// gpt-5.6-sol made the change in about half of its runs, and three prompt wordings (keep
+// the email as heard / use the spelled name / both with the example rewritten) did not
+// make it choose one way (3 to 5 of 8 runs each, 2026-10-09). So the server reads the
+// transcript.
+//
+// True only when ALL hold:
+//   - the transcript says the email's domain after a single word ("<word> at outlook",
+//     "<word>@outlook") at least once;
+//   - the extracted local part is NOT what stands before the domain in any of those
+//     places. Letters and digits are compared with everything else removed, so an email
+//     spelled letter by letter ("j, a, n, e at ...") counts as said;
+//   - one of those words is 1 or 2 letters away from the extracted local part, and the
+//     change is what made the email agree with the name: the extracted local part
+//     holds a caller name token that the said word does not hold.
+// The model stays free to build an email from spelled letters, from phonetic markers
+// and from "my first name dot my last name": none of those leaves a near-identical
+// word before the domain. A local part that only adds letters around the said word
+// ("j" + "smith") is not a rewrite either. Without a transcript the answer is false.
+// Measured on 60 days of stored calls (151 with an email, 2026-10-09): it fires on 2.
+// Wide enough for a surname spelled with a marker word on every letter.
+const EMAIL_SAID_CONTEXT_CHARS = 400;
+const PHONETIC_MARKER_RE = /\b([a-z0-9])[\s,]+(?:as in|like in|as|like|for)\s+[a-z]+\b[\s,.]*/g;
+function emailRewrittenFromSpoken(caller = {}, transcript = '') {
+  const email = String(caller.email || '').toLowerCase();
+  const at = email.indexOf('@');
+  if (at < 1 || !transcript) return false;
+  const local = email.slice(0, at).replace(/[^a-z0-9]/g, '');
+  const domainLabel = email.slice(at + 1).split('.')[0].replace(/[^a-z0-9-]/g, '');
+  if (local.length < 4 || domainLabel.length < 2) return false;
+  const nameTokens = [caller.first_name, caller.last_name, caller.name_full]
+    .filter(Boolean)
+    .flatMap((n) => String(n).toLowerCase().split(/\s+/))
+    .map((t) => t.replace(/[^a-z]/g, ''))
+    .filter((t) => t.length >= 3 && local.includes(t));
+  if (nameTokens.length === 0) return false;
+
+  const text = String(transcript).toLowerCase();
+  const saidDomain = new RegExp(`(?:@|\\bat\\s+)${domainLabel}\\b`, 'g');
+  let sawNearWord = false;
+  for (let m = saidDomain.exec(text); m; m = saidDomain.exec(text)) {
+    const rawBefore = text.slice(Math.max(0, m.index - EMAIL_SAID_CONTEXT_CHARS), m.index);
+    // "H as in hotel", "b like in boy", "v for victor": keep the letter, drop the marker
+    // word, so a phonetic spelling counts as said (codex #6247 r1 P2).
+    const before = rawBefore.replace(PHONETIC_MARKER_RE, '$1 ');
+    if (before.replace(/[^a-z0-9]/g, '').endsWith(local)) return false;
+    const word = (rawBefore.trim().split(/\s+/).pop() || '').replace(/[^a-z0-9]/g, '');
+    if (word.length < 4 || local.includes(word) || word.includes(local)) continue;
+    const distance = editDistance(word, local);
+    if (distance >= 1 && distance <= 2 && nameTokens.some((t) => !word.includes(t))) sawNearWord = true;
+  }
+  return sawNearWord;
 }
 
 // Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
@@ -509,11 +627,16 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
   // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
   // rather than re-deriving the condition).
-  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })) {
+  // ani_cannot_text (schema 1.28.0, owner ruling 2026-10-08, card-only): the caller said
+  // the line they called from cannot get texts. Automation never texts a number the caller
+  // dictated, so the call's texts to the ANI hold through this same flag; the
+  // text_number_differs card (not a callback_number_needed card) asks the office to fix the
+  // phones. Not caller_id_disclaimed: the caller still owns the line for calls.
+  if (callbackNumberNeeded(caller, { ani: opts.contactPhone })) {
     flags.push('callback_number_needed');
   }
 
-  if (hasNameEmailMismatch(caller)) {
+  if (hasNameEmailMismatch(caller) || emailRewrittenFromSpoken(caller, opts.transcript)) {
     flags.push('name_email_mismatch');
   }
 
@@ -729,6 +852,9 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 //      an empty record, and only the card gets it reviewed). A new service
 //      ask, a quote, or any time asked, offered or confirmed keeps them all.
 //      out_of_service_area is never touched.
+//   3b. address_unverifiable beside missing_service_address: the model's
+//      flag repeats the deterministic one (no address was given at all), so
+//      the second card is dropped; the routing verdict keeps both flags.
 //   4. caller_not_authorized on a call that asked for no visit time (status
 //      none / canceled) from a caller the owner treats as authorized: a
 //      family member (owner ruling 2026-09-28), a client's own employee, or a
@@ -743,6 +869,24 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
 const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
 const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address']);
+// The asks a return call would have answered. When the office's callback to a
+// voicemail reached a solicitor (call_log.metadata.callback_verdict.spam, written
+// by closeParentOnCallbackSpam), these cards are moot on the voicemail: the
+// settlement resolves them, and a later reprocess of the voicemail files none
+// of them again (codex #6271 r3). Cards that judge on-file data, authorization,
+// email or a property role are human verdicts and are not in this set; nor is
+// callback_number_needed: the caller said the inbound number was not theirs,
+// so a callback to that number reaching a solicitor answers nothing (r4 P1).
+// The processor applies this set at its card-filter sites; see
+// callbackVerdictSpam there.
+const CALLBACK_SPAM_MOOT_CODES = new Set([
+  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+  'address_unverified', 'address_validation_unavailable', 'address_not_validated',
+  'missing_first_name', 'missing_last_name', 'missing_required_customer_fields',
+  'not_confirmed', 'quote_promised',
+  'ambiguous_pest_or_service', 'ambiguous_scheduling', 'low_extraction_confidence',
+  'call_dropped_mid_intake',
+]);
 const AUTHORIZED_THIRD_PARTY_RELATIONSHIPS = new Set(['family_member', 'employee']);
 
 function callMakesNoServiceAsk(extraction) {
@@ -753,9 +897,20 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
+// A pre-construction pre-treat (a new slab) has no unit to ask about,
+// commercial jobs included (owner 2026-10-07): the advisory "which unit?"
+// card is skipped. The caller decides preConstructionPretreat (every view of
+// the call's service resolves to the allowlist, no condo/apartment wording);
+// any address hold on the booking is unchanged. A named predicate keeps this
+// decision out of dropUnneededCallCards' complexity.
+function pretreatDroppedCards(preConstructionPretreat) {
+  return preConstructionPretreat ? ['missing_unit_number'] : [];
+}
+
+function dropUnneededCallCards(flags, extraction, options) {
+  const { canonicalStreet, preConstructionPretreat } = options || {};
   const list = Array.isArray(flags) ? flags : [];
-  const dropped = new Set();
+  const dropped = new Set(noTextDroppedCards(extraction));
   const has = (f) => list.includes(f);
   if (has('cancellation_request')) {
     dropped.add('reschedule_or_cancel');
@@ -771,14 +926,77 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
   if (callMakesNoServiceAsk(extraction) && !statedStreet) {
     for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
   }
+  // One address card, not two (2026-10-09 audit: the pair landed on 6 of 16
+  // calls that day). missing_service_address is deterministic: the call gave
+  // no street, city or postal code. The model's address_unverifiable on the
+  // same call says the same thing a second time, so the office saw two cards
+  // for one ask. With a stated street both cards stay (each may carry a
+  // different reading for review). The routing verdict keeps both flags;
+  // only the card goes.
+  if (has('missing_service_address') && !statedStreet) dropped.add('address_unverifiable');
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (SCHEDULING_NO_ASK_STATUSES.has(status)
       && (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)
         || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {})))) {
     dropped.add('caller_not_authorized');
   }
+  pretreatDroppedCards(preConstructionPretreat).forEach((f) => dropped.add(f));
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
+}
+
+// 5. A call that ended with nothing to do (2026-10-10 call audit: 8 cards in
+//    48 hours on callers who heard the price and said no, wanted a product
+//    Waves does not carry, or were outside the service area and were told
+//    so). The model's own verdict is recommended_disposition
+//    no_action_needed, and the call left no open thread: no time agreed,
+//    offered or accepted, no promised callback or follow-up, no promised
+//    quote, not a voicemail. Scheduling status 'requested' means only that
+//    the caller wanted a visit, not that the caller dropped it, so on its own
+//    it keeps every card: it qualifies only with the call's own evidence
+//    that the request ended (the caller declined the stated price and
+//    accepted no other, or the urgency reads no_appointment_needed). Such a call holds on "not_confirmed" or on its
+//    address, and the card that files is nobody's work. Returned as card
+//    codes, not as a flag filter, because not_confirmed is the routing
+//    reason and never one of the call's flags. The routing verdict and the
+//    flags are untouched. A stated street keeps the address cards, for the
+//    same reason as rule 3 (Step 3's backfill can copy it onto a record).
+// The caller said no to the price staff stated, and said yes to no other.
+function callerDeclinedThePrice(serviceRequest) {
+  const sr = serviceRequest || {};
+  const all = [sr.price, ...(Array.isArray(sr.prices) ? sr.prices : [])].filter(Boolean);
+  if (all.some((p) => p.caller_response === 'accepted' || p.accepted === true)) return false;
+  return sr.price?.caller_response === 'declined';
+}
+
+function requestedVisitWasDropped(extraction) {
+  const sr = extraction?.service_request || {};
+  return sr.urgency === 'no_appointment_needed' || callerDeclinedThePrice(sr);
+}
+
+const NO_ACTION_HOLD_CARDS = ['not_confirmed', 'ambiguous_scheduling'];
+const NO_ACTION_ADDRESS_CARDS = ['missing_service_address', 'address_unverifiable', 'address_unverified', 'low_confidence_address'];
+
+function callEndedWithNothingToDo(extraction) {
+  if (!extraction || extraction.recommended_disposition !== 'no_action_needed') return false;
+  if (extraction.meta?.is_voicemail === true) return false;
+  const scheduling = extraction.scheduling || {};
+  const status = String(scheduling.status || 'none');
+  if (status === 'requested' ? !requestedVisitWasDropped(extraction) : status !== 'none') return false;
+  const openThread = scheduling.confirmed_start_at
+    || scheduling.agent_committed_booking === true
+    || scheduling.caller_accepted_slot === true
+    || scheduling.follow_up_mentioned === true
+    || scheduling.callback_window_start
+    || scheduling.callback_window_end;
+  if (openThread) return false;
+  return extraction.service_request?.quote_promised !== true;
+}
+
+function noActionCallCards(extraction, { canonicalStreet } = {}) {
+  if (!callEndedWithNothingToDo(extraction)) return [];
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
+  return statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
 }
 
 function hasCanonicalWriteBlock(flags) {
@@ -2716,7 +2934,7 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // so a disclaimed ANI kept getting texted while V2 is in shadow. Same
   // ADVISORY posture as every other flag here — this never holds the
   // booking, only the confirmation/reminder SMS leg (see SMS_ONLY_FLAGS).
-  if (flags.includes('callback_number_needed')) needsConfirmation.push('callback_number_needed');
+  if (callbackCardWanted(flags, v2Extraction)) needsConfirmation.push('callback_number_needed');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -3253,6 +3471,8 @@ module.exports = {
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,
+  UNIT_LEVEL_WORDING_RE,
+  EXISTING_SERVICE_INTENTS,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,
@@ -3260,6 +3480,9 @@ module.exports = {
   deriveEmailReview,
   spelledEmailSettled,
   dropUnneededCallCards,
+  callEndedWithNothingToDo,
+  noActionCallCards,
+  CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
@@ -3270,6 +3493,9 @@ module.exports = {
   SMS_ONLY_FLAGS,
   callbackNumberNeededBlocksSms,
   callerIdDisclaimedNeedsCallback,
+  aniCannotText,
+  noTextSafeExtraction,
+  aniCannotTextOnly,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
@@ -3283,6 +3509,7 @@ module.exports = {
   FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,
+  emailRewrittenFromSpoken,
   isDialablePhone,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,

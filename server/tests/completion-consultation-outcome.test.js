@@ -78,6 +78,19 @@ describe('recordConsultationOutcomeInCompletion', () => {
     );
   });
 
+  test('the call-back date (followUpAt) the sheet sends reaches recordOutcome unchanged, and an invalid one is the rule\'s own 400', async () => {
+    mockRecordOutcome.mockResolvedValue({ id: 'co-1' });
+    await recordConsultationOutcomeInCompletion({
+      trx, serviceId: 'svc-1', consultationOutcome: { outcome: 'cold', followUpAt: '2026-10-20T09:00' }, actor,
+    });
+    expect(mockRecordOutcome.mock.calls[0][0]).toMatchObject({ outcome: 'cold', followUpAt: '2026-10-20T09:00' });
+
+    mockRecordOutcome.mockRejectedValue(Object.assign(new Error('followUpAt must be a valid date/time'), { isOperational: true, statusCode: 400, code: 'VALIDATION' }));
+    await expect(recordConsultationOutcomeInCompletion({
+      trx, serviceId: 'svc-1', consultationOutcome: { outcome: 'cold', followUpAt: 'nope' }, actor,
+    })).rejects.toMatchObject({ code: 'consultation_outcome_refused', statusCode: 400, outcomeCode: 'VALIDATION' });
+  });
+
   test('no field: recordOutcome is not called', async () => {
     await recordConsultationOutcomeInCompletion({ trx, serviceId: 'svc-1', consultationOutcome: null, actor });
     expect(mockRecordOutcome).not.toHaveBeenCalled();

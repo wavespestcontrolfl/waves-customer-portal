@@ -722,7 +722,7 @@ function lastComputeUnstable() {
 }
 
 function gateSignature() {
-  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true)].join('|');
+  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true), process.env.GATE_LAWN_COST_PLUS_LIST || ''].join('|');
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {

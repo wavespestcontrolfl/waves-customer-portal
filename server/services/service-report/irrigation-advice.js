@@ -118,6 +118,21 @@ function numberOrNull(value) {
 }
 
 /**
+ * The balance of one week's water against the target: applied = irrigation + rain (rounded to a quarter), the
+ * differential, and the status. A quarter-inch band around the target is balanced; outside it the lawn is meaningfully
+ * over/under-watered. Surplus is safe even when rainfall is unknown (rain only adds water), but we must NOT claim a
+ * deficit/balanced without rainfall (the missing rain could close the gap), so that is 'rain_unknown' with no
+ * differential. Exported so a caller that re-counts the rain (the rain card's per-day cap) uses the same rule.
+ */
+function balanceOf({ recommended, irrigation, rain, rainKnown }) {
+  const appliedInchesPerWeek = roundQuarter(irrigation + (rainKnown ? rain : 0));
+  const differentialInchesPerWeek = roundQuarter(appliedInchesPerWeek - recommended);
+  if (differentialInchesPerWeek >= 0.25) return { appliedInchesPerWeek, differentialInchesPerWeek, status: 'surplus' };
+  if (!rainKnown) return { appliedInchesPerWeek, differentialInchesPerWeek: null, status: 'rain_unknown' };
+  return { appliedInchesPerWeek, differentialInchesPerWeek, status: differentialInchesPerWeek <= -0.25 ? 'deficit' : 'balanced' };
+}
+
+/**
  * Build the water-balance advice for the report.
  *
  * @param {object} args
@@ -168,26 +183,9 @@ function buildIrrigationAdvice({
     };
   }
 
-  const appliedInchesPerWeek = roundQuarter(irrigation + (rainKnown ? rain : 0));
-  const differentialInchesPerWeek = roundQuarter(appliedInchesPerWeek - recommendedInchesPerWeek0);
-
-  // A quarter-inch band around the target is balanced; outside it the lawn is
-  // meaningfully over/under-watered. Surplus is safe even when rainfall is
-  // unknown (rain only adds water), but we must NOT claim a deficit/balanced
-  // without rainfall — the missing rain could close the gap — so report
-  // 'rain_unknown' and withhold the differential in that case.
-  let status;
-  let differentialOut = differentialInchesPerWeek;
-  if (differentialInchesPerWeek >= 0.25) {
-    status = 'surplus';
-  } else if (!rainKnown) {
-    status = 'rain_unknown';
-    differentialOut = null;
-  } else if (differentialInchesPerWeek <= -0.25) {
-    status = 'deficit';
-  } else {
-    status = 'balanced';
-  }
+  const { appliedInchesPerWeek, differentialInchesPerWeek: differentialOut, status } = balanceOf({
+    recommended: recommendedInchesPerWeek0, irrigation, rain, rainKnown,
+  });
 
   return {
     recommendedInchesPerWeek: recommendedInchesPerWeek0,
@@ -205,5 +203,6 @@ module.exports = {
   recommendedFromEt0,
   isKnownGrass,
   buildIrrigationAdvice,
+  balanceOf,
   _private: { seasonMultiplier, classifySeason, seasonalKcFactor, normalizeGrassKey, PEAK_INCHES_BY_GRASS, CROP_COEFFICIENT_BY_GRASS, SEASONAL_KC_FACTOR },
 };

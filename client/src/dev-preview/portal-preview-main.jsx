@@ -16,6 +16,7 @@ import api from '../utils/api';
 import { AuthProvider } from '../hooks/useAuth';
 import PortalPage from '../pages/PortalPage';
 import CustomerDialogHost from '../components/brand/CustomerDialogHost';
+import WATERING_COPY from '../../../shared/watering-copy.json';
 
 // ── auth seed ──────────────────────────────────────────────────────────────
 // useAuth only base64url-decodes the payload segment ({ customerId,
@@ -626,7 +627,6 @@ Object.assign(api, {
       fungus: { level: 'MODERATE', color: '#FF9800', advice: 'Moderate fungus risk — water only in early morning' },
       chinch: { level: 'MODERATE', color: '#FF9800', advice: 'Chinch bugs active — watch sunny areas near driveways' },
     },
-    irrigationRecommendation: 'Skip a cycle if afternoon rain arrives — about 0.75 inches this week is plenty.',
     updatedAt: new Date().toISOString(),
   }),
   getAlerts: async () => ({ alerts: [] }),
@@ -654,7 +654,7 @@ Object.assign(api, {
       {
         id: 'irrigation_advice', kind: 'advice', priority: 'high',
         title: 'Ease up on irrigation',
-        body: 'Your recent lawn visits show more combined rain and irrigation than your lawn needs. Cutting back a watering cycle this week helps prevent fungus.',
+        body: `Your recent lawn visits show more rain and sprinkler water than your lawn needs. ${WATERING_COPY.surplusAdvice}`,
         asOf: day(-22),
       },
       {

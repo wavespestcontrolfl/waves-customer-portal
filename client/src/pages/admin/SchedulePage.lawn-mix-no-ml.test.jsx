@@ -110,3 +110,65 @@ describe('Complete Service lawn protocol mix (WaveGuard)', () => {
     expect(document.body.textContent).not.toMatch(ML_WORD);
   });
 });
+
+describe('Service Protocol drawer bermuda backpack mix order', () => {
+  const service = {
+    id: 'bermuda-order-visit', customerId: 'bermuda-order-customer', serviceType: 'Lawn Care',
+    customerName: 'Fixture account', lawnType: 'St. Augustine', lawnSqft: 10000,
+  };
+  const bermudaMixingOrder = [
+    { step: 1, productId: null, productName: 'Water', instruction: 'Fill the backpack sprayer about half full with clean water.' },
+    { step: 2, productId: 'rec', productName: 'Fixture Recognition', instruction: 'Add the Recognition.' },
+    { step: 3, productId: 'fus', productName: 'Fixture Fusilade', instruction: 'Add the Fusilade.' },
+    { step: 4, productId: 'nis', productName: 'Fixture surfactant', instruction: 'Add the surfactant last.' },
+  ];
+  let withBermuda;
+  function fixture(url) {
+    const path = new URL(url, 'http://localhost').pathname;
+    if (path.endsWith('/intelligence-bar/quick-actions')) return { actions: [] };
+    if (path.includes('/protocols/job-card/')) return { enabled: false };
+    if (path.endsWith('/pay-growth/availability')) return { available: false };
+    if (path.endsWith('/turf-profile')) return { profile: { track_key: 'A_St_Aug_Sun', lawn_sqft: 10000 } };
+    if (path.endsWith('/photos/relevant')) return { photos: [] };
+    if (path.endsWith('/seasonal-index')) return { pests: [] };
+    if (path.endsWith('/scripts')) return { scripts: [] };
+    if (path.endsWith('/equipment')) return { checklists: [] };
+    if (path.endsWith('/programs')) return { track: { name: 'Fixture lawn program', notes: [], visits: [] } };
+    if (path.endsWith('/lawn-mix')) return {
+      month: 'Jun', visit: { visit: 6 }, areaSqft: 10000,
+      equipment: { systemName: 'Fixture calibrated rig', carrierGalPer1000: 2 },
+      items: [
+        { raw: 'Base instruction', selected: true, product: { name: 'Liquid potassium' }, jobMix: { amount: 30, amountUnit: 'fl_oz' }, fullTankMix: { amount: 60, amountUnit: 'fl_oz' } },
+        // The three step lines are offered, none selected.
+        ...['Fixture Recognition', 'Fixture Fusilade', 'Fixture surfactant'].map((name) => ({ raw: name, selected: false, conditional: true, bermudaStep: true, product: { id: name, name }, jobMix: null, fullTankMix: null, plannedMix: null, spot: { note: 'Spot: enter the area treated and the amount used.', reference: 'Label rate' } })),
+      ],
+      mixingOrder: [{ step: 1, productId: 'pot', productName: 'Liquid potassium', instruction: 'Add the potassium.' }],
+      ...(withBermuda ? { bermudaMixingOrder } : {}),
+    };
+    throw new Error(`Unexpected request: ${path}`);
+  }
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn((url) => reply(fixture(url))));
+    vi.stubGlobal('scrollTo', vi.fn());
+  });
+
+  // The visit's sheet returns the order whenever the step is offered, selected or not: here no step line is
+  // selected (only the base item is), and the block still shows.
+  it('shows a separate Bermuda backpack mix order only when the sheet returns one, with no step line selected', async () => {
+    withBermuda = true;
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    await screen.findByText('Bermuda backpack mix');
+    for (const { step, productName } of bermudaMixingOrder) expect(screen.getByText(`${step}. ${productName}`)).toBeTruthy();
+    expect(screen.getByText('Add the surfactant last.')).toBeTruthy();
+    // The base order stays its own block, without the step products.
+    expect(screen.getByText('Mixing Order')).toBeTruthy();
+    expect(screen.getByText('1. Liquid potassium')).toBeTruthy();
+  });
+
+  it('shows no such block when the sheet returns none', async () => {
+    withBermuda = false;
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    await screen.findByText('1. Liquid potassium');
+    expect(screen.queryByText('Bermuda backpack mix')).toBeNull();
+  });
+});

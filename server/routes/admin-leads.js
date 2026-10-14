@@ -194,86 +194,9 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // membership.
 const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal, unlessHandledSince } = require('../services/lead-statuses');
 
-// Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
-async function ensureLeadsTables(db) {
-  const tables = [
-    { name: 'lead_sources', sql: `CREATE TABLE IF NOT EXISTS lead_sources (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      name varchar(200) NOT NULL, source_type varchar(30) NOT NULL DEFAULT 'other',
-      channel varchar(50), twilio_phone_number varchar(20), twilio_phone_sid varchar(255),
-      domain varchar(255), landing_page_url varchar(255), gbp_location_id varchar(255),
-      cost_type varchar(20) DEFAULT 'free', monthly_cost decimal(10,2) DEFAULT 0,
-      cost_per_lead decimal(10,2) DEFAULT 0, setup_cost decimal(10,2) DEFAULT 0,
-      is_active boolean DEFAULT true, notes text,
-      created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-    )` },
-    { name: 'leads', sql: `CREATE TABLE IF NOT EXISTS leads (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      lead_source_id uuid, first_name varchar(255), last_name varchar(255),
-      phone varchar(255), email varchar(255), address varchar(255), city varchar(255), zip varchar(255),
-      lead_type varchar(30), service_interest varchar(255), urgency varchar(20) DEFAULT 'normal',
-      is_residential boolean DEFAULT true, is_commercial boolean DEFAULT false,
-      first_contact_at timestamptz DEFAULT NOW(), first_contact_channel varchar(255),
-      twilio_call_sid varchar(255), twilio_message_sid varchar(255),
-      call_duration_seconds integer, call_recording_url varchar(255),
-      transcript_summary text, extracted_data jsonb,
-      is_qualified boolean, disqualification_reason varchar(255),
-      status varchar(30) DEFAULT 'new',
-      assigned_to uuid, estimate_id uuid, customer_id uuid, converted_at timestamptz,
-      monthly_value decimal(10,2), initial_service_value decimal(10,2),
-      waveguard_tier varchar(255), lost_reason varchar(255), lost_to_competitor varchar(255), lost_notes text,
-      next_follow_up_at timestamptz, follow_up_count integer DEFAULT 0,
-      last_follow_up_at timestamptz, response_time_minutes integer,
-      deleted_at timestamptz, deleted_by uuid,
-      created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-    )` },
-    { name: 'lead_activities', sql: `CREATE TABLE IF NOT EXISTS lead_activities (
-      id serial PRIMARY KEY, lead_id uuid NOT NULL,
-      activity_type varchar(30), description text, performed_by varchar(100),
-      metadata jsonb, created_at timestamptz DEFAULT NOW()
-    )` },
-    { name: 'lead_source_costs', sql: `CREATE TABLE IF NOT EXISTS lead_source_costs (
-      id serial PRIMARY KEY, lead_source_id uuid NOT NULL,
-      month date NOT NULL, cost_amount decimal(10,2) NOT NULL,
-      cost_category varchar(30), notes text, created_at timestamptz DEFAULT NOW(),
-      UNIQUE(lead_source_id, month, cost_category)
-    )` },
-    { name: 'marketing_campaigns', sql: `CREATE TABLE IF NOT EXISTS marketing_campaigns (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      name varchar(200) NOT NULL, channel varchar(50), lead_source_id uuid,
-      status varchar(20) DEFAULT 'active', start_date date, end_date date,
-      budget decimal(10,2), spend_to_date decimal(10,2) DEFAULT 0,
-      target_leads integer, target_conversions integer,
-      offer_details text, utm_source varchar(255), utm_medium varchar(255), utm_campaign varchar(255),
-      notes text, created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-    )` },
-  ];
-  for (const { name, sql } of tables) {
-    try { await db.raw(sql); } catch (e) { console.error(`[leads] Create ${name} error:`, e.message); }
-  }
-  // Add indexes safely
-  const indexes = [
-    'CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_customer_id ON leads(customer_id)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_first_contact_at ON leads(first_contact_at)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_deleted_at ON leads(deleted_at) WHERE deleted_at IS NOT NULL',
-    'CREATE INDEX IF NOT EXISTS idx_lead_sources_is_active ON lead_sources(is_active)',
-  ];
-  for (const idx of indexes) {
-    try { await db.raw(idx); } catch (e) { /* index may exist */ }
-  }
-}
-
-let _tablesChecked = false;
-router.use(async (req, res, next) => {
-  if (!_tablesChecked) {
-    _tablesChecked = true;
-    try { await ensureLeadsTables(db); } catch (e) { console.error('[leads] Auto-create error:', e.message); }
-  }
-  next();
-});
+// The leads tables (lead_sources, leads, lead_activities, lead_source_costs, marketing_campaigns) and their
+// indexes are created by migrations 20260401000095_lead_attribution and 20260701000004_leads_soft_delete. A request
+// never runs DDL.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ANALYTICS (must be before /:id to avoid param catch)

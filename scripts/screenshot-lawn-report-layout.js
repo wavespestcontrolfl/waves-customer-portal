@@ -27,11 +27,14 @@ const port = arg('port', '5191');
 const out = arg('out', path.join(os.homedir(), 'lawn-report-layout-preview'));
 const widths = arg('widths', '390,1280').split(',').map(Number);
 const VISITS = ['spot', 'granular', 'clean'];
+// GATE_LAWN_REPORT_POLISH visits: before (gate off) and after (gate on), written as <visit>-off / <visit>-on.
+const POLISH_VISITS = ['mixed', 'single', 'fourday', 'nothing', 'rainwet', 'raindry', 'rainnone'];
 
 async function shoot(browser, visit, layout, width) {
+  const query = POLISH_VISITS.includes(visit) ? `layout=on&polish=${layout}` : `layout=${layout}`;
   const page = await browser.newPage({ viewport: { width, height: 900 } });
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto(`http://localhost:${port}/preview-lawn-report-layout.html?scenario=${visit}&layout=${layout}`, { waitUntil: 'networkidle' });
+  await page.goto(`http://localhost:${port}/preview-lawn-report-layout.html?scenario=${visit}&${query}`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1500);
   await page.addStyleTag({ content: '[data-preview-bar]{display:none !important}' });
   const file = path.join(out, `${visit}-${layout}-${width}.png`);
@@ -43,7 +46,7 @@ async function shoot(browser, visit, layout, width) {
 (async () => {
   fs.mkdirSync(out, { recursive: true });
   const browser = await chromium.launch();
-  for (const visit of VISITS) {
+  for (const visit of [...VISITS, ...POLISH_VISITS]) {
     for (const layout of ['off', 'on']) {
       for (const width of widths) await shoot(browser, visit, layout, width);
     }

@@ -17,6 +17,8 @@ const visitInput = require('../services/lawn-visit-input');
 const shotList = require('../services/lawn-photo-shots');
 const { decodedBase64Bytes } = require('../utils/request-photo-validation');
 const shotListLive = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_SHOT_LIST');
+// GATE_LAWN_PHOTO_LABEL_PICK: the technician's customer-facing label for a photo (shot-list captures only).
+const labelPickLive = () => shotListLive() && require('../config/feature-gates').lawnPhotoLabelPickLive();
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
 const visitRuns = require('../services/lawn-visit-runs');
@@ -509,6 +511,7 @@ router.post('/assess', async (req, res, next) => {
     // legacy merge and the front-first hero photo. Decided once per request;
     // off = every line below behaves exactly as before.
     const shotListEnabled = shotListLive();
+    const labelPick = labelPickLive();
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
@@ -904,14 +907,21 @@ router.post('/assess', async (req, res, next) => {
     }
 
     // Build photo metadata (always stored even without S3 for backward compat)
-    const photoMeta = photos.map((p, i) => ({
-      filename: `lawn_${customerId}_${Date.now()}_${i}.${(p.mimeType || 'image/jpeg').split('/')[1]}`,
-      uploadedAt: new Date().toISOString(),
-      // Capture mode, stored at capture time (no schema change): the zones on the
-      // photo rows cannot say which vocabulary they were captured under. Absent,
-      // not false, with the gate off, so those rows are unchanged.
-      ...(shotListEnabled ? { photoVocabulary: shotList.PHOTO_VOCABULARY } : {}),
-    }));
+    const photoMeta = photos.map((p, i) => {
+      const labelKey = labelPick ? shotList.normalizeLabelPick(p?.zone, p?.labelKey) : null;
+      return {
+        filename: `lawn_${customerId}_${Date.now()}_${i}.${(p.mimeType || 'image/jpeg').split('/')[1]}`,
+        uploadedAt: new Date().toISOString(),
+        // Capture mode, stored at capture time (no schema change): the zones on the
+        // photo rows cannot say which vocabulary they were captured under. Absent,
+        // not false, with the gate off, so those rows are unchanged.
+        ...(shotListEnabled ? { photoVocabulary: shotList.PHOTO_VOCABULARY } : {}),
+        // GATE_LAWN_PHOTO_LABEL_PICK: the shot key whose customer wording prints under this
+        // photo on the report. Kept only for a real shot key on a photo in a slot, and only
+        // when it differs from the slot; absent otherwise (and always absent with the gate off).
+        ...(labelKey ? { labelKey } : {}),
+      };
+    });
 
     // Save the assessment. Gate on: the raw output and provenance live on the
     // run row; score columns the model could not determine stay NULL.
@@ -1516,7 +1526,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
 
-    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), assessment: null });
+    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), ...(labelPickLive() ? { labelPickEnabled: true } : {}), assessment: null });
 
     const visitRun = await visitRuns.loadRun(assessment.id, db);
     const photos = await db('lawn_assessment_photos')
@@ -1528,6 +1538,8 @@ router.get('/service/:serviceId', async (req, res, next) => {
       // GATE_LAWN_SHOT_LIST: how the admin drawer learns the shot list is live
       // (key absent when off, so the gate-off payload is unchanged).
       ...(shotListLive() ? { shotListEnabled: true } : {}),
+      // GATE_LAWN_PHOTO_LABEL_PICK: tells the sheet to show the label chooser (key absent when off).
+      ...(labelPickLive() ? { labelPickEnabled: true } : {}),
       assessment: {
         ...normalizeAssessmentRow(assessment),
         photo_records: photos,

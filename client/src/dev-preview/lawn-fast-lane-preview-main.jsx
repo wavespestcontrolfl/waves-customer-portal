@@ -11,6 +11,8 @@
  *   confirmed       assessment confirmed, a note typed, a tip and a blog post
  *                   picked, products on: Complete is on
  *   empty-products  a visit whose plan lists no products
+ *   sod             new sod, day 5, whole lawn: the banner, the fertilizer and weed killer lines held
+ *   sod-rooted      new sod, day 31: the "Sod mowed twice and does not lift" tick (the fake server saves it)
  *
  * The sheet wears the full form's mobile Complete service page (header with a
  * back arrow and a Details pill, the customer block, white cards, pill buttons).
@@ -33,7 +35,7 @@ document.documentElement.classList.add('admin-app');
 document.body.style.margin = '0';
 document.body.style.background = '#fafafa';
 
-const STATES = ['start', 'photos', 'analyzed', 'confirmed', 'empty-products'];
+const STATES = ['start', 'photos', 'analyzed', 'confirmed', 'empty-products', 'sod', 'sod-rooted'];
 const requested = new URLSearchParams(window.location.search).get('state');
 const STATE = STATES.includes(requested) ? requested : 'start';
 
@@ -44,6 +46,7 @@ const IDS = {
   primo: 'bbbbbbbb-0000-4000-8000-000000000003',
   prodiamine: 'bbbbbbbb-0000-4000-8000-000000000004',
   dismiss: 'bbbbbbbb-0000-4000-8000-000000000005',
+  bag: 'bbbbbbbb-0000-4000-8000-000000000006',
 };
 const CATALOG = [
   { id: IDS.celsius, name: 'Celsius WG', category: 'herbicide', formulation: 'WG', inventory_on_hand: '120.0000', inventory_unit: 'oz' },
@@ -51,6 +54,8 @@ const CATALOG = [
   { id: IDS.primo, name: 'Primo Maxx', category: 'pgr', formulation: 'SC', inventory_on_hand: '90.0000', inventory_unit: 'fl_oz' },
   { id: IDS.prodiamine, name: 'Prodiamine 65 WDG', category: 'pre-emergent', formulation: 'WDG', inventory_on_hand: '200.0000', inventory_unit: 'oz' },
   { id: IDS.dismiss, name: 'Dismiss NXT', category: 'herbicide', formulation: 'SC', inventory_on_hand: '60.0000', inventory_unit: 'fl_oz' },
+  // The sod states' fertilizer: the server holds a granular product as fertilizer only when it carries nitrogen (Headway G is never held).
+  { id: IDS.bag, name: 'LESCO 24-0-11 75% PolyPlus OPTI', category: 'fertilizer', formulation: 'granular', analysis_n: 24, inventory_on_hand: '500.0000', inventory_unit: 'lb' },
   // Tagged rows: the lawn sheet lists the lawn-tagged insecticide and not the roach bait.
   { id: '77777777-7777-4777-8777-000000000001', name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.46, default_unit: 'oz/1000sf', inventory_on_hand: '40.0000', inventory_unit: 'oz' },
   { id: '77777777-7777-4777-8777-000000000003', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', formulation: 'SC', service_lines: ['lawn'], inventory_on_hand: '64.0000', inventory_unit: 'fl_oz' },
@@ -66,6 +71,12 @@ const PLANNED = [
   { productId: IDS.headway, name: 'Headway G', applicationMethod: 'granular_broadcast', amount: 17.3, amountUnit: 'lb', treatedSqft: LAWN_SQFT, areaUnit: 'sqft', ratePer1000: 3, rateUnit: 'lb' },
   { productId: IDS.primo, name: 'Primo Maxx', applicationMethod: 'broadcast_spray', amount: 1.4, amountUnit: 'fl_oz', treatedSqft: LAWN_SQFT, areaUnit: 'sqft', ratePer1000: 0.25, rateUnit: 'fl_oz' },
 ];
+// The planned lines of the sod states: the plan with the fertilizer bag the holds act on.
+const SOD_BAG = { productId: IDS.bag, name: 'LESCO 24-0-11 75% PolyPlus OPTI', applicationMethod: 'granular_broadcast', amount: 14.4, amountUnit: 'lb', treatedSqft: LAWN_SQFT, areaUnit: 'sqft', ratePer1000: 2.5, rateUnit: 'lb' };
+const plannedItems = () => {
+  if (STATE === 'empty-products') return [];
+  return STATE === 'sod' || STATE === 'sod-rooted' ? [...PLANNED, SOD_BAG] : PLANNED;
+};
 const VISIT = {
   id: 'svc-preview',
   customerId: 'cust-preview',
@@ -118,6 +129,33 @@ const POSTS = [
   { id: '99999999-9999-4999-8999-000000000002', title: 'Chinch Bugs in Bradenton Lawns: What to Look For', url: 'https://www.wavespestcontrol.com/lawn-care/chinch-bugs-bradenton/' },
 ];
 
+// GATE_LAWN_NEW_SOD_NOTE: what the server sends for a home with new sod (the words are the server's; see lawn-sod-sheet.js).
+let sodTicked = false;
+const newSodFor = () => {
+  if (STATE === 'sod') {
+    return {
+      v: 1, day: 5, sodLaidOn: '2026-10-01', covers: 'whole', area: null,
+      headline: 'New sod, day 5. Laid Oct 1, 2026.', where: 'Whole lawn.',
+      heldLine: 'Held: fertilizer, weed killer, pre-emergent, Tetrino, Dylox, Gravex.', largePatch: 'Watch for large patch.',
+      swap: null, noWholeLawn: null, rooted: null,
+      lines: {
+        [IDS.bag]: { held: true, kinds: ['fertilizer'], reason: 'Held: new sod. Fertilizer starts Oct 31, 2026.' },
+        [IDS.celsius]: { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer starts Oct 31, 2026, once the sod has been mowed twice and does not lift.' },
+      },
+    };
+  }
+  if (STATE === 'sod-rooted') {
+    return {
+      v: 1, day: 31, sodLaidOn: '2026-09-05', covers: 'whole', area: null,
+      headline: 'New sod, day 31. Laid Sep 5, 2026.', where: 'Whole lawn.',
+      heldLine: sodTicked ? 'Held: pre-emergent, Gravex.' : 'Held: weed killer, pre-emergent, Gravex.', largePatch: null, swap: null, noWholeLawn: null,
+      rooted: sodTicked ? null : { sodLaidOn: '2026-09-05', label: 'Sod mowed twice and does not lift' },
+      lines: sodTicked ? {} : { [IDS.celsius]: { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer waits until the sod has been mowed twice and does not lift.' } },
+    };
+  }
+  return null;
+};
+
 const context = () => ({
   enabled: true,
   eligible: true,
@@ -127,7 +165,7 @@ const context = () => ({
   service: VISIT,
   visitDate: '2026-10-05',
   turfHeightCapture: false,
-  plannedProducts: { source: 'plan', items: STATE === 'empty-products' ? [] : PLANNED },
+  plannedProducts: { source: 'plan', items: plannedItems() },
   plannedProductsUnavailable: null,
   methods: [
     { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
@@ -142,6 +180,7 @@ const context = () => ({
   photoStatus: null,
   previousFrontPhoto: null,
   readFailures: [],
+  ...(newSodFor() ? { newSod: newSodFor() } : {}),
 });
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,7 +188,8 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // The fake admin API: no network, ever.
 async function request(path, options = {}) {
   const body = options.body ? JSON.parse(options.body) : null;
-  if (path.endsWith('/lawn-fast/context')) return context();
+  if (path.split('?')[0].endsWith('/lawn-fast/context')) return context();
+  if (path.split('?')[0].endsWith('/lawn-fast/sod-rooted')) { sodTicked = true; return { enabled: true, sodRootedOn: '2026-10-06', changed: true }; }
   if (path.includes('/lawn-assessment/service/')) {
     if (STATE === 'analyzed') return { shotListEnabled: true, assessment: ASSESSMENT, visitAssessment: REVIEW, aiScores: SCORES };
     if (STATE === 'confirmed') return { shotListEnabled: true, assessment: { ...ASSESSMENT, confirmed_by_tech: true }, visitAssessment: REVIEW, aiScores: SCORES };

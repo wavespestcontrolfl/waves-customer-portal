@@ -75,6 +75,8 @@
   border-bottom: 0.5px solid var(--tech-border);
   background: var(--tech-bg);
 }
+.tech-visit-header-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.tech-visit-header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .tech-visit-title { margin: 0; font-family: inherit; font-size: 18px; font-weight: 500; line-height: 1.35; letter-spacing: -0.005em; }
 /* An UPPERCASE section label like the Today page's overlines, at the 14px floor
    (the portal-brand gate bans smaller text in this stylesheet). */
@@ -143,6 +145,8 @@
 /* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
 .tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
 .tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* The tip's own line: the same mic beside a one-line box. */
+.tech-visit-tip-own-row { align-items: center; }
 /* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the words and the photos
    share one box. */
 .tech-visit-note-box { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 0.5px solid var(--tech-border-strong); border-radius: 4px; background: var(--tech-card); }
@@ -174,6 +178,45 @@
 .tech-visit-checkbox:checked { background: var(--tech-accent); border-color: var(--tech-accent); }
 .tech-visit-checkbox:focus { --tw-ring-color: var(--tech-accent); }
 .tech-visit-feedback { color: var(--tech-muted); margin: 8px 0 16px; }
+/* Fast Complete Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the full form's Options and Next scheduled visit. */
+.tech-wrapup .tech-visit-choice { align-items: center; }
+.tech-wrapup-indent { margin-left: 30px; }
+.tech-wrapup-block { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; padding: 12px; border: 0.5px solid var(--tech-border); border-radius: 6px; background: var(--tech-card); }
+.tech-wrapup-block .tech-visit-muted { margin: 0; }
+.tech-wrapup-stepper { display: flex; align-items: center; gap: 8px; }
+.tech-wrapup-stepper-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 14px; }
+.tech-wrapup-stepper-value { color: var(--tech-text); font-size: 16px; }
+/* One width for every step button, so the two rows' buttons line up ("−5" is narrower than "−15"). */
+.tech-wrapup-stepper .ui-action.tech-visit-action { width: 60px; min-width: 60px; padding-left: 0; padding-right: 0; }
+/* The pay-link row's hint sits under its label, not after it on the same line. */
+.tech-wrapup-hint { display: block; }
+.tech-wrapup-timing { display: grid; gap: 8px; margin-top: 8px; }
+.tech-wrapup-next { margin: 0; font-size: 16px; font-weight: 500; }
+/* One look for the Wrap-up on every sheet (owner 2026-10-12): the full Complete Service form's own, which the lawn
+   sheet already wears (the M tokens above .tech-lawn-sheet): ink #111111 on white, hairline #e5e5e5, grey labels,
+   48px inputs with a 12px radius, and 999px outline pills. Scoped to the section, so the rest of each sheet is unchanged. */
+.tech-wrapup {
+  --tech-card: #ffffff;
+  --tech-subtle: #f5f5f5;
+  --tech-border: #e5e5e5;
+  --tech-border-strong: #e5e5e5;
+  --tech-accent: #111111;
+  --tech-text: #111111;
+  --tech-muted: #737373;
+  --tech-faint: #a3a3a3;
+  --tech-error-text: #c2410c;
+  color: #111111;
+  font-family: "Roboto", Arial, sans-serif;
+}
+.tech-wrapup .tech-visit-section-title { margin: 0 0 8px; color: #a3a3a3; font-size: 14px; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
+.tech-wrapup .tech-visit-muted { color: #737373; }
+.tech-wrapup .ui-control.tech-visit-control { min-height: 48px; padding: 0 16px; border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; color: #111111; font-size: 16px; font-weight: 400; }
+.tech-wrapup .ui-control.tech-visit-control:focus { border-color: #111111; --tw-ring-color: #111111; }
+.tech-wrapup select.ui-control.tech-visit-control { padding: 0 32px 0 16px; }
+.tech-wrapup .ui-action.tech-visit-action { min-height: 44px; border: 1px solid #111111; border-radius: 999px; background: transparent; color: #111111; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
+.tech-wrapup .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: #f5f5f5; }
+/* The Time on-site clock outside the lawn sheet (the Tree & Shrub Wrap-up); the lawn sheet's own, more specific rule wins there. */
+.tech-visit-on-site-time { margin: 0; font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 500; }
 .tech-visit-feedback[role='alert'] { color: var(--tech-error-text); }
 
 .tech-visit-photo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -226,6 +269,15 @@
 .tech-visit-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tech-visit-amount-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 88px; align-items: center; gap: 8px; margin: 8px 0; }
 .tech-visit-amount-label { font-size: 14px; color: var(--tech-text); overflow-wrap: anywhere; }
+
+/* A Fast Complete sheet as one part of a stop (the combo container, GATE_COMBO_FAST_COMPLETE): the container's one scroll
+   carries every part, so the part's own header is hidden and its body and footer flow with the page. */
+.tech-visit-embedded-part { display: flex; flex-direction: column; margin-bottom: 16px; border: 0.5px solid var(--tech-border-strong); border-radius: 6px; background: var(--tech-page); }
+.tech-visit-embedded-part .tech-visit-header,
+.tech-visit-embedded-part.tech-visit-embedded-part .tech-lawn-header { display: none; }
+.tech-visit-embedded-part .tech-visit-form-area { flex: none; min-height: 0; }
+.tech-visit-embedded-part .tech-visit-body { flex: none; overflow: visible; }
+.tech-visit-embedded-part .tech-visit-footer { position: static; }
 
 /* Fast Complete "+ Other product" (slice 1b). The form area under the sheet
    header holds the phone picker, so the header stays in view above it. */
@@ -420,6 +472,12 @@
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add:disabled { border-color: #e5e5e5; opacity: 1; }
 .tech-lawn-sheet .tech-guide-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; }
 .tech-lawn-sheet .tech-guide-card + .tech-guide-card { border-top: 1px solid #e5e5e5; }
+/* New sod (GATE_LAWN_NEW_SOD_NOTE): the banner at the top of the lawn sheet, and the lines the holds keep off it, greyed. */
+.tech-lawn-sheet .tech-sod-banner { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #e5e5e5; border-radius: 12px; background: #fafafa; }
+.tech-lawn-sheet .tech-sod-banner-title { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.3; }
+.tech-lawn-sheet .tech-sod-tick { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 6px; }
+.tech-lawn-sheet .tech-sod-tick input { width: 20px; height: 20px; flex-shrink: 0; }
+.tech-lawn-sheet .tech-sod-held-line .tech-protocol-addon-name { color: #737373; }
 .tech-lawn-sheet .tech-guide-check { margin: 0; padding: 6px 8px; border: 1px solid #e5e5e5; border-radius: 8px; background: #fafafa; color: #171717; font-size: 14px; font-weight: 500; }
 .tech-lawn-sheet .tech-guide-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .tech-lawn-sheet .tech-guide-empty { margin: 0; padding: 10px 14px; }

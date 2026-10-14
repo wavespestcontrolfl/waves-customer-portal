@@ -871,9 +871,21 @@ function initScheduledJobs() {
       // prior tick must not double-run and bypass the per-run change cap.
       await runExclusive('auto-dispatch-recurring', async () => {
         if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) {
-          const { flagUnplacedVisits } = require('./auto-dispatch/audit');
+          const { flagUnplacedVisits, maintainMissingGeoNotices } = require('./auto-dispatch/audit');
           const { getAutoDispatchConfig } = require('./auto-dispatch/config');
-          await flagUnplacedVisits(getAutoDispatchConfig());
+          // No placement run tonight: close pin notices that no longer apply.
+          // Each upkeep runs even when the other fails; the first failure is
+          // thrown after both ran.
+          const failures = [];
+          await flagUnplacedVisits(getAutoDispatchConfig()).catch((err) => failures.push(err));
+          await maintainMissingGeoNotices().catch((err) => failures.push(err));
+          // Move-check notices get their upkeep on this path too. A manual
+          // apply run can still raise them with the cron off, so they close
+          // by the same rule as in a run: all of them only when the
+          // proofreader's own gate is off.
+          const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
+          if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
+          if (failures.length) throw failures[0];
           return;
         }
         const { runAutoDispatch } = require('./auto-dispatch');
@@ -1383,7 +1395,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY MON 4:05AM ET — Manatee permit sync (public ACA CSV reports →
+  // WEEKLY MON 7:41AM ET — Manatee permit sync (public ACA CSV reports →
   // pool_permit_records + construction_permit_records). Pool report =
   // closed-permit backstop for the pool-facts lookup (the live GIS layer
   // drops permits when they close and the assessment roll lags a finished
@@ -1396,6 +1408,17 @@ function initScheduledJobs() {
   // (2026-10-05: killed at 4:14 AM, so the week had no permit data): both
   // steps upsert by permit number and the detail step skips permits it
   // already read, so a second run on the same morning is harmless.
+  // 7:41 AM, not the first slot of 4:05 AM: the county report server does
+  // not answer in that hour (form requests hung on every 4:05 run from
+  // 2026-08-17; on 2026-10-12 both reports came back as a web page). The
+  // same requests from this service at 7:16 AM (2026-09-28) took 172 s
+  // with no retry. The detail step is one request every 2 s or more.
+  // Minute 41 (codex #6286 r1+r2): no job starts on it, and it is clear of
+  // the :25 urgent combined-booking check and of the :30 / :33 / :37 / :40
+  // groups. The report step is the only heavy database work (one upsert
+  // transaction, about 3 minutes after the start) and it ends before the
+  // :48 and :52 groups. The detail step then holds only the lease's one
+  // connection, under the cron-lock holder cap, as it did from 4:08 AM.
   // =========================================================================
   const runPermitSyncTick = async () => {
     // ONE lease for the whole sequence (codex #5673 P1): with separate
@@ -1432,7 +1455,7 @@ function initScheduledJobs() {
       if (failures.length) throw new Error(failures.join(' | '));
     }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   };
-  cron.schedule('5 4 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
+  cron.schedule('41 7 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
   registerDeployKillRetry('permit-sync', runPermitSyncTick);
 
   // =========================================================================
@@ -2032,6 +2055,31 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 06:35 — pin check after a visit (GATE_PIN_PARKED_CHECK, dark): compares the map pin of each
+  // customer whose visit was completed in the last 2 ET days with where the technician's truck parked,
+  // and SUGGESTS the parked point to staff. It never changes a pin and never contacts a customer.
+  // Gate read per run, so a flip needs no restart. With the gate off the run only retires any suggestions
+  // still open (a clean rollback), so the tick is not skipped here. runExclusive records the job health.
+  cron.schedule('35 6 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('pin-parked-check', async () => {
+        const result = await require('./pin-parked-check').runPinParkedCheck();
+        if (result.created > 0) logger.info(`[pin-parked-check] ${result.created} new pin suggestion(s)`);
+      });
+      // A tick that never ran (no lock connection) is recorded as a failed run, like the geocode-review alert.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`pin-parked-check tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('pin-parked-check').catch(() => {});
+        await recordJobEnd('pin-parked-check', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[pin-parked-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
@@ -2130,7 +2178,24 @@ function initScheduledJobs() {
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
-    if (!require('./callback-cards').enabled()) return;
+    if (!require('./callback-cards').enabled()) {
+      // Cards off: the callback-spam reconcile keeps its five-minute cadence
+      // on its own, gate or no gate (the reconciler itself gates only the
+      // forward settlements; its correction half runs through a rollback), so
+      // a lost settlement or correction never waits for the daily sweep.
+      const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+      const t0 = Date.now();
+      const lockRes = await runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
+        .catch((err) => { logger.warn(`[callback-verdict-reconcile] tick failed: ${err.message}`); return null; });
+      // runExclusive resolves { skipped, reason } instead of throwing: a
+      // no_connection skip is a missed run and is recorded as a failed job,
+      // like the adjacent ticks; a held lease is another pod's run.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordJobStart('callback-verdict-reconcile').catch(() => {});
+        await recordJobEnd('callback-verdict-reconcile', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+      }
+      return;
+    }
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
       const result = await runCallCommitmentsWatchdog();

@@ -45,6 +45,7 @@ const {
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
+const { PORTAL_CANCEL_FACT_LABEL, PORTAL_CANCEL_AVAILABLE_LINE, PORTAL_CANCEL_UNAVAILABLE_LINE } = require('./sms-portal-cancel-fact');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -189,6 +190,11 @@ const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
   // read existed may hide an open miss behind "- none", so it lacks the scope line and
   // never grades '7_m' (Codex #5610 r1 P1); a '7_m' item never grades an older identity.
   m: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER, MISSED_VISIT_SCOPE_LINE],
+  // PORTAL SELF-CANCEL (2026-10-09): the next cumulative key — everything 'm' requires plus
+  // the PORTAL SELF-CANCEL label. The line renders on EVERY gate-on block ("available" or
+  // "not available"), so its absence always means "frozen before the fact existed": such an
+  // item never grades an 'n' identity, and an 'n' item never grades an older one.
+  n: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER, MISSED_VISIT_SCOPE_LINE, PORTAL_CANCEL_FACT_LABEL],
 });
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {
@@ -259,6 +265,12 @@ const COMPANY_FACTS_OPTIONAL = `(?:${COMPANY_FACTS_HEADER.replace(/[.*+?^${}()|[
 const MARKER_STRUCTURE = Object.freeze({
   [V12_FACTS_MARKER]: `(?:^|\\n)FOLLOW-UP SLA RIGHT NOW: [^\\n]*\\n(?:FREE RE-SERVICE:[^\\n]*\\n)?${COMPANY_FACTS_OPTIONAL}BILLING:\\n`,
   [V12_PAYMENT_OPTIONS_MARKER]: '\\nBILLING:\\n(?:(?!PENDING ESTIMATE:|RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:)[^\\n]*\\n)*?- Payment options:',
+  // PORTAL SELF-CANCEL counts only where buildFactsBlock renders it (Codex #6223 r1): one of
+  // its two exact lines, directly after the PENDING ESTIMATE line that follows the BILLING
+  // section and directly before PROPERTY & PREFERENCES. A multi-line service note sits in
+  // SERVICE HISTORY, before BILLING, and a thread line sits after the free-text headers, so
+  // neither can supply it.
+  [PORTAL_CANCEL_FACT_LABEL]: `\\nBILLING:\\n(?:(?!PENDING ESTIMATE:|RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:)[^\\n]*\\n)*?PENDING ESTIMATE: [^\\n]*\\n(?:${[PORTAL_CANCEL_AVAILABLE_LINE, PORTAL_CANCEL_UNAVAILABLE_LINE].map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\nPROPERTY & PREFERENCES:\\n`,
 });
 // Defense in depth: the three free-text sections buildFactsBlock writes AFTER
 // every fixed section (call summaries, a per-line-sanitized call transcript, the

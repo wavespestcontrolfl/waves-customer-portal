@@ -40,6 +40,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
       }),
       leftJoin: () => ({
         where: () => ({
+          whereRaw() { return this; },
           select: () => Promise.resolve([]),
         }),
       }),
@@ -89,7 +90,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     const trx = (table) => ({
       whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completions.push(row);
@@ -198,7 +199,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
       }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completions.push(row);
@@ -296,7 +297,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     const trx = (table) => ({
       whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve({ id: 'row-1' }), del: () => Promise.resolve(0) }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([protocolRow]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completionOut = row;
@@ -383,7 +384,7 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
       whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog')
         ? ids.filter((id) => (catalogIds || ids).includes(id)).map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completions.push(row);
@@ -525,6 +526,46 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
     expect(actuals).toHaveLength(1);
     expect(actuals[0].status).not.toBe('skipped');
     expect(JSON.parse(completions[0].metadata).unlistedSkippedProducts).toEqual([]);
+  });
+
+  // GATE_LAWN_NEW_SOD_NOTE (Codex on #6231): the new-sod bag swap is not a plan substitution; the visit hands it in.
+  describe('a substitution the visit made (visitSubstitutions: the new-sod bag swap)', () => {
+    const plan = {
+      protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] },
+        products: [{ productId: 'dim-bag', defaultInPlan: true }] } },
+      mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [{ selected: true, product: { id: 'dim-bag' } }] },
+    };
+    const swap = { id: null, originalProductId: 'dim-bag', originalProductName: 'Dimension bag', substituteProductId: 'sod-bag', substituteProductName: 'Sod bag', reason: 'New sod: no pre-emergent yet.', source: 'new_sod' };
+    const applied = { id: 'sp-7', product_id: 'sod-bag', product_name: 'Sod bag', application_rate: 2.5, rate_unit: 'lb', total_amount: 12.5, amount_unit: 'lb', application_method: 'granular_broadcast', area_value: '5000', area_unit: 'sqft' };
+    const run = async (extra) => {
+      process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+      const actuals = []; const completions = [];
+      await recordLawnProtocolCompletion(fakeTrx(completions, actuals), {
+        service: visit, serviceRecord: { id: 'record-3' }, plan, serviceProducts: [applied],
+        completionInput: { treatedSqft: 5000, skippedProducts: [{ productId: 'dim-bag', productName: 'Dimension bag' }] }, ...extra,
+      });
+      return { actuals, metadata: JSON.parse(completions[0].metadata) };
+    };
+
+    test('the swap bag is a substituted application of the bag it replaced, and that bag is not also a skipped default', async () => {
+      const { actuals, metadata } = await run({ visitSubstitutions: [swap] });
+      expect(actuals).toHaveLength(1);
+      expect(actuals[0]).toMatchObject({ status: 'substituted_applied', product_id: 'sod-bag' });
+      expect(JSON.parse(actuals[0].metadata).substitution).toMatchObject({ originalProductId: 'dim-bag', substituteProductId: 'sod-bag', source: 'new_sod' });
+      expect(metadata.substitutions).toEqual([swap]);
+    });
+
+    test('without it the completion is as before: an off-protocol application and a skipped default', async () => {
+      const { actuals, metadata } = await run({});
+      expect(actuals.map((row) => row.status).sort()).toEqual(['off_protocol_applied', 'skipped']);
+      expect(metadata.substitutions).toEqual([]);
+    });
+
+    test('withheld attribution withholds it too', async () => {
+      const { actuals, metadata } = await run({ plan: { ...plan, protocol: null }, visitSubstitutions: [swap] });
+      expect(actuals.find((row) => row.product_id === 'sod-bag').status).toBe('applied');
+      expect(metadata.substitutions).toEqual([]);
+    });
   });
 
   test('withheld attribution also withholds the plan\'s substitution labels: the applied substitute is a plain application', async () => {

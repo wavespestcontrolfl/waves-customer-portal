@@ -15,7 +15,7 @@ const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/oc
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
 const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
-const { lunchBlockEnabled } = require('./scheduling/customer-windows');
+const { lunchBlockEnabled, pastCustomerLastStart } = require('./scheduling/customer-windows');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
@@ -411,6 +411,8 @@ class AvailabilityEngine {
       const afternoonStartMin = lunchBlockEnabled() ? null : lunchEnd;
       const accept = (g) => {
         if (violatesSelfServeNotice({ date: dateStr, startTime: this.minToTime24(g.start) }, today)) return false;
+        // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16). No-op while unset.
+        if (pastCustomerLastStart(g.start)) return false;
         if (travelMirror && violatesTravelGap(
           {
             startMin: g.start, endMin: g.end, ...travelMirror.pin,
@@ -690,6 +692,13 @@ class AvailabilityEngine {
       if (startMin < lunchEnd && endMin > lunchStart) {
         throw bookingError('That time falls in the lunch block — please pick another slot', 'SLOT_TAKEN');
       }
+    }
+    // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+    // 2026-10-09) — commit-side mirror of getAvailableSlots' accept(): an
+    // option the assistant quoted before the gate flipped on must not
+    // commit. No-op while unset.
+    if (pastCustomerLastStart(startMin)) {
+      throw bookingError('That time is no longer offered — please pick another slot', 'SLOT_TAKEN');
     }
 
     // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served

@@ -17,7 +17,7 @@ describe('week-plan premise binding', () => {
     // The canonical lookup is STRICT and outside the fail-open prefs catch: a failure propagates (render refused), never plan=none.
     expect(src).toMatch(/const snapshot = await loadCurrentWeekPlan\(service\.customer_id, \{ strict: true \}\);/);
     // The report renderer receives the snapshot's restriction (hour constraints).
-    expect(src).toMatch(/renderWeekPlanReport\(snapshot\.plan, \{ runMinutes: [^}]*, restriction: snapshot\.restriction \|\| null \}\)/);
+    expect(src).toMatch(/renderWeekPlanReport\(snapshot\.plan, \{ runMinutes: [^}]*, restriction: snapshot\.restriction \|\| null, rateTable \}\)/);
   });
 
   test('two units in one building are different homes; the same premise is not', () => {

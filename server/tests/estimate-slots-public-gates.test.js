@@ -372,6 +372,256 @@ describe('bermuda-suppression money/slot gate', () => {
   });
 });
 
+// Same boundaries for a persisted area add-on treatment (GATE_AREA_ADDONS): own code, same 409, nothing touched.
+describe('area add-on money/slot gate (GATE_AREA_ADDONS)', () => {
+  const ADDON_ESTIMATE = {
+    id: 'est-addon',
+    status: 'sent',
+    expires_at: null,
+    archived_at: null,
+    estimate_data: JSON.stringify({
+      result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Pool Cage, Lanai & Eave Web Sweep', price: 59 }], specItems: [] } },
+    }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('gate off: availability, card hold and recurring card intent 409 with AREA_ADDONS_GATED', async () => {
+    delete process.env.GATE_AREA_ADDONS;
+    currentEstimate = ADDON_ESTIMATE;
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).toBe(409);
+    expect((await slots.json()).code).toBe('AREA_ADDONS_GATED');
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    for (const leg of ['card-hold-intent', 'recurring-card-intent']) {
+      const res = await fetch(`${base}/${TOKEN}/${leg}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('AREA_ADDONS_GATED');
+    }
+  });
+
+  test('gate on: the add-on gate does not fire on the slot path', async () => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    currentEstimate = ADDON_ESTIMATE;
+    getAvailableSlots.mockResolvedValue([]);
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).not.toBe(409);
+  });
+});
+
+// Area add-ons are booked and billed by the one-time accept only: a recurring-mode reserve of an estimate that
+// carries one is refused before any hold exists (the matching accept refusal is in the atomicity suite).
+describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () => {
+  const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
+  const ONE_TIME_ONLY = {
+    id: 'est-addon-ot', status: 'sent', expires_at: null, archived_at: null,
+    estimate_data: JSON.stringify({ result: { oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const WITH_RECURRING = {
+    id: 'est-addon-rec', status: 'sent', expires_at: null, archived_at: null, monthly_total: 88,
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 }, oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  const reserve = (body) => fetch(`${base}/${TOKEN}/reserve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slotId: '2030-01-01_09-00_unassigned', ...body }),
+  });
+  beforeEach(() => { process.env.GATE_AREA_ADDONS = 'true'; });
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('a recurring-mode reserve of an estimate with an add-on is refused with the office hand-off and holds nothing', async () => {
+    currentEstimate = WITH_RECURRING;
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+      code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+    });
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+  });
+
+  test('a structurally one-time estimate (add-ons only) reserves in one-time mode, whatever mode the body asks for', async () => {
+    currentEstimate = ONE_TIME_ONLY;
+    // The real predicate (estimate-public.js isStructuralOneTimeOnlyEstimate, pinned with real add-on rows in
+    // area-addon-flow.test.js) is mocked in this suite.
+    require('../routes/estimate-public').isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: null });
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ serviceMode: 'one_time' }));
+  });
+
+  test('a mixed estimate reserves when the customer asked for the one-time mode', async () => {
+    currentEstimate = WITH_RECURRING;
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-2', expiresAt: null });
+    const res = await reserve({ serviceMode: 'one_time' });
+    expect(res.status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ serviceMode: 'one_time' }));
+  });
+
+  test('an estimate with no add-on is untouched by the rule', async () => {
+    currentEstimate = { id: 'est-plain', status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }) };
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-3', expiresAt: null });
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(201);
+  });
+});
+
+// Codex round 11 P1 on #6135: /recurring-card-intent checked the park and the quote gates but not the add-on rule, so an
+// add-on estimate with a linked appointment (checkout bypasses /reserve) minted a SetupIntent and saved the customer's card,
+// and only then did the accept refuse. The same refusal now comes first, before any Stripe work.
+describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_ADDONS on)', () => {
+  const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
+  const WITH_RECURRING = {
+    id: 'est-addon-rec', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, customer_id: 'cust-1',
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 }, oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const REFUSAL = {
+    error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+    code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+  };
+  const stripeObjects = () => {
+    const { createRecurringCardSetupIntentForEstimate, replaceRecurringCardIntent } = require('../services/recurring-card-on-file');
+    return [createRecurringCardSetupIntentForEstimate, replaceRecurringCardIntent];
+  };
+  let spies = [];
+  beforeEach(() => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    const recurring = require('../services/recurring-card-on-file');
+    spies = [
+      jest.spyOn(recurring, 'createRecurringCardSetupIntentForEstimate').mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'seti_new' }),
+      jest.spyOn(recurring, 'replaceRecurringCardIntent').mockResolvedValue({ ok: true, intent: { clientSecret: 'cs', setupIntentId: 'seti_new' } }),
+    ];
+  });
+  afterEach(() => {
+    spies.forEach((spy) => spy.mockRestore());
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('a recurring-mode request for an add-on estimate answers the one-time-only 409 and creates or replaces no intent', async () => {
+    currentEstimate = WITH_RECURRING;
+    for (const body of [{}, { serviceMode: 'recurring' }, { replaceSetupIntentId: 'seti_old' }]) {
+      const res = await post('recurring-card-intent', body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(REFUSAL);
+    }
+    for (const fn of stripeObjects()) expect(fn).not.toHaveBeenCalled();
+  });
+
+  // Codex round 22 (two P0): the estimate can gain an add-on, or the gate can turn off, after the route's first read.
+  describe('the add-on rules are re-judged on the freshly read row (locked reserve row, post-mint reload)', () => {
+    const { lockedAreaAddOnRuleRefusal } = require('../routes/estimate-slots-public')._internals;
+    test('a recurring-mode request for a row that now carries an add-on is refused; one-time mode and a plain row are not', () => {
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, 'recurring')).toEqual({ status: 409, body: REFUSAL });
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, '')).toEqual({ status: 409, body: REFUSAL });
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, 'one_time')).toBeNull();
+      expect(lockedAreaAddOnRuleRefusal({ ...WITH_RECURRING, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] } } }) }, 'recurring')).toBeNull();
+      // the card-hold route passes no mode: only the gate is judged
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, undefined)).toBeNull();
+    });
+    test('the gate turned off: every mode is refused with the gated code', () => {
+      process.env.GATE_AREA_ADDONS = 'false';
+      for (const mode of ['one_time', 'recurring', undefined]) {
+        expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, mode)).toMatchObject({ status: 409, body: { code: 'AREA_ADDONS_GATED' } });
+      }
+    });
+    test('source: the reserve callback and the post-mint recheck both ask it; the recurring success exit passes the requested mode', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const callback = src.slice(src.indexOf('revalidateEstimate: async (row, trx, { date } = {}) => {'));
+      expect(callback.slice(0, 900)).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
+      const recheck = src.slice(src.indexOf('async function postMintRefusal('), src.indexOf('async function refuseParkedRecurringIntent('));
+      expect(recheck).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
+      expect(src).toContain("{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? '' }");
+      // Codex round 35: every projected estimate read of this router carries pricing_authority (the gates read the authoritative result).
+      expect(src).toMatch(/const SLOT_ESTIMATE_COLUMNS = \[[^\]]*'pricing_authority'/);
+      // Codex round 34: the card-hold success exit passes the requested mode too (an estimate revised into a recurring plan
+      // with an add-on while the intent was minted).
+      const cardHold = src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'"));
+      expect(cardHold).toContain("}, { requestedServiceMode: req.body?.serviceMode ?? '' });");
+    });
+  });
+
+  test('a stale intent the tab submits for replacement is retired, as every other exempt answer does', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+    const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
+    const refusal = route.indexOf('recurringAreaAddOnRefusalBody(estimate,');
+    expect(refusal).toBeGreaterThan(route.indexOf('const serviceMode = resolveSlotServiceMode('));
+    // Before the contact check, the policy, the replace and the mint: nothing reaches Stripe first.
+    for (const later of ['resolveRecurringCardPolicyForEstimate', 'replaceRecurringCardIntent({', 'createRecurringCardSetupIntentForEstimate(estimate)']) {
+      expect(route.indexOf(later)).toBeGreaterThan(refusal);
+    }
+    expect(route.slice(refusal, refusal + 500)).toContain('{ retireSetupIntentId: replaceSetupIntentId }');
+  });
+
+  test('a one-time-mode request is not refused by the rule, and an estimate with no add-on is untouched by it', async () => {
+    currentEstimate = WITH_RECURRING;
+    const oneTime = await post('recurring-card-intent', { serviceMode: 'one_time' });
+    expect(await oneTime.json()).not.toEqual(REFUSAL);
+    currentEstimate = { ...WITH_RECURRING, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }) };
+    const plain = await post('recurring-card-intent', {});
+    expect(await plain.json()).not.toEqual(REFUSAL);
+  });
+
+  test('card-hold-intent is unreachable for a recurring-mode add-on estimate: the policy owes no hold before any intent is created', async () => {
+    const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+    resolveCardHoldPolicy.mockImplementation(({ treatAsOneTime }) => (treatAsOneTime ? { required: true } : { enforced: true, required: false, exemptReason: 'recurring' }));
+    createCardHoldSetupIntentForEstimate.mockClear();
+    currentEstimate = WITH_RECURRING;
+    const res = await post('card-hold-intent', {});
+    expect(res.status).toBe(409);
+    expect((await res.json()).exemptReason).toBe('recurring');
+    expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    resolveCardHoldPolicy.mockReset();
+    createCardHoldSetupIntentForEstimate.mockReset();
+  });
+});
+
+// Codex round 11 P1 on #6135: the reserve read a customer's add-on history without that customer's booking fence.
+describe('the reserve fences the customer before it reads the add-on history', () => {
+  const limits = require('../services/area-addon-limits');
+  const { lockedAreaAddOnLimitRefusal } = require('../routes/estimate-slots-public')._internals;
+  const ROW = { id: 'est-1', customer_id: 'cust-1', customer_phone: null };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('the recheck is asked to fence the named customer and the found one, with the transaction\'s own non-blocking take', async () => {
+    const refusal = jest.spyOn(limits, 'areaAddOnLimitRefusal').mockResolvedValue(null);
+    const fence = jest.spyOn(limits, 'fenceCustomerBookings').mockResolvedValue(undefined);
+    const trx = { isTransaction: true };
+    expect(await lockedAreaAddOnLimitRefusal(ROW, trx, '2030-01-01')).toBeNull();
+    const options = refusal.mock.calls[0][1];
+    expect(refusal.mock.calls[0][0]).toBe(trx);
+    expect(options).toMatchObject({ estimate: ROW, appliedOn: '2030-01-01', fenceNamed: true });
+    await options.fenceCustomer('cust-1');
+    expect(fence).toHaveBeenCalledWith(trx, 'cust-1');
+  });
+
+  test('a busy account is the existing retryable 409 with nothing reserved; a limit refusal passes through; any other failure is thrown', async () => {
+    const busy = Object.assign(new Error('busy'), { status: 409, code: 'CUSTOMER_BUSY_RETRY' });
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockRejectedValueOnce(busy);
+    expect(await lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).toEqual({
+      status: 409,
+      body: { error: 'This account is being updated right now \u2014 please retry your acceptance in a moment.', code: 'CUSTOMER_BUSY_RETRY' },
+    });
+    const limitRefusal = { status: 409, body: { error: 'x', code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' } };
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockResolvedValueOnce(limitRefusal);
+    expect(await lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).toBe(limitRefusal);
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockRejectedValueOnce(new Error('boom'));
+    await expect(lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).rejects.toThrow('boom');
+  });
+});
+
 describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
   const { estimatePublicBlockingState } = require('../routes/estimate-public');
   const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
@@ -656,12 +906,12 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       const exit = route.indexOf('return await sendRecheckedIntentResponse(res, estimate, 200, {');
       expect(mint).toBeGreaterThan(0);
       expect(exit).toBeGreaterThan(mint);
-      expect(route.slice(exit)).toContain('{ retireSetupIntentId: intent.setupIntentId }');
+      expect(route.slice(exit)).toContain('{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? \'\' }');
       // The exit function re-checks (reloaded row) BEFORE it sends, retiring first when asked.
       const fn = src.slice(src.indexOf('async function sendRecheckedIntentResponse'), src.indexOf('// What a slot route answers') > 0 ? undefined : undefined);
       const body = fn.slice(0, fn.indexOf('\n}\n') + 3);
-      expect(body.indexOf('await postMintRefusal(estimate)')).toBeGreaterThan(0);
-      expect(body.indexOf('await postMintRefusal(estimate)')).toBeLessThan(body.indexOf('res.status(status).json(body)'));
+      expect(body.indexOf('await postMintRefusal(estimate, { requestedServiceMode })')).toBeGreaterThan(0);
+      expect(body.indexOf('await postMintRefusal(estimate, { requestedServiceMode })')).toBeLessThan(body.indexOf('res.status(status).json(body)'));
       expect(body.indexOf('retireOrDenyDroppedCapture')).toBeLessThan(body.indexOf('respondNoBookingRefusal'));
     });
 
@@ -685,7 +935,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
         }
       }
       // The re-check helper appears twice: its definition and its one call, inside the exit.
-      expect(src.split('postMintRefusal(estimate)').length - 1).toBe(2);
+      expect(src.split('postMintRefusal(estimate, {').length - 1).toBe(2);
       expect(src.split('sendRecheckedIntentResponse(res, estimate').length - 1).toBeGreaterThanOrEqual(6);
       // Every exit is AWAITED inside the route's try: a rejected final recheck must reach the catch (Express 4
       // does not handle a rejected handler promise, so an un-awaited return would hang the request).

@@ -713,7 +713,7 @@ export default function ServiceReportDocument({ data, token }) {
   const termiteV2 = suppressProgramDashboards ? null : (data.termiteReportV2 || null);
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
-  // GATE_LAWN_REPORT_LEAD: only lawn payloads ever carry `lead` (the server
+  // Only lawn payloads ever carry `lead` (the server
   // derives it for lawn alone); tree & shrub is excluded here too, so it
   // prints exactly as before.
   const v2Lead = v2 && v2.lead && typeof v2.lead === 'object' && data.serviceLine !== 'tree_shrub' ? v2.lead : null;
@@ -732,7 +732,7 @@ export default function ServiceReportDocument({ data, token }) {
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
-        // The lead's headline when it has one: under GATE_LAWN_REPORT_COPY_V6
+        // The lead's headline when it has one: with the v6 copy
         // that is the FROZEN headline the live report replays, which a later
         // assessment correction must not make the PDF contradict. Without the
         // v6 copy the lead headline is this same statusHeadline (or null).
@@ -851,7 +851,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stripped sentence by sentence: the banner composes a plan sentence onto a
   // frozen line (partial credit), so the frozen sentence alone must go too.
   const bannerSentences = hasActualTreatment
-    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    && ['hold', 'water_in', 'hold_then_water_in', 'water_in_by_rain'].includes(data.reportV2?.banner?.state)
     ? (data.reportV2.banner.lines || [])
       .filter((line) => typeof line === 'string' && line)
       .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
@@ -1233,7 +1233,7 @@ export default function ServiceReportDocument({ data, token }) {
                 {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
               </Bullet>
             )}
-            {/* GATE_LAWN_REPORT_COPY_V6: the approved expectation sentences the web
+            {/* Lawn v6 copy: the approved expectation sentences the web
                 lead prints. Its headline is the Overall line above, and its
                 watching line names insights this list already prints in full. */}
             {v2Lead?.whatToExpect ? (

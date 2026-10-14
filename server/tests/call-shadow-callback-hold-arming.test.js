@@ -37,7 +37,7 @@ describe('shadow-mode callback_number_needed hold arming', () => {
     expect(enforceGateAt).toBeGreaterThan(-1);
     const callAt = processorSource.indexOf('callbackNumberNeededBlocksSms(finalFlags)', enforceGateAt);
     expect(callAt).toBeGreaterThan(enforceGateAt);
-    const enforceSection = processorSource.slice(callAt, callAt + 600);
+    const enforceSection = processorSource.slice(callAt, callAt + 900);
     expect(enforceSection).toContain('v2SmsBlocked = true');
     expect(enforceSection).toContain('callbackNumberNeededHoldActive = true');
   });

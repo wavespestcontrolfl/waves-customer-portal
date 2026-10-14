@@ -253,6 +253,85 @@ describe("ProtocolPanel independent request failures", () => {
   });
 });
 
+describe("area add-on visits are generic work, whatever their name says", () => {
+  const addOn = (serviceType, serviceKey, category) => ({
+    id: "visit-addon-a", customerId: "customer-fixture-a", serviceType, customerName: "Fixture account",
+    lawnType: "St. Augustine", lawnSqft: 10000, completionProfile: { serviceKey, category, findingsType: null },
+  });
+  const paths = () => fetch.mock.calls.map(([url]) => new URL(url, "http://localhost").pathname);
+
+  it.each([
+    ["Lawn Insect Spot Treatment", "area_addon_lawn_insect_spot", "lawn_care"],
+    ["Yearly Lawn Insect Preventive", "area_addon_lawn_insect_preventive", "lawn_care"],
+    ["Bed Pre-Emergent Weed Control", "area_addon_bed_pre_emergent", "lawn_care"],
+    ["Shell, Rock & Paver Weed Control", "area_addon_hardscape_weed", "lawn_care"],
+    ["Fire Ant Yard Treatment", "area_addon_fire_ant_yard", "lawn_care"],
+    ["Web Sweep", "area_addon_web_sweep", "pest_control"],
+  ])("%s loads neither the lawn program nor the pest program", async (serviceType, serviceKey, category) => {
+    await act(async () => { render(<ProtocolPanel service={addOn(serviceType, serviceKey, category)} onClose={() => {}} />); });
+    await waitFor(() => expect(paths().some((path) => path.endsWith("/scripts"))).toBe(true));
+    const called = paths();
+    for (const lawnOrPestOnly of ["/turf-profile", "/programs", "/lawn-mix", "/protocols/match"]) {
+      expect(called.filter((path) => path.endsWith(lawnOrPestOnly))).toEqual([]);
+    }
+    // The guidance lookups ask for the neutral line, not "lawn" or "pest".
+    const lines = fetch.mock.calls.map(([url]) => new URL(url, "http://localhost").searchParams.get("service_line")).filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(new Set(lines)).toEqual(new Set(["general"]));
+  });
+
+  it("a lawn visit with an add-on row attached still loads the lawn program (only an add-on visit is generic)", async () => {
+    const host = { ...service, serviceType: "Lawn Care", completionProfile: { serviceKey: "lawn", category: "lawn_care", findingsType: null }, areaAddOnRowsAttached: true, areaAddOns: [{ key: "area_addon_fire_ant_yard" }] };
+    await act(async () => { render(<ProtocolPanel service={host} onClose={() => {}} />); });
+    await waitFor(() => expect(paths().some((path) => path.endsWith("/turf-profile"))).toBe(true));
+    expect(paths().some((path) => path.endsWith("/programs"))).toBe(true);
+  });
+
+  it("the same lawn name on an ordinary lawn visit still loads the lawn program", async () => {
+    await act(async () => { render(<ProtocolPanel service={{ ...service, serviceType: "Lawn Insect Control" }} onClose={() => {}} />); });
+    await waitFor(() => expect(paths().some((path) => path.endsWith("/turf-profile"))).toBe(true));
+  });
+});
+
+describe("Job card chemical area add-on", () => {
+  const governed = {
+    rate: "16 fl oz in 1 gal of water per 1,000 sq ft.", area: "Hard-surface and bare-ground square feet treated.",
+    limit: "Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.",
+    safety: "Hard surfaces and bare ground only. Do not walk on it until dry.", rateNote: null,
+  };
+  const card = (extra = {}) => ({
+    enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Shell, Rock & Paver Weed Control" }, addons: [], planBlocks: [],
+    sprayCheck: { window: "not_today" }, tank: { calibrated: false, reason: "Fixture rig unavailable" },
+    products: [{ id: "gov1", name: "Roundup QuikPro SC", role: "base", conditional: false, line: "Spray weeds on hard surfaces and bare ground only.", verdict: "unknown", governed: { ...governed, ...extra } }],
+  });
+  const show = async (body) => {
+    fetch.mockImplementation((url) => reply(url.includes("/protocols/job-card/") ? body : fixture(url)));
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+  };
+
+  it("opens the product with its rate, area basis, yearly limit and safety line", async () => {
+    await show(card());
+    expect(await screen.findByText("Rate: 16 fl oz in 1 gal of water per 1,000 sq ft.")).toBeVisible();
+    expect(screen.getByText("Area: Hard-surface and bare-ground square feet treated.")).toBeVisible();
+    expect(screen.getByText("Limit: Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.")).toBeVisible();
+    expect(screen.getByText("Safety: Hard surfaces and bare ground only. Do not walk on it until dry.")).toBeVisible();
+  });
+
+  it("says how many applications of the product the property has had in 12 months", async () => {
+    await show(card({ use: "Application 2 of 2 in 12 months; last applied 2026-08-01." }));
+    expect(await screen.findByText("Application 2 of 2 in 12 months; last applied 2026-08-01.")).toBeVisible();
+    expect(screen.getByText(/^Limit:/)).toBeVisible();
+  });
+
+  it("shows the hold reason in place of a withheld rate, and no Safety line when none is stated", async () => {
+    await show(card({ rate: null, rateNote: "Spray check: wind over 10 mph — rate withheld", safety: null }));
+    expect(await screen.findByText("Spray check: wind over 10 mph — rate withheld")).toBeVisible();
+    expect(screen.queryByText(/^Rate:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Safety:/)).not.toBeInTheDocument();
+    expect(screen.getByText(/^Limit:/)).toBeVisible();
+  });
+});
+
 describe("Job card Tank section rigs", () => {
   const rigs = [
     { equipmentSystemId: "sys-1", name: "110-Gallon Spray Tank #1", tankCapacityGal: 110 },

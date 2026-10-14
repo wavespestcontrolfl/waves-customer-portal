@@ -22,7 +22,9 @@ describe('the three tracks carry the same adds', () => {
   test('every track has the same visits, notes and safety rules', () => {
     expect(TRACKS).toEqual(['st_augustine', 'bermuda', 'zoysia']);
     for (const track of TRACKS) {
-      expect(v13[track].visits).toEqual(v13.st_augustine.visits);
+      // The bermuda removal add-on (visit.addOns, St. Augustine and Zoysia only) is set aside.
+      const withoutAddOns = (visits) => visits.map(({ addOns, ...visit }) => visit);
+      expect(withoutAddOns(v13[track].visits)).toEqual(withoutAddOns(v13.st_augustine.visits));
       expect(v13[track].notes).toEqual(v13.st_augustine.notes);
       expect(v13[track].safety_rules).toEqual(v13.st_augustine.safety_rules);
     }

@@ -510,8 +510,11 @@ postgres('closeout: the place of a spot treatment', () => {
       expect(res.statusCode).toBe(200);
       expect(res.body.products).toHaveLength(1);
       expect(res.body.products[0]).not.toHaveProperty('treated_place');
-      // Byte-identical to before the column: the table's other columns, no more and no fewer.
-      const columns = Object.keys(await mockPg('service_products').columnInfo()).filter((c) => c !== 'treated_place').sort();
+      // Byte-identical to before the column: the table's other columns, no more and no fewer. area_addon_key
+      // (20261009200000, the internal tag naming the area add-on a row belongs to) is staff-only too.
+      expect(res.body.products[0]).not.toHaveProperty('area_addon_key');
+      const staffOnly = ['treated_place', 'area_addon_key'];
+      const columns = Object.keys(await mockPg('service_products').columnInfo()).filter((c) => !staffOnly.includes(c)).sort();
       expect(Object.keys(res.body.products[0]).sort()).toEqual(columns);
     } finally { await cleanup(f); }
   });

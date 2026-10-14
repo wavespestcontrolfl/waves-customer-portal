@@ -12,19 +12,23 @@ let mockCustomers = [];
 let mockDuesInvoiceRow = null;
 
 jest.mock('../models/db', () => {
-  function thenableFor(resultFn) {
+  function thenableFor(resultFn, firstFn) {
     const b = {};
     for (const m of [
       'where', 'andWhere', 'orWhere', 'whereIn', 'whereNot', 'whereNull',
       'whereNotNull', 'whereRaw', 'distinct', 'select', 'orderBy', 'update',
       'insert', 'returning', 'count', 'pluck', 'join', 'leftJoin',
     ]) b[m] = () => b;
-    b.first = () => Promise.resolve(null);
+    // where('id', x) / where({ id: x }) remembers the id so customers.first()
+    // can answer the under-lock re-read (monthly-dues-eligibility guards).
+    const baseWhere = b.where;
+    b.where = (...a) => { if (a[0] === 'id') b.__id = a[1]; else if (a[0] && a[0].id !== undefined) b.__id = a[0].id; return baseWhere(...a); };
+    b.first = () => Promise.resolve(firstFn ? firstFn(b) : null);
     b.then = (resolve, reject) => Promise.resolve(resultFn()).then(resolve, reject);
     return b;
   }
   const db = jest.fn((table) => {
-    if (table === 'customers') return thenableFor(() => mockCustomers);
+    if (table === 'customers') return thenableFor(() => mockCustomers, (q) => mockCustomers.find((c) => String(c.id) === String(q.__id)) || null);
     if (table === 'invoices') {
       const b = thenableFor(() => []);
       b.first = () => Promise.resolve(mockDuesInvoiceRow);

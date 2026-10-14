@@ -170,6 +170,89 @@ describe('GATE_LAWN_SHOT_LIST on the lawn report payload', () => {
   });
 });
 
+describe('GATE_LAWN_PHOTO_LABEL_PICK on the lawn report payload', () => {
+  const saved = { pick: process.env.GATE_LAWN_PHOTO_LABEL_PICK, list: process.env.GATE_LAWN_SHOT_LIST };
+  // Photo 5 (the shade slot) holds a close-up the technician relabeled; photo 6 carries a stored value that is not a shot key.
+  const META = ZONES.map((_, i) => ({
+    filename: `f${i}.jpg`,
+    photoVocabulary: 'shot_list_v1',
+    ...(i === 5 ? { labelKey: 'close_up' } : {}),
+    ...(i === 6 ? { labelKey: 'garage' } : {}),
+  }));
+  const CURP = { ...CUR, photos: JSON.stringify(META) };
+  const withUrls = () => photoRows().map((row) => ({ ...row, s3_key: `lawn/${row.id}.jpg` }));
+  const withPicks = (rows) => ({ ...fixtures(rows), lawn_assessments: [CURP] });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CURP);
+    history.historyForReport.mockResolvedValue({ current: CURP, rows: [CURP], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CURP, rows: [CURP], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+    jest.spyOn(require('../services/photos'), 'getViewUrl').mockResolvedValue('https://example.test/x.jpg');
+    process.env.GATE_LAWN_SHOT_LIST = 'true';
+    delete process.env.GATE_LAWN_PHOTO_LABEL_PICK;
+  });
+  afterEach(() => {
+    for (const [name, value] of [['GATE_LAWN_PHOTO_LABEL_PICK', saved.pick], ['GATE_LAWN_SHOT_LIST', saved.list]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+
+  const render = async () => buildReportV1Data(service(), 'token-pick', makeKnex(withPicks(withUrls())), {});
+
+  test('gate off: a stored pick changes nothing (no labelPicked key, slot labels in the web payload and the PDF strip)', async () => {
+    const data = await render();
+    for (const photo of data.lawnAssessment.photos) expect(Object.prototype.hasOwnProperty.call(photo, 'labelPicked')).toBe(false);
+    expect(data.lawnAssessment.photos.find((p) => p.zone === 'shade').zoneLabel).toBe('Shaded area');
+    expect(data.reportV2.photos.map((p) => p.label)).toContain('Shaded area');
+    // Only the real close-up slot reads Close-up.
+    expect(data.reportV2.photos.map((p) => p.label).filter((label) => label === 'Close-up')).toHaveLength(1);
+  });
+
+  test('gate on: the picked label prints for that photo in the web payload and the PDF strip; the slot key is unchanged', async () => {
+    process.env.GATE_LAWN_PHOTO_LABEL_PICK = 'true';
+    const data = await render();
+    const shade = data.lawnAssessment.photos.find((p) => p.id === 'ph-5');
+    expect(shade).toMatchObject({ zone: 'shade', zoneLabel: 'Shaded area', labelPicked: 'Close-up' });
+    // Only that photo carries a pick.
+    expect(data.lawnAssessment.photos.filter((p) => p.labelPicked).map((p) => p.id)).toEqual(['ph-5']);
+    const labels = data.reportV2.photos.map((p) => p.label);
+    // The real close-up slot plus the relabeled shade photo; no photo reads Shaded area any more.
+    expect(labels.filter((label) => label === 'Close-up')).toHaveLength(2);
+    expect(labels).not.toContain('Shaded area');
+  });
+
+  test('gate on: a stored value that is not a shot key falls back to the slot label', async () => {
+    process.env.GATE_LAWN_PHOTO_LABEL_PICK = 'true';
+    const data = await render();
+    const odd = data.lawnAssessment.photos.find((p) => p.id === 'ph-6');
+    expect(Object.prototype.hasOwnProperty.call(odd, 'labelPicked')).toBe(false);
+    expect(odd.zoneLabel).toBe('Trouble spot');
+  });
+
+  test('gate on, no picks stored: payload is identical to gate off', async () => {
+    const plain = { ...fixtures(withUrls()), lawn_assessments: [{ ...CUR, photos: JSON.stringify(ZONES.map(() => ({ photoVocabulary: 'shot_list_v1' }))) }] };
+    const run = async () => JSON.stringify((await buildReportV1Data(service(), 'token-pick', makeKnex(plain), {})).lawnAssessment.photos);
+    const off = await run();
+    process.env.GATE_LAWN_PHOTO_LABEL_PICK = 'true';
+    expect(await run()).toBe(off);
+  });
+
+  test('the PDF cache signature moves only while the gate is live', async () => {
+    const sig = async () => (await resolveCanonicalLawnRender(
+      { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' },
+      makeKnex(withPicks(photoRows())),
+    )).signature;
+    const off = await sig();
+    process.env.GATE_LAWN_PHOTO_LABEL_PICK = 'true';
+    const on = await sig();
+    expect(on).not.toBe(off);
+    delete process.env.GATE_LAWN_PHOTO_LABEL_PICK;
+    expect(await sig()).toBe(off);
+  });
+});
+
 describe('the lawn lead layout and PDF strip (reportV2.photos)', () => {
   const lawnAssessment = (zones) => ({
     scores: { turfDensity: 80, weedSuppression: 80, colorHealth: 80, stressDamage: 80, fungusControl: 80, overallScore: 80, season: 'peak' },

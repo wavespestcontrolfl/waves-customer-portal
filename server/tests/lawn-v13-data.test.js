@@ -37,15 +37,21 @@ describe('the v13 recipe', () => {
   test('three tracks (no bahia), one universal program, 12 months in the existing visit shape', () => {
     expect(Object.keys(v13)).toEqual(GRASSES);
     for (const grass of GRASSES) {
-      expect(v13[grass].visits).toEqual(v13.st_augustine.visits);
+      // One universal program: the visits match once the optional bermuda removal
+      // addOns block (St. Augustine and Zoysia only) is set aside.
+      const withoutAddOns = (visits) => visits.map(({ addOns, ...visit }) => visit);
+      expect(withoutAddOns(v13[grass].visits)).toEqual(withoutAddOns(v13.st_augustine.visits));
       expect(v13[grass].visits.map((v) => v.month)).toEqual(MONTH_ABBR);
       expect(v13[grass].visits.map((v) => v.visit)).toEqual(MONTHS);
       expect(v13[grass].exact_catalog_names).toBe(true);
       expect(v13[grass].notes).toEqual(v13.st_augustine.notes);
       expect(v13[grass].safety_rules.length).toBeGreaterThan(0);
       for (const visit of v13[grass].visits) {
-        // April alone carries the 9x plan step (cadenceVariants); every other visit is the plain shape.
-        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : [])].sort());
+        // April alone carries the 9x plan step (cadenceVariants); addOns is the bermuda
+        // removal step on the April and June St. Augustine and Zoysia visits
+        // (GATE_LAWN_BERMUDA_REMOVAL); every other visit is the plain shape.
+        const bermudaStep = ['st_augustine', 'zoysia'].includes(grass) && ['Apr', 'Jun'].includes(visit.month);
+        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : []), ...(bermudaStep ? ['addOns'] : [])].sort());
         expect(Object.values(visit.tiers)).toEqual([true, true, true, true]);
       }
     }

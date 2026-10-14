@@ -126,7 +126,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
   return vi.fn(async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, options, body });
-    if (path.endsWith('/lawn-fast/context')) {
+    if (path.split('?')[0].endsWith('/lawn-fast/context')) {
       if (contextError) throw contextError;
       return ctx;
     }
@@ -260,6 +260,14 @@ async function analyzeAndComplete() {
 }
 
 describe('opening the sheet', () => {
+  test('a visit whose plan offers the bermuda removal mix (the server answers ineligible, bermuda_removal) opens the full form once', async () => {
+    const request = makeRequest({ ctx: context({ eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' }) });
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+  });
+
   test('a visit the server calls ineligible is handed to the parent once, with no button on the sheet', async () => {
     const request = makeRequest({ ctx: context({ eligible: false, reason: 'has_companions' }) });
     const onFullForm = vi.fn();
@@ -283,7 +291,7 @@ describe('opening the sheet', () => {
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
@@ -563,7 +571,7 @@ describe('Confirm assessment, then Complete', () => {
     await analyzeOnly();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
     await screen.findByText('Could not save the scores');
-    expect(completeButton().textContent).toBe('Confirm the assessment');
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
     // The bar's Confirm can try again; it is still no completion.
     expect(completeButton().disabled).toBe(false);
     expect(completeCalls()).toHaveLength(0);
@@ -575,7 +583,7 @@ describe('Confirm assessment, then Complete', () => {
     await analyzeOnly();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
     await screen.findByText('The photos did not give a full read. Fill any blank score, or tap Retake and analyze again.');
-    expect(completeButton().textContent).toBe('Confirm the assessment');
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
     expect(completeCalls()).toHaveLength(0);
   });
 
@@ -939,7 +947,8 @@ describe('products', () => {
     expect(screen.queryByRole('button', { name: '+ Other product' })).toBeNull();
     expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
     await analyze();
-    expect(completeButton().textContent).toBe('Products applied required');
+    // The button reads "Confirming..." until the block's progress report reaches the sheet, one render after "Assessment confirmed".
+    await waitFor(() => expect(completeButton().textContent).toBe('Products applied required'));
   });
 
   test('the search sits in the Products section: typing filters the catalog in place and one tap adds the row, with no sheet opened', async () => {
@@ -1494,20 +1503,17 @@ describe('tips from your tech', () => {
     expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
   });
 
-  test('a tip the note calls for leads the list, ahead of the library order', async () => {
+  test('no tip is listed until the tech searches, whatever the note says (owner 2026-10-12)', async () => {
     tips = lib(['Mow high', 'Dollarweed', 'Chinch bugs']);
     await openSheet();
-    const order = () => screen.getAllByRole('button', { name: /^(Mow high|Dollarweed|Chinch bugs)/ }).map((b) => b.textContent.split('Copy')[0].trim());
-    expect(order()[0]).toBe('Mow high');
+    const listed = () => screen.queryAllByRole('button', { name: /^(Mow high|Dollarweed|Chinch bugs)/ });
+    await screen.findByLabelText('Search tips');
+    expect(listed()).toHaveLength(0);
     fireEvent.change(screen.getByLabelText(/tell me about the visit/i), { target: { value: 'Chinch bugs in the trouble spot, treated with Arena.' } });
-    expect(order()[0]).toBe('Chinch bugs');
-    // Two matches: the tip with more matched keywords leads, not the library's earlier one.
-    tips = lib(['Dollarweed', 'Chinch bugs']);
-    tips.groups[0].tips[1].keywords.push('side strip');
-    cleanup();
-    await openSheet();
-    fireEvent.change(screen.getByLabelText(/tell me about the visit/i), { target: { value: 'Dollarweed near the lanai. Chinch bugs by the drive, chinch bugs in the side strip.' } });
-    expect(order().slice(0, 2)).toEqual(['Chinch bugs', 'Dollarweed']);
+    expect(listed()).toHaveLength(0);
+    expect(screen.queryByText('For what you saw today')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'chinch' } });
+    expect(listed().map((b) => b.textContent.split('Copy')[0].trim())).toEqual(['Chinch bugs']);
   });
 
   test('no tip library, no section, and techTips is null', async () => {
@@ -1524,9 +1530,14 @@ describe('tips from your tech', () => {
     expect(box.tagName).toBe('INPUT');
     expect([...document.querySelectorAll('label')].some((l) => l.textContent === 'Search tips')).toBe(false);
     expect(screen.queryByText('Pick 1 (optional)')).toBeNull();
+    fireEvent.change(box, { target: { value: 'mow' } });
     fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
+    // One pick at a time: the search is gone until the pick is removed.
+    expect(screen.queryByLabelText('Search tips')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove tip' }));
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'sedge' } });
     fireEvent.click(screen.getByRole('button', { name: /Sedge/ }));
-    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
     expect(screen.getByRole('button', { name: /Sedge/ }).getAttribute('aria-pressed')).toBe('true');
     await analyzeAndComplete();
     expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
@@ -1535,26 +1546,26 @@ describe('tips from your tech', () => {
   test('reads the list again once the assessment settles, and keeps the tip already picked', async () => {
     tips = lib(['Mow high', 'Dollarweed']);
     await openSheet();
-    fireEvent.click(await screen.findByRole('button', { name: /Mow high/ }));
+    fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'mow' } });
+    fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
     expect(requests.filter((r) => tipRead(r.path))).toHaveLength(1);
     tips = lib(['Dollarweed', 'Mow high']);
     await analyze();
     // the open, the analysis settling, the confirm settling
     await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
-    await waitFor(() => {
-      const names = screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent);
-      expect(names[0]).toMatch(/Dollarweed/);
-    });
     expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
   });
 
   test('a re-read that answers unavailable clears the tips (the server would drop the pick)', async () => {
     tips = lib(['Mow high']);
     await openSheet();
-    await screen.findByRole('button', { name: /Mow high/ });
+    fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'mow' } });
+    fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
     tips = { available: false, groups: [] };
     await analyze();
     await waitFor(() => expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull());
+    expect(screen.queryByText('Tip for the customer')).toBeNull();
   });
 });
 
@@ -1756,7 +1767,7 @@ describe('a visit type that could not be read', () => {
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test.each(['photo_status', 'turf_height_flag', 'planned_products', 'assessment'])('an advisory %s failure still opens the sheet', async (failure) => {
@@ -2126,7 +2137,8 @@ describe('weed spots and the spot area', () => {
     expect(within(addons()).getByText('On the sheet · Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
   });
 
-  test('no product of the weed group is listed in the search: offered or held back, it comes through the entry only', async () => {
+  // Owner 2026-10-09: every lawn product is in the search; only a limit that was read keeps one out.
+  test('the search lists the weed group too: the entry adds the mix, the search adds one product', async () => {
     await open(weedContext(MIX({
       productIds: [P_LEAD, P_CERT], note: 'Surfactant left out: it is 90°F or hotter.',
       surfactant: { productId: P_SURF, included: false, note: 'Surfactant left out: it is 90°F or hotter.' }, tempF: 93,
@@ -2134,8 +2146,28 @@ describe('weed spots and the spot area', () => {
     const search = await screen.findByLabelText('Search products');
     for (const name of ['Lead WG', 'Tank Surfactant', 'Blind Herbicide']) {
       fireEvent.change(search, { target: { value: name } });
-      expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
     }
+  });
+
+  test('a member at its own yearly limit while the lead stays open is not in the search', async () => {
+    await open(weedContext(MIX({ productIds: [P_LEAD], blockedIds: [P_CERT], surfactant: null, note: 'Cert yearly limit reached; left out.' })));
+    const search = await screen.findByLabelText('Search products');
+    fireEvent.change(search, { target: { value: 'Lead WG' } });
+    expect(await screen.findByRole('button', { name: /^Lead WG/ })).toBeTruthy();
+    fireEvent.change(search, { target: { value: 'Cert Herbicide' } });
+    expect(screen.queryByRole('button', { name: /^Cert Herbicide/ })).toBeNull();
+  });
+
+  test('lead at its yearly limit: the search leaves out the lead only; the replacement and the members with no limit of their own are listed', async () => {
+    await open(weedContext(MIX({ mode: 'replacement', productIds: [P_BLIND], blockedIds: [P_LEAD], surfactant: null, note: 'Lead yearly limit reached; Blind is used in its place.' })));
+    const search = await screen.findByLabelText('Search products');
+    for (const name of ['Blind Herbicide', 'Tank Surfactant']) {
+      fireEvent.change(search, { target: { value: name } });
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
+    }
+    fireEvent.change(search, { target: { value: 'Lead WG' } });
+    expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
   });
 
   test('when the limits could not be read the search lists the weed products again', async () => {
@@ -2385,7 +2417,7 @@ describe('suggested from this lawn', () => {
     { id: P_CERT, name: 'Cert Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
     { id: P_ART, name: 'Art Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
     { id: P_VEL, name: 'Vel Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
-    { id: P_ACE, name: 'Ace Insecticide', category: 'insecticide', formulation: 'SC', default_rate_per_1000: 0.07, default_unit: 'fl_oz' },
+    { id: P_ACE, name: 'Ace Insecticide', category: 'insecticide', service_lines: ['lawn'], formulation: 'SC', default_rate_per_1000: 0.07, default_unit: 'fl_oz' },
     { id: P_DISP, name: 'Disp Wetting Agent', category: 'adjuvant', formulation: 'SL', default_rate_per_1000: 1, default_unit: 'fl_oz' },
     { id: P_ARENA, name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.29, default_unit: 'oz' },
     { id: P_BIF, name: 'Atticus Talak 7.9 F', category: 'insecticide', formulation: 'SC', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
@@ -2666,6 +2698,27 @@ describe('suggested from this lawn', () => {
         expect(completeCalls()[0].body.products.filter((p) => p.productId === P_ARENA)).toHaveLength(1);
       });
 
+      test('with GATE_LAWN_SPOT_TARGET lists in the context, the standing Found tap carries the chinch find into the row (no new row, so no guided marker); before the tap it sends none', async () => {
+        const SPOT_TARGETS = { v: 1, fungicide: ['Dollar spot'], insecticide: ['Southern chinch bugs', 'Fall armyworms'], chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' };
+        await putArenaOnSheet(guideContext({ lawnReportTies: true, spotTargets: SPOT_TARGETS }));
+        const mark = within(addons()).getByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' });
+        const row = () => within(editorFor('Arena 50 WDG'));
+        expect(row().queryByText('Recorded for: Southern chinch bugs.')).toBeNull();
+        fireEvent.click(mark);
+        expect(row().getByText('Recorded for: Southern chinch bugs.')).toBeTruthy();
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        const sentArena = completeCalls()[0].body.products.find((p) => p.productId === P_ARENA);
+        expect(sentArena).toMatchObject({ targets: [], targetFind: 'chinch' });
+      });
+
+      test('with the lists but no tap, the product on the sheet sends no chinch find', async () => {
+        await putArenaOnSheet(guideContext({ lawnReportTies: true, spotTargets: { v: 1, fungicide: ['Dollar spot'], insecticide: ['Fall armyworms'], chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' } }));
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(completeCalls()[0].body.products.find((p) => p.productId === P_ARENA)).not.toHaveProperty('targetFind');
+      });
+
       test('product present, no tap: no chinch find (a product on the sheet is not a find)', async () => {
         await putArenaOnSheet(guideContext({ lawnReportTies: true }));
         await waitFor(() => expect(completeButton().disabled).toBe(false));
@@ -2897,14 +2950,14 @@ describe('suggested from this lawn', () => {
       expect(within(cardGroup('Weed spots')).getByRole('button', { name: 'Weed spots: on the sheet' }).disabled).toBe(true);
     });
 
-    test('the search follows the fresh decision: no product of its weed group is listed, offered or held back', async () => {
+    test('the search follows the fresh decision: it lists the weed group the fresh read does not forbid', async () => {
       answer([freshCard()], FRESH);
       await open();
       await analyze();
       await suggested();
       for (const name of ['Cert Herbicide', 'Lead WG']) {
         fireEvent.change(screen.getByLabelText('Search products'), { target: { value: name } });
-        expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+        expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
       }
     });
 
@@ -3047,7 +3100,7 @@ describe('suggested from this lawn', () => {
     });
   });
 
-  describe('a product a visible card owns is not offered anywhere else', () => {
+  describe('a product a visible card owns leaves the add-ons list; the search still lists it', () => {
     const searchFor = (name) => fireEvent.change(screen.getByLabelText('Search products'), { target: { value: name } });
     const GENERIC = (name) => within(addons()).queryByRole('button', { name: `Add ${name}` });
 
@@ -3055,25 +3108,25 @@ describe('suggested from this lawn', () => {
       ['fungus', () => CARDS.fungus(), 'Art Fungicide'],
       ['caterpillars', () => CARDS.caterpillars(), 'Ace Insecticide'],
       ['dry_spots', () => CARDS.dry_spots(), 'Disp Wetting Agent'],
-    ])('the %s card owns its product: not in the add-ons list, not in the search', async (_kind, makeCard, name) => {
+    ])('the %s card owns its product: not in the add-ons list, still in the search', async (_kind, makeCard, name) => {
       answer([makeCard()]);
       await open();
       await analyze();
       await suggested();
       expect(GENERIC(name)).toBeNull();
       searchFor(name.split(' ')[0]);
-      expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
       // The other add-ons are still there.
       expect(GENERIC('Vel Fungicide')).toBeTruthy();
     });
 
-    test('the chinch card owns Arena: out of the search while it shows', async () => {
+    test('the chinch card shows and the search still lists Arena', async () => {
       answer([CARDS.chinch()]);
       await open();
       await analyze();
       await suggested();
       searchFor('Arena');
-      expect(screen.queryByRole('button', { name: /^Arena 50 WDG/ })).toBeNull();
+      expect(await screen.findByRole('button', { name: /^Arena 50 WDG/ })).toBeTruthy();
     });
 
     test('"Nothing found" releases the product to the list and the search (the tech looked and decided)', async () => {
@@ -3086,11 +3139,10 @@ describe('suggested from this lawn', () => {
       searchFor('Art Fungicide');
       expect(await screen.findByRole('button', { name: /^Art Fungicide/ })).toBeTruthy();
       fireEvent.click(within(cardGroup('Insects: check for chinch bugs')).getByRole('button', { name: 'Nothing found' }));
-      // A chinch rung is governed for the visit: after "Nothing found" it comes through the standing
-      // entry (which returns), never the search.
+      // After "Nothing found" the standing chinch entry returns, and the search lists Arena as before.
       expect(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' })).toBeTruthy();
       searchFor('Arena');
-      expect(screen.queryByRole('button', { name: /^Arena 50 WDG/ })).toBeNull();
+      expect(await screen.findByRole('button', { name: /^Arena 50 WDG/ })).toBeTruthy();
     });
 
     test('a take-all card holds its product: no add button anywhere, and it stays out of the list and the search', async () => {
@@ -3227,7 +3279,7 @@ describe('suggested from this lawn', () => {
 
     const STATES = [
       ['guide off', async () => { await mxOpen(mxContext({ treatmentGuide: false })); await analyze(); },
-        { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'hidden', ...NO_CARDS }],
+        { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'hidden', ...NO_CARDS }],
       ['idle (before Confirm)', async () => { answer([]); await mxOpen(); },
         { art: 'locked', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'locked', vel: 'addable', weedEntry: 'locked', chinchEntry: 'locked', ...NO_CARDS }],
       ['pending (asked, not answered)', async () => { guideAnswer = NEVER; await mxOpen(); await analyze(); },
@@ -3235,18 +3287,18 @@ describe('suggested from this lawn', () => {
       ['answered, everything offered', async () => {
         guideAnswer = answerOf([CARDS.weeds(), CARDS.fungus(), CARDS.chinch(), CARDS.caterpillars(), CARDS.dry_spots()], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'hidden', chinchEntry: 'hidden', weedCard: 'addable', chinchCard: 'addable', fungusCard: 'addable', catCard: 'addable', dryCard: 'addable' }],
+      }, { art: 'hidden', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'hidden', chinchEntry: 'hidden', weedCard: 'addable', chinchCard: 'addable', fungusCard: 'addable', catCard: 'addable', dryCard: 'addable' }],
       ['answered, everything blocked', async () => {
         const note = 'The yearly weed-spray limit is reached for this lawn.';
-        guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
+        guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note, blockedIds: [P_LEAD, P_CERT, P_BLIND] }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
         await mxOpen(); await analyze(); await suggested();
       }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
       ['answered, no finding and nothing blocked', async () => {
         guideAnswer = answerOf([], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
+      }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
       ['guide request fails after a clean context (failed on the first read)', async () => { guideAnswer = refusal(500, 'boom', 'Internal error'); await mxOpen(); await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(1)); },
-        { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
+        { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
       // Unreadable is not blocked: nothing is offered (no card, no tap), but every product is released to
       // the search, a pick to the list, so a real application can still be recorded.
       ['answered, limits unreadable', async () => {
@@ -3261,7 +3313,7 @@ describe('suggested from this lawn', () => {
           unreadableProductIds: [P_BIF], unreadableNote: UNREADABLE,
         };
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
+      }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'hidden', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
       ['failed on the first read, context weed mix unavailable', async () => {
         guideAnswer = refusal(500, 'boom', 'Internal error');
         await mxOpen(mxContext({ plannedProducts: mxPlanned({ weedMix: { ...MX_WEED, mode: 'unavailable', productIds: [], note: UNREADABLE }, chinch: UNREAD_CHINCH }) }));
@@ -3281,18 +3333,29 @@ describe('suggested from this lawn', () => {
       expect(await probe()).toEqual(expected);
     });
 
-    test('a failed guide request keeps the context\'s rungs governed: Arena is not in the search, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
+    test('a failed guide request keeps the context\'s rungs governed: the search lists them, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
       await mxOpen();
       await analyze();
       await waitFor(() => expect(guideCalls()).toHaveLength(1));
       await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
-      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
-      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('hidden');
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('addable');
+      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
       expect(listState('Atticus Talak 7.9 F')).toBe('hidden');
       expect(lineOf('Chinch bugs found at the edge of damage').textContent).toContain('Arena 50 WDG, spot treatment');
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
       expect(present('Arena 50 WDG')).toBe(true);
+    });
+
+    test('a failed guide request keeps the context\'s read limits: Arena at its yearly limit stays out of the search, Talak is listed', async () => {
+      guideAnswer = refusal(500, 'boom', 'Internal error');
+      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA] };
+      await mxOpen(mxContext({ plannedProducts: mxPlanned({ chinch }) }));
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
+      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
     });
 
     test('weed members are judged one by one: the member read as capped stays out of the search, its sibling is released', async () => {
@@ -3376,7 +3439,7 @@ describe('suggested from this lawn', () => {
       for (const name of ['Art Fungicide', 'Lead WG', 'Vel Fungicide']) expect(present(name)).toBe(true);
       await retake();
       // Now the read succeeds and forbids them.
-      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
+      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], blockedIds: [P_LEAD, P_CERT, P_BLIND] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
       await analyze();
       await screen.findByText('Removed: Art Fungicide, Lead WG. The limits changed.');
       expect(present('Art Fungicide')).toBe(false);
@@ -3734,5 +3797,186 @@ describe('a visit already invoiced from the payment flow', () => {
   test('a visit with only a door-charge marker posts no invoice field, as the full form does', async () => {
     const body = await complete({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' });
     expect(body).not.toHaveProperty('invoiceAlreadySent');
+  });
+});
+
+// GATE_COMBO_FAST_COMPLETE (PR 1): the sheet as one part of a grouped stop.
+describe('prepare mode (a part of a grouped stop)', () => {
+  const withoutKey = ({ idempotencyKey: _key, ...rest }) => rest;
+  const NOTE = 'Synthetic stop note';
+
+  async function fill() {
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  }
+
+  test('hands over the exact body a normal completion posts, posts nothing and stores no saved completion', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', sharedNote: NOTE, onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared.mock.calls[0][0]).toBe('svc-lawn');
+    expect(completeCalls()).toHaveLength(0);
+
+    cleanup();
+    requests.length = 0;
+    await openSheet({ props: { operatorId: 'op-1', sharedNote: NOTE } });
+    await fill();
+    await submit();
+    const posted = completeCalls()[0].body;
+    expect(withoutKey(onPrepared.mock.calls[0][1])).toEqual(withoutKey(posted));
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe(NOTE);
+    expect(onPrepared.mock.calls[0][1].lawnFast).toEqual({ visitType: 'recurring' });
+  });
+
+  test('preparing again after an edit hands over a new body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'First words' } });
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Second words' } });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(onPrepared.mock.calls.filter(([, body]) => body).length).toBe(2));
+    const bodies = onPrepared.mock.calls.map(([, body]) => body).filter(Boolean);
+    expect(bodies[0].technicianNotes).toBe('First words');
+    expect(bodies[1].technicianNotes).toBe('Second words');
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a shared note replaces the sheet\'s own note box and reaches the body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared, sharedNote: NOTE } });
+    expect(screen.queryByLabelText('Tell me about the visit')).toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(onPrepared).toHaveBeenCalled());
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe(NOTE);
+  });
+
+  test('Analyze reads the stop\'s shared note, as it reads the sheet\'s own', async () => {
+    await openSheet({ props: { operatorId: 'op-1', onPrepared: vi.fn(), sharedNote: NOTE } });
+    await analyzeOnly();
+    const assess = requests.find((r) => r.path.endsWith('/lawn-assessment/assess'));
+    expect(JSON.stringify(assess.body)).toContain(NOTE);
+  });
+
+  test('every lawn-fast read says it is part of a combined stop; a normal sheet sends no such header', async () => {
+    await openSheet({ props: { operatorId: 'op-1', onPrepared: vi.fn() } });
+    const reads = requests.filter((r) => r.path.includes('/lawn-fast/'));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((r) => r.options.headers?.['X-Combo-Stop'] === '1')).toBe(true);
+    expect(requests.filter((r) => !r.path.includes('/lawn-fast/')).every((r) => !r.options.headers?.['X-Combo-Stop'])).toBe(true);
+    cleanup();
+    requests.length = 0;
+    await openSheet();
+    expect(requests.some((r) => r.options.headers?.['X-Combo-Stop'])).toBe(false);
+  });
+
+  test('a change after the handoff revokes it and tells the container; preparing again hands over the new body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Changed words' } });
+    await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null, expect.any(Number));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared.mock.calls.at(-1)[1].technicianNotes).toBe('Changed words');
+  });
+
+  test('a container that passes a new inline onPrepared on every render keeps the form, reloads nothing and revokes nothing', async () => {
+    const calls = [];
+    const request = makeRequest();
+    const { rerender } = render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Typed before the re-render' } });
+    const contextReads = () => requests.filter((r) => r.path.endsWith('/lawn-fast/context')).length;
+    const before = contextReads();
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('Typed before the re-render');
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(calls).toHaveLength(1);
+    // After the handoff the parent re-renders with another inline callback.
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText('Saved for this stop')).toBeTruthy();
+    expect(calls).toHaveLength(1);
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('Typed before the re-render');
+    expect(contextReads()).toBe(before);
+  });
+
+  test('retaking the photos after the handoff (the assessment no longer confirmed) revokes the part', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null, expect.any(Number));
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a part that cannot be prepared at mount is never prepared', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    // The footer asks for the next missing step (photos), not for a save.
+    expect(completeButton().textContent).not.toMatch(/this stop/);
+    fireEvent.click(completeButton());
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+  });
+
+  test('embedded: no dialog, no portal; the part renders in place and still prepares', async () => {
+    const onPrepared = vi.fn();
+    const { container } = render(<div id="host"><FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={onPrepared} /></div>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(container.querySelector('#host .tech-visit-embedded-part')).not.toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+  });
+
+  test('embedded: a write in flight (Analyze) reports busy through the part guard; the reads do not', async () => {
+    const { PartBusyContext } = await import('./FastCompleteParts');
+    const reports = [];
+    let release;
+    const request = makeRequest();
+    const slow = vi.fn(async (path, options) => {
+      if (path.endsWith('/lawn-assessment/assess')) await new Promise((resolve) => { release = resolve; });
+      return request(path, options);
+    });
+    render(<PartBusyContext.Provider value={(source, busy) => reports.push([source, busy])}><FastCompleteLawnSheet service={SERVICE} request={slow} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={vi.fn()} /></PartBusyContext.Provider>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(false);
+    await addPhoto();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(true));
+    release();
+    await screen.findByLabelText('Density score');
+    await waitFor(() => expect(reports.filter(([source]) => source.endsWith(':writes')).at(-1)[1]).toBe(false));
+  });
+
+  test('a refused hand-over shows its message and leaves the sheet editable', async () => {
+    const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Could not save this on the device');
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+    expect(completeCalls()).toHaveLength(0);
   });
 });

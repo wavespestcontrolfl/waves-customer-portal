@@ -42,7 +42,8 @@ const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted|treat|liquid|spot|ap
 // Interior-only lanes whose catalog names say "treatment" without saying
 // "interior" (trace-eligibility.js: bed_bug, german_roach_knockdown,
 // Codex #6102 r9). Checked before the treatment words; "exterior" still wins.
-const INDOOR_TREATMENT = /bed ?bugs?|german (cock)?roach/i;
+// "Cockroach Treatment Service" is inside work too (owner 2026-10-09).
+const INDOOR_TREATMENT = /bed ?bugs?|german (cock)?roach|cockroach treatment/i;
 
 function rainOkService(name) {
   if (/exterior/i.test(name)) return false;
@@ -65,6 +66,14 @@ const RAIN_OK_KEYS = new Set([
   'wdo_inspection', 'termite_inspection', 'pest_inspection', 'rodent_inspection', 'lawn_inspection',
   // interior-only treatment
   'bed_bug_treatment', 'german_roach', 'german_roach_initial', 'vehicle_german_roach',
+  // Cockroach Treatment Service (owner 2026-10-09, after the rain pass
+  // flagged two of these visits): inside work. The key also covers the
+  // native-roach package sold from the public quote, whose only outside
+  // step is perimeter GRANULAR, which rain does not wash away (rain-out.js
+  // EFFICACY_EXEMPT_SERVICE treats granular the same way). No liquid goes
+  // down outside under this key; the native roach knockdown, a perimeter
+  // spray with its own key, stays outdoor.
+  'cockroach_control',
   // rodent checks and attic work (not trap setup, exclusion or station install)
   'rodent_bait_quarterly', 'rodent_monitoring',
   'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',

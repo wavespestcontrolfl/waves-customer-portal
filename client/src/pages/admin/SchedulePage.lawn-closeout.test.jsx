@@ -19,6 +19,7 @@ let failPlan;
 let withdrawDefaults;
 let catalog;
 let optionalOptions;
+let planWarnings;
 let delayFlags;
 let flagResolvers;
 let reentryDefaultsFromEvidence;
@@ -41,6 +42,7 @@ beforeEach(async () => {
   withdrawDefaults = false;
   catalog = products;
   optionalOptions = [];
+  planWarnings = [];
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -67,6 +69,7 @@ beforeEach(async () => {
       if (delayPlan) await new Promise((resolve) => { planResolvers.push(resolve); });
       if (failPlan) throw new Error('Synthetic plan outage');
       data = { plan: { protocol: {}, mixCalculator: { items: [{ product: products[0], mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: mixAmount, amountUnit: 'fl_oz', treatedSqft: 5000 } }] } } };
+      if (planWarnings.length) data.plan.propertyGate = { warnings: planWarnings };
       if (defaultsEnabled) {
         const items = (withdrawDefaults ? [] : catalog).map((product, index) => ({ product, selected: true, applicationMethod: 'broadcast_spray',
           mix: { ratePer1000: index === 0 ? 3 : 2, rateUnit: 'fl_oz', amount: sqft ? sqft * (index === 0 ? 3 : 2) / 1000 : null, amountUnit: 'fl_oz', treatedSqft: sqft } }));
@@ -75,7 +78,7 @@ beforeEach(async () => {
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
           // Optional protocol rows reach the client as id/name only (server options), never as defaults.
-          items, options: [...items, ...optionalOptions.map(({ applicationMethod, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod }))], propertyMatchesProfile: true,
+          items, options: [...items, ...optionalOptions.map(({ applicationMethod, group, gateNotes, prefillAmount, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod, ...(group ? { group } : {}), ...(gateNotes ? { gateNotes } : {}), ...(prefillAmount === false ? { prefillAmount } : {}) }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -1474,6 +1477,231 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
   expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('6');
   expect(totals()[2].value).toBe('30');
+});
+
+it.each([[true], [false]])('the test-patch line shows beside the Additional work selector only when the mix carries the note (note: %s)', async (withNote) => {
+  enableDefaults();
+  const note = { key: 'testPatchFirst', severity: 'required', text: 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.' };
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', ...(withNote ? { gateNotes: [note] } : {}) }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, gateNotes, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  await screen.findByRole('option', { name: 'Mix rec' });
+  const line = 'Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot';
+  if (withNote) expect(screen.getByText(line)).toBeTruthy();
+  else expect(screen.queryByText(line)).toBeNull();
+});
+
+it('the spray conditions of the bermuda removal mix show once each beside the selector, however many products carry them', async () => {
+  enableDefaults();
+  const notes = [
+    { key: 'activelyGrowingOnly', severity: 'required', text: 'Spray only when the bermuda is actively growing.' },
+    { key: 'morningUnderF', severity: 'required', text: 'Spray in the morning, with the temperature under 85°F.' },
+    { key: 'noRainOrIrrigationHours', severity: 'note', text: 'No rain or irrigation for 3 hours after the spray.' },
+    { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow for 2 days before or after the spray.' },
+    { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' },
+    { key: 'zoysia2eeOnHand', severity: 'required', text: 'Zoysia: this mix is a Syngenta FIFRA 2(ee) recommendation (2023-03-28), not the printed label — keep the 2(ee) on hand when applying.' },
+  ];
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', gateNotes: notes }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, gateNotes, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  await screen.findByRole('option', { name: 'Mix rec' });
+  for (const { text } of notes) expect(screen.getAllByText(text)).toHaveLength(1);
+});
+
+it('selecting the bermuda removal group gives three spot rows with no suggested rate, area or amount', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', applicationMode: 'spot', prefillAmount: false, group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, applicationMode, prefillAmount, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-rec' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  for (const total of totals().slice(2)) expect(total.value).toBe('');
+  // The catalog rate (1 per 1,000) is not suggested either: the Rate box is empty, as is the area.
+  for (const rate of screen.getAllByPlaceholderText('Rate').slice(2)) expect(rate.value).toBe('');
+});
+
+it('the /completion-actions fallback records every bermuda action as spot work, the surfactant included', async () => {
+  // Defaults off: the actions come from /completion-actions. A fertilizer-category product
+  // would default to a broadcast method; the action's spot mode overrides it.
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `fallback-${id}`, name: `Fallback ${id}`, category: 'fertilizer', rate_unit: 'fl_oz', default_rate_per_1000: 1 }));
+  completionActions = {
+    programKey: 'lawn', visit: { visit: 6, month: 'Jun' },
+    actions: mix.map((product) => ({
+      id: `fallback-action-${product.id}`, label: product.name, note: product.name, raw: product.name, scope: 'exterior', treatmentApplied: true,
+      product: { id: product.id, name: product.name }, group: 'bermuda_removal', bermudaStep: true, applicationMode: 'spot', prefillAmount: false,
+    })),
+  };
+  render(<CompletionPanel service={service} products={[...catalog, ...mix]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: 'Fallback nis' });
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'fallback-action-fallback-nis' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Total').length).toBeGreaterThanOrEqual(3));
+  // Each of the three rows (the surfactant too) is a spot row: the method select reads spot.
+  const rows = screen.getAllByPlaceholderText('Total').slice(-3);
+  expect(screen.getAllByPlaceholderText('Total')).toHaveLength(4);
+  for (const total of rows) {
+    expect(within(total.parentElement).getAllByRole('combobox')[2].value).toBe('spot_treatment');
+    expect(total.value).toBe('');
+  }
+  // Each group row shows the treated-area box on this path too (the server refuses a step spray with no
+  // area or rate), and typing into it keeps the row's spot shape with a sq ft unit.
+  const areas = screen.getAllByPlaceholderText('Treated sq ft');
+  expect(areas).toHaveLength(3);
+  fireEvent.change(areas[0], { target: { value: '5000' } });
+  expect(screen.getAllByPlaceholderText('Treated sq ft')[0].value).toBe('5000');
+});
+
+it('the /completion-actions warnings show in the drawer, so the reason the bermuda mix is not offered is visible', async () => {
+  const reason = 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row.';
+  const excluded = 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.';
+  completionActions = {
+    programKey: 'lawn', visit: { visit: 6, month: 'Jun' },
+    actions: [{ id: 'warn-action', label: 'Warn product', note: 'Warn product', raw: 'Warn product', scope: 'exterior', treatmentApplied: true, product: { id: 'warn-product', name: 'Warn product' } }],
+    // A repeated message shows once.
+    warnings: [{ code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason }, { code: 'lawn_bermuda_cultivar_excluded', severity: 'warning', message: excluded }, { code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason }],
+  };
+  render(<CompletionPanel service={service} products={[...catalog, { id: 'warn-product', name: 'Warn product', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1 }]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: 'Warn product' });
+  expect(screen.getAllByText(reason)).toHaveLength(1);
+  expect(screen.getAllByText(excluded)).toHaveLength(1);
+});
+
+it('with the appointment plan in use, the plan\'s bermuda warnings show beside the Additional work selector (other plan warnings do not)', async () => {
+  enableDefaults();
+  const reason = 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row.';
+  planWarnings = [
+    { code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason },
+    { code: 'lawn_bermuda_limit_warning', severity: 'warning', message: 'Recognition: cumulative 0.150 oz/1000sf/year approaching/exceeding max 0.1437.' },
+    { code: 'lawn_v13_limit_warning', severity: 'warning', message: 'An unrelated plan warning that stays out of this line.' },
+  ];
+  mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  expect(await screen.findByText(reason)).toBeTruthy();
+  expect(screen.getByText(/cumulative 0\.150/)).toBeTruthy();
+  expect(screen.queryByText(/unrelated plan warning/)).toBeNull();
+  // The actions list is not fetched on this path: the line came from the plan.
+  expect(fetch.mock.calls.some(([url]) => /completion-actions/.test(url))).toBe(false);
+});
+
+it('no warnings, no warning lines beside the Additional work selector', async () => {
+  completionActions = {
+    programKey: 'lawn', visit: { visit: 6, month: 'Jun' },
+    actions: [{ id: 'quiet-action', label: 'Quiet product', note: 'Quiet product', raw: 'Quiet product', scope: 'exterior', treatmentApplied: true, product: { id: 'quiet-product', name: 'Quiet product' } }],
+  };
+  render(<CompletionPanel service={service} products={[...catalog, { id: 'quiet-product', name: 'Quiet product', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1 }]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: 'Quiet product' });
+  expect(screen.queryByText(/Bermuda removal is/)).toBeNull();
+});
+
+it('a St. Augustine mix (no 2(ee) note on its lines) shows no 2(ee) line', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', gateNotes: [{ key: 'activelyGrowingOnly', severity: 'required', text: 'Spray only when the bermuda is actively growing.' }] }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, gateNotes, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  await screen.findByText('Spray only when the bermuda is actively growing.');
+  expect(screen.queryByText(/2\(ee\)/)).toBeNull();
+});
+
+it.each([[false], [true]])('a group member added by hand BEFORE the group is applied takes the group\'s spot shape: spot method, empty rate and area and no derived total; a typed total is kept (typed: %s)', async (typed) => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'adjuvant', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', applicationMode: 'spot', prefillAmount: false, group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, applicationMode, prefillAmount, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  // Recognition first, by the product search: a broadcast-style row with the catalog rate and a derived total.
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Mix rec' } });
+  fireEvent.click(screen.getByText('Mix rec', { selector: 'button, div, span, li' }));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(totals()[2].value).not.toBe('');
+  expect(within(totals()[2].parentElement).getAllByRole('combobox')[2].value).not.toBe('spot_treatment');
+  if (typed) fireEvent.change(totals()[2], { target: { value: '7' } });
+  // Then the group: no row is added twice, and Recognition's row is now the grouped spot shape.
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  const recRow = totals()[2];
+  expect(recRow.value).toBe(typed ? '7' : '');
+  expect(within(recRow.parentElement).getAllByRole('combobox')[2].value).toBe('spot_treatment');
+  // The catalog rate is cleared either way; only a typed total stays.
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+});
+
+it('a restored group row comes off with its whole group before any protocol action has loaded (the row\'s own persisted group)', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', applicationMode: 'spot', prefillAmount: false, group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  const catalogRows = [...catalog, ...mix.map(({ applicationMethod, applicationMode, prefillAmount, group, ...row }) => row)];
+  const view = render(<CompletionPanel service={service} products={catalogRows} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  // The draft persists each row's group.
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts.filter((p) => p.group === 'bermuda_removal')).toHaveLength(3));
+  view.unmount();
+  // Reopen with the actions list not available: the restored rows are all there is.
+  optionalOptions = [];
+  failActions = true;
+  render(<CompletionPanel service={service} products={catalogRows} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  expect(screen.queryByRole('option', { name: 'Mix rec' })).toBeNull();
+  // Removing ONE restored group row removes the other two and the group's labels.
+  fireEvent.click(screen.getAllByRole('button', { name: /remove/i }).at(-1));
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  expect(screen.getByPlaceholderText(/Notes about this service/).value).not.toMatch(/Mix (rec|fus|nis)/);
+});
+
+it('the bermuda removal mix options go on together and come off together', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  // Picking ONE option adds all three rows, and the three labels with their note lines.
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  for (const { name } of mix) expect(notes.value).toContain(`[Protocol] ${name}`);
+  // Removing ONE row removes all three rows AND the three labels, scopes and note lines.
+  fireEvent.click(screen.getAllByRole('button', { name: /remove/i }).at(-1));
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  expect(notes.value).not.toMatch(/\[Protocol(?: optional)?\]/);
+  for (const { name } of mix) expect(notes.value).not.toContain(name);
+  // Nothing of the mix is left in what the completion submits.
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  for (const { name } of mix) {
+    expect((body.protocolActionsCompleted || []).includes(name)).toBe(false);
+    expect(String(body.technicianNotes || '')).not.toContain(name);
+    expect(JSON.stringify(body.actionScopes || body.protocolActionScopes || {})).not.toContain(name);
+  }
+  expect((body.products || []).map((p) => p.productId)).not.toEqual(expect.arrayContaining(mix.map((m) => m.id)));
+});
+
+it('removing one bermuda removal pill after an AI draft removes all three labels and all three products', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toContain('WHAT WE DID'));
+  // One pill per label; the x on ONE of them takes the whole mix.
+  for (const { name } of mix) await screen.findByRole('button', { name: `Remove protocol item: ${name}` });
+  fireEvent.click(screen.getByRole('button', { name: 'Remove protocol item: Mix fus' }));
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  for (const { name } of mix) expect(screen.queryByRole('button', { name: `Remove protocol item: ${name}` })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  for (const { name } of mix) expect((body.protocolActionsCompleted || []).includes(name)).toBe(false);
+  expect((body.products || []).map((p) => p.productId)).not.toEqual(expect.arrayContaining(mix.map((m) => m.id)));
 });
 
 it.each([

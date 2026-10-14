@@ -1219,6 +1219,21 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
   }
   const group = groups.find((g) => g.winner.id === winnerId);
   const candidate = group?.candidates.find((c) => c.loser.id === loserId);
+  return phoneCandidateVerdict(candidate);
+}
+
+// The verdict on ONE phone-queue candidate (null = the pair is not listed).
+// Shared by duplicatePairEligibility and duplicateWinnerFor so both read a
+// candidate the same way.
+// `requireSameIdentity` (the delete tool): a candidate whose reasons name an
+// identity conflict (a different name, or a phone group that holds more than
+// one identity) is a POSSIBLE match, not a confirmed duplicate, and is refused.
+// Address and loser-history reasons keep their own refusals (the address one
+// below; the history one is the delete tool's emptiness scan).
+const NON_IDENTITY_REASON_RE = /^(address_|loser_has_)/;
+const POSSIBLE_MATCH_REASON = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+
+function phoneCandidateVerdict(candidate, { requireSameIdentity = false } = {}) {
   if (!candidate) {
     return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
   }
@@ -1228,7 +1243,35 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
   if (candidate.reasons.some((r) => r.startsWith('address_'))) {
     return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
   }
+  if (requireSameIdentity && candidate.reasons.some((r) => !NON_IDENTITY_REASON_RE.test(r))) {
+    return { eligible: false, code: 'possible_match_only', reason: POSSIBLE_MATCH_REASON, candidate };
+  }
   return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
+// The queue's own answer to "which live record is this one a duplicate of?",
+// from ONE queue build (a single findDuplicateGroups scan, however many
+// records share the phone). Returns { winnerId, ...verdict } for the group
+// that lists `loserId` as a candidate (an eligible one wins over a refused
+// one), or { winnerId: null, eligible: false, code: 'not_in_queue' } when no
+// group lists it. Same dismissal fail-closed rule as duplicatePairEligibility.
+async function duplicateWinnerFor(loserId, database = db, { requireSameIdentity = false } = {}) {
+  let groups;
+  try {
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] duplicateWinnerFor: dismissals unreadable, refusing: ${e.message}`);
+    return { winnerId: null, eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this record as a mergeable duplicate right now', candidate: null };
+  }
+  let refused = null;
+  for (const group of groups) {
+    const candidate = group.candidates.find((c) => c.loser.id === loserId);
+    if (!candidate) continue;
+    const verdict = { winnerId: group.winner.id, ...phoneCandidateVerdict(candidate, { requireSameIdentity }) };
+    if (verdict.eligible) return verdict;
+    refused = refused || verdict;
+  }
+  return refused || { winnerId: null, ...phoneCandidateVerdict(null) };
 }
 
 // The auto sweep's under-lock eligibility recheck, scoped to ONE pair: the
@@ -1754,7 +1797,31 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
   return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}${carried ? `, carried ${carried} fallback hold(s) into the surviving dispute` : ''}`;
 }
 
+// customer_pin_suggestions: one OPEN row per customer (partial unique index). The loser's open suggestion is
+// retired (superseded, its bell closed) and its closed history moves to the winner; the winner's open row stays.
+// executeMerge retires it before the sweep, so this handler is the backstop for a row opened in between.
+async function retirePinSuggestionsBeforeSweep(trx, loserId) {
+  const pins = require('./customer-pin-suggestions');
+  try {
+    await trx.transaction((sp) => pins.retireOnMerge(sp, loserId));
+  } catch (err) {
+    // The full retire failed (in its own savepoint, so the merge transaction is intact). Fall back, still inside
+    // this merge, to the minimal safe state: the open suggestion superseded and its bell closed. If even that
+    // fails the error propagates and the merge aborts: a failed merge can be retried, a half-reconciled one cannot.
+    logger.warn('[customer-dedupe] retiring the loser pin suggestion failed; using the minimal fallback', { error: err.code || err.name });
+    await trx.transaction((sp) => pins.retireOnMergeMinimal(sp, loserId));
+  }
+}
+
+// Registered for customer_pin_suggestions only, whose one customer FK is
+// customer_id: a literal table and column, so this is not a dynamic writer.
+async function repointPinSuggestions(trx, _table, _column, winnerId, loserId) {
+  await require('./customer-pin-suggestions').retireOnMerge(trx, loserId);
+  return trx('customer_pin_suggestions').where({ customer_id: loserId }).update({ customer_id: winnerId });
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
+  customer_pin_suggestions: repointPinSuggestions,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
   customer_properties: repointCustomerProperties,
@@ -3345,6 +3412,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
     await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
     await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
+    // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
+    await retirePinSuggestionsBeforeSweep(trx, loser.id);
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -7141,6 +7210,12 @@ module.exports = {
   findSameNameGroups,
   SAME_NAME_KIND,
   duplicatePairEligibility,
+  duplicateWinnerFor,
+  // The "not a shell" blocker list and the tables previewMergeEffects never
+  // counts — customer-empty-loser.js (the delete_duplicate_customer
+  // emptiness scan) reads the same lists.
+  loserAutoBlockers,
+  REPOINT_EXCLUDED_TABLES,
   executeMerge,
   lockSeriesCreateForMerge,
   runAutoMergeSweep,
@@ -7216,6 +7291,7 @@ module.exports = {
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
+    retirePinSuggestionsBeforeSweep,
     stableStringify,
     normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },

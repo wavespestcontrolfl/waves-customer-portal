@@ -97,6 +97,7 @@ const SELECTORS = [
   // 'vision' (Codex #5307 r1 finding 6) — the referee call sends the SAME
   // photos every other photo-model selector below sends, not text alone.
   { key: 'SMS_SCHEDULING_DECIDE', env: 'MODEL_SMS_SCHEDULING_DECIDE', description: 'SMS scheduling decide step (owner ruling 2026-10-02: one model, Sonnet 5.5; shadow behind GATE_SMS_SCHEDULING_DECIDE)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  { key: 'AUTO_DISPATCH_PROOFREADER', env: 'MODEL_AUTO_DISPATCH_PROOFREADER', description: 'Auto-dispatch move proofreader (owner 2026-10-09: reads the customer record before an automatic move; the nightly run asks it behind GATE_AUTO_DISPATCH_PROOFREADER, and only an allow moves the visit; also the replay script)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   // deep: true — its only call site (report-ask-ai.js, TEXT_POLICIES.reportAsk)
   // goes through llm/call.js, same as NEWSLETTER above.
   { key: 'REPORT_ASK', env: 'MODEL_REPORT_ASK', description: 'Service report Ask Waves answers (owner 2026-10-05: Sonnet 5.5; dark behind GATE_REPORT_ASK_AI)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
@@ -153,6 +154,7 @@ const ROUTE_SELECTOR = {
   smsToneRewrite: 'SMS_SONNET',
   plantIdReferee: 'PLANT_ID_REFEREE',
   smsSchedulingDecide: 'SMS_SCHEDULING_DECIDE',
+  autoDispatchProofreader: 'AUTO_DISPATCH_PROOFREADER',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
   typedDecision: 'TYPESAFE_JEV',
   typedDecisionClef: 'CLOUDFLARE_CLEF',
@@ -378,7 +380,7 @@ const LANES = [
   L('visit_typed_facts', 'Typed voice fill (a typed visit\'s findings)', 'visit-typed-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_TYPED_VOICE_FILL, dark' }),
   L('review_ask_fact_check', 'Tech-voice review text fact check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('review_ask_repeat_check', 'Tech-voice review text repeat check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
-  L('lawn_draft_timing_check', 'Lawn report draft result-timing check', 'service-report/lawn-draft-timing-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { note: 'GATE_LAWN_REPORT_COPY_V6; kill LAWN_DRAFT_TIMING_CHECK=off' }),
+  L('lawn_draft_timing_check', 'Lawn report draft result-timing check', 'service-report/lawn-draft-timing-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { note: 'lawn v6 copy (GATE_LAWN_REPORT_LEAD); kill LAWN_DRAFT_TIMING_CHECK=off' }),
   L('sms_service_identity', 'SMS draft · which job the open times are for', 'sms-shadow-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_SMS_REAL_ANSWERS only' }),
   L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
@@ -434,6 +436,7 @@ const LANES = [
   // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
   // invalid, or out of budget leaves the escalation result unchanged.
   L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE: records what it would do (owner ruling 2026-10-02: one model, Sonnet 5.5); a would-move is carried out by code only when GATE_SMS_SCHEDULING_ACT_MOVE is on' }),
+  L('auto_dispatch_proofreader', 'Auto-dispatch move proofreader (may a move break a time promise?)', 'auto-dispatch/proofreader/index.js', 'reason', R('autoDispatchProofreader'), null, { note: 'Owner 2026-10-09: allow / hold / unknown on one planned move, from the full customer record. Called by the 04:10 auto-dispatch run behind GATE_AUTO_DISPATCH_PROOFREADER (auto-dispatch/proofreader/nightly.js: only an allow moves the visit; an unknown raises an admin notice) and by the replay (scripts/auto-dispatch-proofreader-replay.js)' }),
   L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
@@ -928,7 +931,7 @@ const LANE_DESCRIBE = {
   review_topic: 'Finds the topic a customer raised before the Day-0 review ask',
   review_ask_fact_check: 'Checks every sentence of a tech-voice review text against the customer record (GATE_REVIEW_ASK_TECH_VOICE)',
   review_ask_repeat_check: 'Holds a later tech-voice review text that repeats an earlier one (GATE_REVIEW_ASK_TECH_VOICE)',
-  lawn_draft_timing_check: 'Rejects a lawn technician report draft whose sentence says when a result will show (GATE_LAWN_REPORT_COPY_V6)',
+  lawn_draft_timing_check: 'Rejects a lawn technician report draft whose sentence says when a result will show (lawn v6 copy)',
   hero_alt: 'Writes alt text for hero images',
   image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',

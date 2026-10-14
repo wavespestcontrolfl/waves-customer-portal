@@ -562,7 +562,7 @@ const SERVICE_DETAILS_COPY = {
         level: 2,
         paragraphs: ['Tell us the install date, the grass type, and what the installer applied. New sod stays on your regular program. We hold some products while it roots.'],
         bullets: [
-          'Water: days 1–7, 2–3 short cycles a day; days 8–14, once a day, early morning; weeks 3–4, 2–3 times a week at ¼–½ inch; from week 5, your normal schedule at ½–¾ inch. New sod is usually exempt from district watering days for the first 30 days only.',
+          'Water: days 1–7, 2–3 short cycles a day; days 8–14, once a day, early morning; weeks 3–4, 2–3 times a week at ¼–½ inch; once rooted (3 to 4 weeks after laying), as needed at ½–¾ inch on your allowed watering days. New sod is usually exempt from district watering days for the first 30 days only.',
           'Mow: first cut at 14–21 days, once a tug on the sod holds. Sharp blade, correct height for the grass, never more than a third of the blade.',
           'Fertilizer: none for 30–60 days, and none at all during your area’s restricted season: June 1–Sept 30 in Sarasota, Manatee, and Charlotte counties, and April 1–Sept 30 in North Port. A summer install gets iron and micronutrients until October.',
           'Herbicide: none during establishment. Pull weeds by hand. The Recognition/Fusilade program waits at least 4 weeks after sodding and in practice a full season.',

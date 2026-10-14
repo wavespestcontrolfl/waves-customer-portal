@@ -95,10 +95,11 @@ describe('execution-mode matrix on main', () => {
     expect(exec('update_customer', { updates: { notes: 'x' } })).toBe(false);
     for (const field of ['email', 'waveguard_tier', 'monthly_rate', 'active', 'pipeline_stage']) expect(exec('update_customer', { updates: { [field]: 'x' } })).toBe(false);
     expect(exec('update_customer', { updates: { phone: 'x', email: 'y' } })).toBe(false);
-    for (const tool of ['add_customer_property', 'update_customer_property']) {
-      expect(exec(tool, { label: null })).toBe(true);
-      expect(exec(tool, { label: 'rental' })).toBe(false);
-    }
+    expect(exec('update_customer_property', { label: null })).toBe(true);
+    expect(exec('update_customer_property', { label: 'rental' })).toBe(false);
+    // Every valid add carries an address (#6297), so it is always a card and not on the direct list.
+    expect(ownerDirect.OWNER_DIRECT_TOOL_NAMES.has('add_customer_property')).toBe(false);
+    for (const input of [{ label: null }, { address_line1: '100 Example Way' }, { relationship: 'rental' }]) expect(exec('add_customer_property', input)).toBe(false);
     expect(exec('reschedule_appointment', { appointment_id: 'a' }, { pinned_appointment: { id: 'a' } })).toBe(true);
     expect(exec('reschedule_appointment', { appointment_id: 'a' }, { pinned_appointment: { id: 'a', visit_id: 'v' } })).toBe(false);
     expect(exec('reschedule_appointment', { appointment_id: 'a' }, null)).toBe(false);

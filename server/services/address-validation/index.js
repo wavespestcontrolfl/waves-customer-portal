@@ -162,8 +162,9 @@ function withTimeout(signal) {
   return signal ? AbortSignal.any([signal, AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS)]) : AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS);
 }
 
-async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null, signal } = {}) {
-  const lines = (addressLines || []).filter(Boolean);
+// The state a caller's address text names, read from locality/state tails.
+function statedStateOf(lines, stateFromText) {
+  if (stateFromText === false) return '';
   // Geography comes from locality/state tails only. A line that starts
   // with a house number ("100 Main St Apt CT") carries a state only when the
   // parse also found a locality or ZIP — otherwise the state-shaped token
@@ -178,8 +179,18 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     if (/^\d/.test(String(line).trim()) && !locality && !parsed.zip) return '';
     return parsed.state;
   };
-  const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]
+  return [lines.join(' ').replace(/,/g, ' '), ...lines]
     .map(geographyState).filter(Boolean).pop();
+}
+
+// `stateFromText: false`: the caller does not want a state read from the
+// address text to steer the region hint or to veto the result (the
+// Intelligence Bar address check: it shows Google's own answer beside the
+// operator's words, and the county rule already places a non-Florida address
+// outside the service area).
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null, signal, stateFromText } = {}) {
+  const lines = (addressLines || []).filter(Boolean);
+  const statedState = statedStateOf(lines, stateFromText);
   const regionHint = statedState || administrativeArea;
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };

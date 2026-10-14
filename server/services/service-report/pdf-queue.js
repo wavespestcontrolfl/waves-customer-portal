@@ -267,7 +267,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // fence compares against it (the browser fetches its own /data, so a
     // change anywhere in between skips the store).
     cardFenceAtRender = await reserviceCardRenderFence(service, knex);
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true });
+    const data = await buildReportV1Data(service, reportToken, knex, {
+      pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true,
+      lawnWaterInRain: true,
+    });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
@@ -357,7 +360,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     err.retryable = true;
     throw err;
   }
-  // GATE_LAWN_REPORT_COPY_V6: the lawn lead copy could not be FROZEN on this
+  // Lawn v6 copy: the lawn lead copy could not be FROZEN on this
   // render (a failed read or a failed freeze write). The live report will
   // freeze it on a later render, possibly with different words, so an emailed
   // attachment now could disagree with it forever. Retryable: defer the send.

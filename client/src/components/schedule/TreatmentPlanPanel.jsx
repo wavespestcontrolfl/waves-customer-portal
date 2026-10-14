@@ -179,6 +179,17 @@ export default function TreatmentPlanPanel({ service, onClose }) {
   function toggleConditional(item) {
     const id = item.product?.id;
     if (!id) return;
+    // The bermuda removal step is one selection: the server marks all three lines selected when
+    // any one is asked for, so a click on any member takes every member off, or puts them all on.
+    if (item.bermudaStep) {
+      const groupIds = [...base, ...conditional].filter((line) => line.bermudaStep && line.product?.id).map((line) => String(line.product.id));
+      setSelectedConditionalIds((prev) => {
+        const on = !!item.selected || groupIds.some((member) => prev.includes(member));
+        const rest = prev.filter((v) => !groupIds.includes(v));
+        return on ? rest : [...rest, ...groupIds];
+      });
+      return;
+    }
     setSelectedConditionalIds((prev) => (
       prev.includes(String(id))
         ? prev.filter((v) => v !== String(id))
@@ -318,6 +329,22 @@ export default function TreatmentPlanPanel({ service, onClose }) {
                 <div className="text-13 text-ink-secondary">Select equipment and planned products to build the mix order.</div>
               )}
             </PlanCard>
+
+            {plan.bermudaMixingOrder?.length > 0 && (
+              <PlanCard icon={Beaker} title="Bermuda backpack mix">
+                <div className="space-y-2">
+                  {plan.bermudaMixingOrder.map((step) => (
+                    <div key={`${step.step}-${step.productId}`} className="flex gap-3 border-hairline border-zinc-200 rounded-sm p-3">
+                      <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">{step.step}</div>
+                      <div className="min-w-0">
+                        <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
+                        <div className="text-14 text-ink-secondary leading-snug mt-1">{step.instruction}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </PlanCard>
+            )}
 
             <PlanCard icon={Camera} title="Inspection / Photo / Closeout" right={<CheckCircle2 size={16} className="text-zinc-700" />}>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">

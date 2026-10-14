@@ -31,7 +31,14 @@ function ProductDetails({ product, equipment, mode, tank, onTankChange }) {
   </div>;
 }
 
+// A product with a second method dosed another way (Zylam: a soil drench by plant
+// height) names the method its tank amount is for, so the amount is never read as the other dose.
 function amountFor(product, gallons) {
+  const amount = tankAmountFor(product, gallons);
+  return product.mix && product.mixLabel ? `${product.mixLabel}: ${amount}` : amount;
+}
+
+function tankAmountFor(product, gallons) {
   if (!product.mix) return product.summary;
   if (product.mix[0] === product.mix[1]) {
     // A fixed guide dose is the label minimum (TriTek 1% = 1.28 fl oz/gal):

@@ -20,17 +20,22 @@
  *     diarized primary model does not support prompts, so this pass is the
  *     only place transcription prompting actually applies on the OpenAI path).
  *   - decodeDictatedContacts(): one structured Gemini call over both
- *     transcripts → { emails, addresses } candidates. Number words become
+ *     transcripts → { emails, addresses, names } candidates. Number words become
  *     digits HERE ("six three" → 63), never in the literal transcript.
  *   - applyEmailDictationPolicy(): pure decision — adopt exactly one strong,
  *     validated candidate; anything ambiguous or URL-shaped is quarantined to
  *     the review card with a ready-to-read confirmation question.
+ *   - nameSpellingDifferences(): pure decision — a first/last name the CALLER
+ *     spelled out letter by letter that differs from the name being saved is
+ *     reported for an advisory review card. Card-only: no name is ever written
+ *     from it. The model decides whose name each spelling is.
  *
  * Fail-open everywhere: any model/provider failure returns null and the
  * pipeline behaves exactly as before this module existed.
  */
 
 const logger = require('./logger');
+const { properCase } = require('../utils/name-case');
 const { cleanValidEmailOrNull, looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 
 const ENABLED = () => process.env.CONTACT_DICTATION_ENABLED !== 'false';
@@ -48,6 +53,30 @@ const ADOPT_CONFIDENCE = 0.75;
 
 const EMAIL_SIGNAL_RE = /\b(e-?mail|at g ?mail|at gmail|gmail dot|yahoo dot|outlook dot|hotmail dot|dot com|dot net|dot org)\b/i;
 const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like|for) in [a-z]+|[a-z] for [a-z]+)\b/i;
+// A name spelled out letter by letter ("S-E-R-O-V", "S E R O V", "S as in
+// Sam"). Tighter than SPELLING_SIGNAL_RE on purpose: this gates a paid decoder
+// pass, and "like in the past" must not buy one.
+// Bare "spell" only counts in a dictation phrase: "a dry spell" must not buy a
+// paid second transcription pass and a decoder call.
+const NAME_SPELLING_WORD_RE = /\bspell(?:ed|ing)\b|\bspell\s+(?:it|that|this|my|your|the|his|her|their|our)\b|\b(?:how|to)\s+(?:(?:do|can|would|could)\s+you\s+)?spell\b/i;
+const NAME_SPELLING_LETTERS_RE = new RegExp([
+  // Separated single letters: four or more in any case ("S, E, R, O, V", "v a r n u m").
+  String.raw`\b(?:[A-Za-z]\s*[-.,]\s*){3,}[A-Za-z]\b`,
+  String.raw`\b(?:[A-Za-z] ){3,}[A-Za-z]\b`,
+  // Three letters need a stronger shape: capitals ("L-E-E", "L, E, E") or a hyphenated run.
+  String.raw`\b(?:[A-Z]\s*[-.,]\s*){2,}[A-Z]\b`,
+  String.raw`\b(?:[a-z]-){2,}[a-z]\b`,
+  // Phonetic markers.
+  String.raw`\b[A-Za-z]\s+as\s+in\s+[A-Za-z]{3,}\b`,
+  // "V like Victor" / "S for Sam": a capital letter (never "I like pizza")...
+  String.raw`\b[A-HJ-Z]\s+(?:like|for)\s+(?:in\s+)?[A-Za-z]{3,}\b`,
+  // Three or more separated single letters shortly after the word "name" ("last name is l e e").
+  String.raw`\b[Nn]ame\b[^.?!\n]{0,40}?\b(?:[A-Za-z][\s,-]+){2,}[A-Za-z]\b(?![A-Za-z'’])`,
+].join('|'), '');
+// ...or any casing when the word starts with the letter it names ("v like victor").
+// A two-letter name only when the spelling repeats the name just spoken ("Li, L-I").
+const NAME_SPELLING_TWO_LETTER_RE = /\b([a-z])([a-z])\b[\s,.]+\1\s*[-.,\s]\s*\2\b/i;
+const NAME_SPELLING_PHONETIC_RE = /\b([a-z])\s+(?:as|like|for)\s+(?:in\s+)?\1[a-z]{2,}\b/i;
 // Suffix coverage for the service area's street vocabulary — Fruitville ROAD,
 // Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
 // dictation-focused second STT pass never ran for those calls. The common
@@ -65,7 +94,143 @@ function detectContactDictationSignals(transcript) {
   const t = String(transcript || '');
   const email = EMAIL_SIGNAL_RE.test(t) || (/@/.test(t) && SPELLING_SIGNAL_RE.test(t));
   const address = ADDRESS_SIGNAL_RE.test(t);
-  return { email, address, any: email || address };
+  const name = NAME_SPELLING_WORD_RE.test(t) || NAME_SPELLING_LETTERS_RE.test(t) || NAME_SPELLING_PHONETIC_RE.test(t) || NAME_SPELLING_TWO_LETTER_RE.test(t);
+  return { email, address, name, any: email || address || name };
+}
+
+// ── Collapsed-spelling trigger ───────────────────────────────────────────────
+// The diarized primary transcript sometimes collapses a spoken spelling ("Serov,
+// S-E-R-O-V") into the plain word ("Serov, Serov"), so every letter-run regex above
+// returns false and the spelling-preserving second pass never runs. These signals are
+// what the collapse leaves behind. Cheap and pure; the caller pays for a second pass
+// only when one fires.
+
+// (a) A name token said twice in a row across punctuation ("Serov, Serov" / "Serov. Serov"),
+// with an optional speaker label between ("Caller: Serov. Agent: Serov.").
+const REPEATED_TOKEN_RE = /\b([A-Z][\p{L}'’-]+)\s*[,.;:?!]+(?:\s*(?:Caller|Agent|Customer|Speaker \d+)\s*:)?\s*\1\b/gu;
+// Words that repeat in ordinary speech and are never the name being spelled: fillers, answers,
+// weekdays, months, US states and the cities of the service area ("Monday. Monday.",
+// "Florida. Florida.").
+const REPEAT_VOCABULARY = new Set([
+  'ok', 'hi', 'uh', 'um', 'oh', 'so', 'we', 'me', 'my', 'he', 'it', 'is', 'am', 'to', 'do', 'go', 'on', 'or',
+  'okay', 'yes', 'yeah', 'yep', 'no', 'nope', 'sure', 'right', 'thanks', 'thank', 'sorry', 'hello', 'perfect', 'great', 'good',
+  'alright', 'again', 'what', 'well', 'please', 'exactly', 'correct', 'wonderful', 'awesome', 'bye', 'goodbye', 'morning', 'afternoon',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'today', 'tomorrow', 'tonight',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+  'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota',
+  'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'hampshire', 'jersey', 'mexico', 'york', 'carolina', 'dakota', 'ohio',
+  'oklahoma', 'oregon', 'pennsylvania', 'rhode', 'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'wisconsin', 'wyoming',
+  'sarasota', 'bradenton', 'venice', 'parrish', 'palmetto', 'nokomis', 'osprey', 'englewood', 'north', 'port', 'charlotte', 'punta', 'gorda',
+  'ellenton', 'longboat', 'siesta', 'lakewood', 'ranch', 'tampa', 'naples', 'miami', 'orlando', 'manatee', 'north port', 'myakka', 'bayshore',
+]);
+// A name is being given or asked for within this many characters before the repeat.
+const REPEAT_CONTEXT_WINDOW = 80;
+// A bare "name" is a person's name unless a qualifier says it names a thing ("service name").
+const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|(?<!\b(?:service|product|company|street|business|brand|trade|file|user|domain|city|pest|chemical)\s+)name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am)\b/i;
+// (b) A phrase that announces a spelling. It counts only when no letter run follows within
+// ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
+// The letter forms are case sensitive on purpose ("that's S", not "that's a"). Where the words
+// around the letter already say a spelling is coming ("that's an", "with a", "as in", "like in")
+// an uppercase A or I counts too (not "I like in", which is ordinary speech); the bare-letter
+// class excludes them so "I spoke with a tech" and a stray "A" do not fire.
+const ANNOUNCE_WINDOW = 60;
+const SPELLING_ANNOUNCE_RES = [
+  new RegExp(NAME_SPELLING_WORD_RE.source, 'gi'),
+  new RegExp([
+    String.raw`\b[Tt]hat'?s\s+(?:an?\s+)?[B-HJ-Z]\b(?![\p{L}'’])`,
+    String.raw`\b[Tt]hat'?s\s+an?\s+[AI]\b(?![\p{L}'’])`,
+    String.raw`\b[Ww]ith\s+an?\s+[A-Z]\b(?![\p{L}'’])`,
+    String.raw`\b(?:[A-Z]\s+as|[A-HJ-Z]\s+like)\s+in\b`,
+  ].join('|'), 'gu'),
+];
+const LETTER_RUN_AFTER_RE = new RegExp(`${NAME_SPELLING_LETTERS_RE.source}|${NAME_SPELLING_PHONETIC_RE.source}`, 'i');
+
+// The look-behind for name context: the repeated token's own turn, plus the turn right before it
+// when that turn is a question ("Agent: Can I get your last name?" / "Caller: Serov, Serov."). A
+// question or answer from further back ("Agent: What's your name? Caller: John. Agent: Sentricon?
+// Sentricon.") is never context for this one.
+const SPEAKER_LABEL_RE = /\b(?:Agent|Caller|Customer|Tech(?:nician)?|Staff|Speaker \d+)\s*:/gi;
+function sameTurnBefore(text, index) {
+  const window = text.slice(Math.max(0, index - REPEAT_CONTEXT_WINDOW), index);
+  const labels = [...window.matchAll(SPEAKER_LABEL_RE)];
+  if (!labels.length) return window;
+  const last = labels[labels.length - 1];
+  const own = window.slice(last.index + last[0].length);
+  const prev = labels.length > 1 ? labels[labels.length - 2] : null;
+  const before = window.slice(prev ? prev.index + prev[0].length : 0, last.index);
+  return /\?/.test(before) ? `${before} ${own}` : own;
+}
+
+// A repeated capitalized token counts when it is not everyday vocabulary AND a name is being given
+// or asked for just before it (or it is the extracted first or last name itself).
+function repeatedNameToken(text, extracted = null) {
+  const extractedNames = [extracted?.first_name, extracted?.last_name].map(nameKey).filter(Boolean);
+  for (const m of text.matchAll(REPEATED_TOKEN_RE)) {
+    const token = m[1].toLowerCase();
+    if (REPEAT_VOCABULARY.has(token)) continue;
+    if (extractedNames.includes(nameKey(token))) return true;
+    if (NAME_CONTEXT_RE.test(sameTurnBefore(text, m.index))) return true;
+  }
+  return false;
+}
+
+// A single-letter announcement ("with a C") is ordinary speech when a word follows the letter
+// ("with a C corporation", codex #6290 r5). It counts only when the letter ends the thought
+// (punctuation, end of text, "and" / "then", "as in" / "like in") or a name is being given in
+// the same turn. The spelling words (first pattern) need no such check.
+const LETTER_ENDS_THOUGHT_RE = /^\s*(?:[,.;:!?)-]|$|and\b|then\b|as\s+in\b|like\s+in\b)/i;
+function announcedWithoutLetters(text) {
+  SPELLING_ANNOUNCE_RES.forEach((re) => { re.lastIndex = 0; });
+  const [wordRe, letterRe] = SPELLING_ANNOUNCE_RES;
+  for (const m of text.matchAll(wordRe)) {
+    const end = m.index + m[0].length;
+    if (!LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) return true;
+  }
+  for (const m of text.matchAll(letterRe)) {
+    const end = m.index + m[0].length;
+    if (LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) continue;
+    if (LETTER_ENDS_THOUGHT_RE.test(text.slice(end, end + 12)) || NAME_CONTEXT_RE.test(sameTurnBefore(text, m.index))) return true;
+  }
+  return false;
+}
+
+// Plain edit distance (insert, delete, substitute), early-out above `limit`.
+function editDistance(a, b, limit = 2) {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// (c) The extracted last name is the stored last name misspelled by one or two letters,
+// same first letter (two-letter names included: "Lu" against "Li"). A short name (4 letters or fewer) tolerates one letter only, so "Lee"
+// against "Lam" is not a near miss.
+function lastNameNearMiss(extracted, knownCustomer) {
+  const got = nameKey(extracted?.last_name);
+  const had = nameKey(knownCustomer?.last_name);
+  if (got.length < 2 || had.length < 2 || got === had || got[0] !== had[0]) return false;
+  const limit = Math.min(got.length, had.length) <= 4 ? 1 : 2;
+  return editDistance(got, had, limit) <= limit;
+}
+
+/**
+ * Which collapse signals the call leaves behind. `repeated` and `announced` read the primary
+ * transcript alone (so they can gate the second transcription pass, which runs before the
+ * extraction exists); `nearMiss` also needs the extraction and the stored customer.
+ */
+function spellingCollapseSignals(transcript, { extracted = null, knownCustomer = null } = {}) {
+  const t = String(transcript || '');
+  const repeated = repeatedNameToken(t, extracted);
+  const announced = announcedWithoutLetters(t);
+  const nearMiss = lastNameNearMiss(extracted, knownCustomer);
+  return { repeated, announced, nearMiss, any: repeated || announced || nearMiss };
 }
 
 // ── Second-pass transcription prompt ─────────────────────────────────────────
@@ -95,7 +260,7 @@ Use clear punctuation and line breaks where helpful.`;
 // ── Structured decoder ───────────────────────────────────────────────────────
 
 function buildDecoderPrompt({ transcript, contactPassTranscript }) {
-  return `You are decoding dictated CONTACT FIELDS (email addresses and service addresses) from a pest-control phone call. Use the transcripts as EVIDENCE — do not blindly copy malformed transcript text; transcription mishears dictation.
+  return `You are decoding dictated CONTACT FIELDS (email addresses, service addresses, and spelled-out names) from a pest-control phone call. Use the transcripts as EVIDENCE — do not blindly copy malformed transcript text; transcription mishears dictation.
 
 PRIMARY TRANSCRIPT (diarized):
 """
@@ -122,6 +287,13 @@ ADDRESS RULES:
 3. Street names are real words or proper names. If the transcribed street name is nonsensical phonetic text, list plausible real street-name alternatives that SOUND like it (street_alternatives, with suffix, no house numbers) — consider suffix mishears too (Trail/Terrace/Trace, Court/Cove, Lane/Drive).
 4. Do not invent an address the caller did not say; alternatives are re-hearings of what they DID say.
 
+NAME RULES:
+1. Report a name ONLY when a speaker actually spelled it out letter by letter (a run of single letters, or letters with phonetic markers such as "B as in boy"). A name merely said aloud is not a spelling — omit it.
+2. raw_spoken is the spelling evidence verbatim. spelled_value is the name those letters make, joined and capitalized the way the letters spell it. Use only the letters spelled; never invent, complete or "fix" a name.
+3. field is "first_name" or "last_name".
+4. whose is "caller" ONLY when the spelling is of the CALLER's OWN name (the person speaking, not the Waves agent). Use "other" for anyone else the caller mentions (a buyer, tenant, spouse, parent, neighbor, a business contact) and whenever you are unsure whose name it is.
+5. If the caller spells the same field two different ways, return both entries with honest confidences.
+
 Return ONLY JSON with this exact shape (empty arrays when nothing was dictated):
 {
   "emails": [
@@ -140,6 +312,9 @@ Return ONLY JSON with this exact shape (empty arrays when nothing was dictated):
       "needs_confirmation": true,
       "confirmation_question": ""
     }
+  ],
+  "names": [
+    { "raw_spoken": "", "spelled_value": "", "field": "first_name or last_name", "whose": "caller or other", "confidence": 0.0 }
   ]
 }`;
 }
@@ -198,7 +373,7 @@ function sanitizeEmailCandidates(candidates) {
 
 /**
  * One structured decoder pass over the call's transcripts.
- * Returns { emails, addresses } (sanitized shape) or null on any failure.
+ * Returns { emails, addresses, names } (sanitized shape) or null on any failure.
  */
 async function decodeDictatedContacts({ transcript, contactPassTranscript = null, deps = {} } = {}) {
   if (!ENABLED() || !String(transcript || '').trim()) return null;
@@ -228,11 +403,247 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
       needs_confirmation: a?.needs_confirmation !== false,
       confirmation_question: String(a?.confirmation_question || '').slice(0, 300),
     }));
-    return { emails, addresses };
+    return { emails, addresses, names: sanitizeNameEntries(parsed.names, [transcript, contactPassTranscript]) };
   } catch (err) {
     logger.warn(`[contact-dictation] decoder failed open: ${err.message}`);
     return null;
   }
+}
+
+// ── Spelled names (card-only) ────────────────────────────────────────────────
+// A spelling the caller gives of their own name is EVIDENCE for the office, never
+// an automatic write: nothing here changes an extraction, a customer or a lead.
+// When a grounded spelling attributed to the caller differs from the name being
+// saved for the caller, the processor files ONE advisory `name_spelling_differs`
+// card carrying the spelling, the saved name and the caller turn it came from.
+
+const NAME_FIELDS = ['first_name', 'last_name'];
+const SPELLED_NAME_RE = /^\p{L}[\p{L}'’ -]{0,48}\p{L}$/u;
+const EMAIL_WORDING_RE = /e-?mail|@|\bdot\b|\bat\b[^\n]{0,25}\b(?:dot|gmail|yahoo|outlook|hotmail|icloud)/;
+
+const squash = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const nameKey = (v) => String(v || '').toLowerCase().replace(/[^\p{L}]/gu, '');
+
+// Spoken punctuation that joins parts of one spelled name; it adds no letter and does not end the run.
+const SPOKEN_JOINER_RE = /^(?:apostrophe|hyphen|dash|space|['’])$/i;
+
+// The letters a spelling actually spells: runs of single-letter tokens, with
+// "S as in Sam" reduced to its letter. Words, and apostrophe words like "it's",
+// are never single-letter tokens.
+function spelledLetterRuns(raw) {
+  const reduced = String(raw || '').replace(/\b([A-Za-z])\s+(?:as|like|for)\s+(?:in\s+)?[A-Za-z]+/gi, '$1');
+  const runs = [];
+  let run = '';
+  for (const tok of reduced.split(/[\s,.\-]+/).filter(Boolean)) {
+    if (SPOKEN_JOINER_RE.test(tok)) continue; // "O apostrophe N-E-I-L", "M-A-R-Y hyphen A-N-N": same run
+    if (/^[A-Za-z]$/.test(tok)) run += tok.toLowerCase();
+    else { if (run) runs.push(run); run = ''; }
+  }
+  if (run) runs.push(run);
+  return runs;
+}
+
+const QUOTE_MAX = 300;
+const QUOTE_LEAD = 120;
+
+// The part of an over-long turn shown as evidence: a window around the spelling (so the quote always
+// contains it), with an ellipsis where the turn was cut. A turn that fits is returned as it is.
+function quoteWindow(turn, at, len) {
+  if (turn.length <= QUOTE_MAX) return turn;
+  const from = Math.max(0, Math.min(at - QUOTE_LEAD, turn.length - QUOTE_MAX));
+  const to = Math.min(turn.length, Math.max(from + QUOTE_MAX, at + len));
+  return `${from > 0 ? '…' : ''}${turn.slice(from, to)}${to < turn.length ? '…' : ''}`;
+}
+
+// Every turn (a line) of `text` that holds the spelling as a WHOLE spelled run, so S-M-I-T-H inside
+// S-M-I-T-H-E is not S-M-I-T-H. Each hit is { turn, quote }; `wanted` is the letter run to find.
+function turnsWithSpelling(text, lower, needle, wanted) {
+  const hits = [];
+  for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
+    const start = text.lastIndexOf('\n', at) + 1;
+    const endIdx = text.indexOf('\n', at + needle.length);
+    const rawTurn = text.slice(start, endIdx < 0 ? text.length : endIdx);
+    const turn = rawTurn.trim();
+    if (wanted.length && !wanted.every((r) => spelledLetterRuns(turn).includes(r))) continue;
+    const local = at - start - (rawTurn.length - rawTurn.trimStart().length);
+    hits.push({ turn, quote: quoteWindow(turn, local, needle.length) });
+  }
+  return hits;
+}
+
+// The caller turn that contains the spelling, or null. The simple qualifier:
+// when a transcript carries Agent:/Caller: labels the turn must be labeled
+// Caller:; an unlabeled transcript (the dictation pass) is taken as it is, EXCEPT
+// when a labeled transcript puts the same spelling in an Agent: turn and in no
+// Caller: turn (the spelling is the employee's, so the unlabeled copy is too);
+// a turn with email wording is an address, not a name. The spelling must be a whole
+// letter run in the turn (`run`: the run the decoder's value spells; default every run of `raw`).
+function callerTurnWithSpelling(raw, sources, run = null) {
+  const flat = (v) => String(v || '').replace(/[ \t]+/g, ' ');
+  const needle = flat(raw).trim().replace(/\s*\n\s*/g, ' ').toLowerCase();
+  if (!needle) return null;
+  const wanted = run ? [run] : spelledLetterRuns(raw);
+  const noEmail = (h) => !EMAIL_WORDING_RE.test(h.turn.toLowerCase());
+  const unlabeled = [];
+  let agentSpoke = false;
+  for (const src of sources) {
+    const text = flat(src);
+    const lower = text.toLowerCase();
+    if (!/^\s*(?:agent|caller)\s*:/im.test(text)) { unlabeled.push({ text, lower }); continue; }
+    const hits = turnsWithSpelling(text, lower, needle, wanted);
+    const caller = hits.find((h) => /^caller\s*:/i.test(h.turn) && noEmail(h));
+    if (caller) return caller.quote;
+    if (hits.some((h) => /^agent\s*:/i.test(h.turn))) agentSpoke = true;
+  }
+  // The diarized transcript binds the speaker: an Agent: spelling with no Caller: copy is never the caller's.
+  if (agentSpoke) return null;
+  for (const { text, lower } of unlabeled) {
+    const hit = turnsWithSpelling(text, lower, needle, wanted).find(noEmail);
+    if (hit) return hit.quote;
+  }
+  return null;
+}
+
+/**
+ * Keep the decoder's name entries that are well formed and GROUNDED: field
+ * first_name|last_name, a letters-only value, raw_spoken present in a source
+ * transcript, and the letters it spells equal to the value. `whose` is the
+ * model's judgment ("caller" only when it said so); `turn` is the caller turn
+ * the spelling sits in (null when it fails the simple qualifier).
+ */
+function sanitizeNameEntries(entries, sources = []) {
+  const srcs = (Array.isArray(sources) ? sources : []).filter(Boolean);
+  const haystacks = srcs.map(squash).filter(Boolean);
+  const out = [];
+  for (const n of (Array.isArray(entries) ? entries : []).slice(0, 6)) {
+    const spelled = String(n?.spelled_value || '').trim().replace(/\s+/g, ' ');
+    if (!NAME_FIELDS.includes(n?.field) || !SPELLED_NAME_RE.test(spelled)) continue;
+    const raw = squash(n?.raw_spoken);
+    if (!raw || !haystacks.some((h) => h.includes(raw))) continue;
+    const run = nameKey(spelled);
+    if (!spelledLetterRuns(n.raw_spoken).includes(run)) continue;
+    // Grounded only when a source holds that spelling as a WHOLE run, not as part of a longer one.
+    if (!srcs.some((src) => spelledLetterRuns(src).includes(run))) continue;
+    out.push({
+      raw_spoken: String(n.raw_spoken).slice(0, 300),
+      spelled_value: properCase(spelled),
+      field: n.field,
+      whose: n?.whose === 'caller' ? 'caller' : 'other',
+      confidence: Math.max(0, Math.min(1, Number(n?.confidence) || 0)),
+      turn: callerTurnWithSpelling(n.raw_spoken, srcs, run),
+    });
+  }
+  return out;
+}
+
+/**
+ * The name-spelling differences to put on the review card. `saved` is the name
+ * being saved for the caller ({ first_name, last_name }). Per field, only entries
+ * the model attributed to the caller, at ADOPT_CONFIDENCE or above, in a qualifying
+ * caller turn count; two caller spellings of one field that disagree decide nothing;
+ * a field with no saved name is the missing-name cards' job; letters that already
+ * match (any case) need no card. Pure.
+ */
+function nameSpellingDifferences({ dictation = null, saved = {} } = {}) {
+  const out = [];
+  for (const field of NAME_FIELDS) {
+    // Disagreement is judged across EVERY grounded caller-turn spelling, whatever its confidence: a
+    // weak alternate still means the caller did not give one unambiguous spelling.
+    const entries = (dictation?.names || []).filter((n) => n.field === field && n.whose === 'caller' && n.turn);
+    if (new Set(entries.map((n) => nameKey(n.spelled_value))).size !== 1) continue;
+    const best = entries.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+    if (best.confidence < ADOPT_CONFIDENCE) continue; // the agreed spelling needs strong support
+    const savedValue = String(saved[field] || '').trim();
+    if (!savedValue || nameKey(savedValue) === nameKey(best.spelled_value)) continue;
+    out.push({ field, spelled_value: best.spelled_value, saved_value: savedValue, quote: best.turn, confidence: best.confidence });
+  }
+  return out;
+}
+
+/**
+ * The pure decision for one filing pass. `saved` is the name compared against: a linked customer's
+ * STORED fields only (a blank stays blank), else the extracted caller name. `differences` are the
+ * spelling differences to file. `retire` is true only when there is nothing to file AND the open
+ * card's own recorded spellings (the main entry AND every `also` entry) ALL equal the live stored value of their field;
+ * a pass that merely lost confidence or found a conflicting pair leaves that card alone.
+ * `differences` is what to file: this pass's evidence plus the card's still-unresolved entries. Pure.
+ */
+function nameSpellingCardDecision({ dictation = null, live = null, extracted = {}, openCardPayload = null } = {}) {
+  const saved = Object.fromEntries(NAME_FIELDS.map((f) => [f, live
+    ? (String(live[f] || '').trim() || null)
+    : (extracted?.[f] || null)]));
+  const differences = nameSpellingDifferences({ dictation, saved });
+  const recorded = openCardPayload ? [openCardPayload, ...(Array.isArray(openCardPayload.also) ? openCardPayload.also : [])] : [];
+  // The open card's own entries are judged against the live stored name, with or without new evidence:
+  // an entry whose live value now matches is dropped; one still different is kept (its stored value
+  // refreshed). Evidence from this pass replaces the card's entry for the same field.
+  const matches = (d) => !!(d && saved[d.field] && d.spelled_value && nameKey(saved[d.field]) === nameKey(d.spelled_value));
+  // An entry whose field is now blank is dropped: a blank name belongs to the missing-name cards.
+  const stillWrong = recorded.filter((d) => d && NAME_FIELDS.includes(d.field) && d.spelled_value && saved[d.field] && !matches(d));
+  const unresolved = stillWrong
+    .map((d) => ({ field: d.field, spelled_value: d.spelled_value, saved_value: saved[d.field], quote: d.quote ?? null, confidence: d.confidence ?? null }));
+  if (differences.length) {
+    return { saved, differences: [...differences, ...unresolved.filter((d) => !differences.some((n) => n.field === d.field))], retire: false };
+  }
+  // No new evidence: no entry still wrong retires the card; fewer entries than recorded, or a changed
+  // stored value on one that is still wrong, is a refresh with only the unresolved entries; nothing
+  // changed writes nothing.
+  const changed = unresolved.length < recorded.length
+    || stillWrong.some((d) => nameKey(d.saved_value) !== nameKey(saved[d.field]));
+  return { saved, differences: unresolved.length && changed ? unresolved : [], retire: recorded.length > 0 && !unresolved.length };
+}
+
+/**
+ * Whether a spouse / partner caller is NOT the account holder: identity is separate from authorization,
+ * so a spouse spelling their own, differently named, first and last name must not be compared with the
+ * account holder's record. The caller is the account holder only when the extracted caller name equals
+ * the record's name (first + last, letters only). Any other relationship returns false. Pure.
+ */
+function spouseCallerIsNotAccountHolder({ relationship = null, extracted = {}, live = null } = {}) {
+  if (relationship !== 'spouse_partner' || !live) return false;
+  const full = (n) => nameKey(`${n?.first_name || ''}${n?.last_name || ''}`);
+  const callerName = full(extracted);
+  return !callerName || callerName !== full(live);
+}
+
+/**
+ * The name_spelling_differs card payload: the main discrepancy, the card text, the other
+ * differing entries, and WHAT it was compared against (the linked customer's record, whose id
+ * the card carries so the office opens that record, or the name heard on the call). Pure.
+ */
+function nameSpellingCardPayload({ top, others = [], saved = {}, filingCustomer = null }) {
+  return {
+    ...top,
+    card_text: nameSpellingCardText(top),
+    also: others,
+    compared_against: {
+      source: filingCustomer ? 'customer' : 'extracted',
+      name: [saved.first_name, saved.last_name].filter(Boolean).join(' ') || null,
+    },
+    customer_ids: [filingCustomer].filter(Boolean),
+  };
+}
+
+/**
+ * Drop the discrepancies a HUMAN already settled for the SAME filing customer (or unlinked):
+ * each is judged on its own (customer, field, spelling, saved name) against every settled card's
+ * evidence (its main entry and its `also` list), so a decision for customer A does not suppress
+ * the same discrepancy for customer B after a relink. `settledPayloads` are the settled cards'
+ * payload objects. Pure.
+ */
+function unsettledNameDifferences(differences, settledPayloads, filingCustomer) {
+  const key = (d, who) => `${who}|${d?.field}|${nameKey(d?.spelled_value)}|${nameKey(d?.saved_value)}`;
+  const seen = new Set((settledPayloads || []).flatMap((o) => {
+    const who = String((Array.isArray(o?.customer_ids) && o.customer_ids[0]) || 'unlinked');
+    return [o, ...(Array.isArray(o?.also) ? o.also : [])].map((d) => key(d, who));
+  }));
+  return differences.filter((d) => !seen.has(key(d, filingCustomer || 'unlinked')));
+}
+
+// "Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs."
+function nameSpellingCardText({ spelled_value: spelled, saved_value: saved }) {
+  const letters = nameKey(spelled).toUpperCase().split('').join('-');
+  return `Caller spelled their name ${letters}; the record says ${saved}. Fix the name if the spelling is theirs.`;
 }
 
 /**
@@ -284,9 +695,17 @@ function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
 
 module.exports = {
   detectContactDictationSignals,
+  spellingCollapseSignals,
   decodeDictatedContacts,
   applyEmailDictationPolicy,
+  nameSpellingDifferences,
+  nameSpellingCardDecision,
+  spouseCallerIsNotAccountHolder,
+  nameSpellingCardText,
+  unsettledNameDifferences,
+  nameSpellingCardPayload,
   sanitizeEmailCandidates,
+  sanitizeNameEntries,
   buildDecoderPrompt,
   CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
   ADOPT_CONFIDENCE,

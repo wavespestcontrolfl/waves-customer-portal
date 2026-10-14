@@ -23,11 +23,15 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
+const bermudaRemoval = require('./lawn-bermuda-removal');
+const { FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
 // 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
@@ -94,9 +98,24 @@ function lawnFastVisitType(profile, billingMode, isCallback = false) {
  * `allowStatuses` lists visit statuses NOT treated as terminal (the submit
  * preflight passes ['completed'], see preflightLawnFastCompletion).
  */
+// A lawn visit by its completion profile. An area add-on (lawn care by family)
+// is generic one-time work with its own governed recipe: never the lawn
+// program's sheet, whatever its name says.
+function isLawnProgramProfile(profile) {
+  return profile.category === LAWN_CATEGORY && !isAreaAddOnCatalogKey(profile.serviceKey);
+}
+
+// Why this is not a lawn-program visit for the sheet, or null: not a lawn visit at all, or a visit
+// with an attached area add-on row (work this sheet cannot record: its product and treated area).
+function lawnProgramRefusal(svc, profile) {
+  if (!isLawnProgramProfile(profile)) return 'not_lawn';
+  return svc?.hasAreaAddOnRows ? 'area_addon_attached' : null;
+}
+
 function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
   if (!profile) return 'profile_unavailable';
-  if (profile.category !== LAWN_CATEGORY) return 'not_lawn';
+  const notLawnProgram = lawnProgramRefusal(svc, profile);
+  if (notLawnProgram) return notLawnProgram;
   // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
   // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
   // the Waves Assessment visit is its own diagnostic lane. Derived from the completion
@@ -135,7 +154,7 @@ async function loadBillingMode(svc, knex, readFailures) {
  * only `visitType` (to 'unknown'), never the verdict. `withVisitType: false`
  * skips that read (the submit preflight does not need the type).
  */
-async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [], withVisitType = true } = {}) {
+async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [], withVisitType = true, allowGrouped } = {}) {
   if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
   // STRICT profile read: the non-strict resolver swallows a failed availability probe
   // into a synthesized profile that has lost projectBacked / requiresProject /
@@ -152,7 +171,12 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
     const visit = await knex('service_visits').where({ id: svc.visit_id }).first('status');
     visitGroupStatus = visit ? String(visit.status || '') : null;
   }
-  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
+  // GATE_COMBO_FAST_COMPLETE: `allowGrouped` ({ stop: true } for the sheet's reads, { packetContext } for the preflight
+  // inside the visit-closeout packet) only asks. A grouped member counts as ungrouped here when the server
+  // itself confirms a combined stop (services/combo-fast-complete.js groupedStopAllowed).
+  const groupedOk = !!(allowGrouped && svc.visit_id
+    && await require('./combo-fast-complete').groupedStopAllowed(knex, svc, allowGrouped));
+  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id && !groupedOk, visitGroupStatus, allowStatuses });
   let visitType = null;
   if (profile && withVisitType) {
     const billingMode = reason === 'not_lawn' ? null : await loadBillingMode(svc, knex, readFailures);
@@ -168,7 +192,11 @@ const ruleSummary = (rule) => {
   if (rule.mode === 'hold') {
     return rule.hold_until === 'dry' ? 'Hold watering until the treatment has dried' : `Hold watering ${rule.hold_hours} h`;
   }
-  if (rule.mode === 'water_in') return `Water in ${rule.water_in_inches} in within ${rule.water_in_by_hours} h${rule.water_in_same_day ? ', same day' : ''}`;
+  if (rule.mode === 'water_in') {
+    const hours = Number(rule.water_in_by_hours);
+    const within = hours >= 48 && hours % 24 === 0 ? `${hours / 24} days` : `${rule.water_in_by_hours} h`;
+    return `Water in ${rule.water_in_inches} in within ${within}${rule.water_in_same_day ? ', same day' : ''}`;
+  }
   return 'No watering instruction';
 };
 
@@ -494,6 +522,13 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
+// GATE_LAWN_NOV_LARGE_PATCH_N: a nitrogen line the plan sized for the reduced target keeps the plan's note on the sheet (the planned row
+// prints its gateNotes). Only that note is carried: every other planned row is the payload it was. `{}` when the plan did not cut the bag.
+function fungusNitrogenNoteOf(item) {
+  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => note?.key === FUNGUS_NITROGEN_NOTE_KEY && note.text).map((note) => note.text);
+  return texts.length ? { gateNotes: texts } : {};
+}
+
 // GATE_LAWN_TROUBLE_AREAS: the places the yearly limits are judged at (lawn-trouble-areas.js), or null (gate off: every
 // decision is the lawn-wide one, as before).
 const limitPlaces = async (svc, knex) => (featureGates.lawnTroubleAreasLive() && await require('./lawn-trouble-areas').propertyOf(knex, svc) ? require('./lawn-trouble-areas').PLACE_IDS : null);
@@ -631,8 +666,9 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex, places = null }
   // technician adds), and why.
   const offerOf = async (f) => {
     const { rungIds, blockedIds, unreadableIds } = f;
-    // chinchOnlyIds exists only with the places gate live (see lawn-treatment-guide chinchOnlyIdsOf).
-    const only = f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {};
+    // chinchOnlyIds exists only with the places gate live (see lawn-treatment-guide chinchOnlyIdsOf). limitedIds: the rungs
+    // whose own limit was read as forbidding (the sheet's search leaves out only these); absent when the limit read failed.
+    const only = { ...(f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {}), ...(Array.isArray(f.limitedIds) ? { limitedIds: f.limitedIds } : {}) };
     if (!f.productId) return { item: null, note: f.note, rungIds, blockedIds, unreadableIds, ...only };
     return { item: await itemFor(f), note: f.note, rungIds, blockedIds, unreadableIds, ...only };
   };
@@ -683,6 +719,7 @@ async function sheetPlanned({ plan, items, addOns }, knex) {
       ratePer1000: item.mix?.ratePer1000 ?? null,
       rateUnit: item.mix?.rateUnit ?? null,
       ...programRateFor(item, programRows),
+      ...fungusNitrogenNoteOf(item),
       approvedForReport: entry.approvedForReport,
       wateringRule: entry.rule,
       wateringSummary: entry.ruleSummary,
@@ -737,6 +774,8 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       ...weed,
       ...chinch,
       ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet)),
+      // GATE_LAWN_MIX_HELP: the amount for a full tank of each spot spray (lawn-mix-help.js; `{}` while the gate is off).
+      ...await require('./lawn-mix-help').contextBlock({ loaded, weed, chinch, month: visitMonthOf(svc), knex }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };
@@ -853,14 +892,31 @@ function reportFactsContextKeys() {
  * missing visit; an ineligible visit answers `eligible: false` with the reason
  * and the visit identity and skips the heavier reads.
  */
-async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds } = {}) {
-  const base = await resolveLawnFastEligibility(serviceId, knex);
+// The outcome that sends a visit to the full form, or null for the quick sheet. The eligibility's
+// own reason comes first. Then the bermuda removal mix: it is one grouped selection the quick sheet
+// has no UI for, so a visit that OFFERS it (decided from the visit's step eligibility, whatever the
+// completion defaults say) takes the full form. A read error while checking it fails CLOSED to the
+// full form (where the warning and the account check live), never an eligible quick sheet.
+async function fullFormOutcome(knex, svc, reason) {
+  if (reason) return { reason };
+  const mixOffered = await bermudaRemoval.stepOffered(knex, svc.id).catch((err) => {
+    logger.warn(`[lawn-fast] bermuda eligibility unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  });
+  return mixOffered ? { reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON } : null;
+}
+
+async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds, sodAware, allowGrouped } = {}) {
+  const base = await resolveLawnFastEligibility(serviceId, knex, { allowGrouped });
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile, reason, visitType, readFailures } = base;
   // The technician rides the identity so a reassignment since the sheet opened is
   // caught at submit (recapVisitIdentityChanged compares it when sent).
   const service = { ...recapServiceIdentity(svc, profile), technicianId: svc.technician_id ?? null };
-  if (reason) return { ok: true, eligible: false, reason, visitType, service };
+  // Why this visit takes the full form, if it does: the eligibility's own reason, or the bermuda
+  // removal mix (fullFormOutcome).
+  const fullForm = await fullFormOutcome(knex, svc, reason);
+  if (fullForm) return { ok: true, eligible: false, ...fullForm, visitType, service };
 
   const { assessmentRow, assessmentReadFailed, assessmentUnusable } = await loadAssessmentState(svc, knex, readFailures);
   const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;
@@ -868,6 +924,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
   const { unavailable: plannedProductsUnavailable, troubleSeed, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
+  // GATE_LAWN_NEW_SOD_NOTE: the visit's new-sod holds, for a sod-aware sheet only (lawn-sod-sheet.js: `sodContextParts`).
+  // Gate off, or an older sheet that did not send the signal: the legacy context exactly, no read of the sod record.
+  const sod = await require('./lawn-sod-sheet').sodContextParts({ sodAware, svc, knex, readFailures, plannedProducts, ruleFor: (row) => productRuleEntry(String(row.id), row) });
 
   return {
     ok: true,
@@ -882,7 +941,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // The height-of-cut capture is a lawn-visit feature the typed lawn form
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
-    plannedProducts,
+    plannedProducts: sod.plannedProducts,
+    // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick, only for a home with a sod record that holds something today.
+    ...sod.fields,
     // GATE_LAWN_SPOT_RULES: the sheet asks for a spot row's area (and holds Complete without
     // one). The key exists only while the gate is live, so gate off is byte-identical.
     ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
@@ -894,7 +955,10 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // the key exists only while the gate is live, so gate off is byte-identical.
     // A visit whose program rows could not be read has no guide at all (the read failure is named), rather
     // than a guide that claims a clean "no chinch rows staged".
-    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true } : {}),
+    // GATE_LAWN_SPOT_TARGET: the context also carries the closed lists of a spot fungicide / insecticide row's target (lawn-spot-target.js).
+    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
+    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. The key exists only while the gate is live, so gate off is byte-identical.
+    ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
     // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
     ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed
@@ -967,10 +1031,10 @@ async function takeAllAreasOn({ svc, knex, offers }) {
  * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
  * the sheet then shows no cards and works as before).
  */
-async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, productIds = null }) {
+async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, productIds = null, allowGrouped }) {
   if (!featureGates.lawnTreatmentGuideLive()) return { ok: false, reason: 'disabled' };
   if (!isUuid(assessmentId)) return { ok: false, reason: 'invalid_assessment' };
-  const base = await resolveLawnFastEligibility(serviceId, knex);
+  const base = await resolveLawnFastEligibility(serviceId, knex, { allowGrouped });
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, reason, visitType, readFailures } = base;
   if (reason) return { ok: false, reason: 'not_eligible' };
@@ -1083,6 +1147,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  *   profile_unavailable                          503 (retry, same key; a transient lookup failure)
  *   not_lawn, lawn_re_service, assessment_visit,
  *   project_backed, has_companions, grouped_visit,
+ *   area_addon_attached (the visit carries an area add-on row),
  *   terminal_status (cancelled, skipped, no_show,
  *     incomplete, rescheduled)                   409 lawn_fast_not_eligible (terminal)
  *   terminal_status when status is 'completed'   allowed (see above)
@@ -1101,7 +1166,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, packetContext, propertyServiceArea = null, actor = null } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
@@ -1134,7 +1199,8 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
-  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'] });
+  // A packet member (GATE_COMBO_FAST_COMPLETE): the grouped refusal lifts only inside the stop's own packet.
+  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'], allowGrouped: { packetContext } });
   if (!verdict.ok) {
     return { status: 404, payload: { error: 'Service not found', code: 'lawn_fast_not_found' } };
   }
@@ -1201,9 +1267,15 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
+  // GATE_LAWN_NEW_SOD_NOTE: an empty list that claims "every planned product is held by new sod" is re-judged by the server
+  // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
   // GATE_LAWN_TROUBLE_AREAS: every spot row names a place, and the place the yearly limits forbid is refused
   // (lawn-trouble-areas.js preflightPlaces; null while the gate is off).
-  return require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products });
+  // GATE_LAWN_MIX_HELP: gallons sprayed become the recorded spot area first (lawn-mix-help.js), so the places are judged on it.
+  return require('./lawn-sod-sheet').checkNoProductNote({
+    knex, svc, products, technicianNotes,
+    next: () => require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan, propertyServiceArea, actor }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products })),
+  });
 }
 
 // The visit type re-judged INSIDE the completion transaction, beside the main flow's

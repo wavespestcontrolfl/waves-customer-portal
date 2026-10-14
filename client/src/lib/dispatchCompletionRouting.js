@@ -139,13 +139,16 @@ export function shouldOpenPestFastComplete(service) {
 // visits the technician home already sends there (owner 2026-10-08: the
 // Schedule screen sent every specialty visit to the long form): a lane visit
 // under the lane voice fill, or a typed visit the reader reads (a station
-// visit only once the station map is known to be off). The shared rules
+// visit only once the station map is known to be off; under
+// GATE_STATION_FAST_COMPLETE also a termite or rodent bait station visit with
+// the map on, the sheet then carrying the station checks, never a trap
+// check). The shared rules
 // already leave out a visit that completes through a project (a WDO
 // inspection, a pre-treat), a whole-visit closeout and a closed visit; this
 // page's guards go on top, as for the pest sheet above. The sheet's "Full
 // form" hands the visit to the Dispatch completion panel.
-export function shouldOpenSpecialtyFastComplete(service, { stationMapOff = false } = {}) {
-  return (isLaneReportEligible(service) || isTypedReportEligible(service, { stationMapOff }))
+export function shouldOpenSpecialtyFastComplete(service, { stationMapOff = false, stationSheetOn = false } = {}) {
+  return (isLaneReportEligible(service) || isTypedReportEligible(service, { stationMapOff, stationSheetOn }))
     && !(service?.completionProfile?.companions || []).length
     && "propertyId" in service
     && !refusesInvoicedVisit(service);
@@ -165,12 +168,12 @@ export function shouldOpenAssessmentFastComplete(service) {
 // Which one-screen sheet admin Dispatch opens for a visit, or null for the
 // full form. Order matters: a lawn re-service is a typed lawn visit, so it is
 // asked first (as on the technician home) and no later rule may claim it.
-export function fastCompleteSheetFor(service, { stationMapOff = false } = {}) {
+export function fastCompleteSheetFor(service, { stationMapOff = false, stationSheetOn = false } = {}) {
   if (service == null) return null;
   if (shouldOpenLawnReserviceFastComplete(service)) return "lawn_reservice";
   if (shouldOpenTreeShrubFastComplete(service)) return "tree_shrub";
   if (shouldOpenLawnFastComplete(service)) return "lawn";
   if (shouldOpenAssessmentFastComplete(service)) return "assessment";
-  if (shouldOpenPestFastComplete(service) || shouldOpenSpecialtyFastComplete(service, { stationMapOff })) return "pest";
+  if (shouldOpenPestFastComplete(service) || shouldOpenSpecialtyFastComplete(service, { stationMapOff, stationSheetOn })) return "pest";
   return null;
 }

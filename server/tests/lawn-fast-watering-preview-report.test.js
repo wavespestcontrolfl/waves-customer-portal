@@ -141,10 +141,12 @@ function fixtureFor(rows, prefs) {
   return { service, knex: makeKnex(tables) };
 }
 
-// The report's banner for the fixture, and the preview for the same fixture.
+// The report's banner for the fixture, built as the completion pass builds it
+// (wateringInstructionOut: the build that gets frozen), and the preview for
+// the same fixture.
 async function both(rows, prefs) {
   const { service, knex } = fixtureFor(rows, prefs);
-  const data = await buildReportV1Data(service, 'token-w1', knex);
+  const data = await buildReportV1Data(service, 'token-w1', knex, { wateringInstructionOut: {} });
   const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: rows.map((r) => r.id), knex, now: NOW });
   return { banner: data.reportV2.banner, preview };
 }
@@ -187,30 +189,17 @@ describe('watering preview equals the report banner (real buildReportV1Data)', (
     expect(result.preview.lines[1]).toMatch(/^Run each zone about \d+ minutes\.$/);
   });
 
-  // GATE_LAWN_REPORT_CLARITY: the report freezes the amount-only wording at
-  // completion, so the preview shows that wording, and equals the banner the
-  // completion pass builds. Off: the minutes wording, as before.
-  test('GATE_LAWN_REPORT_CLARITY: a water-in with no sprinkler entries previews the amount the completion will freeze', async () => {
-    const saved = process.env.GATE_LAWN_REPORT_CLARITY;
-    try {
-      const completion = async () => {
-        const { service, knex } = fixtureFor([WATER_IN_ROW], null);
-        const data = await buildReportV1Data(service, 'token-w1', knex, { wateringInstructionOut: {} });
-        const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [WATER_IN_ROW.id], knex, now: NOW });
-        return { banner: data.reportV2.banner, preview };
-      };
-      delete process.env.GATE_LAWN_REPORT_CLARITY;
-      const off = await completion();
-      expectSameAsReport(off);
-      expect(off.preview.lines[1]).toMatch(/minutes/);
-      process.env.GATE_LAWN_REPORT_CLARITY = 'true';
-      const on = await completion();
-      expectSameAsReport(on);
-      expect(on.preview.lines).toEqual(['Water in today’s treatment with about ¼ inch by Thu 2 PM.', 'Run it even if it is not your usual day.']);
-      expect(on.preview.sentence).not.toMatch(/minute|sprinkler setup/);
-    } finally {
-      if (saved === undefined) delete process.env.GATE_LAWN_REPORT_CLARITY; else process.env.GATE_LAWN_REPORT_CLARITY = saved;
-    }
+  // The report freezes the amount-only wording at completion for a customer
+  // with no sprinkler entries (owner 2026-10-09, permanent), so the preview
+  // shows that wording, and equals the banner the completion pass builds.
+  test('a water-in with no sprinkler entries previews the amount the completion will freeze', async () => {
+    const { service, knex } = fixtureFor([WATER_IN_ROW], null);
+    const data = await buildReportV1Data(service, 'token-w1', knex, { wateringInstructionOut: {} });
+    const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [WATER_IN_ROW.id], knex, now: NOW });
+    const result = { banner: data.reportV2.banner, preview };
+    expectSameAsReport(result);
+    expect(result.preview.lines).toEqual(['Water in today’s treatment with about ¼ inch by Thu 2 PM.', 'Run it even if it is not your usual day.']);
+    expect(result.preview.sentence).not.toMatch(/minute|sprinkler setup/);
   });
 
   test('a hold then a water-in', async () => {

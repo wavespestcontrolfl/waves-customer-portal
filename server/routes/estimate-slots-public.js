@@ -159,19 +159,25 @@ const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void'])
 // PaymentIntent minted gate-on must never finalize gate-off). Returns a
 // sent 409 (caller must `return` it) or null when unaffected. Callers'
 // row loads all carry estimate_data (`.first()` or an explicit column).
-function isSuppressionGatedEstimate(estimate = {}) {
-  const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-  return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+// A persisted area add-on treatment (GATE_AREA_ADDONS off) rides the same rail: same helper, same 409, its own
+// code (AREA_ADDONS_GATED), and like the Bermuda shape it is never priced (its replay would throw).
+// The 409 body ({ error, code }) or null.
+function gatedAddOnRefusal(estimate = {}) {
+  return require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
 }
-function rejectGatedSuppressionEstimate(res, estimate = {}) {
-  if (isSuppressionGatedEstimate(estimate)) {
-    return res.status(409).json({
-      error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-      code: 'BERMUDA_SUPPRESSION_GATED',
-    });
-  }
-  return null;
+function isSuppressionGatedEstimate(estimate = {}) {
+  return !!gatedAddOnRefusal(estimate);
+}
+// Area add-ons are booked only by a one-time accept: a recurring-mode reserve of an estimate that carries
+// one holds nothing (the accept would refuse it). `serviceMode` is passed by the reserve route only.
+function recurringAreaAddOnRefusalBody(estimate = {}, serviceMode) {
+  const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+  return serviceMode && serviceMode !== 'one_time' && mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })
+    ? { error: mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE } : null;
+}
+function rejectGatedSuppressionEstimate(res, estimate = {}, { serviceMode } = {}) {
+  const body = gatedAddOnRefusal(estimate) || recurringAreaAddOnRefusalBody(estimate, serviceMode);
+  return body ? res.status(409).json(body) : null;
 }
 
 // The DURABLE call-side verdict (codex P1, PR #3304 GH r10): when a
@@ -245,7 +251,9 @@ function isCommercialAutoEstimate(estimate = {}) {
 // (+ estimate_group_id: a grouped sibling the accept resolves through its accepted sibling is never parked.)
 // (+ customer_phone_typed: a phone the customer typed on the accept card never resolves to an existing customer.)
 const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'estimate_group_id', 'customer_phone_typed'];
-const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
+// `pricing_authority` rides every projected read: the add-on gates read the AUTHORITATIVE result container (a SERVER reprice
+// can leave an empty `result` beside a stale `engineResult` that still lists an add-on).
+const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'pricing_authority', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
 
 // B18 park: the estimate's phone belongs to another customer, so it cannot self-book (contact_review, decided by
 // the ONE precedence helper in estimate-public.js - the existing quote-required / trenching refusals each caller
@@ -292,10 +300,12 @@ async function slotBlockingRefusal(estimate, opts, shape) {
 // The re-check a card-intent route runs AFTER its Stripe mint, before a client secret leaves the server: the
 // ESTIMATE row is re-read (staff can edit its phone, email or address, or deactivate it, during the mint) and judged
 // by the same helper with the candidate cache bypassed. An estimate that is no longer active is withheld too.
-async function postMintRefusal(estimate) {
+// The add-on gate (both intent routes) and the one-time-only rule (the recurring intent passes `requestedServiceMode`) are
+// re-judged on the reloaded row as well: an add-on added, or the gate turned off, while Stripe minted the intent.
+async function postMintRefusal(estimate, { requestedServiceMode } = {}) {
   const row = await db('estimates').where({ id: estimate.id }).first();
   if (!row || !isEstimateAcceptActive(row)) return { status: 409, body: ESTIMATE_INACTIVE_409 };
-  return slotBlockingRefusal(row, { fresh: true });
+  return (await slotBlockingRefusal(row, { fresh: true })) || lockedAreaAddOnRuleRefusal(row, requestedServiceMode);
 }
 // The ONE exit of both card-intent routes for every response that carries customer-derived content (the success body with
 // its client secret, and every exemption answer - saved method, Auto Pay, plan member, payer-billed, ... - which can
@@ -318,8 +328,8 @@ async function refuseParkedRecurringIntent(res, estimate, parkState, replaceSetu
   }
   return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
 }
-async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null } = {}) {
-  const blocked = await postMintRefusal(estimate);
+async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null, requestedServiceMode } = {}) {
+  const blocked = await postMintRefusal(estimate, { requestedServiceMode });
   if (blocked) {
     if (retireSetupIntentId) {
       try {
@@ -367,6 +377,38 @@ async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {})
     if (err?.code === '55P03') return skipOnBusy ? null : CUSTOMER_BUSY_REFUSAL;
     throw err;
   }
+}
+// The customer an unowned estimate's phone matches - the one its accept will land on - for the add-ons' yearly-limit
+// recheck at reserve (area-addon-limits.js limitSubject: a customer known by then has their history read).
+async function phoneMatchedCustomerId(row, trx) {
+  return (await matchAcceptCustomerByPhone(row, trx)).match?.id || null;
+}
+// The add-ons' yearly limits on the LOCKED estimate row, for the reserve. The transaction holds the estimate row and nothing else,
+// while every staff booking, Mark Won and accept of a customer serializes on that customer's booking fence, so the customer
+// whose history is read (the estimate's own, or the phone match of an unowned one) is fenced here BEFORE the read and to the end of
+// the reservation: a reserve and a booking of one customer cannot both pass the same allowance. The take is non-blocking
+// (the estimate row is held): a busy account is the existing retryable 409, with nothing reserved.
+async function lockedAreaAddOnLimitRefusal(row, trx, date) {
+  const limits = require('../services/area-addon-limits');
+  try {
+    return await limits.areaAddOnLimitRefusal(trx, {
+      estimate: row,
+      appliedOn: date,
+      resolveCustomer: () => phoneMatchedCustomerId(row, trx),
+      fenceCustomer: (id) => limits.fenceCustomerBookings(trx, id),
+      fenceNamed: true,
+    });
+  } catch (err) {
+    if (err?.code === 'CUSTOMER_BUSY_RETRY') return CUSTOMER_BUSY_REFUSAL;
+    throw err;
+  }
+}
+// The add-on refusals that need no query, on a freshly read estimate row: the gate (a persisted add-on with the gate off)
+// and, when the route passes the requested mode, the one-time-only rule. { status, body } or null.
+function lockedAreaAddOnRuleRefusal(row, requestedServiceMode) {
+  const body = gatedAddOnRefusal(row)
+    || (requestedServiceMode === undefined ? null : recurringAreaAddOnRefusalBody(row, resolveSlotServiceMode(row, requestedServiceMode)));
+  return body ? { status: 409, body } : null;
 }
 // Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
 async function respondNoBookingRefusal(res, estimate, refusal) {
@@ -702,7 +744,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       const blocked = await slotBlockingRefusal(estimate, {});
       if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
     }
-    const gatedReserve = rejectGatedSuppressionEstimate(res, estimate);
+    slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
+    const gatedReserve = rejectGatedSuppressionEstimate(res, estimate, { serviceMode: slotOpts.serviceMode });
     if (gatedReserve) return gatedReserve;
     if (isCommercialAutoEstimate(estimate)) {
       return res.status(409).json({
@@ -720,7 +763,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         invoiceOnlyAcceptance: true,
       });
     }
-    slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
 
     try {
       const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
@@ -730,8 +772,13 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // The same blocking states the checks above refuse, re-judged on the LOCKED row inside the service
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
-        revalidateEstimate: async (row, trx) => {
-          return lockedContactReviewRefusal(row, trx);
+        // The add-on yearly limits are judged on the SELECTED slot's day (`date`), not on today.
+        revalidateEstimate: async (row, trx, { date } = {}) => {
+          // The add-on gate and the one-time-only rule are re-judged on the LOCKED row too: an estimate revised to carry an
+          // add-on (or a gate turned off) after the pre-transaction read must not take a hold the accept would refuse.
+          return (await lockedContactReviewRefusal(row, trx))
+            || lockedAreaAddOnRuleRefusal(row, requestedServiceMode)
+            || lockedAreaAddOnLimitRefusal(row, trx, date);
         },
       });
       return res.status(201).json({
@@ -923,7 +970,9 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       // Both estimate UIs bootstrap Stripe Elements from this response — the
       // public estimate pages have no other authenticated key source.
       publishableKey: require('../config/stripe-config').publishableKey,
-    });
+      // The mode is judged again on the reloaded row: an estimate revised into a recurring plan with an area add-on while
+      // the intent was minted answers the one-time-only refusal, and no secret is returned.
+    }, { requestedServiceMode: req.body?.serviceMode ?? '' });
   } catch (err) {
     logger.error(`[estimate-slots-public:card-hold-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
@@ -980,8 +1029,16 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
 
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.
-    const treatAsOneTime = req.body?.serviceMode === 'one_time'
-      || isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // (The reserve's own resolver: structurally one-time, or the customer asked for one-time.)
+    const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
+    const treatAsOneTime = serviceMode === 'one_time';
+    // Area add-ons are booked by the one-time accept only: a recurring-mode request for an estimate that carries one can
+    // never be accepted, so no SetupIntent is minted and no payment method is saved for it (a submitted stale intent is
+    // retired like every other exempt answer). Same refusal as the reserve and the accept, before any Stripe work.
+    const recurringAddOnRefusal = recurringAreaAddOnRefusalBody(estimate, serviceMode);
+    if (recurringAddOnRefusal) {
+      return await sendRecheckedIntentResponse(res, estimate, 409, recurringAddOnRefusal, { retireSetupIntentId: replaceSetupIntentId });
+    }
     // Mirror accept's contact gate BEFORE capturing a card: a recurring accept
     // with no linked customer and no phone is rejected pre-commit
     // (CUSTOMER_CONTACT_REQUIRED — accept-time customer creation is
@@ -1084,7 +1141,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       // Both estimate UIs bootstrap Stripe Elements from this response — the
       // public estimate pages have no other authenticated key source.
       publishableKey: require('../config/stripe-config').publishableKey,
-    }, { retireSetupIntentId: intent.setupIntentId });
+    }, { retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? '' });
   } catch (err) {
     logger.error(`[estimate-slots-public:recurring-card-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
@@ -1167,18 +1224,9 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
       // the pre-txn rejectIneligibleEstimate passed, and extending then
       // answers 200 for a quote the customer is refused everywhere else,
       // holding capacity until the next refusal. Same body the pre-txn path
-      // returns.
-      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-      if (estimateDataCarriesBermudaSuppression(row.estimate_data)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-        return {
-          status: 409,
-          body: {
-            error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-            code: 'BERMUDA_SUPPRESSION_GATED',
-          },
-        };
-      }
+      // returns. The area add-on (GATE_AREA_ADDONS off) is rechecked here too, with its own code.
+      const gatedAddOn = gatedAddOnRefusal(row);
+      if (gatedAddOn) return { status: 409, body: gatedAddOn };
       if (isCommercialAutoEstimate(row)) {
         return {
           status: 409,
@@ -1423,4 +1471,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, slotBlockingRefusal, postMintRefusal };
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, lockedAreaAddOnRuleRefusal, slotBlockingRefusal, postMintRefusal };

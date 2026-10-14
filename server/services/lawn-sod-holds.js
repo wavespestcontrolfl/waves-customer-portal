@@ -11,7 +11,8 @@
  * Rules and their sources (day 1 is the day the sod went down):
  *   - Fertilizer: held through day 30. Manatee County ordinance 11-21 allows no
  *     nitrogen in the first 30 days of new turf; UF/IFAS says 30-60 days. Never
- *     held when only part of the lawn is new sod.
+ *     held when only part of the lawn is new sod (a spreader cannot skip a patch),
+ *     but then `fertilizerKeepOff` says to keep it off the new sod until day 30.
  *   - Weed killer: held through day 30 AND until a technician confirms the sod
  *     has been mowed twice and does not lift (sod_rooted_on). Blindside and
  *     Dismiss labels: "following the second mowing". Gravex follows the same hold
@@ -20,7 +21,9 @@
  *     the sod year when the sod went down January-May, otherwise Oct 1 of the
  *     next year (Waves rule; program note "no pre-emergent on first-year sod").
  *   - Tetrino: held through day 21 (Tetrino label: not on saturated soil).
- *   - Dylox: same window and scope rule as fertilizer.
+ *   - Dylox: held through day 30 on the sod area, whole lawn or part (same scope rule
+ *     as Tetrino). Label: do not apply when turf grass areas are water-logged or the
+ *     soil is saturated with water.
  *   - Large patch watch: St. Augustine and zoysia sod laid October 1 - March 31
  *     is watched for large patch until March 31 ends that cool season.
  *
@@ -45,9 +48,18 @@ const SOD_AREA_MAX = 120;
 // The fertilizer bag that replaces the pre-emergent fertilizer bag when the
 // pre-emergent is held but the fertilizer is not (name as in lawn-protocol-v13.json).
 const SOD_SWAP_BAG = Object.freeze({ name: 'LESCO 24-0-11 with PolyPlus OPTI', lbPer1000: 2.5, lbN: 0.6 });
+// The same bag in April (the 9-visit plan): it replaces a 0.5 lb N Dimension pass, so the rate is 2.1 lb
+// per 1,000 sq ft (0.50 lb N), the Feb/Apr rate the protocol already uses for this bag.
+const SOD_SWAP_BAG_APRIL = Object.freeze({ name: SOD_SWAP_BAG.name, lbPer1000: 2.1, lbN: 0.5 });
 
 const DAY_MS = 86400000;
 const LARGE_PATCH_GRASSES = new Set(['st_augustine', 'zoysia']);
+
+// The swap bag for a visit day: the April rate in April, the October rate otherwise.
+function swapBagFor(visitDate) {
+  const day = ymdOrNull(visitDate);
+  return day && day.slice(5, 7) === '04' ? SOD_SWAP_BAG_APRIL : SOD_SWAP_BAG;
+}
 
 // All columns set to null, for the writers that clear the record together.
 function clearedNewSodColumns() {
@@ -193,7 +205,7 @@ function datedHold(visit, until, scope) {
   return { held: visit < until, until, scope };
 }
 
-// Fertilizer and Dylox: whole-lawn sod only (a spreader cannot skip a patch).
+// Fertilizer: whole-lawn sod only (a spreader cannot skip a patch).
 function wholeLawnHold(visit, until, whole) {
   return whole && visit < until
     ? { held: true, until, scope: 'whole' }
@@ -223,7 +235,10 @@ function buildSodHolds(record) {
   const weedKiller = weedKillerHold(record, scope);
   const preEmergent = datedHold(visit, preEmergentHoldUntil(laid), scope);
   const tetrino = datedHold(visit, addDaysYmd(laid, TETRINO_HOLD_DAYS), scope);
-  const dylox = wholeLawnHold(visit, addDaysYmd(laid, DYLOX_HOLD_DAYS), whole);
+  const dylox = datedHold(visit, addDaysYmd(laid, DYLOX_HOLD_DAYS), scope);
+  // Part-of-lawn sod: the fertilizer line stays on, but the new sod is kept clear of it until day 30.
+  const fertilizerUntil = addDaysYmd(laid, FERTILIZER_HOLD_DAYS);
+  const fertilizerKeepOff = { on: !whole && visit < fertilizerUntil, until: fertilizerUntil };
   const fungicideGravex = { ...weedKiller };
   const largePatchWatch = largePatchWatchFor(record);
   const holds = [fertilizer, weedKiller, preEmergent, tetrino, dylox, fungicideGravex];
@@ -239,8 +254,9 @@ function buildSodHolds(record) {
     dylox,
     fungicideGravex,
     largePatchWatch,
+    fertilizerKeepOff,
     swapPreEmergentBag: preEmergent.held && whole && !fertilizer.held,
-    active: holds.some((h) => h.held) || largePatchWatch.on,
+    active: holds.some((h) => h.held) || largePatchWatch.on || fertilizerKeepOff.on,
   };
 }
 
@@ -312,6 +328,8 @@ module.exports = {
   MAX_SOD_AGE_MONTHS,
   SOD_AREA_MAX,
   SOD_SWAP_BAG,
+  SOD_SWAP_BAG_APRIL,
+  swapBagFor,
   clearedNewSodColumns,
   validateSodLaidOn,
   preEmergentHoldUntil,

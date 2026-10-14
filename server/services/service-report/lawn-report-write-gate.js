@@ -120,7 +120,7 @@ function withReportFacts(record, freeze) {
 // and the block itself (null when the gate is off or the freeze made nothing new).
 async function freezeFactsInto(record, knex) {
   if (!featureGates.lawnReportFactsLive()) return { record, freeze: null };
-  const freeze = reportFacts.frozenBlockOf(await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive() }));
+  const freeze = reportFacts.frozenBlockOf(await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive(), withLabelLines: featureGates.lawnReportPolishFreezeLive(), withWaterAdvice: featureGates.lawnReportPolishFreezeLive(), withRainCard: featureGates.lawnWaterRainFreezeLive() }));
   return { record: withReportFacts(record, freeze), freeze };
 }
 
@@ -140,7 +140,7 @@ async function freezeReportFactsOnly({ service, knex } = {}) {
     if (!service || !service.id || !knex || !isLawnService(service) || !featureGates.lawnReportFactsLive()) return null;
     const { loadServiceRecordForPdf } = require('./pdf-queue');
     const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
-    return await reportFacts.gatherAndFreezeReportFacts({ record: joined || service, knex, withTies: featureGates.lawnReportTiesLive() });
+    return await reportFacts.gatherAndFreezeReportFacts({ record: joined || service, knex, withTies: featureGates.lawnReportTiesLive(), withLabelLines: featureGates.lawnReportPolishFreezeLive(), withWaterAdvice: featureGates.lawnReportPolishFreezeLive(), withRainCard: featureGates.lawnWaterRainFreezeLive() });
   } catch (err) {
     logger.warn(`[lawn-report-facts] early freeze failed for service_record ${service && service.id}: ${err.message}`);
     return null;

@@ -8,9 +8,16 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import FastCompleteAssessmentSheet, { assessmentCompletionBody, assessmentVisitIdentity } from './FastCompleteAssessmentSheet';
 
+// The admin shell hands the server-returned role down through its Outlet context.
+let mockRole = 'admin';
+vi.mock('react-router-dom', async () => ({
+  ...(await vi.importActual('react-router-dom')),
+  useOutletContext: () => (mockRole ? { user: { role: mockRole } } : undefined),
+}));
+
 vi.setConfig({ testTimeout: 30000 });
 
-beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
+beforeEach(() => { mockRole = 'admin'; vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -33,7 +40,7 @@ const SERVICE = {
 
 const notFound = () => Object.assign(new Error('No outcome recorded for that visit'), { status: 404 });
 
-function makeRequest({ row = null, loadError = null, completeError = null } = {}) {
+function makeRequest({ row = null, loadError = null, completeError = null, estimate = undefined, estimateError = null } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options = {}) => {
     calls.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
@@ -45,6 +52,10 @@ function makeRequest({ row = null, loadError = null, completeError = null } = {}
       }
       // The sheet never writes here: the read rides the completion.
       throw new Error('unexpected outcome write');
+    }
+    if (path === '/admin/consultations/svc-a/estimate') {
+      if (estimateError) throw estimateError;
+      return estimate === undefined ? {} : { estimate };
     }
     if (path === '/tech/services/svc-a/photos') return { photos: [] };
     if (path === '/admin/dispatch/svc-a/complete') {
@@ -228,6 +239,275 @@ describe('FastCompleteAssessmentSheet', () => {
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(2));
     // Same body, same idempotency key.
     expect(posts(request, '/complete')[1].body).toEqual(posts(request, '/complete')[0].body);
+  });
+});
+
+const SENT_ESTIMATE = {
+  state: 'found',
+  estimate: {
+    id: 'est-1', slug: 'EST-2026-0001', status: 'sent', sentAt: '2026-10-03T14:00:00.000Z',
+    createdAt: '2026-10-02T14:00:00.000Z', monthlyTotal: 59, annualTotal: 708, onetimeTotal: 0,
+  },
+};
+
+describe('the call-back date', () => {
+  const dateField = () => screen.getByLabelText('Call back on');
+
+  test('is optional: left blank, the complete body carries followUpAt null and Complete is not blocked', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    expect(screen.getByText(/Leave blank for the default: warm in 3 days, cold in 30\./)).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBeNull();
+  });
+
+  test('a picked date rides the same consultationOutcome as 9 AM that day, in the one write', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cold' }));
+    fireEvent.change(dateField(), { target: { value: '2026-10-20' } });
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(request.calls.filter((call) => call.method === 'POST').map((call) => call.path)).toEqual(['/admin/dispatch/svc-a/complete']);
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBe('2026-10-20T09:00');
+  });
+
+  test('a lost outcome has no call-back date, and none is sent even after one was picked', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Not buying.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.change(dateField(), { target: { value: '2026-10-20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Lost' }));
+    expect(screen.queryByLabelText('Call back on')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'DIY' }));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBeNull();
+  });
+
+  test('a clearing of a picked date sends null, so the server default applies', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.change(dateField(), { target: { value: '2026-10-20' } });
+    fireEvent.change(dateField(), { target: { value: '' } });
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBeNull();
+  });
+
+  test('a saved date is shown and, untouched, rides unchanged; a changed outcome does not carry it', async () => {
+    const row = { outcome: 'warm', interests: [], follow_up_at: '2026-11-01T13:00:00.000Z' };
+    const request = makeRequest({ row });
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    await screen.findByRole('button', { name: 'Warm' });
+    expect(dateField().value).toBe('2026-11-01');
+    fireEvent.change(note(), { target: { value: 'Second look.' } });
+    // Switching the outcome drops the saved date from view, as it drops it from the write.
+    fireEvent.click(screen.getByRole('button', { name: 'Cold' }));
+    expect(dateField().value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    expect(dateField().value).toBe('2026-11-01');
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBe('2026-11-01T13:00:00.000Z');
+  });
+});
+
+describe('the estimate line', () => {
+  const links = () => screen.getAllByRole('link');
+
+  test('shows the estimate\'s own total, status and a staff link; nothing to type', async () => {
+    const request = makeRequest({ estimate: SENT_ESTIMATE });
+    await openSheet(request);
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
+    const link = screen.getByRole('link', { name: 'Open estimate' });
+    expect(link.getAttribute('href')).toBe('/admin/estimates?estimateId=est-1');
+    expect(link.getAttribute('target')).toBe('_blank');
+    // Never the customer's token link.
+    expect(links().map((a) => a.getAttribute('href')).join(' ')).not.toMatch(/token|\/estimate\//);
+    // No price input anywhere on the sheet.
+    expect(screen.queryByPlaceholderText('$')).toBeNull();
+    expect(screen.queryByLabelText(/price|amount|quote/i)).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+    expect(request.calls.filter((call) => call.path.endsWith('/estimate'))).toEqual([{ path: '/admin/consultations/svc-a/estimate', method: 'GET', body: null }]);
+  });
+
+  test('a draft says it is not sent', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, status: 'draft', sentAt: null } } }));
+    expect(await screen.findByText('Estimate draft, not sent yet')).toBeTruthy();
+  });
+
+  // The stored totals are accounting figures, not the quoted price. Even if a
+  // response carried them, the sheet prints no amount and no cadence.
+  test.each([
+    ['a per-application plan stored as $50 monthly', { monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0 }],
+    ['a recurring-or-one-time estimate', { monthlyTotal: 59, annualTotal: 708, onetimeTotal: 249, showOneTimeOption: true }],
+  ])('%s: no amount, no "/ month", no added one-time', async (_label, totals) => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, ...totals } } }));
+    const line = await screen.findByText('Estimate sent Oct 3');
+    const card = line.closest('section');
+    expect(card.textContent).toBe('Estimate sent Oct 3Open estimate');
+    // The card is the whole estimate line; no dollar figure anywhere on the sheet.
+    expect(document.body.textContent).not.toMatch(/\$|\d+\.\d\d|one-time/i);
+  });
+
+  test('a suppressed send (status sent, no delivery date) reads "Not sent yet", never a date', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, sentAt: null } } }));
+    expect(await screen.findByText('Estimate not sent yet')).toBeTruthy();
+  });
+
+  test('"No estimate yet" with a link that starts one for this customer', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'none' } }));
+    expect(await screen.findByText('No estimate yet')).toBeTruthy();
+    const href = screen.getByRole('link', { name: 'Create estimate' }).getAttribute('href');
+    expect(href).toContain('/admin/estimates?');
+    expect(href).toContain('customerId=cust-1');
+  });
+
+  test('a retired (declined, expired or archived) estimate shows no amount and no open link', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'retired', status: 'declined' } }));
+    expect(await screen.findByText('No current estimate · the last one was declined')).toBeTruthy();
+    expect(screen.queryByText(/\$/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Open estimate' })).toBeNull();
+  });
+
+  test.each([
+    ['more than one live estimate', { state: 'ambiguous' }],
+    ['an unreadable estimate', { state: 'unavailable' }],
+  ])('shows nothing for %s', async (_label, estimate) => {
+    const request = makeRequest({ estimate });
+    await openSheet(request);
+    await waitFor(() => expect(request.calls.some((call) => call.path.endsWith('/estimate'))).toBe(true));
+    expect(screen.queryByText(/estimate/i)).toBeNull();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('a failed estimate read does not block the sheet or the completion', async () => {
+    const request = makeRequest({ estimateError: Object.assign(new Error('boom'), { status: 500 }) });
+    await openSheet(request);
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(screen.queryByText(/No estimate yet/)).toBeNull();
+  });
+
+  test('the estimate figure never reaches the write: the saved quote rides through, an estimate total is not copied in', async () => {
+    const row = { outcome: 'warm', interests: [], quoted_amount: '129.5', quoted_cadence: 'quarter', quote_notes: 'Side yard' };
+    const request = makeRequest({ row, estimate: SENT_ESTIMATE });
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    await screen.findByText('Estimate sent Oct 3');
+    fireEvent.change(note(), { target: { value: 'Second look.' } });
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    const outcome = posts(request, '/complete')[0].body.consultationOutcome;
+    expect(outcome).toMatchObject({ quotedAmount: '129.5', quotedCadence: 'quarter', quoteNotes: 'Side yard' });
+    expect(Object.values(outcome).filter((v) => v === 59 || v === '59' || v === '59.00')).toEqual([]);
+  });
+
+  test.each([['technician'], [null]])('role %s: the estimate line shows, with no Open estimate link', async (role) => {
+    mockRole = role;
+    await openSheet(makeRequest({ estimate: SENT_ESTIMATE }));
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  // A technician's answer carries no estimate id or number (the server withholds them).
+  test.each([
+    ['sent', { status: 'sent', sentAt: '2026-10-03T14:00:00.000Z' }, 'Estimate sent Oct 3'],
+    ['draft', { status: 'draft', sentAt: null }, 'Estimate draft, not sent yet'],
+  ])('a technician\'s %s line renders without an estimate id, and has no link', async (_label, estimate, text) => {
+    mockRole = 'technician';
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate } }));
+    expect(await screen.findByText(text)).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('an admin answer with no id offers no dead Open link', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { status: 'sent', sentAt: '2026-10-03T14:00:00.000Z' } } }));
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('Create estimate prefills the visit\'s full address, not the short display line', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'none' } }), { ...SERVICE, address: '123 Main St', fullAddress: '123 Main St, Bradenton, FL 34201' });
+    await screen.findByText('No estimate yet');
+    const href = screen.getByRole('link', { name: 'Create estimate' }).getAttribute('href');
+    expect(new URL(href, 'http://x').searchParams.get('address')).toBe('123 Main St, Bradenton, FL 34201');
+  });
+
+  test('a technician with no estimate sees "No estimate yet" and no Create estimate link', async () => {
+    mockRole = 'technician';
+    await openSheet(makeRequest({ estimate: { state: 'none' } }));
+    expect(await screen.findByText('No estimate yet')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('coming back to the tab re-reads the estimate, one request at a time, and keeps what the tech typed', async () => {
+    let current = { state: 'none' };
+    let release = null;
+    const base = makeRequest();
+    const request = vi.fn(async (path, options) => {
+      if (path === '/admin/consultations/svc-a/estimate') {
+        base.calls.push({ path, method: 'GET', body: null });
+        if (release === 'hold') await new Promise((resolve) => { release = resolve; });
+        return { estimate: current };
+      }
+      return base(path, options);
+    });
+    request.calls = base.calls;
+    const reads = () => request.calls.filter((call) => call.path.endsWith('/estimate')).length;
+    await openSheet(request);
+    expect(await screen.findByText('No estimate yet')).toBeTruthy();
+    fireEvent.change(note(), { target: { value: 'Walked the yard.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cold' }));
+    fireEvent.change(screen.getByLabelText('Call back on'), { target: { value: '2026-10-20' } });
+    // The admin made and sent the estimate in the other tab, then came back.
+    screen.getByRole('link', { name: 'Create estimate' }).focus();
+    current = SENT_ESTIMATE;
+    release = 'hold';
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(reads()).toBe(2));
+    // A second return while the first read is in flight starts no second request.
+    fireEvent(window, new Event('focus'));
+    fireEvent(document, new Event('visibilitychange'));
+    expect(reads()).toBe(2);
+    release();
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open estimate' })).toBeTruthy();
+    expect(note().value).toBe('Walked the yard.');
+    expect(screen.getByRole('button', { name: 'Cold' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByLabelText('Call back on').value).toBe('2026-10-20');
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome).toMatchObject({ outcome: 'cold', followUpAt: '2026-10-20T09:00' });
+  });
+
+  test('a failed re-read keeps the estimate line already shown', async () => {
+    let fail = false;
+    const base = makeRequest({ estimate: SENT_ESTIMATE });
+    const request = vi.fn(async (path, options) => {
+      if (fail && path === '/admin/consultations/svc-a/estimate') throw new Error('offline');
+      return base(path, options);
+    });
+    request.calls = base.calls;
+    await openSheet(request);
+    await screen.findByText('Estimate sent Oct 3');
+    screen.getByRole('link', { name: 'Open estimate' }).focus();
+    fail = true;
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/estimate')).length).toBe(2));
+    expect(screen.getByText('Estimate sent Oct 3')).toBeTruthy();
+  });
+
+  test('a won consultation still shows the estimate line', async () => {
+    const request = makeRequest({ row: { outcome: 'won', won_at: '2026-10-08T15:00:00.000Z', interests: [] }, estimate: SENT_ESTIMATE });
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
   });
 });
 

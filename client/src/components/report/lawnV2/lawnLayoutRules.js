@@ -75,6 +75,32 @@ export function bannerShowsAnything(banner) {
   return watering || isText(banner.mowHold?.line);
 }
 
+// Live-only sentences about the short run: they end with it.
+const SHORT_RUN_EXTRAS = ['forecastLine', 'observedRain', 'setupLine'];
+const finiteMs = (iso) => { const ms = iso ? Date.parse(iso) : NaN; return Number.isFinite(ms) ? ms : null; };
+
+/**
+ * The banner as it reads at `nowMs`. A visit with a short water-in beside a 14-day one carries banner.later
+ * ({ at, state, lines }, frozen by the server): once the short deadline (`at`) has passed, the live banner prints
+ * only the long line, so a deadline that is over is never shown as current. The live-only sentences about the short
+ * run (forecast, measured rain, sprinkler setup) go with it. A printed page keeps the lines as written at the visit.
+ */
+export function bannerAtNow(banner, nowMs = Date.now(), printing = false) {
+  const later = banner?.later;
+  const laterMs = finiteMs(later?.at);
+  const lines = Array.isArray(later?.lines) ? later.lines.filter(isText) : [];
+  if (printing || laterMs == null || nowMs <= laterMs || !lines.length) return banner;
+  const now = { ...banner, state: later.state || banner.state, lines };
+  SHORT_RUN_EXTRAS.forEach((key) => { delete now[key]; });
+  return now;
+}
+
+/** The next moment the live banner changes (its later phase starts, or it ends), or null when none is ahead. */
+export function bannerNextChangeMs(banner, nowMs = Date.now()) {
+  const ahead = [finiteMs(banner?.later?.at), finiteMs(banner?.expiresAt)].filter((ms) => ms != null && ms > nowMs);
+  return ahead.length ? Math.min(...ahead) : null;
+}
+
 function bannerWateringLines(banner) {
   return Array.isArray(banner?.lines) ? banner.lines.filter(isText) : [];
 }
@@ -138,6 +164,8 @@ export const INSTRUCTION_SOURCES = Object.freeze({
 // page also shows most of them on a clean visit, so counting them would remove the sentence from nearly every report.
 export const INVITATIONS = Object.freeze({
   waterScheduleCta: 'the "Add your watering schedule" call to action (WaterIntakeBar, scheduleOnFile false): optional account setup that makes the reading more exact; no treatment depends on it',
+  longerCyclesAdvice: 'the longer-cycles sentence on the water card (water.longerCycles, GATE_LAWN_REPORT_POLISH): advice about the customer\'s standing sprinkler schedule, printed only when no banner, weekly plan or after-visit watering note is on the visit; it is not a step after this visit',
+  rainCardAdvice: 'the rain card\'s sentence on the water card (water.rainCard, GATE_LAWN_WATER_RAIN: "Rain alone covered your lawn this week. Leave the sprinklers off until the grass shows…", and the new deficit and surplus sentences): the explanation of the week that ended and advice about the standing schedule, like every water-card explanation today; "leave the sprinklers off" is not an after-visit task, and a visit that carries a real watering instruction (hold / water-in) never shows it',
   bannerSetupLink: 'the sprinkler-setup link under an amount-only water-in (banner.setupLine): the amount to water is already printed; the link only offers minutes per zone',
   reviewAsk: 'the review ask',
   referralCard: 'the referral card',
@@ -152,7 +180,7 @@ export const INVITATIONS = Object.freeze({
 export const SLOT_CLASS = Object.freeze({
   status: 'information', recap: 'information', nearYou: 'information', recordedFindings: 'information',
   visitSummary: 'information', products: 'information', productsKind: 'information', poisonNote: 'information',
-  tracedMap: 'information', markedPhotos: 'information', highlights: 'information',
+  tracedMap: 'information', markedPhotos: 'information', highlights: 'information', newSod: 'information',
   yourPart: 'instruction', recommendations: 'instruction', techNote: 'instruction',
   reservice: 'invitation', plan: 'invitation', upcoming: 'invitation', review: 'invitation', referral: 'invitation', crossSell: 'invitation',
 });
@@ -280,6 +308,52 @@ export function withoutRepeatedApplied(text, applied) {
   if (!isText(text)) return null;
   if (!isText(applied)) return text;
   return withoutSentences(text, (sentence) => APPLIED_SENTENCE.test(sentence) && appliedCovered(sentence, applied));
+}
+
+// What the applied text may carry after the result sentence and still say nothing more (treatment-summary.js summarySentence):
+// the products' recorded targets (", targeting chinch bugs") and the surfactant clause. Anything else after the result
+// sentence (another product, another clause, a second sentence) is information the card owns, so the card stays.
+const APPLIED_SUFFIX = /^(?:, targeting [^.]+?)?(?:, with a surfactant added so the treatment coats the foliage evenly)?$/;
+
+/**
+ * GATE_LAWN_REPORT_STAGE1_FIXES: the "What we applied today" text repeats the hero's Today's result when it IS that sentence
+ * (final period aside) or that sentence plus only the known targeting / surfactant suffix. A text that lists more ("...weed
+ * control and insect control." against "...weed control.") is not a repeat.
+ */
+export function appliedRepeatsResult(applied, result) {
+  const head = norm(result);
+  if (!head || !isText(applied)) return false;
+  const text = norm(applied);
+  return text.startsWith(head) && APPLIED_SUFFIX.test(text.slice(head.length));
+}
+
+// One stable object per payload, so a re-render does not hand the page a new `data` each time.
+const appliedCardCache = new WeakMap();
+
+/**
+ * GATE_LAWN_REPORT_STAGE1_FIXES (payload key lawnStage1Fixes, lawn only): the web page leaves out the "What we applied
+ * today" card, on the standard page and on the lawn layout, when it repeats Today's result (reportV2.todaysResult).
+ * Nothing else moves: the Visit Summary paragraph is frozen text and stays, and the PDF reads its own payload.
+ * Returns the same object when nothing changes.
+ */
+export function withoutRepeatedAppliedCard(data) {
+  if (data?.lawnStage1Fixes !== true || data.serviceLine !== 'lawn' || !data.reportV2) return data;
+  if (appliedCardCache.has(data)) return appliedCardCache.get(data);
+  const v2 = data.reportV2;
+  const dropLead = appliedRepeatsResult(v2.lead?.applied, v2.todaysResult);
+  const dropSnapshot = appliedRepeatsResult(v2.snapshot?.treatmentSummary, v2.todaysResult);
+  const next = dropLead || dropSnapshot
+    ? {
+      ...data,
+      reportV2: {
+        ...v2,
+        ...(dropLead ? { lead: { ...v2.lead, applied: null } } : {}),
+        ...(dropSnapshot ? { snapshot: { ...v2.snapshot, treatmentSummary: null } } : {}),
+      },
+    }
+    : data;
+  appliedCardCache.set(data, next);
+  return next;
 }
 
 // ── Next visit ──────────────────────────────────────────────────────────────

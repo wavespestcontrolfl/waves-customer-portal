@@ -58,7 +58,7 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
-const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+const { gatedAddOnStaffRefusal } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
@@ -610,15 +610,15 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
-  // A persisted bermuda-suppression estimate is only sendable while the gate
-  // is LIVE: the send path serves stored rows without re-entering
-  // priceLawnCare, so a save-then-gate-off sequence would otherwise publish
-  // a disabled add-on (codex #3272 r2). Same fail-closed rail as pricing.
-  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-    const err = new Error('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before sending.');
+  // A persisted bermuda-suppression or area add-on estimate is only sendable while its gate
+  // is LIVE: the send path serves stored rows without re-entering the pricer, so a
+  // save-then-gate-off sequence would otherwise publish a disabled add-on (codex #3272 r2).
+  // Same fail-closed rail as pricing.
+  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority });
+  if (gatedAddOn) {
+    const err = new Error(gatedAddOn.message);
     err.statusCode = 409;
-    err.code = 'BERMUDA_SUPPRESSION_GATED';
+    err.code = gatedAddOn.code;
     throw err;
   }
   // Estimator-engine YELLOW drafts carry review reasons (fallback sqft
@@ -5419,7 +5419,8 @@ router.post('/:id/extend', async (req, res, next) => {
 // POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.
 // This is intentionally separate from PATCH status edits so accepted_at is
 // stamped for funnel reporting and acceptance side effects run once.
-router.post('/:id/mark-accepted', async (req, res, next) => {
+router.post('/:id/mark-accepted', markAcceptedHandler);
+async function markAcceptedHandler(req, res, next) {
   try {
     // The DURABLE call-side verdict blocks a MANUAL acceptance too (codex
     // P0, PR #3304 GH r10b): when estimate-side invalidation failed — the
@@ -5452,7 +5453,15 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
       adminUserId: req.technicianId,
       source: req.body?.source || 'verbal_yes',
       billingTerm: req.body?.billingTerm || 'standard',
+      // The Intelligence Bar card's pins and the dry-run switch are internal
+      // arguments, set only by markEstimateAcceptedAsStaff on the request
+      // object. NOTHING here reads them from req.body: a caller of the HTTP
+      // route cannot supply pins (for example an approved "no email") or
+      // switch the accept into a dry run.
+      ...(req.acceptExpected && typeof req.acceptExpected === 'object' ? { expected: req.acceptExpected } : {}),
+      ...(req.acceptDryRun === true ? { dryRun: true } : {}),
     });
+    if (result.dryRun) return res.json({ success: true, ...result });
     clearRouteCacheForRequest(req, ['/admin/dashboard']);
     res.json({ success: true, ...result });
   } catch (err) {
@@ -5463,7 +5472,27 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
-});
+}
+
+// Mark accepted without an HTTP request — the Intelligence Bar's
+// accept_estimate tool (owner ruling 2026-10-07, Q5) runs this so the bar and
+// the estimate page accept through the SAME handler (the call-linkage
+// preflight, markEstimateManuallyAccepted, the dashboard cache clear). It runs
+// the handler with the only request fields it reads and resolves the reply it
+// would send: { status, json }. An error the handler passes to next() rejects.
+function markEstimateAcceptedAsStaff({ estimateId, body, actor, dryRun = false, expected = null }) {
+  const req = {
+    params: { id: estimateId }, body, technicianId: actor.technicianId, acceptDryRun: dryRun === true, acceptExpected: expected,
+  };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    markAcceptedHandler(req, res, reject).catch(reject);
+  });
+}
 
 // Estimate status values backed by the estimates_status_check constraint
 // (models/migrations/20260518000003_estimate_scheduled_send_claims.js).
@@ -5761,3 +5790,6 @@ module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
 module.exports.clearEstimateDeliveryClaim = clearEstimateDeliveryClaim;
 module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims;
+
+// Same handler as POST /:id/mark-accepted — see markEstimateAcceptedAsStaff above.
+module.exports.markEstimateAcceptedAsStaff = markEstimateAcceptedAsStaff;

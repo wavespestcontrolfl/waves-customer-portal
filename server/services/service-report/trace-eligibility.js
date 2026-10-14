@@ -173,6 +173,17 @@ const SERVICE_KEY_RULES = {
   plugging: { eligible: false, reason: 'mechanical_lawn_lane' },
   top_dressing: { eligible: false, reason: 'mechanical_lawn_lane' },
   bora_care: { eligible: false, reason: 'localized_treatment_lane' },
+  // Area add-ons (20261008200000, owner rulings 2026-10-08). The two whole-
+  // lawn broadcasts mirror fire_ant (the treated geometry is the lawn); the
+  // rest treat beds, hard surfaces, a damaged-turf spot or webs - a lawn or
+  // perimeter trace would overstate what was treated, and a web sweep applies
+  // nothing. Not eligible until a tech-drawn treated-area trace exists.
+  area_addon_fire_ant_yard: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  area_addon_lawn_insect_preventive: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  area_addon_bed_pre_emergent: { eligible: false, reason: 'localized_treatment_lane' },
+  area_addon_lawn_insect_spot: { eligible: false, reason: 'localized_treatment_lane' },
+  area_addon_hardscape_weed: { eligible: false, reason: 'localized_treatment_lane' },
+  area_addon_web_sweep: { eligible: false, reason: 'localized_treatment_lane' },
   rodent_guarantee: { eligible: false, reason: 'billing_rider' },
   // Reactivation batch (20260809000000): German roach work is interior
   // gel/IGR treatment — no exterior perimeter or lawn trace.

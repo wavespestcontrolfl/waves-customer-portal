@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   LAYOUT_COPY,
   alsoSteps,
+  bannerAtNow,
   bannerCarriesWatering,
+  bannerNextChangeMs,
   bannerShowsAnything,
   gaugePrintsRange,
   LAYOUT_DECLINES,
@@ -523,6 +525,24 @@ describe('invitations never count as after-visit instructions', () => {
     expect(pageCarriesInstruction(data, Date.now())).toBe(false);
   });
 
+  it('the longer-cycles sentence is an invitation: it never removes "Nothing for you to do after this visit."', () => {
+    const data = clean();
+    data.reportV2.water = { scheduleOnFile: true, scheduleKind: 'inches', irrigationInches: 1, longerCycles: true };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    expect(INVITATIONS).toHaveProperty('longerCyclesAdvice');
+    expect(Object.keys(INSTRUCTION_SOURCES)).not.toContain('longerCyclesAdvice');
+  });
+
+  it('the rain card sentences are invitations: a rain-covered week still allows "Nothing for you to do after this visit."', () => {
+    const data = clean();
+    data.reportV2.water = { scheduleOnFile: false, status: 'rain_covered', rainCard: true, rainSensorLine: true, explanation: 'Rain alone covered your lawn this week.' };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    data.reportV2.water = { scheduleOnFile: true, status: 'low', rainCard: true, explanation: 'Your weekly water is below about 1.25"/wk.' };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    expect(INVITATIONS).toHaveProperty('rainCardAdvice');
+    expect(Object.keys(INSTRUCTION_SOURCES)).not.toContain('rainCardAdvice');
+  });
+
   it('the closed lists name the invitations the brief lists', () => {
     expect(Object.keys(INVITATIONS)).toEqual(expect.arrayContaining(['waterScheduleCta', 'bannerSetupLink', 'reviewAsk', 'referralCard', 'crossSellCard', 'reschedule', 'textUs']));
   });
@@ -622,5 +642,42 @@ describe('lawnLayoutStatusData drops "Next service" only when the plan area prin
   it('a page that is not on the layout is returned untouched', () => {
     const data = { ...base, nextAppointment: { serviceType: 'Lawn Care', scheduledDate: '2026-10-23' } };
     expect(lawnLayoutStatusData(data, 'pdf', TODAY)).toBe(data);
+  });
+});
+
+describe('bannerAtNow / bannerNextChangeMs (a short water-in beside a 14-day one)', () => {
+  const at = Date.parse('2026-10-02T19:00:00.000Z');
+  const end = Date.parse('2026-10-14T18:00:00.000Z');
+  const banner = {
+    state: 'hold_then_water_in',
+    lines: ['Skip your turf watering until Thu 3 PM.', 'After that, water in today’s treatment by Fri 3 PM: run each zone about 40 minutes.', 'In all, it needs about ½ inch of water by Wed, Oct 14 at 2 PM.'],
+    expiresAt: new Date(end).toISOString(),
+    forecastLine: 'f',
+    observedRain: { line: 'o' },
+    setupLine: 's',
+    later: { at: new Date(at).toISOString(), state: 'water_in', lines: ['Today’s treatment needs about ½ inch of water by Wed, Oct 14 at 2 PM.', 'Rain and your regular watering both count.'] },
+  };
+
+  it('is the banner itself up to the short deadline, on a printed page, and when there is no later phase', () => {
+    expect(bannerAtNow(banner, at)).toBe(banner);
+    expect(bannerAtNow(banner, at + 1, true)).toBe(banner);
+    const plain = { ...banner, later: undefined };
+    expect(bannerAtNow(plain, end - 1)).toBe(plain);
+    expect(bannerAtNow({ ...banner, later: { at: 'x', lines: ['y'] } }, end - 1).lines).toBe(banner.lines);
+    expect(bannerAtNow({ ...banner, later: { ...banner.later, lines: [] } }, end - 1).lines).toBe(banner.lines);
+    expect(bannerAtNow(null, at)).toBeNull();
+  });
+
+  it('after the short deadline: the later lines and state, the same expiry, none of the short run’s live extras', () => {
+    const now = bannerAtNow(banner, at + 1);
+    expect(now).toEqual({ state: 'water_in', lines: banner.later.lines, expiresAt: banner.expiresAt, later: banner.later });
+    expect(bannerCarriesWatering(now, at + 1)).toBe(true);
+  });
+
+  it('the next change is the short deadline, then the expiry, then nothing', () => {
+    expect(bannerNextChangeMs(banner, at - 1)).toBe(at);
+    expect(bannerNextChangeMs(banner, at)).toBe(end);
+    expect(bannerNextChangeMs(banner, end)).toBeNull();
+    expect(bannerNextChangeMs({ expiresAt: null }, 0)).toBeNull();
   });
 });

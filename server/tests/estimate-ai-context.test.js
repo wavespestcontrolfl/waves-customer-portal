@@ -100,6 +100,7 @@ function filteringDb(tables = {}) {
       whereIn() { return this; },
     orWhereIn() { return this; },
     whereNotIn() { return this; },
+      whereRaw() { return this; },
       whereNull() { return this; },
       orWhere(column, _op, pattern) {
         if (typeof column === 'function') {

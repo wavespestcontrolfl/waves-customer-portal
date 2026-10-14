@@ -28,7 +28,7 @@ const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
-const { redactRequestUrl } = require('./utils/redact-request-url');
+const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('./utils/request-log-format');
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -686,14 +686,7 @@ app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
 }));
 
 // Request logging
-morgan.token('redacted-url', (req) => redactRequestUrl(req.originalUrl || req.url || ''));
-morgan.token('redacted-referrer', (req) => {
-  const referrer = req.headers?.referer || req.headers?.referrer;
-  return referrer ? redactRequestUrl(referrer) : '-';
-});
-const REDACTED_COMBINED_LOG = ':remote-addr - :remote-user [:date[clf]] '
-  + '":method :redacted-url HTTP/:http-version" :status :res[content-length] '
-  + '":redacted-referrer" ":user-agent"';
+registerRedactedTokens(morgan);
 app.use(morgan(REDACTED_COMBINED_LOG, {
   stream: { write: (message) => logger.info(message.trim()) },
 }));
@@ -1769,12 +1762,27 @@ function shutdown(signal) {
     .then((count) => { if (count) logger.info(`[shutdown] sent ${count} pending lead fallback reply(ies)`); })
     .catch(err => logger.warn(`[shutdown] lead fallback flush failed: ${err.message}`));
   const leadFallbacksFlushed = flushLeadFallbacks();
+  // A call-processing pass in flight (transcription + extraction run for
+  // minutes) dies with this process. Stamp its row so the next pod reclaims
+  // it after 2 quiet minutes instead of 10; the pass keeps its claim until the
+  // kill, so nothing overlaps it. Gated (GATE_CALL_PROC_SHUTDOWN_RELEASE);
+  // fail-soft; one bounded UPDATE per pass; done before the pool closes.
+  const callPassesMarked = (async () => {
+    try {
+      const processor = require('./services/call-recording-processor');
+      const r = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
+      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.stamped} stamped, ${r.failed} not stamped, gate ${r.enabled ? 'on' : 'off'}`);
+    } catch (err) {
+      logger.warn(`[shutdown] call pass stamp failed: ${err.message}`);
+    }
+  })();
   io.close(() => {
     logger.info('[shutdown] Socket.io closed');
     httpServer.close(async () => {
       logger.info('[shutdown] HTTP server closed, exiting');
       await leadFallbacksFlushed;
       await flushLeadFallbacks();
+      await callPassesMarked;
       try {
         const db = require('./models/db');
         await Promise.race([

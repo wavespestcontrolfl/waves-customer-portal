@@ -702,14 +702,14 @@ describe('engine replay runs at the line\'s own cadence', () => {
   });
   test('historical pins come off: a v1-pinned pest quote, frozen floors and minimums reprice at today\'s list', () => {
     const saved = {
-      homeSqFt: 2100, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 89, lawnProgramMinimumMonthly: 45, useLawnCostFloor: true,
+      homeSqFt: 2100, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 89, lawnProgramMinimumMonthly: 45, useLawnCostFloor: true, lawnCostPlusList: true,
       commercialFloorsArmedServices: ['pest_control'], rodentWaveguardPostureReplay: { tierQualifier: false }, termitePricingKnobs: { x: 1 },
-      services: { pest: { frequency: 'quarterly', version: 'v1', pricingVersion: 'v1' }, lawn: { track: 'st_augustine', tier: 'enhanced', programMinimumMonthly: 45, useLawnCostFloor: true } },
+      services: { pest: { frequency: 'quarterly', version: 'v1', pricingVersion: 'v1' }, lawn: { track: 'st_augustine', tier: 'enhanced', programMinimumMonthly: 45, useLawnCostFloor: true, costPlusList: true } },
     };
     const clean = P.listReplayInputs(saved, { familyKey: 'pest_control', cadence: 'quarterly' });
     expect(clean.services.pest).toEqual({ frequency: 'quarterly' });
     expect(clean.services.lawn).toEqual({ track: 'st_augustine', tier: 'enhanced' });
-    for (const key of ['pestProgramFloorArmed', 'pestProgramFloorPerVisit', 'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs']) {
+    for (const key of ['pestProgramFloorArmed', 'pestProgramFloorPerVisit', 'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'lawnCostPlusList', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs']) {
       expect(clean[key]).toBeUndefined();
     }
     expect(clean.homeSqFt).toBe(2100);

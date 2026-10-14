@@ -125,6 +125,31 @@ function anthropicAcceptsEffort(model, level) {
 // take the floor like Opus 5.5.
 const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5(?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
+// Does `model` think by default (so its replies can carry thinking blocks even
+// when the caller sends no `thinking` parameter)? Wider than the floor list on
+// purpose, and fail-safe for new ids: every Claude family numbered 5 or later
+// (Opus, Sonnet, Haiku 5.5 with adaptive thinking on by default, and any
+// family added later), plus Fable and Mythos. The floor list stays the
+// max_tokens rule and is not changed by this. The Intelligence Bar's tool
+// search reads it: a model that thinks by default does not get tool search.
+const ANTHROPIC_THINKS_BY_DEFAULT_RE = /^claude-[a-z]+-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+function anthropicThinksByDefault(model) {
+  const id = String(model || '');
+  return ANTHROPIC_THINKS_BY_DEFAULT_RE.test(id) || ANTHROPIC_THINKING_FLOOR_RE.test(id);
+}
+
+// Does `model` accept Anthropic's tool search tool (tool_search_tool_*_20251119)?
+// The list is the "Model compatibility" table of
+// platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+// (read 2026-10-13): Opus 4.5 and later, Sonnet 4.5 and later, Haiku 4.5 and
+// later, Fable and Mythos; "Claude Opus 4.1 and earlier models don't support
+// the tool search tool." An unknown id is NOT supported (fail closed: the
+// caller keeps its ordinary tool list).
+const ANTHROPIC_TOOL_SEARCH_RE = /^claude-(?:opus|sonnet|haiku)-4-(?:[5-9]|[1-9][0-9])(?![0-9])|^claude-(?:opus|sonnet|haiku)-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+function anthropicSupportsToolSearch(model) {
+  return ANTHROPIC_TOOL_SEARCH_RE.test(String(model || ''));
+}
+
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
@@ -209,6 +234,15 @@ const DEFAULTS = Object.freeze({
   // alone 10/13 right, 1 wrong; Opus 5.5 alone 10/13, 2 wrong. A route so a
   // second model can be added later. Shadow only behind GATE_SMS_SCHEDULING_DECIDE.
   SMS_SCHEDULING_DECIDE: 'claude-sonnet-5-5',
+  // Auto-dispatch move proofreader (owner 2026-10-09, "proofreader yes";
+  // services/auto-dispatch/proofreader): reads the customer record before an
+  // automatic move and answers allow / hold / unknown. Owner 2026-10-12
+  // ("go with the better agent"): Opus 5.5. In the 30-day replay of 134 past
+  // moves (scripts/auto-dispatch-proofreader-replay.js, 2026-10-10) both
+  // models got 18 of 18 made-up hard cases; Opus stopped or questioned 30
+  // moves and Sonnet 23. The owner gave no labels, so this is the more
+  // careful reader, not a measured error rate.
+  AUTO_DISPATCH_PROOFREADER: 'claude-opus-5-5',
   // Service report "Ask Waves" answer writer (owner 2026-10-05, "use sonnet
   // 5.5"): writes the answer to a customer's typed question from the report's
   // own facts. Customer-facing generated text, so it rides the two-provider
@@ -353,6 +387,7 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 // SMS scheduling decide step (owner ruling 2026-10-02) — its own selector.
 const SMS_SCHEDULING_DECIDE = process.env.MODEL_SMS_SCHEDULING_DECIDE || DEFAULTS.SMS_SCHEDULING_DECIDE;
+const AUTO_DISPATCH_PROOFREADER = process.env.MODEL_AUTO_DISPATCH_PROOFREADER || DEFAULTS.AUTO_DISPATCH_PROOFREADER;
 // Service report Ask Waves answer writer (owner 2026-10-05) — its own selector.
 const REPORT_ASK           = process.env.MODEL_REPORT_ASK          || DEFAULTS.REPORT_ASK;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
@@ -508,6 +543,12 @@ const ROUTES = Object.freeze({
   // single leg, no automatic fallback — a miss records an error row and the
   // text stays with staff, exactly as today. Shadow behind GATE_SMS_SCHEDULING_DECIDE.
   smsSchedulingDecide: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SCHEDULING_DECIDE, effort: 'high' }),
+  // Auto-dispatch move proofreader (owner 2026-10-09,
+  // auto-dispatch/proofreader/index.js): single leg, no automatic fallback —
+  // a miss is the verdict "unknown" and the visit stays where it is. Called
+  // by the nightly run behind GATE_AUTO_DISPATCH_PROOFREADER
+  // (proofreader/nightly.js) and by the replay script.
+  autoDispatchProofreader: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: AUTO_DISPATCH_PROOFREADER, effort: 'high' }),
   // Lawn visit assessment name referee (owner ruling 2026-09-29,
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
   // miss leaves Gemini's read exactly as it was.
@@ -747,6 +788,8 @@ module.exports = {
   ANTHROPIC_EFFORT_CAPABLE_RE,
   anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
+  anthropicThinksByDefault,
+  anthropicSupportsToolSearch,
   ANTHROPIC_THINKING_REQUIRED_RE,
   anthropicThinkingAlwaysOn,
   DEEP,
@@ -781,6 +824,7 @@ module.exports = {
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
   SMS_SCHEDULING_DECIDE,
+  AUTO_DISPATCH_PROOFREADER,
   REPORT_ASK,
   TYPESAFE_JEV,
   CLOUDFLARE_CLEF,
@@ -815,9 +859,11 @@ module.exports = {
 // tiers. Listed here only as a breadcrumb so they're discoverable:
 //
 //   OPENAI_TRANSCRIPTION_MODEL     primary call transcription/diarization
-//                                  default: gpt-4o-transcribe-diarize
+//                                  default: gpt-4o-transcribe-diarize (production sets
+//                                  gpt-transcribe, no diarization: the Agent/Caller labels
+//                                  then come from OPENAI_TRANSCRIPT_LABEL_MODEL)
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
-//                                  default: gemini-2.5-flash
+//                                  default: gemini-3.5-flash (call-recording-processor.js)
 //   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
 //                                  (services/fast-complete-voice-fill.js; goes through
 //                                  call-recording-processor's transcribeWithOpenAI)

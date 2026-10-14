@@ -140,6 +140,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // with no instruction; lawn-watering-sms.js passes this same requiredVars
   // list to getTemplate at render time.
   lawn_watering_instruction: Object.freeze(['watering_lines']),
+  // Auto Pay setup text: the link IS the text. A body or variant without
+  // {secure_link} would send the customer a message with nothing to open;
+  // autopay-setup-link.js passes this same list to getTemplate at send time
+  // and checks every active body in its read-only delivery preflight.
+  autopay_setup_link: Object.freeze(['secure_link']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {
@@ -149,7 +154,7 @@ function validateTemplateBody(body, variables, templateKey = null) {
     const missing = required.filter((name) => !present.has(name));
     if (missing.length) {
       return {
-        error: `This template must keep {${required.join('}, {')}} — the Quick Move flow refuses to send without them`,
+        error: `This template must keep {${required.join('}, {')}} — the flow that sends this text refuses to send without them`,
         missing_placeholders: missing,
       };
     }

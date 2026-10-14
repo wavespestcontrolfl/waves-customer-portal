@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence, NameSpellingEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -281,6 +281,124 @@ describe('follow-up card Resolve path', () => {
   });
 });
 
+describe('no-text line card (text_number_differs)', () => {
+  const card = { ...ordinary, id: 'tn', first_name: 'Relay', last_name: 'Caller', feedback_verdict: null,
+    reason_code: 'text_number_differs',
+    payload: JSON.stringify({ flag: 'text_number_differs', ani_phone: '+19415550100', text_phone: '+19415559876', customer_phone: '+19415550100' }) };
+
+  it('has Resolve (single-card, which lifts the SMS hold) and Dismiss, never Accept/Deny (/verdict would leave the line blocked)', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    fireEvent.click(within(el).getByRole('button', { name: /phones are updated/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/tn/verdict', expect.anything());
+  });
+
+  it('"Line can get texts" is its own button with its own confirm; confirming resolves with line_can_get_texts', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    // nothing is sent until the confirm; the copy names the line
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/tn/resolve', expect.anything());
+    expect(await screen.findByText(/Texts to \+19415550100 will resume/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at, line_can_get_texts: true }),
+    }));
+  });
+
+  it('a CLOSED card keeps "Line can get texts" (the hold outlives the card); confirming releases and reloads, the card is not re-closed', async () => {
+    const closed = { ...card, status: 'resolved' };
+    let loads = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) { loads += 1; return { items: [closed], counts: { open: 0, resolved: 1, dismissed: 0 } }; }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    fireEvent.click(await screen.findByRole('button', { name: /resolved/i }));
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /phones are updated/i })).toBeNull();
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at, line_can_get_texts: true }),
+    }));
+    await waitFor(() => expect(loads).toBeGreaterThanOrEqual(3));
+  });
+
+  it('when the server keeps the hold (open "not my number" card), the inbox says so instead of claiming texts resume (codex r10 P2)', async () => {
+    const kept = { ok: true, status: 'resolved', callback_number: { verdict: 'replacement_number', disclaimed_number_hold: 'kept', number_holds_cleared: 0, release: 'deferred',
+      message: 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first, then use Line can get texts on this card again.' } };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : kept));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    expect(await screen.findByText(/the line stays blocked for texts/)).toBeInTheDocument();
+  });
+
+  it('a deferred release on a CLOSED card still shows its message after the reload (reload first, then the message)', async () => {
+    const closed = { ...card, status: 'resolved' };
+    const message = 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first, then use Line can get texts on this card again.';
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [closed], counts: { open: 0, resolved: 1, dismissed: 0 } }
+      : { ok: true, callback_number: { verdict: 'replacement_number', disclaimed_number_hold: 'kept', number_holds_cleared: 0, release: 'deferred', message } }));
+    render(<TriageInboxTabV2 />);
+    fireEvent.click(await screen.findByRole('button', { name: /^resolved/i }));
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    expect(await screen.findByText(/the line stays blocked for texts/)).toBeInTheDocument();
+    // the reload ran, and the message is still on screen after it settles
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u.startsWith('/admin/triage?')).length).toBeGreaterThanOrEqual(3));
+    expect(screen.getByText(/the line stays blocked for texts/)).toBeInTheDocument();
+  });
+
+  it('a cleared release shows no warning', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true, callback_number: { verdict: 'verified_same_number', disclaimed_number_hold: 'cleared', number_holds_cleared: 1 } }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', expect.anything()));
+    expect(screen.queryByText(/stays blocked for texts/)).toBeNull();
+  });
+
+  it('Resolve ("Phones are updated") sends no line_can_get_texts, so the hold stays', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /phones are updated/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+  });
+
+  it('shows the customer\'s LIVE phone from the list query, not the snapshot taken at the call', async () => {
+    const live = { ...card, customer_phone: '+19415559876' };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [{ ...live, payload: JSON.stringify({ flag: 'text_number_differs', ani_phone: '+19415550100', text_phone: '+19415559876', customer_phone_at_call: '+19415550100', note: 'n' }) }], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    expect(within(el).getByText('Account phone now:').parentElement.textContent).toContain('+19415559876');
+    expect(within(el).getByText('Account phone at the call:').parentElement.textContent).toContain('+19415550100');
+  });
+});
+
 describe('missing first-name card', () => {
   const card = { ...ordinary, id: 'fn', first_name: '', last_name: 'Murphy', feedback_verdict: null,
     reason_code: 'missing_first_name', payload: JSON.stringify({ flag: 'missing_first_name', heard_name_v1: { first_name: null, last_name: 'Murphy' } }) };
@@ -311,6 +429,85 @@ describe('missing first-name card', () => {
     const el = (await screen.findByText('Murphy')).closest('.py-4');
     fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+});
+
+describe('NameSpellingEvidence', () => {
+  it('shows the card text and EVERY differing spelling with its caller turn', () => {
+    render(<NameSpellingEvidence payload={JSON.stringify({
+      flag: 'name_spelling_differs',
+      field: 'last_name',
+      spelled_value: 'Serov',
+      saved_value: 'Sirov',
+      quote: 'Caller: my last name is Serov, S-E-R-O-V',
+      card_text: 'Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs.',
+      also: [{ field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell', quote: 'Caller: first name K-W-E-N-T-R-E-L-L' }],
+    })} />);
+    expect(screen.getByText(/the record says Sirov\. Fix the name/)).toBeInTheDocument();
+    expect(screen.getByText(/last name:/)).toBeInTheDocument();
+    expect(screen.getByText(/caller spelled Serov; record says Sirov/)).toHaveTextContent('my last name is Serov, S-E-R-O-V');
+    expect(screen.getByText(/caller spelled Kwentrell; record says Quentrell/)).toHaveTextContent('first name K-W-E-N-T-R-E-L-L');
+  });
+
+  it('shows who it was compared against and opens THAT customer (the server-resolved survivor), not the call link', () => {
+    const A = '11111111-2222-4333-8444-555555555555';
+    const B = '66666666-7777-4888-8999-000000000000';
+    const payload = JSON.stringify({
+      spelled_value: 'Serov', saved_value: 'Sirov', field: 'last_name', customer_ids: [A],
+      compared_against: { source: 'customer', name: 'Quentrell Sirov' },
+    });
+    const { rerender } = render(<NameSpellingEvidence payload={payload} />);
+    expect(screen.getByText(/Compared against:/).parentElement).toHaveTextContent('Quentrell Sirov (customer record)');
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    // A merged-away customer opens its survivor (the server's open ids win).
+    rerender(<NameSpellingEvidence payload={payload} openCustomerIds={[B]} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    // An unlinked call compares against the heard name and links nothing.
+    rerender(<NameSpellingEvidence payload={JSON.stringify({ spelled_value: 'Serov', saved_value: 'Sirov', customer_ids: [], compared_against: { source: 'extracted', name: 'Quentrell Sirov' } })} />);
+    expect(screen.getByText(/Compared against:/).parentElement).toHaveTextContent('name heard on this call');
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  it('renders nothing without a spelling', () => {
+    const { container } = render(<NameSpellingEvidence payload={{ flag: 'name_spelling_differs' }} />);
+    expect(container.firstChild).toBeNull();
+  });
+});
+
+describe('name-spelling card', () => {
+  const card = { ...ordinary, id: 'ns', first_name: 'Quentrell', last_name: 'Sirov', feedback_verdict: null,
+    reason_code: 'name_spelling_differs',
+    payload: JSON.stringify({ flag: 'name_spelling_differs', spelled_value: 'Serov', saved_value: 'Sirov', quote: 'Caller: my last name is Serov, S-E-R-O-V' }) };
+  const load = () => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+    ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+
+  it('Resolve is admin-only: a non-admin sees Dismiss but no Resolve', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
+  });
+
+  it('has its own Resolve and Dismiss for an admin, no Accept/Deny', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+  });
+
+  it('Resolve is PUT /resolve with its version, never a /verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/ns/resolve', {
       method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
     }));
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
@@ -413,6 +610,34 @@ describe('FamilyEvidence — family account suggestions', () => {
   it('opens the server-resolved survivor for a merged candidate', () => {
     render(<FamilyEvidence payload={payload} openCustomerIds={[B, A]} />);
     expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+  });
+});
+
+// 2026-10-10 call audit: the same card also suggests the caller's OWN account (no named holder).
+describe('FamilyEvidence — the caller\'s own account', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  it('shows the spoken number that matched the account (contact_phone_on_account)', () => {
+    render(<FamilyEvidence payload={{
+      flag: 'family_account_candidates', caller_name: null, caller_phone: '+19415550101',
+      account_holder_name: null, match_basis: 'contact_phone_on_account', matched_contact_phones: ['+19415550177'],
+      holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Sampleton', address_matches: true, matched_phone: '+19415550177' }],
+      customer_ids: [A], reason: 'The caller gave a phone number for another person, and an account carries that number.',
+    }} />);
+    expect(screen.getByText('Angelina Testerson · Sampleton · has the number +19415550177 · address matches')).toBeInTheDocument();
+  });
+
+  it('shows the caller, the suggested account and the reason, with no Named row', () => {
+    render(<FamilyEvidence payload={{
+      flag: 'family_account_candidates', caller_name: 'Robin Example', caller_phone: '+19415550101',
+      account_holder_name: null, match_basis: 'caller_full_name',
+      holder_candidates: [{ id: A, name: 'Robin Example', city: 'Sampleton', address_matches: false }],
+      customer_ids: [A], reason: 'An account carries this caller\'s exact name under another phone number.',
+    }} />);
+    expect(screen.getByText(/Robin Example · calling from \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText('Robin Example · Sampleton')).toBeInTheDocument();
+    expect(screen.queryByText('Named')).not.toBeInTheDocument();
+    expect(screen.getByText(/exact name under another phone number/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
   });
 });
 
@@ -792,4 +1017,134 @@ describe('Save to notes on second-contact cards', () => {
     expect(listCalls()).toBe(before + 1);
     expect(screen.getByText('Second Contact')).toBeInTheDocument();
   });
+});
+
+describe('held lines panel on the page', () => {
+  const line = { hold_id: 'h1', phone_e164: '+19415550100', held_at: '2026-10-01T15:00:00.000Z', source_call_log_id: 'call-9',
+    call_created_at: '2026-10-01T14:50:00.000Z', first_name: 'Relay', last_name: 'Caller', card_id: 'tn-old', card_status: 'resolved',
+    card_updated_at: '2026-10-02T10:00:00.000Z', blocked_by_ownership_card: false };
+
+  function wire({ lines, release }) {
+    let held = lines;
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url.startsWith('/admin/triage?')) return { items: [], counts: { open: 0, resolved: 0, dismissed: 0 } };
+      if (url === '/admin/triage/held-lines') return { lines: held };
+      if (url === `/admin/triage/${line.card_id}/resolve` && opts?.method === 'PUT') {
+        const out = release || { ok: true, callback_number: { disclaimed_number_hold: 'cleared', number_holds_cleared: 1 } };
+        if (!release) held = [];
+        return out;
+      }
+      return { ok: true };
+    });
+  }
+
+  it('a technician is not offered the chip or the panel (the route is admin-only), and nothing is fetched; an admin sees the chip', async () => {
+    wire({ lines: [line] });
+    const { unmount } = render(<TriageInboxTabV2 isAdmin={false} />);
+    await screen.findByText('No calls awaiting review.');
+    expect(screen.queryByRole('button', { name: /held lines/i })).not.toBeInTheDocument();
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/held-lines');
+    unmount();
+    render(<TriageInboxTabV2 isAdmin />);
+    expect(await screen.findByRole('button', { name: /held lines/i })).toBeInTheDocument();
+  });
+
+  it('loads only when opened, then lists one row per line with its number, since-date, call and card state', async () => {
+    wire({ lines: [line, { ...line, hold_id: 'h2', source_call_log_id: 'call-10', card_id: 'tn-2', held_at: '2026-10-05T15:00:00.000Z' }] });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('No calls awaiting review.');
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/held-lines');
+    fireEvent.click(screen.getByRole('button', { name: /held lines/i }));
+    const row = await screen.findByTestId('held-line');
+    expect(screen.getAllByTestId('held-line')).toHaveLength(1); // the same line from two calls is one row
+    expect(row.textContent).toContain('+19415550100');
+    expect(row.textContent).toContain('Held since Oct 1, 2026');
+    expect(row.textContent).toContain('Relay Caller');
+    expect(row.textContent).toContain('Card resolved');
+    expect(row.textContent).toContain('1 more call hold this line');
+  });
+
+  it('"Line can get texts" asks the same confirm, resolves the card with line_can_get_texts, then reloads the panel', async () => {
+    wire({ lines: [line] });
+    render(<TriageInboxTabV2 isAdmin />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    const row = await screen.findByTestId('held-line');
+    fireEvent.click(within(row).getByRole('button', { name: /line can get texts/i }));
+    expect(adminFetch).not.toHaveBeenCalledWith(`/admin/triage/tn-old/resolve`, expect.anything());
+    expect(await screen.findByText(/Texts to \+19415550100 will resume/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn-old/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: line.card_updated_at, line_can_get_texts: true, line_e164: line.phone_e164 }),
+    }));
+    expect(await screen.findByText('No held lines.')).toBeInTheDocument();
+  });
+
+  it('shows the server\'s deferred message and keeps the line listed', async () => {
+    const message = 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first.';
+    wire({ lines: [{ ...line, blocked_by_ownership_card: true }], release: { ok: true, callback_number: { disclaimed_number_hold: 'kept', release: 'deferred', message } } });
+    render(<TriageInboxTabV2 isAdmin />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    const row = await screen.findByTestId('held-line');
+    expect(row.textContent).toContain('open "not my number" card');
+    fireEvent.click(within(row).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    expect(await screen.findAllByText(/the line stays blocked for texts/)).not.toHaveLength(0);
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length).toBe(2));
+    expect(screen.getByText(/the line stays blocked for texts/)).toBeInTheDocument();
+    expect(screen.getAllByTestId('held-line')).toHaveLength(1);
+  });
+
+  it('with two lines on one call, each row releases ITS line (line_e164), not the call\'s newest', async () => {
+    const other = { ...line, hold_id: 'h9', phone_e164: '+19415557777', held_at: '2026-10-03T15:00:00.000Z' };
+    wire({ lines: [other, line] });
+    render(<TriageInboxTabV2 isAdmin />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    const rows = await screen.findAllByTestId('held-line');
+    expect(rows).toHaveLength(2);
+    const older = rows.find((r) => r.textContent.includes('+19415550100'));
+    fireEvent.click(within(older).getByRole('button', { name: /line can get texts/i }));
+    expect(await screen.findByText(/Texts to \+19415550100 will resume/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn-old/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: line.card_updated_at, line_can_get_texts: true, line_e164: '+19415550100' }),
+    }));
+  });
+
+  it('a line someone else already released shows the server\'s message and reloads the panel', async () => {
+    wire({ lines: [line] });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url === '/admin/triage/tn-old/resolve') throw Object.assign(new Error('That line is no longer held by this call. Reload the held lines and review the latest.'), { status: 409, code: 'NO_TEXT_LINE_NOT_HELD' });
+      return base(url, opts);
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    fireEvent.click(within(await screen.findByTestId('held-line')).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    expect(await screen.findByText(/That line is no longer held by this call/)).toBeInTheDocument();
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length).toBe(2));
+  });
+
+  it('releasing from the normal inbox card (Line can get texts, or Phones are updated) refreshes an open panel', async () => {
+    const card = { ...ordinary, id: 'tn', first_name: 'Relay', last_name: 'Caller', feedback_verdict: null, reason_code: 'text_number_differs',
+      payload: JSON.stringify({ flag: 'text_number_differs', ani_phone: '+19415550100' }) };
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) return { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      if (url === '/admin/triage/held-lines') return { lines: [line] };
+      return { ok: true, callback_number: { disclaimed_number_hold: 'cleared', number_holds_cleared: 1 } };
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    await screen.findByTestId('held-line');
+    const heldLoads = () => adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length;
+    expect(heldLoads()).toBe(1);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(heldLoads()).toBe(2));
+  });
+
+
+
+
 });

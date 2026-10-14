@@ -9,6 +9,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+  SLOT_CHANGED_SQL: '(1 = 1)',
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -59,7 +60,7 @@ const CAND_DATE = shiftDateStr(TODAY, 22);
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereIn', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count'];
+    'orWhere', 'orWhereIn', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;
@@ -283,6 +284,96 @@ test('same-day re-time is inside the window (never excluded)', async () => {
   expect(changed.newPlacement.date).toBe(VISIT_DATE);
   expect(changed.constraints.route_tiers.window.dateFrom <= VISIT_DATE).toBe(true);
   expect(changed.constraints.route_tiers.window.dateTo >= VISIT_DATE).toBe(true);
+});
+
+// A recurring child with neither an arrival window nor a due date has no
+// instant to freeze on; the freeze reads that as frozen (fail closed), which
+// used to log WITHIN_73H for a visit weeks away. Same skip, truthful label.
+test('a windowless visit with no due date is skipped as NO_ARRIVAL_WINDOW, not WITHIN_73H', async () => {
+  reminderResults = [[]];
+  db.mockImplementation((table) => {
+    if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+    if (table === 'scheduled_services') return buildChain([{ ...svc(), window_start: null, window_end: null, recurring_dispatch_due_date: null }]);
+    return buildChain([]);
+  });
+  const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+  expect(res).toMatchObject({ changed: 0, skipped: 1 });
+  expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+  const skipped = decisions('skipped');
+  expect(skipped.map((d) => d.reason_code)).toEqual(['NO_ARRIVAL_WINDOW']);
+  expect(skipped[0].reason_description).toMatch(/no arrival window and no due date/);
+});
+
+// reservation_arrival_start returns NULL for a row with no window_start before
+// it reads the allocation stamp, so a stale stamp is no arrival (Codex #6208 r1).
+test('a windowless visit with a leftover combined-allocation stamp is still NO_ARRIVAL_WINDOW', async () => {
+  reminderResults = [[]];
+  db.mockImplementation((table) => {
+    if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+    if (table === 'scheduled_services') {
+      return buildChain([{
+        ...svc(), window_start: null, window_end: null, recurring_dispatch_due_date: null,
+        reservation_service_mix: { allocatedServiceIds: ['gone-1', 'gone-2'] },
+      }]);
+    }
+    return buildChain([]);
+  });
+  // What the SQL function returns for a row with no window_start.
+  db.raw = jest.fn(async () => ({ rows: [{ window_start: null }] }));
+  try {
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+  } finally {
+    delete db.raw;
+  }
+  expect(decisions('skipped').map((d) => d.reason_code)).toEqual(['NO_ARRIVAL_WINDOW']);
+});
+
+// The band around a far-away durable anchor no longer reaches the visit's
+// date, so flexTierMoveWindow collapses to the one day. Only the label
+// changes: the same-day re-time search still runs and still moves a visit.
+describe('stale drift anchor (visit re-dated far from its original date)', () => {
+  const ANCHOR = shiftDateStr(VISIT_DATE, -15);
+  beforeEach(() => {
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain([]);
+      if (table === 'reschedule_log') return buildChain([{ scheduled_service_id: 's1', original_date: ANCHOR, created_at: '2026-01-01T00:00:00Z' }]);
+      if (table === 'scheduled_services') return buildChain([svc()]);
+      return buildChain([]);
+    });
+  });
+
+  test('no same-day slot: NO_VALID_SLOT is relabelled DRIFT_ANCHOR_STALE and names the anchor', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
+    const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(res).toMatchObject({ changed: 0, evaluated: 1 });
+    const [noChange] = decisions('no_change');
+    expect(noChange.reason_code).toBe('DRIFT_ANCHOR_STALE');
+    expect(noChange.reason_description).toContain(ANCHOR);
+    expect(noChange.reason_description).toMatch(/Day moves are blocked.*re-dated after an earlier auto move/);
+    expect(noChange.constraints.route_tiers).toMatchObject({ mode: 'flex', anchor_stale: true });
+    // The search still ran on the collapsed one-day window.
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[0][2].tierWindow).toEqual({ dateFrom: VISIT_DATE, dateTo: VISIT_DATE });
+  });
+
+  test('a same-day re-time still moves the visit', async () => {
+    const sameDay = { ...CAND, date: VISIT_DATE, start_time: '13:00', end_time: '14:00' };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [sameDay] });
+    const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(res.changed).toBe(1);
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(decisions('changed')[0].newPlacement.date).toBe(VISIT_DATE);
+  });
+
+  test('an anchor within reach is not stale: NO_VALID_SLOT keeps its own label', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain([]);
+      if (table === 'scheduled_services') return buildChain([svc()]);
+      return buildChain([]);
+    });
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(decisions('no_change')[0].reason_code).toBe('NO_VALID_SLOT');
+  });
 });
 
 test('gate off (neither flexTierEnabled nor routeTiersEnabled): legacy flat lock, no tier window in the audit', async () => {

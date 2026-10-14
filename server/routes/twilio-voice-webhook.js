@@ -2597,6 +2597,8 @@ router.post('/recording-status', async (req, res) => {
           // fresh branch is `processing_status IS NULL`, and it never
           // re-enters voicemail/spam rows that still carry a transcript.
           write.processing_status = null;
+          // The verdict time belongs to the OLD audio too (Codex #6269 r2).
+          write.processed_at = null;
           // …and the retry budget: extraction_attempts counted failures on
           // the OLD audio, and the sweep's cap would otherwise refuse the
           // new recording after a single transient error (Codex #3736 r11).
@@ -2686,10 +2688,17 @@ router.post('/recording-status', async (req, res) => {
             .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .whereIn('status', ['open', 'in_progress'])
             .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
+          // ...and a card the callback-spam sweep auto-resolved on the OLD
+          // audio (same reason as the adoption route, codex #6271 r46 P2).
+          const retiredSwept = await trx('triage_items')
+            .where({ call_log_id: baseline.id, status: 'resolved', resolution_rule: 'callback_spam' })
+            .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+            .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
+            .update({ resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}`, resolution_rule: null });
           // The review flag follows the cards (Codex #3736 r14 P2): with the
           // old audio's cards retired and nothing else open, a row that was
           // review-open (a V2-vetoed spam row, say) must not stay counted.
-          if (retired > 0) {
+          if (retired + retiredSwept > 0) {
             const stillOpen = await trx('triage_items')
               .where({ call_log_id: baseline.id })
               .whereIn('status', ['open', 'in_progress'])

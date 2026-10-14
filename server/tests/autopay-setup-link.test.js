@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
     chain.whereIn = record('whereIn');
     chain.orderBy = record('orderBy');
     chain.forUpdate = record('forUpdate');
+    chain.forShare = record('forShare');
     chain.insert = record('insert');
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
     chain.update = (patch) => {
@@ -41,6 +42,16 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The comms/phone/email locks: each acquisition and the release are logged, in order.
+let mockLockLog = [];
+jest.mock('../utils/customer-comms-lock', () => ({
+  lockCustomerComms: async (_trx, id) => { mockLockLog.push(['comms', id]); },
+  lockCustomerEmail: async (_trx, email) => { mockLockLog.push(['email', email]); },
+  withSmsConsentLock: async (_dbh, { phone, customerId }, fn) => {
+    mockLockLog.push(['comms', customerId], ['phone', phone]);
+    try { return await fn(require('../models/db')); } finally { mockLockLog.push(['released']); }
+  },
+}));
 
 const mockResolveForInvoice = jest.fn(async () => null);
 jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolveForInvoice(...a) }));
@@ -88,16 +99,51 @@ jest.mock('../services/stripe', () => ({
 const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
+const mockBillingHoldBlock = jest.fn(async () => null);
+const mockCallbackNumberHold = jest.fn(async () => false);
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
+  // The real shared reader of a send's certainty (a pure function).
+  classifyDeliveryCertainty: (...a) => jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty(...a),
+  normalizeRecipient: (phone) => (String(phone || '').replace(/\D/g, '').length === 10 ? `+1${String(phone).replace(/\D/g, '')}` : phone),
+  // The send's own hold predicates, as the preflight calls them.
+  billingHoldBlock: (...a) => mockBillingHoldBlock(...a),
+  callbackNumberHoldBlocksSend: (...a) => mockCallbackNumberHold(...a),
+  CALLBACK_NUMBER_HOLD_BLOCK: jest.requireActual('../services/messaging/send-customer-message').CALLBACK_NUMBER_HOLD_BLOCK,
+}));
 const mockSendTemplate = jest.fn(async () => ({ sent: true }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockSendTemplate(...a) }));
-const mockRenderTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/tok');
+const mockPreflightTemplateSend = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: (...a) => mockSendTemplate(...a),
+  preflightTemplateSend: (...a) => mockPreflightTemplateSend(...a),
+}));
+// The delivery preflight reads the template through getTemplate (audit off,
+// base row only); the real consent / suppression / send-window validators
+// run against the db mock above. Only the cached line type is stubbed.
+const mockGetSmsTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/preflight-check');
+jest.mock('../routes/admin-sms-templates', () => ({
+  getTemplate: (...a) => mockGetSmsTemplate(...a),
+  REQUIRED_TEMPLATE_PLACEHOLDERS: { autopay_setup_link: ['secure_link'] },
+}));
+const mockActiveVariants = jest.fn(async () => []);
+jest.mock('../services/sms-template-variants', () => ({ activeVariants: (...a) => mockActiveVariants(...a) }));
+const mockReadCachedLineType = jest.fn(async () => ({ state: 'miss' }));
+jest.mock('../services/messaging/validators/line-type', () => {
+  const actual = jest.requireActual('../services/messaging/validators/line-type');
+  return { ...actual, readCachedLineType: (...a) => mockReadCachedLineType(...a) };
+});
+// Renders like the real template: the link variable lands in the body.
+const renderWithLink = async (vars) => `Hi ${vars.first_name}! Set up Auto Pay: ${vars.secure_link}`;
+const mockRenderTemplate = jest.fn(renderWithLink);
 jest.mock('../services/appointment-card-request', () => ({ renderTemplate: (...a) => mockRenderTemplate(...a) }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
 
 const gates = require('../config/feature-gates').gates;
 const {
   requestAutopaySetupLink,
+  autopayDeliveryPreflight,
+  findSavedMethodForAutoSecure,
+  setupLinkReuse,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,
@@ -132,12 +178,18 @@ beforeEach(() => {
   mockEnrollConsentedMethod.mockResolvedValue({ enrolled: true });
   mockSendCustomerMessage.mockResolvedValue({ sent: true });
   mockSendTemplate.mockResolvedValue({ sent: true });
-  mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/tok');
+  mockPreflightTemplateSend.mockResolvedValue({ ok: true });
+  mockGetSmsTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/preflight-check');
+  mockReadCachedLineType.mockResolvedValue({ state: 'miss' });
+  gates.proactiveLineTypeLookup = false;
+  mockRenderTemplate.mockImplementation(renderWithLink);
+  mockActiveVariants.mockResolvedValue([]);
+  mockLockLog = [];
   mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-1', method_type: 'card' });
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
   mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
 });
-afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; gates.completionAutopayCharge = false; });
+afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; gates.completionAutopayCharge = false; gates.proactiveLineTypeLookup = false; });
 
 describe('requestAutopaySetupLink — ordered checks', () => {
   it('is inert with the gate off (nothing read, nothing minted, nothing sent)', async () => {
@@ -317,7 +369,7 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
   it('sms: renders the autopay_setup_link template and sends through the card_request purpose, operator-initiated', async () => {
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', trigger: 'admin' });
     expect(r.action).toBe('sent');
-    expect(mockRenderTemplate).toHaveBeenCalledWith(expect.objectContaining({ first_name: 'Pat', secure_link: r.secureUrl }), 'autopay_setup_link');
+    expect(mockRenderTemplate).toHaveBeenCalledWith(expect.objectContaining({ first_name: 'Pat', secure_link: r.secureUrl }), 'autopay_setup_link', { requiredVars: ['secure_link'] });
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415551234',
       channel: 'sms',
@@ -479,6 +531,503 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
   it('never throws — an unexpected failure is a skip', async () => {
     mockTableHandlers.customers = { first: () => { throw new Error('db down'); } };
     expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('request_failed');
+  });
+});
+
+describe('autopayDeliveryPreflight — read-only "could this channel deliver" (requireDeliverable)', () => {
+  const rowWrites = () => touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'insert' || c[0] === 'update');
+
+  it('inline always passes and reads nothing', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'inline' })).toEqual({ ok: true });
+    expect(mockDbTouches).toHaveLength(0);
+  });
+
+  it('sms: a healthy customer passes, and nothing is minted, sent or paid for', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'sms' })).toEqual({ ok: true });
+    expect(mockGetSmsTemplate).toHaveBeenCalledWith(
+      'autopay_setup_link',
+      expect.objectContaining({ first_name: 'Pat', secure_link: 'https://portal.test/secure/preflight-check' }),
+      {},
+      { audit: false, requiredVars: ['secure_link'], noVariants: true },
+    );
+    expect(rowWrites()).toEqual([]);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('sms: no phone, gate off and an inactive template carry the same reasons the send path returns', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: { ...CUSTOMER, phone: null }, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'no_customer_phone' });
+    gates.autopayCustomerSms = false;
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'autopay_sms_gate_off' });
+    gates.autopayCustomerSms = true;
+    mockGetSmsTemplate.mockResolvedValue(null);
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'template_inactive' });
+  });
+
+  it('sms: an active STOP suppression is refused with the pipeline reason', async () => {
+    mockTableHandlers.messaging_suppression = { first: () => ({ phone: '+19415551234', reason: 'opt_out_keyword', created_at: '2026-10-01' }) };
+    const r = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^Recipient is suppressed \(reason: opt_out_keyword/);
+  });
+
+  it('sms: the send\'s own holds refuse too — a callback-number hold and a collections hold (codex P2 #6318 r2)', async () => {
+    mockCallbackNumberHold.mockResolvedValueOnce(true);
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'Caller disclaimed this number (callback_number_needed)' });
+    // Called with the same send input the pipeline would get.
+    expect(mockCallbackNumberHold).toHaveBeenLastCalledWith(expect.objectContaining({ channel: 'sms', to: '+19415551234', purpose: 'card_request', customerId: 'cust-1' }));
+    mockBillingHoldBlock.mockResolvedValueOnce({ ok: false, code: 'COLLECTION_HOLD_DEFER', reason: 'collections hold' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'collections hold' });
+    // No hold: deliverable. A requireDeliverable send behind a hold mints nothing.
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    mockCallbackNumberHold.mockResolvedValueOnce(true);
+    mockSendCustomerMessage.mockClear();
+    const held = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true });
+    expect(held).toMatchObject({ action: 'skipped', reason: 'Caller disclaimed this number (callback_number_needed)' });
+    expect(held.secureUrl).toBeUndefined();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('sms: a customer with texts turned off is refused with the consent reason', async () => {
+    mockTableHandlers.notification_prefs = { first: () => ({ customer_id: 'cust-1', sms_enabled: false }) };
+    const r = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toEqual(expect.any(String));
+    expect(r.reason).not.toMatch(/_check_uncertain$/);
+  });
+
+  it('sms: an unreadable consent or suppression read fails closed with a retryable reason', async () => {
+    mockTableHandlers.notification_prefs = { first: () => { throw new Error('db blip'); } };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_policy_check_uncertain' });
+    mockTableHandlers.notification_prefs = {};
+    mockTableHandlers.messaging_suppression = { first: () => { throw new Error('db blip'); } };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_policy_check_uncertain' });
+  });
+
+  it('sms: a CACHED landline or fixed-VoIP line is refused with the validator\'s reason; a miss and a mobile pass', async () => {
+    gates.proactiveLineTypeLookup = true;
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    const landline = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
+    expect(landline.ok).toBe(false);
+    expect(landline.reason).toMatch(/landline.*SMS not deliverable/);
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
+    expect((await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).reason).toMatch(/fixed-VoIP/);
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    mockReadCachedLineType.mockResolvedValue({ state: 'miss' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+  });
+
+  it('sms: with the proactive line-type gate off the cache is not consulted (the send would not look either)', async () => {
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    expect(mockReadCachedLineType).not.toHaveBeenCalled();
+  });
+
+  it('sms: an unreadable line-type cache fails closed', async () => {
+    gates.proactiveLineTypeLookup = true;
+    mockReadCachedLineType.mockResolvedValue({ state: 'error' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_line_type_check_uncertain' });
+  });
+
+  it('sms: a template read that throws fails closed instead of throwing', async () => {
+    mockGetSmsTemplate.mockRejectedValue(new Error('boom'));
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_delivery_check_uncertain' });
+  });
+
+  it('email: a healthy customer passes through the template library\'s no-send preflight', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' })).toEqual({ ok: true });
+    expect(mockPreflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.autopay_setup_link',
+      to: 'pat@example.com',
+      payload: expect.objectContaining({ first_name: 'Pat', secure_link: 'https://portal.test/secure/preflight-check', expires_on: expect.any(String) }),
+    }));
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(rowWrites()).toEqual([]);
+  });
+
+  it('email: no address, opted out and an unreadable preference carry the send path\'s reasons', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: { ...CUSTOMER, email: 'not-an-email' }, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'no_customer_email' });
+    mockTableHandlers.notification_prefs = { first: () => ({ email_enabled: false }) };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_opted_out' });
+    mockTableHandlers.notification_prefs = { first: () => { throw new Error('db blip'); } };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_prefs_check_uncertain' });
+    expect(mockPreflightTemplateSend).not.toHaveBeenCalled();
+  });
+
+  it('email: an inactive or missing template is email_template_inactive; a suppressed address carries the library\'s reason', async () => {
+    mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'email template payment.autopay_setup_link is paused', code: 'EMAIL_TEMPLATE_DISABLED' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_template_inactive' });
+    mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
+    expect((await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' })).reason).toBe('email_template_inactive');
+    mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'Suppressed: bounce' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'Suppressed: bounce' });
+  });
+
+  it('email: an unreadable template or suppression check fails closed', async () => {
+    mockPreflightTemplateSend.mockRejectedValue(new Error('db blip'));
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_template_check_uncertain' });
+  });
+
+  it('loads the customer by id when none is passed; an unknown or archived one is customer_not_found', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'sms' })).toEqual({ ok: true });
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, deleted_at: new Date() }) };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'sms' })).toEqual({ ok: false, reason: 'customer_not_found' });
+  });
+
+  describe('requestAutopaySetupLink({ requireDeliverable })', () => {
+    it('true + a failing channel: refuses BEFORE minting — no row inserted, updated or retired, no link returned', async () => {
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true });
+      expect(r).toEqual({ requested: false, action: 'skipped', reason: 'no_customer_phone' });
+      expect(r.secureUrl).toBeUndefined();
+      expect(r.expiresAt).toBeUndefined();
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('true + a failing channel leaves an EXPIRED pending row alone (not retired) and a live one untouched', async () => {
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, expires_at: PAST }) };
+      mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'Suppressed: bounce' });
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', requireDeliverable: true });
+      expect(r.reason).toBe('Suppressed: bounce');
+      expect(r.secureUrl).toBeUndefined();
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+    });
+
+    it('true + a passing preflight sends exactly as today (row minted, sent, stamped)', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', trigger: 'admin', requireDeliverable: true });
+      expect(r).toEqual(expect.objectContaining({ action: 'sent', channel: 'sms', secureUrl: expect.stringMatching(/\/secure\//) }));
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
+      expect(calls.some((c) => c[0] === 'insert')).toBe(true);
+      expect(calls.some((c) => c[0] === 'update' && c[1].sent_at)).toBe(true);
+    });
+
+    it('true + inline never runs the preflight (nothing to deliver)', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'inline', requireDeliverable: true });
+      expect(r.action).toBe('link_created');
+      expect(mockGetSmsTemplate).not.toHaveBeenCalled();
+      expect(mockPreflightTemplateSend).not.toHaveBeenCalled();
+    });
+
+    it('true: the saved-card auto-secure still runs first (the card covers the ask, preflight never reached)', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-1', stripe_payment_method_id: 'pm_1' });
+      mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date() }) };
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true });
+      expect(r.action).toBe('auto_secured');
+    });
+
+  });
+
+  describe('requestAutopaySetupLink({ allowAutoSecure })', () => {
+    it('false + a consented saved card: skip(saved_method_available) — nothing enrolled, minted, sent or locked', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+      mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true, allowAutoSecure: false });
+      expect(r).toEqual({ requested: false, action: 'skipped', reason: 'saved_method_available' });
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      expect(touches('customers').some((c) => c.calls.some((x) => x[0] === 'forUpdate'))).toBe(false);
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('false + no saved card sends as usual; default (omitted or true) still auto-secures', async () => {
+      const sent = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', allowAutoSecure: false });
+      expect(sent.action).toBe('sent');
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+      mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
+      for (const opts of [{}, { allowAutoSecure: true }]) {
+        expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', ...opts })).action).toBe('auto_secured');
+      }
+    });
+  });
+
+  describe('requestAutopaySetupLink({ expectedRecipient })', () => {
+    it('sms: a number that differs from the row read here is refused BEFORE the mint — no row touched, nothing sent', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: '9415550000' } });
+      expect(r).toEqual({ requested: false, action: 'skipped', reason: 'recipient_changed' });
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('email: an address that differs is refused before the mint; a matching one (case and spacing ignored) sends to the address just read', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: { email: 'someone.else@example.com' } });
+      expect(r.reason).toBe('recipient_changed');
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      const ok = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: { email: `  ${CUSTOMER.email.toUpperCase()} ` } });
+      expect(ok.action).toBe('sent');
+      expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: CUSTOMER.email }));
+    });
+
+    it('sms: a number that matches is sent to; one that changes between the first read and the send is refused at the provider boundary', async () => {
+      const ok = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: CUSTOMER.phone.replace(/\D/g, '').slice(-10) } });
+      expect(ok.action).toBe('sent');
+      expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: CUSTOMER.phone }));
+
+      mockSendCustomerMessage.mockClear();
+      let reads = 0;
+      mockTableHandlers.customers = { first: () => { reads += 1; return reads === 1 ? CUSTOMER : { ...CUSTOMER, phone: '+19415550000' }; } };
+      const moved = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: CUSTOMER.phone.replace(/\D/g, '').slice(-10) } });
+      expect(moved.reason).toBe('recipient_changed');
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('email: an address that changes between the first read and the send is refused before the template is sent', async () => {
+      let reads = 0;
+      mockTableHandlers.customers = { first: () => { reads += 1; return reads === 1 ? CUSTOMER : { ...CUSTOMER, email: 'moved@example.com' }; } };
+      const moved = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: { email: CUSTOMER.email } });
+      expect(moved.reason).toBe('recipient_changed');
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+    });
+
+    it('an unreadable re-read, a customer gone at the send, and inline delivery: unreadable and gone refuse; inline ignores the pin', async () => {
+      let reads = 0;
+      mockTableHandlers.customers = { first: () => { reads += 1; if (reads === 1) return CUSTOMER; throw new Error('db blip'); } };
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: CUSTOMER.phone.replace(/\D/g, '').slice(-10) } })).reason).toBe('recipient_changed');
+      mockTableHandlers.customers = { first: () => CUSTOMER };
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'inline', expectedRecipient: { phoneLast10: '0000000000' } })).action).toBe('link_created');
+    });
+
+    it('absent pin: unchanged (a changed contact is not looked for)', async () => {
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' })).action).toBe('sent');
+    });
+  });
+
+  describe('findSavedMethodForAutoSecure (the read the preview shares)', () => {
+    it('returns the consented card, null after an opt-out, and reads nothing it should not', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-1' });
+      expect(await findSavedMethodForAutoSecure('cust-1')).toEqual({ id: 'pm-1' });
+      mockTableHandlers.autopay_log = { first: () => ({ event_type: 'autopay_disabled' }) };
+      mockFindConsentedChargeableCard.mockClear();
+      expect(await findSavedMethodForAutoSecure('cust-1')).toBeNull();
+      expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    });
+  });
+
+  // The pin THROUGH the provider request: the senders' own LOCKED handoffs (the annual rate letter's pattern) hold
+  // the comms (+ phone) lock and the customer ROW (FOR SHARE) from the final re-read to the provider call.
+  describe('requestAutopaySetupLink({ expectedRecipient }) through the provider request', () => {
+    const PIN_SMS = { phoneLast10: '9415551234' };
+    const PIN_EMAIL = { email: 'pat@example.com' };
+    const rowReads = () => touches('customers').filter((c) => c.calls.some((x) => x[0] === 'forShare'));
+
+    it('sms: the pipeline gets the locked handoff (and its entry point); no pin, no handoff — the default send is unchanged', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      const sent = mockSendCustomerMessage.mock.calls[0][0];
+      expect(sent).toMatchObject({ entryPoint: 'autopay_setup_link_send', purpose: 'card_request', metadata: expect.objectContaining({ original_message_type: 'autopay_setup_link' }) });
+      expect(typeof sent.withSmsHandoff).toBe('function');
+      expect(sent).not.toHaveProperty('preProviderCheck');
+      mockSendCustomerMessage.mockClear();
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      const plain = mockSendCustomerMessage.mock.calls[0][0];
+      for (const key of ['withSmsHandoff', 'entryPoint', 'preProviderCheck']) expect(plain).not.toHaveProperty(key);
+    });
+
+    it('sms: inside the handoff the comms then phone locks are taken, the customer row is re-read FOR SHARE on the handoff handle, and dispatch runs while they are held; they release after', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      const { withSmsHandoff } = mockSendCustomerMessage.mock.calls[0][0];
+      mockLockLog = [];
+      mockDbTouches = [];
+      const dispatch = jest.fn(async (trx) => { mockLockLog.push(['dispatch']); expect(trx).toBeDefined(); return { ok: true }; });
+      expect(await withSmsHandoff(dispatch)).toEqual({ ok: true });
+      expect(mockLockLog).toEqual([['comms', 'cust-1'], ['phone', CUSTOMER.phone], ['dispatch'], ['released']]);
+      expect(rowReads()).toHaveLength(1);
+      expect(touches('customers')[0].calls.map((c) => c[0])).toEqual(expect.arrayContaining(['where', 'whereNull', 'forShare']));
+    });
+
+    it('sms: a number changed since the card vetoes (recipient_changed) without dispatching; a customer gone or an unreadable re-read also refuses; the locks release on every path', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      const { withSmsHandoff } = mockSendCustomerMessage.mock.calls[0][0];
+      const dispatch = jest.fn(async () => ({ ok: true }));
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: '+19415550000' }) };
+      mockLockLog = [];
+      expect(await withSmsHandoff(dispatch)).toEqual({ ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false });
+      mockTableHandlers.customers = { first: () => null };
+      expect((await withSmsHandoff(dispatch)).ok).toBe(false);
+      mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
+      await expect(withSmsHandoff(dispatch)).rejects.toThrow('db blip');
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(mockLockLog.filter((e) => e[0] === 'released')).toHaveLength(3);
+    });
+
+    it('sms: the pipeline\'s veto of that handoff reports recipient_changed, nothing is stamped sent', async () => {
+      mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECIPIENT_CHANGED', reason: 'recipient_changed' });
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      expect(r).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
+      expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+    });
+
+    it('email: the library gets a locked withProviderHandoff — comms lock, the row FOR SHARE, the address key, then dispatch(trx) — and none without a pin', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL });
+      const { withProviderHandoff } = mockSendTemplate.mock.calls[0][0];
+      expect(typeof withProviderHandoff).toBe('function');
+      mockLockLog = [];
+      mockDbTouches = [];
+      const dispatch = jest.fn(async (trx) => { mockLockLog.push(['dispatch']); expect(trx).toBeDefined(); });
+      expect(await withProviderHandoff(dispatch)).toEqual({ ok: true });
+      expect(mockLockLog).toEqual([['comms', 'cust-1'], ['email', 'pat@example.com'], ['dispatch']]);
+      expect(rowReads()).toHaveLength(1);
+      mockSendTemplate.mockClear();
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+      expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('withProviderHandoff');
+    });
+
+    it('email: an address changed since the card vetoes before dispatch and the send reports recipient_changed', async () => {
+      mockSendTemplate.mockImplementation(async (opts) => {
+        mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, email: 'moved@example.com' }) };
+        const verdict = await opts.withProviderHandoff(async () => { throw new Error('dispatched'); });
+        expect(verdict).toEqual({ ok: false, reason: 'recipient_changed' });
+        return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+      });
+      expect(await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL })).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
+    });
+
+    it('email: an abort before the request for another reason is not reported as a changed recipient', async () => {
+      mockSendTemplate.mockResolvedValue({ sent: false, aborted: true, reason: 'aborted_before_dispatch' });
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL })).reason).toBe('aborted_before_dispatch');
+    });
+  });
+
+  describe('an ambiguous SMS outcome is unknown, not "not sent"', () => {
+    it('deliveryOutcome uncertain (any provider reason), or no outcome stated, is send_outcome_uncertain — link kept, nothing stamped sent', async () => {
+      for (const result of [
+        { sent: false, deliveryOutcome: 'uncertain', reason: 'Twilio request timed out' },
+        { sent: false, reason: 'weird provider text' },
+      ]) {
+        mockDbTouches = [];
+        mockSendCustomerMessage.mockResolvedValue(result);
+        const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+        expect(r).toMatchObject({ action: 'skipped', reason: 'send_outcome_uncertain', secureUrl: expect.stringMatching(/\/secure\//) });
+        expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+      }
+    });
+
+    it('a definite not-sent (blocked, or deliveryOutcome not_sent) keeps its own reason', async () => {
+      for (const result of [
+        { sent: false, blocked: true, reason: 'Recipient is suppressed' },
+        { sent: false, deliveryOutcome: 'not_sent', reason: 'send_window' },
+      ]) {
+        mockSendCustomerMessage.mockResolvedValue(result);
+        expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' })).reason).toBe(result.reason);
+      }
+    });
+  });
+
+  describe('the text must carry the link', () => {
+    it('the send asks for the editor\'s required placeholders, and a rendered body without the URL is not sent (template_inactive, link kept)', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(mockRenderTemplate).toHaveBeenCalledWith(expect.any(Object), 'autopay_setup_link', { requiredVars: ['secure_link'] });
+
+      mockSendCustomerMessage.mockClear();
+      mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay with your saved card.');
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(r).toMatchObject({ action: 'skipped', reason: 'template_inactive', secureUrl: expect.stringMatching(/\/secure\//) });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('the real renderer sends the link without https:// — that text carries the link and is sent (pre-push codex P1)', async () => {
+      // What getTemplate returns in production: stripSmsUrlScheme applied to the rendered body.
+      const { stripSmsUrlScheme } = jest.requireActual('../services/messaging/sms-link-policy');
+      mockRenderTemplate.mockImplementation(async (vars) => stripSmsUrlScheme(`Hi ${vars.first_name}! Set up Auto Pay: ${vars.secure_link}`));
+      mockSendCustomerMessage.mockClear();
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(r).toMatchObject({ action: 'sent', channel: 'sms' });
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).not.toMatch(/https:\/\//);
+      expect(sentBody).toMatch(/\/secure\//);
+      // A full-scheme body (an older renderer, a test double) carries it too.
+      mockRenderTemplate.mockImplementation(async (vars) => `Hi! ${vars.secure_link}`);
+      expect(await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' })).toMatchObject({ action: 'sent' });
+    });
+
+    it('preflight: every active variant must carry the link, not only the base (a bad variant = template_inactive)', async () => {
+      mockActiveVariants.mockResolvedValue([{ id: 'v1', weight: 50, body: 'Hi {first_name}: {secure_link}' }, { id: 'v2', weight: 50, body: 'Hi {first_name}, no link here' }]);
+      mockGetSmsTemplate.mockImplementation(async (_key, _vars, _ctx, opts) => (opts?.templateBody && !opts.templateBody.includes('{secure_link}') ? null : 'rendered'));
+      expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: false, reason: 'template_inactive' });
+      expect(mockGetSmsTemplate).toHaveBeenCalledWith('autopay_setup_link', expect.any(Object), {}, expect.objectContaining({ audit: false, requiredVars: ['secure_link'], templateBody: 'Hi {first_name}, no link here' }));
+      // Zero-weight variants are never selected and are not judged; all-good variants pass.
+      mockActiveVariants.mockResolvedValue([{ id: 'v1', weight: 50, body: 'Hi {first_name}: {secure_link}' }, { id: 'v2', weight: 0, body: 'dead variant' }]);
+      expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    });
+
+    it('preflight: an unreadable variant list fails closed with a retryable reason', async () => {
+      mockActiveVariants.mockRejectedValue(new Error('db blip'));
+      expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: false, reason: 'sms_delivery_check_uncertain' });
+    });
+  });
+
+  describe('setupLinkReuse — what a send would do with the link row (the mint\'s own dedup read)', () => {
+    it('no live row, an expired pending row, or a stale expired claim: a NEW 30-day link', async () => {
+      expect(await setupLinkReuse('cust-1')).toEqual({ state: 'new', expiresAt: null });
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, expires_at: PAST }) };
+      expect(await setupLinkReuse('cust-1')).toEqual({ state: 'new', expiresAt: null });
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST, updated_at: new Date(Date.now() - 24 * 3600 * 1000) }) };
+      expect(await setupLinkReuse('cust-1')).toEqual({ state: 'new', expiresAt: null });
+    });
+
+    it('an unexpired pending row is REUSED as it is, with its own expiry (never extended)', async () => {
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
+      const reuse = await setupLinkReuse('cust-1');
+      expect(reuse.state).toBe('reuse');
+      expect(reuse.expiresAt.getTime()).toBe(FUTURE.getTime());
+      // The send really does reuse it without a new insert (the shared read).
+      const sent = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(sent.expiresAt).toEqual(FUTURE);
+      expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'insert')).toBe(false);
+    });
+
+    it('a row mid-completion is held (live claim, even past expiry): state completing', async () => {
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', updated_at: new Date() }) };
+      expect((await setupLinkReuse('cust-1')).state).toBe('completing');
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST, updated_at: new Date() }) };
+      expect((await setupLinkReuse('cust-1')).state).toBe('completing');
+    });
+
+    it('reads nothing else and writes nothing', async () => {
+      await setupLinkReuse('cust-1');
+      expect(touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => ['insert', 'update'].includes(c[0]))).toEqual([]);
+    });
+  });
+
+  describe('requestAutopaySetupLink (mint-first default)', () => {
+    it('default (omitted or false): a failing channel still MINTS the row and the skip carries the link for copy/paste', async () => {
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
+      for (const opts of [{}, { requireDeliverable: false }]) {
+        mockDbTouches = [];
+        const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', ...opts });
+        expect(r.reason).toBe('no_customer_phone');
+        expect(r.secureUrl).toMatch(/\/secure\//);
+        expect(r.expiresAt).toBeTruthy();
+        expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'insert')).toBe(true);
+        expect(mockGetSmsTemplate).not.toHaveBeenCalled();
+      }
+    });
+
+    it('default: the email path with a suppressed address still mints and returns the link', async () => {
+      mockSendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'Suppressed: bounce' });
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+      expect(r.reason).toBe('Suppressed: bounce');
+      expect(r.secureUrl).toMatch(/\/secure\//);
+      expect(mockPreflightTemplateSend).not.toHaveBeenCalled();
+    });
   });
 });
 

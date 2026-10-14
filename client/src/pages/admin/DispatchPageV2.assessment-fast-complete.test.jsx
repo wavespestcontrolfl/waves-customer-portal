@@ -24,6 +24,7 @@ vi.mock('../../components/tech/FastCompleteAssessmentSheet', () => ({
   default: ({ service, onClose, onCompleted, onFullForm }) => (
     <div>
       Assessment sheet for {service.id} credit {String(service.inspectionCreditAvailable)} property {String(service.routedPropertyId)}
+      {' '}address [{service.address}] full [{service.fullAddress}]
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onCompleted({ success: true })}>Sheet completed</button>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
@@ -69,9 +70,11 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('Dispatch completion routing for the Waves Assessment', () => {
   it('opens the sheet, not CompletionPanel, for an eligible open assessment', async () => {
-    mount([visit('svc-as-on')]);
+    mount([visit('svc-as-on', { address: '100 Example Lane, Bradenton, FL 34201' })]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-as-on' }));
     expect(await screen.findByText(/Assessment sheet for svc-as-on credit true property prop-fixture/)).toBeInTheDocument();
+    // The sheet shows the short line and gets the whole address for the estimate prefill.
+    expect(screen.getByText(/address \[100 Example Lane\] full \[100 Example Lane, Bradenton, FL 34201\]/)).toBeInTheDocument();
     expect(screen.queryByText(/Completion panel/)).not.toBeInTheDocument();
   });
 

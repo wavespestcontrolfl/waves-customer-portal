@@ -6690,7 +6690,8 @@ function CustomerProfileServices({
 // Field list mirrors server/services/property-preferences-schema.js
 // (PREFS_FIELD_SCHEMAS / ALLOWED_FIELDS) plus the two staff-only fields
 // (chemicalSensitivities/chemicalSensitivityDetails) that route also
-// accepts. Keep ACCESS_PREFS_FIELDS in sync if a field is added there.
+// accepts, plus the staff-only new-sod record (sodLaidOn/sodCovers/sodArea).
+// Keep ACCESS_PREFS_FIELDS in sync if a field is added there.
 const ACCESS_PREFS_PREFERRED_DAY_OPTIONS = [
   ["no_preference", "No preference"],
   ["monday", "Monday"],
@@ -6809,6 +6810,9 @@ const ACCESS_PREFS_FIELDS = {
   chemicalSensitivities: "bool",
   chemicalSensitivityDetails: "text",
   specialInstructions: "text",
+  sodLaidOn: "date",
+  sodCovers: "optional",
+  sodArea: "text",
 };
 const accessPrefsColumn = (key) =>
   key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -6985,6 +6989,18 @@ const ACCESS_PREFS_COUPLED = {
   blackoutEnd: ["blackoutStart"],
   chemicalSensitivityDetails: ["chemicalSensitivities"],
 };
+// The sod fields are NOT coupled: the server merges the sod fields a save sends
+// with the stored record under the customer lock (resolveSodRecord), so each
+// save sends only the sod fields changed in this edit and cannot overwrite
+// another admin's newer edit of a different sod field.
+const ACCESS_PREFS_SOD_KEYS = ["sodLaidOn", "sodCovers", "sodArea"];
+
+// Clearing the sod date clears the whole record on the server, so a clear
+// sends the date alone.
+function accessPrefsSodClearKeys(initial, draft, keys) {
+  const clearsDate = keys.includes("sodLaidOn") && !draft.sodLaidOn && !!initial?.sodLaidOn;
+  return clearsDate ? keys.filter((k) => k === "sodLaidOn" || !ACCESS_PREFS_SOD_KEYS.includes(k)) : keys;
+}
 
 // Which draft keys actually changed since the form opened (codex P2): a
 // full-snapshot resubmit could clobber a newer customer portal autosave on
@@ -7021,14 +7037,64 @@ function accessPrefsRejectedMap(rejected) {
 // anything coupled to them — keep their old baseline.
 function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
   const failedKeys = accessPrefsDirtyKeys({}, failed);
-  const saved = dirtyKeys.filter((k) => !failedKeys.includes(k));
+  const saved = dirtyKeys.filter((k) => !failedKeys.includes(k) && !ACCESS_PREFS_SOD_KEYS.includes(k));
   return {
     ...baseline,
     ...Object.fromEntries(saved.map((k) => [k, draft[k]])),
   };
 }
 
-function AccessPrefsReadView({ p, isAdmin, onEdit }) {
+// The sod record as the server stored it after an accepted sod write, or null.
+// The server saves the record whole or not at all and names one rejected field;
+// it also clears Covers and Where with the date. So the form takes all three
+// from the response, never from what was typed.
+function accessPrefsSavedSod(dirtyKeys, failed, preferences) {
+  const touched = dirtyKeys.some((k) => ACCESS_PREFS_SOD_KEYS.includes(k));
+  const rejected = ACCESS_PREFS_SOD_KEYS.some((k) => k in failed);
+  if (!touched || rejected || !preferences) return null;
+  const row = accessPrefsDraftFromRow(preferences);
+  return Object.fromEntries(ACCESS_PREFS_SOD_KEYS.map((k) => [k, row[k]]));
+}
+
+// True when the hold lines answer is for the sod record this profile shows.
+function accessPrefsSameSodRecord(prefs, record) {
+  if (!record) return false;
+  const shown = accessPrefsDraftFromRow(prefs);
+  const answered = accessPrefsDraftFromRow(record);
+  return ACCESS_PREFS_SOD_KEYS.every((k) => (shown[k] ?? "") === (answered[k] ?? ""));
+}
+
+// The hold lines for the saved record (computed on the server): loading, a failed
+// read stated as such (never shown as no holds), a changed record, or the lines.
+function AccessPrefsSodLines({ sodInfo }) {
+  if (sodInfo?.stale) {
+    return <div className="text-ui-label text-ink-secondary" data-testid="sod-stale">The sod record changed. Reload the customer to see the hold dates.</div>;
+  }
+  if (sodInfo?.loading) {
+    return <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the hold dates…</div>;
+  }
+  if (sodInfo?.failed) {
+    return <div className="text-ui-label text-ink-secondary" data-testid="sod-failed">Hold dates could not be read.</div>;
+  }
+  return <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />;
+}
+
+// The saved new-sod record on the read view (admin only): the record and its hold lines.
+function AccessPrefsSodReadBlock({ p, sodInfo }) {
+  if (!p.sod_laid_on) return null;
+  const covers = p.sod_covers === "part" ? `Part of lawn${p.sod_area ? `: ${p.sod_area}` : ""}` : "Whole lawn";
+  return (
+    <>
+      <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
+      <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
+      <AccessPrefRow label="Covers" value={covers} />
+      <AccessPrefsSodLines sodInfo={sodInfo} />
+      <AccessPrefsLastPreEmergent info={sodInfo?.lastPreEmergent} />
+    </>
+  );
+}
+
+function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
   const code = (value) =>
     isAdmin || !value ? value : "Shown in the tech app on service day";
   const hasHoa = ACCESS_PREFS_HOA_ROWS.some(([, key]) => p[key]);
@@ -7105,6 +7171,8 @@ function AccessPrefsReadView({ p, isAdmin, onEdit }) {
       />
       <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
 
+      {isAdmin && <AccessPrefsSodReadBlock p={p} sodInfo={sodInfo} />}
+
       {hasHoa && (
         <>
           <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
@@ -7171,7 +7239,90 @@ function AccessPrefsSwitchRow({ label, checked, onChange }) {
   );
 }
 
-function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets }) {
+// The hold lines come from GET /new-sod (computed on the server from the sod
+// rules); this component only shows them.
+function AccessPrefsSodHoldLines({ lines }) {
+  if (!Array.isArray(lines) || !lines.length) return null;
+  return (
+    <ul className="mt-1 space-y-0.5 text-ui-label text-ink-secondary" data-testid="sod-hold-lines">
+      {lines.map((line) => (
+        <li key={line.key}>{line.text}</li>
+      ))}
+    </ul>
+  );
+}
+
+// The last pre-emergent Waves put on this home's lawn (one entry for each product of that day), and the warning when
+// it is too recent for sod (every string comes from GET /new-sod). Nothing shows while the answer is loading, stale, failed or empty.
+function AccessPrefsLastPreEmergent({ info }) {
+  const entries = Array.isArray(info) ? info.filter((entry) => entry?.line) : [];
+  if (!entries.length) return null;
+  return (
+    <div className="mt-1 space-y-1" data-testid="sod-last-pre-emergent">
+      {entries.map((entry) => (
+        <div key={entry.line} className="space-y-1">
+          <div className="text-ui-label text-ink-secondary">{entry.line}</div>
+          {entry.warning && (
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label" data-testid="sod-pre-emergent-warning">
+              {entry.warning}
+            </div>
+          )}
+          {entry.note && <div className="text-ui-label text-ink-secondary" data-testid="sod-pre-emergent-note">{entry.note}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod, sodUnchanged }) {
+  const clearRecord = () =>
+    setDraft((prev) => ({ ...prev, sodLaidOn: "", sodCovers: "", sodArea: "" }));
+  const part = d.sodCovers === "part";
+  return (
+    <div className="space-y-3">
+      <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
+      <AccessPrefsTextInput d={d} set={set} fieldErrors={fieldErrors} label="Sod laid on" field="sodLaidOn" type="date" />
+      <AccessPrefsField group label="Covers" error={fieldErrors.sodCovers}>
+        <div className="flex flex-wrap gap-4">
+          {[["whole", "Whole lawn"], ["part", "Part of lawn"]].map(([value, label]) => (
+            <label key={value} className="flex items-center gap-1.5 text-ui-body text-zinc-900">
+              <input
+                type="radio"
+                name="sod-covers"
+                checked={value === "part" ? part : !part}
+                onChange={() => set("sodCovers")(value)}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </AccessPrefsField>
+      {part && (
+        <AccessPrefsTextInput d={d} set={set} fieldErrors={fieldErrors} label="Where" field="sodArea" maxLength={120} />
+      )}
+      {hasSavedSod && d.sodLaidOn && (
+        <button
+          type="button"
+          onClick={clearRecord}
+          className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+        >
+          Clear sod record
+        </button>
+      )}
+      {/* The hold lines describe the SAVED record. Once the sod fields are edited they no longer apply, so they are hidden until the save. */}
+      {hasSavedSod && sodUnchanged && <AccessPrefsSodLines sodInfo={sodInfo} />}
+      {hasSavedSod && !sodUnchanged && (
+        <div className="text-ui-label text-ink-secondary" data-testid="sod-hold-lines-stale">
+          Save to see the hold dates for this change.
+        </div>
+      )}
+      {/* Judged against the saved sod date (today when none is saved), so it is hidden while a sod field is being edited. */}
+      {sodUnchanged && <AccessPrefsLastPreEmergent info={sodInfo?.lastPreEmergent} />}
+    </div>
+  );
+}
+
+function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod, sodUnchanged }) {
   const f = { d, set, fieldErrors };
   // Entering sensitivity details turns the flag on — techs only see the
   // warning when the flag is set.
@@ -7229,6 +7380,10 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets 
       <AccessPrefsPills {...f} label="Mowing Days" field="mowingDays" options={DAY_KEYS} />
       <AccessPrefsSelect {...f} label="Mowing Time" field="mowingTimeOfDay" options={ACCESS_PREFS_MOWING_TIME_OPTIONS} />
       <AccessPrefsTextInput {...f} multiline label="Mowing Notes" field="mowingNotes" />
+
+      {isAdmin && (
+        <AccessPrefsNewSod {...f} setDraft={setDraft} sodInfo={sodInfo} hasSavedSod={hasSavedSod} sodUnchanged={sodUnchanged} />
+      )}
 
       <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
       <div className="grid grid-cols-2 gap-2">
@@ -7603,6 +7758,31 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   // The snapshot the form opened with — diffed against on Save so only
   // fields actually touched in THIS edit go in the PUT body.
   const initialDraftRef = useRef(null);
+  // The home stamp the form rendered from (irrigation_home_changed_at). A sod
+  // date set after the home changed is refused unless the save echoes it back.
+  const renderStampRef = useRef(null);
+  // Read-only hold lines for the saved sod record from GET /new-sod.
+  const [sodInfo, setSodInfo] = useState(null);
+  const sodSeq = useRef(0);
+
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    const mine = ++sodSeq.current;
+    // Not loaded yet is its own state: the lines of the last answer (or none) must not stand beside a newer record.
+    setSodInfo({ loading: true });
+    adminFetch(`/admin/customers/${customerId}/new-sod`)
+      .then((data) => {
+        if (mine !== sodSeq.current) return;
+        // Lines built from a record another person changed since this profile loaded are not shown beside the old one.
+        setSodInfo(accessPrefsSameSodRecord(prefs, data?.newSod?.record) ? data.newSod : { stale: true });
+      })
+      // A failed read is stated, never shown as no holds.
+      .catch(() => { if (mine === sodSeq.current) setSodInfo({ failed: true }); });
+    return () => { sodSeq.current += 1; };
+  }, [
+    customerId, isAdmin,
+    prefs?.sod_laid_on, prefs?.sod_covers, prefs?.sod_area, prefs?.sod_rooted_on,
+  ]);
 
   const set = (key) => (value) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -7610,6 +7790,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const openEdit = () => {
     const snapshot = accessPrefsDraftFromRow(prefs);
     initialDraftRef.current = snapshot;
+    renderStampRef.current = prefs?.irrigation_home_changed_at ?? null;
     setDraft(snapshot);
     setFieldErrors({});
     setErr("");
@@ -7623,11 +7804,15 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
 
   // Resolves to the per-field rejections, or throws when the request failed.
   const submit = async (dirtyKeys) => {
+    const body = accessPrefsSavePayload(draft, dirtyKeys);
+    if (ACCESS_PREFS_SOD_KEYS.some((k) => dirtyKeys.includes(k))) {
+      body.confirmedAsOf = renderStampRef.current;
+    }
     const response = await adminFetch(
       `/admin/customers/${customerId}/property-preferences`,
-      { method: "PUT", body: JSON.stringify(accessPrefsSavePayload(draft, dirtyKeys)) },
+      { method: "PUT", body: JSON.stringify(body) },
     );
-    return accessPrefsRejectedMap(response?.rejected);
+    return { failed: accessPrefsRejectedMap(response?.rejected), preferences: response?.preferences };
   };
 
   const handleSave = async () => {
@@ -7637,23 +7822,30 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       setErr(blackoutError);
       return;
     }
-    const dirtyKeys = accessPrefsDirtyKeys(initialDraftRef.current, draft);
+    const dirtyKeys = accessPrefsSodClearKeys(
+      initialDraftRef.current, draft, accessPrefsDirtyKeys(initialDraftRef.current, draft),
+    );
     if (!dirtyKeys.length) return closeEditor();
 
     setSaving(true);
     setErr("");
     let failed;
+    let savedSod;
     try {
-      failed = await submit(dirtyKeys);
+      const result = await submit(dirtyKeys);
+      failed = result.failed;
+      savedSod = accessPrefsSavedSod(dirtyKeys, failed, result.preferences);
     } catch (e) {
       setSaving(false);
       setFieldErrors(accessPrefsRejectedMap(e?.body?.rejected));
       setErr(e.message || "Failed to save property preferences");
       return;
     }
-    initialDraftRef.current = accessPrefsAdvanceBaseline(
-      initialDraftRef.current, draft, dirtyKeys, failed,
-    );
+    initialDraftRef.current = {
+      ...accessPrefsAdvanceBaseline(initialDraftRef.current, draft, dirtyKeys, failed),
+      ...savedSod,
+    };
+    if (savedSod) setDraft((prev) => (prev ? { ...prev, ...savedSod } : prev));
     setFieldErrors(failed);
     const failedCount = Object.keys(failed).length;
     // Refresh before closing: if the reload fails the editor stays open
@@ -7673,7 +7865,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   if (!draft) {
     return (
       <>
-        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />
+        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} sodInfo={sodInfo} />
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
         {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
@@ -7700,6 +7892,10 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           setDraft={setDraft}
           fieldErrors={fieldErrors}
           hasStructuredPets={Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0}
+          isAdmin={isAdmin}
+          sodInfo={sodInfo}
+          hasSavedSod={!!prefs?.sod_laid_on}
+          sodUnchanged={ACCESS_PREFS_SOD_KEYS.every((k) => (draft?.[k] ?? "") === (initialDraftRef.current?.[k] ?? ""))}
         />
       </fieldset>
       <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-hairline border-zinc-200">

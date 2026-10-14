@@ -48,6 +48,20 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     return result;
   }
 
+  test('a blocked refusal row is accepted by the kind check and counts a second sighting on one row', async () => {
+    const signal = {
+      source, kind: 'blocked', code: 'target_clarification_required', closestTool: 'update_customer',
+      summary: 'Synthetic refusal row for db test', attempted: 'Refusal code only',
+    };
+    const [first] = await writeGapRows([signal]);
+    insertedIds.push(first.id);
+    const [second] = await writeGapRows([{ ...signal, summary: 'Same refusal, other words' }]);
+    expect(second.id).toBe(first.id);
+    expect(second.occurrences).toBe(2);
+    const row = await db('agent_gap_reports').where('id', first.id).first();
+    expect(row.kind).toBe('blocked');
+  });
+
   test('list_gap_reports leaves out gaps already marked fixed, by_design or dismissed', async () => {
     const open = await record({ summary: 'Synthetic list gap still open' });
     const fixed = await record({ summary: 'Synthetic list gap fixed after its last sighting' });

@@ -5,7 +5,8 @@
  * used them so query telemetry is redacted.
  *
  * Membership is derived from the scope catalog: EVERY tool whose declared
- * scope is not `none` is a PII tool, because a non-`none` scope means the
+ * scope is not `none` is a PII tool (plus the few `none` tools named in
+ * SCOPE_NONE_PII_TOOL_NAMES below, whose free-form input can carry PII), because a non-`none` scope means the
  * tool reaches customer-identifying rows (a hand-kept inventory missed
  * readers such as get_ar_aging and get_open_commitments, which return names
  * and phone numbers). The reviewed names below document WHY specific tools
@@ -26,10 +27,18 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'repair_closeout',
   // resend_receipt previews name the customer and masked recipients.
   'resend_receipt',
+  // The customer-link writes name the customer and a masked number/inbox,
+  // and return a customer-facing bearer URL + SMS line.
+  'create_customer_link',
+  // send_autopay_setup_link names the customer and a masked number/inbox; its
+  // result never carries the setup link.
+  'send_autopay_setup_link',
   // The billing writes name the customer, a card's last four, and an invoice's
   // printed address (before and after).
   'remove_saved_payment_method',
   'correct_invoice_address',
+  // accept_estimate previews name the customer and a masked email.
+  'accept_estimate',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
@@ -129,10 +138,19 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'get_growthbook_experiments',
 ]);
 
+// Tools whose scope is `none` (they read no customer rows) but whose
+// free-form INPUT can hold a name, phone number or email: the operator types
+// what to look for. Their parameters stay out of logs and telemetry anyway.
+//   find_admin_reads  the `query` words ("Smith autopay", "941-555-0100")
+const SCOPE_NONE_PII_TOOL_NAMES = new Set([
+  'find_admin_reads',
+]);
+
 const { READ_SCOPES, WRITE_SCOPES, toolsWithScope } = require('./scope-policy');
 const PII_TOOL_NAMES = new Set([
   ...REVIEWED_PII_TOOL_NAMES,
+  ...SCOPE_NONE_PII_TOOL_NAMES,
   ...[...new Set([...READ_SCOPES, ...WRITE_SCOPES])].filter(scope => scope !== 'none').flatMap(scope => toolsWithScope(scope)),
 ]);
 
-module.exports = { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES };
+module.exports = { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES, SCOPE_NONE_PII_TOOL_NAMES };

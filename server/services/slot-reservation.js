@@ -45,13 +45,14 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const {
-  overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
+  overlapsLunch, pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
 const { expectedServiceMinutes, expectedMinutesForServices, ensureCatalogLoaded } = require('./scheduling/expected-service-minutes');
 const { violatesTravelGap } = require('./scheduling/travel-gap');
+const { primaryProfileService, writeAreaAddOnVisitRows } = require('./area-addon-visit-rows');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -314,8 +315,9 @@ function treeShrubServiceTypeFromVisits(visitsPerYear) {
 }
 
 function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service', opts = {}) {
-  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
-  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  // The SAME row the catalog stamp picks (catalogLinkForProfile): the label
+  // and the catalog identity of one appointment never name different services.
+  const primary = primaryProfileService(serviceProfile);
   const key = primary?.service || serviceKeyForLabel(fallback);
   // A one-time accept is a single visit with no cadence. The one-time service
   // profile carries an empty `services` array, so visitsPerYear is unknown and
@@ -459,8 +461,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   const lockCatalogTable = async (sp) => { if (lockCatalog) await require('./scheduling/catalog-lock').lockCatalogIdentity(sp); };
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
-  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
-  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const primary = primaryProfileService(serviceProfile);
   const validatedLink = (link) => {
     // A missing match locks no row: activation/mapping can happen after the
     // duration read. Validate the actual identity before stamping it, while
@@ -622,6 +623,19 @@ function notesWithServiceMix(existingNotes, serviceProfile = {}, fallback = '') 
   return `${current}\n${line}`;
 }
 
+// Every sold area add-on other than the visit's own service (the catalog key
+// the commit just stamped on it) becomes an add-on row on the graduated
+// appointment, in the commit's transaction. No add-on in the profile = no
+// query. area-addon-visit-rows.js owns the contract.
+async function writeAcceptedAreaAddOns(client, appointment, serviceProfile) {
+  if (!appointment?.id || serviceProfile?.serviceMode !== 'one_time') return 0;
+  return writeAreaAddOnVisitRows(client, {
+    scheduledServiceId: appointment.id,
+    serviceProfile,
+    ownServiceKey: appointment.service_key_snapshot || null,
+  });
+}
+
 async function resolveReservationServiceProfile(client, row, opts = {}) {
   let estimate = opts.estimate || null;
   if (!estimate && row?.source_estimate_id) {
@@ -763,8 +777,8 @@ async function reserveSlot({
   selectedFrequency = '',
   serviceCadences = null,
   // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
-  // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx) => null | { status, body }`
-  // (may be async; `trx` is the reservation transaction, for reads that must be locked with it). The public /reserve route passes it so a state that appeared after its pre-transaction
+  // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx, { date }) => null | { status, body }`
+  // (may be async; `trx` is the reservation transaction, for reads that must be locked with it; `date` is the selected slot's day). The public /reserve route passes it so a state that appeared after its pre-transaction
   // read (trenching review, the contact_review park) cannot consume capacity. Staff / system callers that
   // reserve for an estimate that cannot be parked (one-tap-purchase's own linked draft) omit it.
   revalidateEstimate = null,
@@ -1045,7 +1059,8 @@ async function reserveSlot({
       // Caller-supplied no-booking revalidation on the LOCKED row, before the profile resolve, any capacity
       // check and the hold insert (see the parameter's comment). The route owns the predicate and the bodies.
       if (typeof revalidateEstimate === 'function') {
-        const refusal = await revalidateEstimate(estimate, trx);
+        // The selected slot's day rides along: a rule judged on the day the visit would happen (the add-on yearly limits).
+        const refusal = await revalidateEstimate(estimate, trx, { date });
         if (refusal) {
           const err = new Error('estimate cannot be self-booked');
           err.code = 'ESTIMATE_NO_BOOKING';
@@ -1388,6 +1403,19 @@ async function reserveSlot({
           expiresAt: refreshedExpiresAt instanceof Date ? refreshedExpiresAt.toISOString() : refreshedExpiresAt,
         });
         return { scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt };
+      }
+      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+      // 2026-10-09): a NEW hold on a 17:00 offer signed before the gate
+      // flipped is refused, like the offer side. Checked only here, after
+      // the same-slot lookup above: a hold the customer already has on that
+      // time is honored (the page re-POSTs /reserve to recover it, and
+      // acceptance commits it). Refused before the estimate's other holds
+      // are dropped. No-op while unset.
+      if (pastCustomerLastStart(slotStartMinutes)) {
+        const err = new Error('slot starts after the last customer start');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
@@ -2094,6 +2122,7 @@ async function commitReservation({
       .where({ id: scheduledServiceId })
       .update(updates)
       .returning('*');
+    await writeAcceptedAreaAddOns(client, updated, serviceProfile);
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
     // Two-treatment package (cockroach / flea): graduating the hold IS the
     // booking, so visit 2 books here for both estimate-accept branches and

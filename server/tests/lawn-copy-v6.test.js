@@ -1,4 +1,4 @@
-// Lawn report v6 copy (P14, GATE_LAWN_REPORT_COPY_V6): fixed sentences built
+// Lawn report v6 copy (P14): fixed sentences built
 // from the visit's facts, no model (owner ruling 2026-10-02). Pure unit tests;
 // the freeze's SQL runs in lawn-copy-v6.db.test.js, the report wiring in
 // lawn-copy-v6-report-data.test.js. Synthetic data only.

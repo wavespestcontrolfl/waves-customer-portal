@@ -14,6 +14,8 @@ const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
 const { validateSodLaidOn, resolveSodRecord, NEW_SOD_COLUMNS, SOD_AREA_MAX } = require('../services/lawn-sod-holds');
+const { buildNewSodSummary } = require('../services/lawn-sod-form-summary');
+const { lastPreEmergentBlock } = require('../services/lawn-last-pre-emergent');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
@@ -466,7 +468,21 @@ function indexServicesForSchedule(rows = []) {
   return { byKey, byName, rows };
 }
 
+// An area add-on line names its catalog row by the key frozen on the estimate
+// (area_addon_<key>), never by its display name: the name is admin-editable,
+// one engine key serves six rows, and "Fire Ant Yard Treatment" reads as the
+// generic fire ant or lawn service to a name matcher. No row for the key
+// means unmatched, not a guess (the visit then carries no add-on identity
+// and the job card withholds its governed rate). Every other line goes to the
+// name and key matcher below.
 function serviceCatalogMatch(line, serviceIndex) {
+  if (normalizeServiceKey(line?.service || '') === 'area_addon') {
+    return serviceIndex.byKey.get(normalizeServiceKey(line?.catalogServiceKey || '')) || null;
+  }
+  return lineServiceCatalogMatch(line, serviceIndex);
+}
+
+function lineServiceCatalogMatch(line, serviceIndex) {
   // The explicit serviceKey is its own candidate, tried FIRST (codex r17
   // P2): an accepted seasonal selection is restamped as { service:
   // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
@@ -1180,6 +1196,8 @@ const SENSITIVE_CUSTOMER_FIELDS = Object.freeze([
   'service_contact3_name', 'service_contact3_phone', 'service_contact3_email',
   'service_contact_role', 'service_contact2_role', 'service_contact3_role',
   'payer_id', 'billing_mode', 'contact_role',
+  // Routes every inbound text from a shared phone (codex #6268 r1).
+  'sms_primary_for_shared_phone',
 ]);
 
 function isValidStage(stage) {
@@ -3542,6 +3560,7 @@ router.get('/:id', async (req, res, next) => {
         satelliteUrl: c.satellite_url,
         hasLeftGoogleReview: !!c.has_left_google_review,
         reviewMarkedAt: c.review_marked_at,
+        smsPrimaryForSharedPhone: !!c.sms_primary_for_shared_phone,
       },
       accountProperties: accountProperties.map(p => ({
         id: p.id,
@@ -3932,7 +3951,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role', smsPrimaryForSharedPhone: 'sms_primary_for_shared_phone' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
@@ -3945,88 +3964,22 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     // Shared by the explicit per-visit prerequisite AND the clear-to-NULL
     // path below: future pending/confirmed visits with no positive price,
-    // which complete unbilled in a per-visit lane (completionInvoiceAmount
-    // refuses the monthly-rate fallback there). Callbacks, always-free
-    // service types, and prepaid-stamped visits are exempt — they complete
-    // without an invoice by design in every lane. Errors return [] — fail
-    // OPEN (completion logging backstops) rather than hard-locking saves.
-    const unpricedFutureBillableVisits = async () => {
-      try {
-        const { etDateString } = require('../utils/datetime-et');
-        const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
-        const rows = await db('scheduled_services')
-          .where({ customer_id: req.params.id })
-          .whereIn('status', ['pending', 'confirmed'])
-          .where('scheduled_date', '>=', etDateString())
-          .where(function unpriced() {
-            this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
-          })
-          .where(function notPrepaid() {
-            this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
-          })
-          .select('id', 'service_type', 'is_callback', 'scheduled_date')
-          .orderBy('scheduled_date', 'asc')
-          .limit(100);
-        return rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
-      } catch { return []; }
-    };
+    // which complete unbilled in a per-visit lane. The query, its exemptions
+    // and its fail-open policy live in services/billing-mode-rules.js, shared
+    // with the Intelligence Bar's update_customer.
+    const BillingModeRules = require('../services/billing-mode-rules');
+    const unpricedFutureBillableVisits = (customerOverride) => BillingModeRules.unpricedFutureBillableVisits(db, req.params.id, { customerOverride });
     if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
-      const { BILLING_MODES } = require('../services/billing-lane');
-      const mode = req.body.billingMode;
-      if (!BILLING_MODES.includes(mode)) {
-        return res.status(400).json({ error: 'Invalid billing mode' });
-      }
-      // Lane prerequisites — a profile save must not move a customer into a
-      // lane whose visits then complete unbilled (Codex r1): membership
-      // needs a dues rate, per-application needs the acceptance fee, and
-      // annual prepay needs a live (paid or pending) coverage term.
-      const beforeRow = await db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee');
-      const effectiveRate = req.body.monthlyRate !== undefined
-        ? parseFloat(req.body.monthlyRate) || 0
-        : parseFloat(beforeRow?.monthly_rate) || 0;
-      if (mode === 'monthly_membership' && !(effectiveRate > 0)) {
-        return res.status(400).json({ error: 'Set a monthly rate before selecting Monthly membership — dues cannot collect at $0' });
-      }
-      if (mode === 'per_application' && !(parseFloat(beforeRow?.per_application_fee) > 0)) {
-        return res.status(400).json({ error: 'Set a per-application fee before selecting Per application — visits would complete unbilled' });
-      }
-      if (mode === 'annual_prepay') {
-        let liveTerm = null;
-        try {
-          // payment_pending deliberately does NOT qualify: the annual-prepay
-          // service only stamps this lane once the prepay invoice is PAID —
-          // pending-window visits must keep billing per application
-          // (Codex r2). The term must also COVER TODAY: an expired or
-          // future-dated term would park the customer in a lane the cron
-          // skips while completion coverage stays false — recurring visits
-          // would complete unbilled until someone noticed (Codex r8 P1).
-          const { etDateString } = require('../utils/datetime-et');
-          const todayEt = etDateString();
-          liveTerm = await db('annual_prepay_terms')
-            .where({ customer_id: req.params.id })
-            .whereIn('status', ['active', 'renewal_pending'])
-            .where('term_start', '<=', todayEt)
-            .where('term_end', '>=', todayEt)
-            .first('id');
-        } catch { /* table absent — treat as no live term */ }
-        if (!liveTerm) {
-          return res.status(400).json({ error: 'Annual prepay requires a PAID term covering today — the lane stamps automatically when the annual invoice is paid' });
-        }
-      }
-      if (mode === 'per_visit' || mode === 'one_time') {
-        // These lanes bill each visit's OWN price, so a future visit
-        // without a positive price completes uninvoiced with only a log
-        // line. Same "would complete unbilled" prerequisite as the other
-        // lanes (Codex r6) — see unpricedFutureBillableVisits above.
-        const billable = await unpricedFutureBillableVisits();
-        if (billable.length > 0) {
-          const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
-          const plural = billable.length !== 1;
-          return res.status(400).json({
-            error: `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`,
-          });
-        }
-      }
+      // Lane prerequisites (monthly rate, per-application fee, live annual
+      // term, priced upcoming visits) — one copy, services/billing-mode-rules.js,
+      // so the Intelligence Bar refuses exactly what this save refuses.
+      const refusal = await BillingModeRules.billingModeRefusal(req.body.billingMode, {
+        requestedMonthlyRate: req.body.monthlyRate,
+        loadRates: () => db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee'),
+        loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(db, req.params.id),
+        loadUnpricedFutureVisits: unpricedFutureBillableVisits,
+      });
+      if (refusal) return res.status(400).json({ error: refusal });
     } else if (req.body.billingMode !== undefined) {
       // Clearing the selector to "Not set" re-enters legacy inference — a
       // tier-less or sentinel-tier customer with a lingering rate RESOLVES
@@ -4043,7 +3996,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear,
       });
       if (resolvedOnClear.mode !== 'monthly_membership') {
-        const billable = await unpricedFutureBillableVisits();
+        const billable = await unpricedFutureBillableVisits({ billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear });
         if (billable.length > 0) {
           const plural = billable.length !== 1;
           return res.status(400).json({
@@ -4067,6 +4020,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
+        else if (v === 'sms_primary_for_shared_phone') { updates[v] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === 1; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
         else if (v === 'billing_mode') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : req.body[k]; }
         else if (v === 'contact_role') { updates[v] = contactRole.value; }
@@ -4090,6 +4044,9 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       const phoneProblem = contactPhoneProblem(updates.phone);
       if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
     }
+    // A changed number drops the shared-phone texting mark unless this save
+    // sets it (intake-normalize.clearSharedPhoneMarkOnPhoneChange, codex #6268).
+    require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, before);
     if (req.body.addressLine1 !== undefined || req.body.addressLine2 !== undefined) {
       const normalizedAddress = normalizeAdminAddressInput({
         addressLine1: req.body.addressLine1 !== undefined ? req.body.addressLine1 : before.address_line1,
@@ -4256,6 +4213,24 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
+          // REBUILD the shared-phone mark clear from the locked row (codex #6268
+          // r4/r8): the pre-lock pass may have derived `false` from a stale
+          // phone; a save that moved the number and marked it since keeps its
+          // mark when this write no longer changes the identity. Only a derived
+          // value is dropped — a mark this request sets explicitly stands.
+          if (req.body.smsPrimaryForSharedPhone === undefined) delete updates.sms_primary_for_shared_phone;
+          require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, lockedBefore);
+          // An explicit mark is a choice for the number the operator SAW. If a
+          // concurrent save changed this row's phone identity before the lock
+          // and this request does not set the phone itself, the mark would
+          // bind to a number nobody chose it for (codex #6268 r13): refuse,
+          // the operator re-reads and marks again.
+          if (updates.sms_primary_for_shared_phone === true && updates.phone === undefined
+            && phoneLast10(lockedBefore.phone) !== phoneLast10(before.phone)) {
+            throw Object.assign(new Error('This customer\'s phone number changed while you were editing. Reload the record, then set the texting mark again.'), {
+              statusCode: 409, isOperational: true, code: 'phone_changed_since_read',
+            });
+          }
           contactAuditAt = new Date();
           // ADMIN-BUG-R10 (round 3): on EVERY write of pipeline_stage=
           // 'churned' — including a re-save on an already-churned row, so a
@@ -4790,15 +4765,17 @@ function prefsRenderStamp(body) {
 // out the lock would re-read the cleared row and write the old home's sod onto
 // the new one: the lock orders the writes but says nothing about when the form
 // was rendered. Setting a sod date after a move on record therefore needs the
-// matching render stamp (an absent one fails closed). Clearing is always allowed.
+// matching render stamp (an absent one fails closed). Clearing a record that exists needs it too.
 const SOD_STALE_HOME = Object.freeze({
   ok: false,
   field: 'sodLaidOn',
-  message: 'The home on this customer changed. Reload the customer, then enter the sod record again.',
+  message: 'The home on this customer changed. Reload the customer, then make the sod change again.',
 });
 function sodWriteIsFresh(current, sodInput, renderStamp) {
+  // A clear with no record on the row changes nothing, so it is always fresh. A clear of a record that exists
+  // faces the same stamp as a set: a form rendered before a move must not delete the new home's record.
   const clears = 'sod_laid_on' in sodInput && sodInput.sod_laid_on == null;
-  if (clears) return true;
+  if (clears && !current?.sod_laid_on) return true;
   const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
   if (movedAt == null) return true;
   return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
@@ -5011,6 +4988,28 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     logger.info(`[customers] property_preferences updated for ${customerId}: ${JSON.stringify({ fields: loggedFields })}`);
 
     res.json({ success: true, preferences, saved: true, ...(rejected.length ? { rejected } : {}) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/customers/:id/new-sod — the read-only hold lines beside the
+// new-sod fields in Customer 360 (office only; no write, no message to anyone):
+//   holdLines  the plain hold lines for the saved sod record ([] when none)
+//   lastPreEmergent  [{ line, warning, note }] | null: one entry for each pre-emergent product Waves put on
+//              this home's lawn on the newest day it applied one. `warning` states that product's own label
+//              wait (only for a registration the app holds, and only inside the wait, counted to the sod
+//              date, or to today when no sod date is saved); `note` says to read the label when the app
+//              holds no wait for it. Both are null once the sod is confirmed rooted. null = none, or unproven
+// The form's render stamp for confirmedAsOf is the irrigation_home_changed_at
+// that GET /:id already returns on `preferences`.
+router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
+  try {
+    const customerId = req.params.id;
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const prefsRow = await db('property_preferences').where({ customer_id: customerId }).first();
+    const todayEt = etDateString();
+    const lastPreEmergent = await lastPreEmergentBlock({ knex: db, customerId, sodLaidOn: prefsRow?.sod_laid_on ?? null, sodRootedOn: prefsRow?.sod_rooted_on ?? null, todayEt });
+    res.json({ newSod: { ...buildNewSodSummary({ prefsRow: prefsRow || null, todayEt }), lastPreEmergent } });
   } catch (err) { next(err); }
 });
 
@@ -5242,7 +5241,8 @@ router.post('/:id/follow-up', requireAdmin, async (req, res, next) => {
 });
 
 // DELETE /api/admin/customers/:id — soft-delete a customer
-router.delete('/:id', requireAdmin, async (req, res, next) => {
+router.delete('/:id', requireAdmin, customerArchiveHandler);
+async function customerArchiveHandler(req, res, next) {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -5288,7 +5288,17 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     let relink;
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
-        await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        if (req.archiveAlsoLock) {
+          // A caller that also depends on a second customer row (the bar's
+          // duplicate delete reads its retained twin) locks both rows in ONE
+          // statement, ascending id: the order the merge engine takes the
+          // same two rows in (customer-dedupe.js), so a delete and a merge on
+          // the pair cannot deadlock. The lock is held to commit.
+          await trx('customers').whereIn('id', [req.params.id, req.archiveAlsoLock]).orderBy('id').forUpdate().select('id');
+        } else {
+          await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        }
+        if (req.archivePrecheck) await req.archivePrecheck(trx);
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
           const err = new Error('customer_still_billing_or_scheduled');
@@ -5329,7 +5339,39 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
   } catch (err) { next(err); }
-});
+}
+
+// The customer-page delete without an HTTP request — the Intelligence Bar's
+// delete_duplicate_customer tool (owner ruling 2026-10-07) runs this so the
+// bar and the customer page soft-delete through the SAME handler (same
+// billing wind-down guard, deletion gate, newsletter relink and audit row).
+// It runs the handler with the only request fields it reads (params.id,
+// technicianId, ip, user-agent) and a capture response, and resolves the
+// reply it would send: { status, json }. An error passed to next() rejects.
+// `precheck(trx)`, when given, runs inside the archive transaction right
+// after the customer row lock and before any write; a throw rolls the
+// archive back and rejects (the bar re-checks the pair and "still empty"
+// there). `alsoLock` (a second customer id) is locked with the archived row,
+// both in ascending id order, and held to commit. HTTP requests never carry
+// either. Restore is PATCH /:id/restore below.
+async function archiveCustomerAsAdmin({ customerId, actor = {}, precheck = null, alsoLock = null }) {
+  const req = {
+    archivePrecheck: precheck,
+    archiveAlsoLock: alsoLock,
+    params: { id: customerId },
+    technicianId: actor.technicianId || null,
+    ip: null,
+    get: (name) => (String(name).toLowerCase() === 'user-agent' ? (actor.userAgent || 'intelligence-bar') : undefined),
+  };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    customerArchiveHandler(req, res, reject).catch(reject);
+  });
+}
 
 // PATCH /api/admin/customers/:id/restore — restore a soft-deleted customer (admin only)
 router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
@@ -6645,6 +6687,8 @@ router._private = {
 };
 
 router.ensureCustomerAccount = ensureCustomerAccount;
+// Same handler as DELETE /:id — see archiveCustomerAsAdmin above.
+router.archiveCustomerAsAdmin = archiveCustomerAsAdmin;
 router.findAccountByContact = findAccountByContact;
 // Canonical membership predicate — consumers (estimate edit-source) must
 // classify sentinel tiers (One-Time/Commercial/...) the same way this file

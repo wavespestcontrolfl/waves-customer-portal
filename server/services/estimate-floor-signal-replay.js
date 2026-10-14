@@ -77,6 +77,24 @@ function estimateLawnFloorArmed(estData = {}) {
   return null;
 }
 
+// Lawn cost-plus list mode (GATE_LAWN_COST_PLUS_LIST). Server-written evidence
+// only: the engine's own pricingMetadata stamp (the mode plus the knob snapshot
+// it priced with). A browser-posted option or stored input is never evidence.
+// An estimate that priced a lawn line (or had one opted out) and carries no
+// stamp was priced before the mode existed: it pins OFF. An estimate that
+// never priced a lawn pins nothing, so a lawn added later follows the live gate.
+function savedLawnCostPlusSignal(estData) {
+  const roots = [estData?.result, estData?.engineResult, estData].filter(Boolean);
+  const pricedLawn = roots.some((r) => [].concat(r.lineItems || []).some((li) => li?.service === 'lawn_care')
+    || [].concat(r.results?.lawn || []).length > 0)
+    || [].concat(estData?.serviceOptOut?.events || []).some((e) => e?.serviceKey === 'lawn_care');
+  if (!pricedLawn) return {};
+  const stamp = roots.flatMap((r) => [r.pricingMetadata, r.routingMetadata])
+    .find((m) => typeof m?.lawnCostPlusList === 'boolean');
+  const on = stamp?.lawnCostPlusList === true;
+  return { lawnCostPlusList: on, ...(on && stamp.lawnCostPlusListBasis ? { lawnCostPlusListBasis: stamp.lawnCostPlusListBasis } : {}) };
+}
+
 // Legacy pre-disarm estimates (engine armed the cost floor by default, so
 // builder payloads never needed to persist the flag): the floor evidence
 // lives on the stored rows as ENFORCEMENT stamps. Only stamps the armed
@@ -180,6 +198,7 @@ function savedFloorReplaySignals(estData) {
   const signals = { palmAnnualRounding: palm || palmRemoval ? (palmMode === 'cents' ? 'cents' : 'whole') : undefined };
   const lawnArm = estimateLawnFloorArmed(estData);
   if (typeof lawnArm === 'boolean') signals.useLawnCostFloor = lawnArm;
+  Object.assign(signals, savedLawnCostPlusSignal(estData));
   const minSignal = require('./estimate-converter').estimateLawnProgramMinimumSignal(estData);
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
   const pest = estimatePestFloorSignal(estData);
@@ -191,6 +210,7 @@ function savedFloorReplaySignals(estData) {
 module.exports = {
   rawEngineInputs,
   estimateLawnFloorArmed,
+  savedLawnCostPlusSignal,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,

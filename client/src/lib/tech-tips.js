@@ -59,3 +59,26 @@ export function tipsCalledForByNote(tips, note) {
   return scored.sort((a, b) => b.hits - a.hits).map((entry) => entry.tip.id);
 }
 
+
+// Tips the customer has not had lately lead: a tip sent to this customer in
+// the picker's window (`lastSent`, id -> day) moves behind the rest, so a
+// recurring visit's short list changes from visit to visit. Order is otherwise
+// kept; nothing is hidden.
+export function unsentTipsFirst(tips, lastSent) {
+  if (!lastSent) return tips;
+  return [...tips.filter((tip) => !lastSent[tip.id]), ...tips.filter((tip) => lastSent[tip.id])];
+}
+
+// The picker's groups with that order (owner 2026-10-09). A lawn visit keeps
+// the server's order, which ranks by today's findings.
+export function rotatedTipGroups(library) {
+  const groups = library?.groups || [];
+  if (library?.line === "lawn") return groups;
+  return groups.map((group) => ({ ...group, tips: unsentTipsFirst(group.tips || [], library?.lastSent) }));
+}
+
+// Every id a pick may hold: the visit's list and `more`, the tips a search of
+// the whole library reaches.
+export function pickableTipIds(library) {
+  return new Set([...(library?.groups || []).flatMap((group) => group.tips || []), ...(library?.more || [])].map((tip) => tip.id));
+}

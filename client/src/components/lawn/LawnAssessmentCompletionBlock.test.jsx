@@ -98,4 +98,28 @@ describe('LawnAssessmentCompletionBlock', () => {
     await waitFor(() => expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ photos: 1, canAnalyze: true })));
     vi.unstubAllGlobals();
   });
+
+  it('the customer-label chooser follows each lookup: a service whose lookup omits the flag does not keep it', async () => {
+    class FixtureFileReader { readAsDataURL() { this.result = 'data:image/jpeg;base64,cGhvdG8='; this.onload({ target: { result: this.result } }); } }
+    class FixtureImage { set src(_v) { this.width = 800; this.height = 600; this.onload(); } }
+    vi.stubGlobal('FileReader', FixtureFileReader);
+    vi.stubGlobal('Image', FixtureImage);
+    const request = vi.fn(async (path) => (path.endsWith('/svc-1')
+      ? { shotListEnabled: true, labelPickEnabled: true, assessment: null }
+      : { shotListEnabled: true, assessment: null }));
+    const block = (id) => <LawnAssessmentCompletionBlock service={{ id, customerId: 'cust-1' }} request={request} showGaugeReading />;
+    const addSlotted = async () => {
+      await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+      fireEvent.change(screen.getByLabelText('Add turf photos'), { target: { files: [new File(['x'], 'a.jpg', { type: 'image/jpeg' })] } });
+      fireEvent.change(await screen.findByLabelText('Slot for photo 1'), { target: { value: 'shade' } });
+    };
+    const { rerender } = render(block('svc-1'));
+    await addSlotted();
+    expect(await screen.findByLabelText('Shown to the customer as, photo 1')).toBeTruthy();
+    rerender(block('svc-2'));
+    await addSlotted();
+    expect(screen.queryByLabelText(/Shown to the customer as/)).toBeNull();
+    vi.unstubAllGlobals();
+  });
 });
+

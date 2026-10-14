@@ -9,7 +9,8 @@ import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
-import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
+import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
+import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -814,14 +815,16 @@ function conditionWarningLine(condition, reserviceNoApplication) {
   return condition && !reserviceNoApplication ? [condition.text, condition.pets].filter(Boolean).join(' ') : '';
 }
 
-function conditionStatus(condition, completedItems, completedAreas) {
+function conditionStatus(condition, completedItems, completedAreas, resultOverridden = false) {
   return {
     heading: 'your service is complete!',
     status: 'Service complete',
     statusTone: 'neutral',
     result: condition.text,
     completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service completed today.',
-    detail: condition.pets || '',
+    // GATE_LAWN_REPORT_POLISH: the keep-off line belongs right after the condition sentence; when the result line is
+    // another sentence (the page's own status headline) there is no condition above it to follow.
+    detail: resultOverridden ? '' : (condition.pets || ''),
   };
 }
 
@@ -980,7 +983,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   }
 
   // A frozen re-entry condition (lawn): the result line IS the condition. It never counts down.
-  if (condition) return conditionStatus(condition, completedItems, completedAreas);
+  if (condition) return conditionStatus(condition, completedItems, completedAreas, data.statusResultOverridden === true);
 
   if (pendingTarget) {
     return {
@@ -1086,7 +1089,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'neutral',
-      // A lawn report with the lead block (GATE_LAWN_REPORT_LEAD) prints the
+      // A lawn report with the lead block prints the
       // snapshot headline right below as its own heading — not here too.
       result: v2Snapshot.peaceOfMind
         || (data.reportV2?.lead ? null : v2Snapshot.statusHeadline)
@@ -2237,6 +2240,13 @@ function LawnTrendChart({ trend = [], summary }) {
   );
 }
 
+// Alt text for a lawn photo in the strip. GATE_LAWN_PHOTO_LABEL_PICK: a technician-chosen customer label
+// (labelPicked, present only while the gate is live) names the photo; otherwise the legacy type wording, as before.
+export function lawnPhotoAlt(photo) {
+  if (photo?.labelPicked) return `Lawn ${String(photo.labelPicked).toLowerCase()}`;
+  return photo?.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo';
+}
+
 function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   useEffect(() => {
     if (mode !== 'live' || !assessment) return;
@@ -2309,8 +2319,8 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
         <div className="lawn-photo-strip">
           {visiblePhotos.map((photo) => (
             <figure key={photo.id}>
-              <img src={photo.url} alt={photo.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo'} />
-              <figcaption>{photo.zoneLabel || formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
+              <img src={photo.url} alt={lawnPhotoAlt(photo)} />
+              <figcaption>{photo.labelPicked || photo.zoneLabel || formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
             </figure>
           ))}
         </div>
@@ -2491,6 +2501,10 @@ const TECH_NOTE_OPENERS = {
   3: ['Three things that will make a real difference:', 'A few things I’d take care of soon:'],
 };
 
+// A note made only of aftercare tips (what to expect after this service's
+// work, owner 2026-10-09) is not "one thing to do": it gets its own opener.
+const TECH_NOTE_AFTERCARE_OPENERS = ['Here is what to expect after this visit:', 'A quick note on what comes next:'];
+
 export function techNoteSeed(value) {
   let h = 0;
   for (const ch of String(value || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -2509,7 +2523,12 @@ export function composeTechNote({ tips = [], customerName = '', firstName, seed 
   const count = Math.min(Math.max(tips.length, 1), 3);
   const first = techNoteFirstName(firstName !== undefined ? firstName : customerName);
   const greeting = first ? TECH_NOTE_GREETINGS[seed % TECH_NOTE_GREETINGS.length](first) : 'Hey there,';
-  const openers = TECH_NOTE_OPENERS[count];
+  // The technician's own line may be something they did or saw at this visit
+  // (owner 2026-10-09: advice or an observation, both), which does not read
+  // under "One thing that will make a real difference:". A note made only of
+  // their own words gets the greeting and no opener.
+  if (tips.length > 0 && tips.every((tip) => tip?.source === 'technician')) return { greeting, opener: null };
+  const openers = tips.length > 0 && tips.every((tip) => tip?.aftercare === true) ? TECH_NOTE_AFTERCARE_OPENERS : TECH_NOTE_OPENERS[count];
   return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
 }
 
@@ -2551,7 +2570,7 @@ export function TechNoteCard({ data, mode = 'live' }) {
       <blockquote style={{ position: 'relative', margin: 0, padding: '4px 4px 0 22px' }}>
         <span aria-hidden="true" style={{ position: 'absolute', left: -2, top: -14, fontSize: 56, lineHeight: 1, color: 'var(--line-strong, rgba(4,57,94,0.35))', fontFamily: 'Georgia, serif' }}>“</span>
         <p style={{ margin: '0 0 10px', fontWeight: 600, color: 'var(--text, #04395E)' }}>{greeting}</p>
-        <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>
+        {opener && <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>}
         {tips.map((tip, i) => (
           <p key={`${tip.id || 'tip'}-${i}`} style={{ margin: '0 0 10px', lineHeight: 1.6 }}>
             {tip.copy}
@@ -2720,6 +2739,30 @@ function RecommendationsSection({ data }) {
   );
 }
 
+// GATE_LAWN_REPORT_POLISH: what the lawn status card prints for its result line and whether the keep-off line
+// follows. With a frozen re-entry condition the plain status prints the condition sentence as the result and the
+// keep-off line right after it. When another sentence is the result (the page's own, or, on the lawn layout, the
+// lead's status headline instead of the walk-on rule that "Your part" states) the keep-off line has no condition
+// above it, so it is left off the card. The layout hero is changed only when the lead has a headline to print.
+function polishStatusProps(data, mode, override, layout) {
+  const condition = data.lawnPolish === true ? reentryCondition(data.dynamicContext?.reentry) : null;
+  if (!condition) return { data, override };
+  // The page's own result line over the condition drops the keep-off line in every mode (live, PDF, static). Only the
+  // layout hero's headline substitution is live-only.
+  const headline = !override && layout && mode === 'live' && smartStatusSummary(data, mode, Date.now()).result === condition.text
+    ? data.reportV2?.lead?.headline || null : null;
+  const result = override || headline;
+  return result ? { data: { ...data, statusResultOverridden: true }, override: result } : { data, override };
+}
+
+// The lawn status card, standard or on the lawn layout (the layout drops "Your documents" and a next appointment the
+// plan area prints; see lawnLayoutStatusData).
+function LawnStatusCard({ data, mode, layout }) {
+  const base = layout ? lawnLayoutStatusData(data, mode) : data;
+  const props = polishStatusProps(base, mode, layout ? lawnTodaysResult(data) : (data.reportV2?.todaysResult || null), layout);
+  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} />;
+}
+
 function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
@@ -2759,10 +2802,14 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
               .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
               .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
           };
+          // GATE_LAWN_REPORT_STAGE1_FIXES (the server sets lawnStage1Fixes on a lawn report only): the report link can be
+          // shared, so the web hero keeps the name and the service address and leaves out the email and phone. The PDF
+          // prints its own contact block.
+          const hideContact = data.lawnStage1Fixes === true;
           const contactLines = [
             data.customerName,
-            data.customerEmail,
-            formatCustomerPhone(data.customerPhone),
+            hideContact ? null : data.customerEmail,
+            hideContact ? null : formatCustomerPhone(data.customerPhone),
             data.serviceAddress,
           ].map(displayContactLine).filter(Boolean);
           return contactLines.length ? (
@@ -9737,10 +9784,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <LawnLayoutBody
               data={data}
               slots={{
-                status: <ServiceStatusCard data={lawnLayoutStatusData(data, mode)} mode={mode} resultOverride={lawnTodaysResult(data)} />,
+                status: <LawnStatusCard data={data} mode={mode} layout />,
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
                 upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
+                newSod: <LawnNewSodCard data={data} mode={mode} />,
                 yourPart: <LawnYourPart data={data} mode={mode} token={token} />,
                 recap: <RecapVideoCard recap={data.recap} token={token} />,
                 recordedFindings: recordedFindingsList,
@@ -9761,7 +9809,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         >
-        <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+        <LawnStatusCard data={data} mode={mode} layout={false} />
 
         {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
             under the visit status, ahead of everything else the customer
@@ -9773,7 +9821,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </LawnPrintContext.Provider>
         )}
 
-        {/* The lawn lead (GATE_LAWN_REPORT_LEAD) is the report's above-the-fold
+        {/* The lawn lead is the report's above-the-fold
             summary, so it sits right under the status and watering banner, not
             down in the lawn section (which then drops its hero). */}
         {isLawnReport && data.reportV2?.lead && (
@@ -9781,6 +9829,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
           </LawnPrintContext.Provider>
         )}
+
+        <LawnNewSodCard data={data} mode={mode} style={{ marginTop: 16 }} />
 
         <ReserviceReportCard data={data} mode={mode} />
 
@@ -10635,7 +10685,8 @@ export default function ReportViewPage() {
     // the post-service email attachment all serve this capture. The glass
     // web report (live) and the unused static mode are unchanged.
     if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
-    return <ServiceReportV1 data={data} token={token} mode={mode} />;
+    // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
+    return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }
   return <LegacyReport data={data} token={token} glass={glassActive} />;
 }

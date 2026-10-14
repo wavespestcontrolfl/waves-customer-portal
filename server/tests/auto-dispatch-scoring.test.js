@@ -142,3 +142,20 @@ describe('density/cluster term (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     expect(full.total_score).toBeLessThanOrEqual(100);
   });
 });
+
+describe('default_time_score (owner 2026-10-09)', () => {
+  test('reports the time credit that came from the service-type default window', () => {
+    const prefs = { ...NEUTRAL_PREFS, effective_time_window: TIME_WINDOWS.early_morning };
+    const inWin = scoreAppointmentPlacement(placement({ start_time: '08:00' }), prefs, {});
+    const outWin = scoreAppointmentPlacement(placement({ start_time: '15:00' }), prefs, {});
+    expect(inWin.default_time_score).toBe(12.5);
+    expect(outWin.default_time_score).toBe(0);
+    expect(inWin.customer_preference_score - outWin.customer_preference_score).toBe(12.5);
+  });
+
+  test('is 0 when the customer set the time, and when there is no window at all', () => {
+    const explicit = { ...NEUTRAL_PREFS, effective_time_window: TIME_WINDOWS.early_morning, preferred_time_window: TIME_WINDOWS.early_morning };
+    expect(scoreAppointmentPlacement(placement({ start_time: '08:00' }), explicit, {}).default_time_score).toBe(0);
+    expect(scoreAppointmentPlacement(placement(), NEUTRAL_PREFS, {}).default_time_score).toBe(0);
+  });
+});

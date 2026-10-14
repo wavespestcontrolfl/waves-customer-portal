@@ -79,8 +79,23 @@ const API = import.meta.env.VITE_API_URL || '';
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 const CLOSE_TAP_CSS_PX = 22;
 
+// `autoTrace`: one outline read as soon as the photo is ready. Never over
+// points already there or a trace already saved, and never a second time
+// (a failed read leaves the tech to tap Auto-trace or trace by hand).
+function useAutoTraceOnce(conditions, run) {
+  const ran = useRef(false);
+  useEffect(() => {
+    if (ran.current || !conditions.every(Boolean)) return;
+    ran.current = true;
+    run();
+  });
+}
+
 export default function TechTreatmentZoneModal({
   serviceId, customerName, address, lat, lng, onClose, onSaved,
+  // Opened from the Fast Complete footer's "Auto-trace the house": the outline
+  // read starts once the photo is ready (one time, and only on an empty trace).
+  autoTrace,
   // Optional: the property the caller loaded the visit at. Sent with the
   // save so the server refuses a visit moved to another property since, even
   // a save that waited behind the move (Codex #5538). Absent, nothing changes.
@@ -343,6 +358,7 @@ export default function TechTreatmentZoneModal({
       setSuggesting(false);
     }
   };
+  useAutoTraceOnce([autoTrace, mapState.status === 'ready', step === 'trace', !points.length, !existing], handleAutoTrace);
 
   // Step the map zoom in place. The Static Map re-centers on the same
   // lat/lng, so dropped points re-project exactly (pure 2× scale per step) —
@@ -700,6 +716,11 @@ export default function TechTreatmentZoneModal({
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
+            {lawnMode && !yardMode ? (
+              <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: 500, color: T.muted }}>
+                Trace the grass only — leave the house, driveway and pool out.
+              </p>
+            ) : null}
             {suggestNote ? (
               <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: 500, color: T.accent }}>{suggestNote}</p>
             ) : null}

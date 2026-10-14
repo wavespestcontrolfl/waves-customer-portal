@@ -103,6 +103,14 @@ describe('buildWeedMix', () => {
     const mix = await run();
     expect(mix.productIds).toEqual([LEAD, SURF]);
     expect(mix.note).toBe('Bravo yearly limit reached; left out.');
+    // The decision names it as forbidden by a read limit: the sheet's search leaves it out.
+    expect(mix.blockedIds).toEqual([CERT]);
+  });
+
+  test('every decision names what a read limit forbids: nothing when nothing is capped, the lead at its cap', async () => {
+    expect((await run()).blockedIds).toEqual([]);
+    capped(LEAD);
+    expect((await run()).blockedIds).toEqual([LEAD]);
   });
 
   test('a limit read that fails offers nothing', async () => {

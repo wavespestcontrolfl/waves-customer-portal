@@ -29,6 +29,54 @@ Tool modules live in `server/services/intelligence-bar/{context}-tools.js`,
 one file per context. The `context` parameter drives which tools load and
 which system-prompt extension applies — no page-specific endpoints.
 
+**Full-access exception (owner ruling 2026-10-12, `GATE_IB_TOOL_SEARCH`).**
+Other admins, technicians, the tech context and the `agent_estimate` rail
+follow the mapping below: the page list plus `discover_capabilities`, and a
+`discover_capabilities` result merges the definitions it found into `tools` at
+once. With the gate off, the owner follows the mapping too.
+
+The search path is one login and one kind of request: a full-access login
+(`ibFullAccess`, the owner) on an ordinary admin page, on the platform path
+(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a model that accepts
+Anthropic's tool search (`MODELS.anthropicSupportsToolSearch`: Opus, Sonnet and
+Haiku 4.5 and later, Fable, Mythos; Opus 4.1 and earlier and any unknown id do
+not) AND does NOT think by default (`MODELS.anthropicThinksByDefault`), on a
+FRESH request. Both model conditions sit in `modelTakesToolSearch`
+(`tool-search.js`). With an unsupported model, or a thinking model, the bar
+keeps the ordinary list, as with the gate off: an unsupported model would
+reject the request, and a history with search blocks and thinking blocks
+cannot be rewritten. A
+resumed task (`/tasks/:id/resume`, `/tasks/:id/select-target`) always runs on
+the ordinary list. On the search path `initialTools` (with `scope.toolSearch`,
+set by `toolSearchWanted` in `tool-search.js`) keeps the page list as the eager
+tools, with `discover_capabilities` still in it as the route to owner-workflow
+actions that are not tools. It adds the API's own tool search
+(`tool_search_tool_bm25_20251119`, no beta header) and sends every other action
+`allowed()` accepts (not `confirmed_endpoint`) with `defer_loading: true`,
+sorted by name. Anthropic documents tool-selection accuracy dropping past 30 to
+50 active tools, so the owner's active set stays page-sized. Deferred tools sit
+outside the cached prefix and carry no `cache_control`.
+
+Inside one live request `tools` never changes. Search blocks
+(`server_tool_use`, `tool_search_tool_result`) are not `tool_use`: the loop
+never executes them and passes the assistant content back unchanged;
+`pause_turn` continues the turn. A `discover_capabilities` result
+(`toolResultContent`) is `tool_reference` blocks only, at most 5, never mixed
+with other content (the API rejects that with a 400), and the API expands them
+from the deferred definitions already in `tools`. When the result also holds an
+owner-workflow action, it is the plain JSON string instead.
+
+When a task continues after a card or an interruption, `stripServerSearchBlocks`
+rewrites the saved checkpoint as it is loaded: search blocks and
+`tool_reference` blocks are removed (a references-only result becomes the JSON a
+plain discover result has, so a tool found just before an interruption is
+restored). The resumed request keeps `discover_capabilities`, and the existing
+restoration loads the tools the history called or discovered. A history that
+somehow holds search blocks AND thinking blocks (a model change between the
+request and the resume) is not rewritten: `continuationError` refuses the resume
+with `not_resumable`. Live shape checks: `ops/agents/ib-tool-search-smoke.js`
+(`--resume-shape`, `--discover-shape`).
+
 ## Context → Tools Mapping
 
 | Context | Route(s) | Extra tool module |
@@ -68,9 +116,35 @@ primary, lead contact/status, stock read/adjust, products, estimate detail,
 open slots, and `offer_choices` (`choice-tools.js`: tap-to-answer buttons for
 a "which value?" question, returned as `choices` (plain strings) on `/query`;
 display only, a tap sends exactly the button text as ordinary operator text
-and never confirms a write). The platform list loads all of them; the legacy list loads the
+and never confirms a write), and `check_address` (`address-tools.js`: Google
+address check, read only; run before any address write so no ZIP is guessed). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
-their UI-confirm card.
+their UI-confirm card. A full-access login also reaches the rest through the
+API's tool search (see the full-access exception above).
+Customer links ride every admin context too (`customer-link-tools.js`,
+admin-only, carded): `create_customer_link` builds any kind the composer's
+Insert Link sheet offers (except review request, Auto Pay, which has its own tool
+(`send_autopay_setup_link`, below), the card request link, which stays
+on the composer / visit card because it can enroll a saved card for Auto Pay, the payer
+statement, which needs the payer's AP phone, and contract signing, whose send
+needs the composer's own Insert Link state) through the SAME exported route handlers
+(`customerLinkInsert` / `rescheduleLinkInsert` / `reserviceLinkInsert` on
+`routes/admin-communications.js`) and sends nothing. The
+composer's `/sms` route is the only sender that records some kinds (card
+claim, contract activation, prep/statement marks, project claim,
+consultation lead), so `comms-tools` `customerLinkSendRefusal` makes
+`send_sms` / `reply_via_sms` refuse a body carrying one of those or an Auto
+Pay link — never re-implement that bookkeeping in a tool.
+`send_autopay_setup_link` (same file, admin-only, carded) texts or emails one
+customer their 30-day Auto Pay setup link through `autopay-setup-link.js`: the
+preview and commit use the service's OWN functions (`setupLinkIneligibility`,
+`findSavedMethodForAutoSecure`, `autopayDeliveryPreflight`), never a copy of
+their checks, and the commit is one `requestAutopaySetupLink` call with
+`requireDeliverable: true`, `allowAutoSecure: false` and the `expectedRecipient`
+the card showed. It refuses a customer with a saved card (enrolling one turns
+Auto Pay on: a billing change for the Customers page), sends no `inline` link
+(a link-only Auto Pay link stays on the Customers page button), and never
+returns the bearer link.
 Tech portal is isolated — no base tools, strictly read-only, lower
 max_tokens for field speed.
 
@@ -85,8 +159,9 @@ max_tokens for field speed.
   boundary is unconditional (`GATE_IB_UI_CONFIRM` is retired and ignored);
   the emergency stop is `IB_WRITES_DISABLED=true`. Write tools never execute
   from the model loop: the call returns a preview, the route persists a
-  pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload
-  hash, single-use), and the client renders a Confirm/Cancel card
+  pending action (`ib_pending_actions` — actor-bound, payload hash,
+  single-use; card life 10 min, or 60 min for the pinned internal-edit
+  allowlist `LONG_TTL_TOOL_NAMES` in `pending-actions.js`), and the client renders a Confirm/Cancel card
   (`PendingActionsCard`). Only the operator's click commits, via
   `/confirm-action` — never a model tool, and the pending id is never
   model-visible. The gated tool list lives in

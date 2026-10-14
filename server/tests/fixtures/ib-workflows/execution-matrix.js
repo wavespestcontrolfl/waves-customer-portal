@@ -85,8 +85,7 @@ const KNOWN_DIFFERENCES = [
 // the input or the proposal preview.
 const OWNER_DIRECT_CONDITIONS = {
   update_lead_contact: 'lead_id alone',
-  update_customer: 'only contact, address, lead source and note fields (notes only over empty notes)',
-  add_customer_property: 'no label',
+  update_customer: 'only name, phone, lead source and note fields (notes only over empty notes)',
   update_customer_property: 'no label',
   reschedule_appointment: 'the pinned visit is ungrouped',
 };
@@ -124,11 +123,14 @@ function ownerGateOnCell(ownerDirect, tool) {
 //     direct; the merged policy keeps a card (a property move on a grouped
 //     visit relocates every service line sharing it; the estimate writers are
 //     money)
-//   - add_customer_property, update_customer_property: direct only with no
-//     label, so W4's own "label it rental" request keeps its card
-//   - update_customer: direct only for contact, address, lead source and note
-//     fields, notes only over empty notes; email and pipeline stage keep the
-//     card (the scope named name, phone and address)
+//   - update_customer_property: direct only with no label, so W4's own
+//     "label it rental" request keeps its card (its schema takes no address)
+//   - add_customer_property: always a card on the owner login (#6297: every
+//     valid add carries address text, and address text always keeps its card;
+//     the tool is off OWNER_DIRECT_TOOL_NAMES)
+//   - update_customer: direct only for name, phone, lead source and note
+//     fields, notes only over empty notes; email, pipeline stage and (#6297)
+//     every address field keep the card (the scope named name, phone and address)
 //   - update_lead_contact: direct only by lead_id alone, never by name
 //   - reschedule_appointment: direct only when the pinned visit is ungrouped
 //   - adjust_stock, update_restock_request: always a card on the owner login (owner 2026-10-05),

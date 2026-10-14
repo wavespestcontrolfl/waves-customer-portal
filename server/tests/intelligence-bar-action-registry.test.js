@@ -318,6 +318,9 @@ const SCOPE_SNAPSHOT = {
     // Third-party anchor text + agent-written strategy summaries, provider
     // error messages, human-typed Play release names.
     'get_backlink_overview', 'get_integration_token_health', 'get_play_store_status',
+    // read_admin_data returns whatever a catalog admin endpoint returns, which
+    // can list any customer's rows (owner ruling 2026-10-12).
+    'read_admin_data',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],
@@ -344,15 +347,22 @@ const SCOPE_SNAPSHOT = {
     // resend_receipt's invoice_id (or invoice_number, bound by validateRecordTarget) is the invoice record.
     // remove_saved_payment_method / correct_invoice_address carry customer_id / invoice_id (validateRecordTarget
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
-    'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address',
+    // accept_estimate carries estimate_id + customer_id (validateRecordTarget binds the estimate to that customer).
+    'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate',
+    // create_customer_link carries customer_id: the link is that customer's own.
+    'create_customer_link', 'send_autopay_setup_link',
+    // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).
+    'send_invoice',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.
     'reprice_future_visits',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
-    'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'submit_review_reply',
+    'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'remove_customer_property', 'submit_review_reply',
     'switch_appointment_property', 'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer',
     'update_customer_property', 'update_lead_contact', 'update_lead_status', 'update_property_access',
+    // delete_duplicate_customer carries customer_id directly (the empty duplicate record).
+    'delete_duplicate_customer',
   ],
 };
 
@@ -428,7 +438,7 @@ test('every record reader carries a selector the task-context guards recognize',
 });
 
 test('every tool with a non-none scope is a PII tool, every reviewed PII tool is non-none, and only reviewed kinds have scopes', () => {
-  const { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
+  const { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES, SCOPE_NONE_PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
   const { scopeOf, scopesFor, validScope } = require('../services/intelligence-bar/scope-policy');
   const policy = require('../services/intelligence-bar/action-policy.json');
   for (const name of REVIEWED_PII_TOOL_NAMES) {
@@ -438,12 +448,16 @@ test('every tool with a non-none scope is a PII tool, every reviewed PII tool is
   // The route redacts telemetry for the derived set, so a reader that returns
   // customer identities is covered by its scope class, not by a hand-kept list.
   for (const name of Object.keys(policy)) {
-    expect({ name, pii: PII_TOOL_NAMES.has(name) }).toEqual({ name, pii: policy[name].scope !== 'none' });
+    expect({ name, pii: PII_TOOL_NAMES.has(name) }).toEqual({ name, pii: policy[name].scope !== 'none' || SCOPE_NONE_PII_TOOL_NAMES.has(name) });
   }
   for (const name of ['get_ar_aging', 'get_outstanding_balances', 'get_top_revenue_customers', 'get_open_commitments', 'get_truck_status', 'find_schedule_gaps']) {
     expect(PII_TOOL_NAMES.has(name)).toBe(true);
   }
   expect(PII_TOOL_NAMES.has('get_kpi_snapshot')).toBe(false);
+  // A scope-none tool with free-form input is a PII tool by name (find_admin_reads takes names and phones).
+  expect(policy.find_admin_reads.scope).toBe('none');
+  expect(PII_TOOL_NAMES.has('find_admin_reads')).toBe(true);
+  for (const name of SCOPE_NONE_PII_TOOL_NAMES) expect({ name, scope: policy[name].scope }).toEqual({ name, scope: 'none' });
   for (const kind of [undefined, '', 'write', 'READ', 'internal-write']) {
     expect(scopesFor(kind)).toEqual([]);
     expect(validScope({ kind, scope: 'none' })).toBe(false);
@@ -451,4 +465,115 @@ test('every tool with a non-none scope is a PII tool, every reviewed PII tool is
   }
   expect(validScope({ kind: 'read', scope: 'route_wide' })).toBe(false);
   expect(validScope({ kind: 'external_action', scope: 'broad' })).toBe(false);
+});
+
+// Owner IB history 10-12: on the dashboard the bar searched the "schedule"
+// domain for a booking tool, got only schedule-domain tools back and told the
+// operator it could not book. Booking is filed under "customers".
+test('a domain is a ranking hint, so a schedule search still finds the booking tool', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  const found = registry.discover({ query: 'create a new appointment', domain: 'schedule' }, scope);
+  expect(found.result.capabilities.map(c => c.id)).toContain('create_appointment');
+  expect(found.definitions.some(tool => tool.name === 'create_appointment')).toBe(true);
+  // An unknown domain no longer hides every match.
+  expect(registry.discover({ query: 'create a new appointment', domain: 'scheduling' }, scope)
+    .result.capabilities.map(c => c.id)).toContain('create_appointment');
+});
+
+test('a tool in the named domain outranks an equal match from another domain', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  const ids = registry.discover({ query: 'switch appointment property', domain: 'schedule' }, scope).result.capabilities.map(c => c.id);
+  expect(ids[0]).toBe('switch_appointment_property');
+});
+
+// Owner ruling 2026-10-12: the owner login reaches every allowed tool. With
+// GATE_IB_TOOL_SEARCH on (scope.toolSearch) the page list stays eager and the
+// rest is deferred behind the API's tool search.
+describe('full-access login with tool search', () => {
+  const { FULL_ACCESS_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+  const names = list => list.map(t => t.name);
+  const search = context => ({ role: 'admin', context, fullAccess: true, toolSearch: true });
+  const plain = context => ({ role: 'admin', context });
+  const eagerOf = list => list.filter(t => !t.defer_loading && t.name !== registry.TOOL_SEARCH_TOOL.name);
+  const deferredOf = list => list.filter(t => t.defer_loading === true);
+
+  test.each(['dashboard', 'customers', 'communications'])('%s: page tools eager, one search tool, everything else deferred once', (context) => {
+    const list = registry.initialTools(context, search(context));
+    const pageList = registry.initialTools(context, plain(context));
+    // Eager = exactly the plain admin page list, in its order, discover_capabilities included (once).
+    expect(names(eagerOf(list))).toEqual(names(pageList));
+    expect(names(list).filter(name => name === 'discover_capabilities')).toHaveLength(1);
+    expect(list.find(t => t.name === 'discover_capabilities').defer_loading).toBeUndefined();
+    // Exactly one search tool, typed, never deferred, right after the eager tools.
+    const searchTools = list.filter(t => t.name === 'tool_search_tool_bm25');
+    expect(searchTools).toEqual([{ type: 'tool_search_tool_bm25_20251119', name: 'tool_search_tool_bm25' }]);
+    expect(list[eagerOf(list).length]).toBe(searchTools[0]);
+    // Every other allowed tool once, deferred, sorted by name.
+    const deferred = deferredOf(list);
+    expect(names(deferred)).toEqual([...names(deferred)].sort());
+    const expected = [...registry.actions.values()]
+      .filter(a => registry.allowed(a, search(context)) && a.approval !== 'confirmed_endpoint' && !names(pageList).includes(a.id)).map(a => a.id);
+    expect(names(deferred).sort()).toEqual(expected.sort());
+    expect(new Set(names(list)).size).toBe(list.length);
+    expect(list.some(t => t.cache_control)).toBe(false);
+    expect(eagerOf(list).length).toBeLessThan(60);
+  });
+
+  test('the deferred set holds the outside-write and reporting tools and no confirmed-endpoint tool', () => {
+    const deferred = names(deferredOf(registry.initialTools('customers', search('customers'))));
+    expect(deferred).toEqual(expect.arrayContaining(['get_review_stats', 'resolve_sentry_issue']));
+    expect(deferred.some(name => FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name))).toBe(true);
+    for (const action of registry.actions.values()) {
+      if (action.approval === 'confirmed_endpoint') expect(deferred).not.toContain(action.id);
+    }
+  });
+
+  test('building the list does not mutate the registry definitions', () => {
+    registry.initialTools('dashboard', search('dashboard'));
+    for (const action of registry.actions.values()) expect(action.definition.defer_loading).toBeUndefined();
+    const later = registry.initialTools('dashboard', plain('dashboard'));
+    expect(later.some(t => 'defer_loading' in t)).toBe(false);
+    // The deferred copy is a new object with the same definition otherwise.
+    const copy = registry.initialTools('dashboard', search('dashboard')).find(t => t.name === 'get_review_stats');
+    expect(copy).not.toBe(registry.actions.get('get_review_stats').definition);
+    expect({ ...copy, defer_loading: undefined }).toEqual({ ...registry.actions.get('get_review_stats').definition, defer_loading: undefined });
+  });
+
+  test('gated tools stay behind their own gate among the deferred tools', () => {
+    const original = process.env.GATE_IB_MERGE_CUSTOMERS;
+    try {
+      delete process.env.GATE_IB_MERGE_CUSTOMERS;
+      expect(names(registry.initialTools('dashboard', search('dashboard')))).not.toContain('merge_customers');
+      process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+      expect(names(deferredOf(registry.initialTools('dashboard', search('dashboard'))))).toContain('merge_customers');
+    } finally {
+      if (original === undefined) delete process.env.GATE_IB_MERGE_CUSTOMERS; else process.env.GATE_IB_MERGE_CUSTOMERS = original;
+    }
+  });
+
+  test('without the tool-search flag a full-access login gets today\'s page list and discover_capabilities', () => {
+    for (const context of ['dashboard', 'customers']) {
+      expect(registry.initialTools(context, { ...plain(context), fullAccess: true })).toEqual(registry.initialTools(context, plain(context)));
+    }
+    const list = names(registry.initialTools('dashboard', { ...plain('dashboard'), fullAccess: true }));
+    expect(list[0]).toBe('discover_capabilities');
+    expect(list.length).toBeLessThan(60);
+  });
+
+  test('another admin, a technician, the tech rail and the estimate rail are unchanged with tool search on', () => {
+    for (const context of ['dashboard', 'customers']) {
+      const scope = { ...plain(context), toolSearch: true };
+      expect(registry.initialTools(context, scope)).toEqual(registry.initialTools(context, plain(context)));
+      expect(names(registry.initialTools(context, scope))[0]).toBe('discover_capabilities');
+    }
+    for (const context of ['tech', 'agent_estimate']) {
+      const withSearch = registry.initialTools(context, { role: 'admin', context, fullAccess: true, toolSearch: true });
+      expect(withSearch).toEqual(registry.initialTools(context, { role: 'admin', context }));
+      expect(names(withSearch)).not.toContain('tool_search_tool_bm25');
+      expect(names(withSearch)).not.toContain('discover_capabilities');
+    }
+    const technician = registry.initialTools('customers', { role: 'technician', context: 'customers', fullAccess: true, toolSearch: true });
+    expect(names(technician)).not.toContain('tool_search_tool_bm25');
+    expect(technician.some(t => t.defer_loading)).toBe(false);
+  });
 });

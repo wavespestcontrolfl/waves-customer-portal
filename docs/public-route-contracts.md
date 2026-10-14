@@ -120,6 +120,19 @@ case) and lockbox or keypad shorthand ("lockbox 42") are masked.
 
 Symptom and ingestion questions (behavior change to the public route, owner review round 5, 2026-10-05; narrowed by owner option A, 2026-10-05): a question that reports a symptom, an ingestion or eye/skin contact ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged. A question that mentions spray plus a person, a pet or a body part from the cue list (`exposureSafetyLine`) and reports no symptom keeps its normal answer, with the fixed line "If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911." in front, gate on or off (owner 2026-10-05, option A); an unlisted word gets no line.
 
+Tips from your tech, aftercare flag (owner 2026-10-09): on the service-report
+payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), an entry of `techNote.tips` (present only while
+`GATE_TECH_TIPS` is `true`) may carry the optional key `aftercare: true`. The
+server sets it at completion from the tip registry
+(`server/services/service-report/tip-library.js`) and freezes it with the
+tip's copy in `structured_notes.techTips`; the client never supplies it, and
+a tip in the technician's own words never carries it. The web report reads it
+only to choose the note's opening line (a note made only of aftercare tips
+opens "Here is what to expect after this visit:"). Tips frozen before this
+change carry no key and render as before. Auth, headers and routes are
+unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
@@ -188,7 +201,8 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
+and the pest PDF key suffix is `-pex5` (2026-10-05, `-pex4`: the Gentrol growth regulator line gained its label's 4-month duration; 2026-10-12, `-pex5`: see the next paragraph).
+**Owner 2026-10-12: the non-repellent line in `expectations.whatToExpect.lines` can omit its timeframe.** When every non-repellent application on the visit is Alpine WSG with no ant target recorded (roach-tagged or untagged; legacy keys such as `ghost_ant` and `ants_general` count as ant targets), the general non-repellent line ends at "…carry it back to their harborage." and omits "Activity can spike for a few days, then declines over the next couple of weeks." The Alpine label states no roach die-off time. No key is added or removed; only that string's content changes. Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the
@@ -775,6 +789,14 @@ With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
 use whole-route feasibility, technician eligibility, existing arrival promises,
 blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
 on the shared customer grid (09:00–17:00 ET, `scheduling/customer-windows.js`;
+09:00–16:00 while `GATE_CUSTOMER_LAST_START_16` is set, owner 2026-10-09: the
+17:00 start is not offered, and a 17:00 offer signed before the gate was set
+is refused when taken. The assistant booking engine (`services/availability.js`
+`getAvailableSlots` and `confirmBooking`, used by the portal assistant and
+text open-time drafts) applies the same rule at offer and at commit. Two exceptions keep a time the customer already has:
+an existing estimate hold on 17:00 is returned by a repeat `/reserve` and
+committed at acceptance, and a `/api/booking/confirm` retry of a 17:00
+booking that already committed replays that booking;
 the customer-facing day closes at 18:00, and `booking_config.day_end` was
 migrated to 18:00 on 2026-09-23) are offered; estimate ASAP and booking
 open-day expansion cannot create additional starts. 12:00 is an ordinary
@@ -811,6 +833,71 @@ was minted under (a rollback or a mixed rolling deploy inside the 45-minute
 offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
 (`checkArrivalPlacement`) stays append-only too.
+
+Reschedule move limits (owner 2026-10-09; `GATE_RESCHEDULE_MOVE_LIMITS`, dark,
+read at call time in `services/scheduling/customer-move-limits.js`; rules in
+`docs/gates-and-env.md`). While set: `GET /api/public/reschedule/:token` may
+answer `state: 'not_reschedulable'`, `reason: 'move_limit'` (a never-serviced
+customer's visit after 2 online moves), and for a movable visit carries
+`moveLimit: { laterByOffice, noTimeSoon }`. `laterByOffice` is true when the
+late-move limit is applied: `availability` then holds no day after the
+visit's limit date, `find-slots` drops the same days, and the page says later
+dates go through the office. No date is sent, because the limit date need not
+have an open time. It is false when the visit has no plan allowance, when the
+limit is at or past the end of the booking range (it drops no day), or when
+fewer than 3 times would remain inside it (the limit is then not applied).
+`noTimeSoon` is true when no time is open in
+the next 7 days. `POST .../find-slots` and the commit route's `SLOT_TAKEN`
+refresh carry the same key for the list they return, and the client replaces
+what it holds with that answer (no key = no line). The key is OMITTED when the
+gate is off, the visit is a missed visit, or the move history cannot be read. `POST /api/public/reschedule/:token`
+answers `409 { code: 'MOVE_LIMIT' }` for a date past an applied limit or a
+blocked first visit, after its idempotent replay; the client reloads.
+`find-slots` answers `409 { code: 'MOVE_LIMIT', reason: 'move_limit' }` for a
+blocked first visit, and the client reloads there too. The commit route's
+`SLOT_TAKEN` refresh reads the visit again first: when its date, start,
+status or plan cadence changed since the request loaded it (another tab moved, rebooked or
+closed it), the answer is `409 SCOPE_CHANGED` and the page reloads (only
+while this gate is set). When the whole-range list that decides the
+limit cannot be built and the limit's date is inside the range (not before its first day), `find-slots`
+and Confirm answer `503 { code: 'LIMIT_UNAVAILABLE' }` (retry); they never
+show or commit a date the limit may hold back. When no limit date is inside the range, `find-slots` builds no whole-range
+list and sends `moveLimit: { laterByOffice: false }` with no `noTimeSoon`
+(the client keeps the `noTimeSoon` the first load set). `find-slots` makes the same check after its
+availability build and answers `409 SCOPE_CHANGED` (the client reloads).
+Confirm also answers `409 SCOPE_CHANGED` when the
+locked visit's plan cadence (`recurring_pattern`, `recurring_interval_days`) is
+not the one the request loaded: the allowance comes from it.
+
+Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
+dark, read at call time in `routes/reschedule-public.js`): `GET
+/api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.
+`currentDate` is the next plan visit's date today (`YYYY-MM-DD`); `byDate` maps
+an offered date in `availability.days` to the cadence date a move to that date
+gives the next visit. Both come from `SmartRebooker.projectNextVisitDates`
+(the sibling selection and projector of `rescheduleSeries`); the client only
+looks the picked date up and never computes a shift. The key is OMITTED, never
+null, when: the gate is off; the visit is not a series visit or
+`GATE_COLLECTIVE_SERIES_ANCHOR` is off; no later visit can move; the
+customer's move would not write the date on the next visit (its stop is shared
+with another live service or its visit is frozen; under
+`GATE_CUSTOMER_RECURRING_DISPATCH` also a row that is not pending/confirmed, is
+customer-confirmed, is dispatch-locked or excluded, or has a sendable
+reminder); the projection fails. `byDate` has no entry for the visit's own
+date (a time-only move does not shift the plan). `POST .../find-slots` and
+the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
+return, and the client replaces the dates it holds with that answer (no key =
+no date named); a date with no entry shows no line. Confirm pin: the commit body carries
+`disclosed_next_visit_date` and `disclosed_next_visit_current_date` (the new
+date and the current date the line named for the picked slot, or null when it
+named none). While the gate is on, the series mover hands its own verdict for
+the next visit (the date it is on and the date the move writes on it, null
+when the move keeps it in place) to `moveGuard` on its locked transaction,
+before its first write; when the page said something else (the next visit became
+customer-confirmed, dispatch-locked, reminded, shared or frozen after the page
+loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
+page reloads. A page loaded before the gate was set sends no field and gets
+the same reload when a date would be named.
 
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
@@ -1867,6 +1954,116 @@ sentence), so a failed refetch (best effort, caught at every call site, includin
   commit), the accept landed on another / no customer, the transaction's phone match differs from the preflight verdict, or
   the reused lone candidate (re-read FOR UPDATE at the end of the transaction) was deleted or moved off the phone. Nothing is suppressed, charged or enrolled on the stale decision.
 
+**Area add-on gate (`GATE_AREA_ADDONS`).** An estimate that carries a persisted area add-on treatment (a stored
+`services.areaAddOns` engine input, or a mapped `area_addon` one-time, spec or quote-required row) while the gate is off is
+refused on the same rail as the Bermuda gate, at the same position in every precedence order described above (after the
+viewability / terminal / inactive refusals and the blocking-state decision; a gated AND parked estimate still answers the park;
+contact review keeps its place ahead of the gate exactly as it does for Bermuda). Affected endpoints: `PUT /:token/accept`,
+`GET /:token/available-slots`, `POST /:token/find-slots`, `POST /:token/reserve`, `POST /:token/card-hold-intent`,
+`POST /:token/recurring-card-intent` and `POST /:token/reserve/:scheduledServiceId/extend` (pre-transaction check and the locked
+recheck). Refusal: HTTP 409 with `{ "error": "This estimate includes an option that is temporarily unavailable. Please contact
+our office and we will refresh your quote.", "code": "AREA_ADDONS_GATED" }`. The estimate is never priced for the park check while
+gated (its replay would throw). `GET /:token/data` is unchanged: it serves the stored rows and takes no money, as it does for a
+Bermuda-gated estimate. With the gate on, or with no add-on on the estimate, every body and status on these routes is unchanged.
+An estimate that carries both a gated Bermuda add-on and a gated area add-on answers the Bermuda body.
+
+Which stored rows count (Codex round 17; no new status or body): the add-on rows are read from the estimate's AUTHORITATIVE result
+container only (`storedAreaAddOnRows`, `server/services/estimate-result-container.js`, the pick the Bermuda evidence detector uses: a
+revision's own `result` wins over the raw `engineResult` it left behind, a SERVER-priced `result` wins even when it prices nothing, and an
+estimate whose only container is `engineResult` is read from it). A revision that removed the add-on is therefore no longer refused with
+`AREA_ADDONS_GATED` because of a stale `engineResult`. The replayable inputs (`engineInputs` / `engineInput` / `inputs`
+`.services.areaAddOns`, `engineRequest.options`) stay fail-closed at every boundary above, as the Bermuda request options do: a
+recompute or an input-only replay would price the add-on again.
+
+**Area add-ons are booked by the one-time accept only (`GATE_AREA_ADDONS` on).** The recurring conversion has no step
+that books or bills a sold one-time add-on, so an estimate that carries an area add-on row is refused when the
+effective service mode is not one-time (an estimate with no recurring amount is structurally one-time; a one-time
+toggle on a mixed estimate also counts): `PUT /:token/accept` (after the quote-required and review refusals, before any
+write) and `POST /:token/reserve` (so no recurring slot is held that accept would refuse) answer HTTP 409 with
+`{ "error": "This estimate includes add-on treatments that our office schedules with you directly. Please contact our
+office to finish booking.", "code": "AREA_ADDONS_ONE_TIME_ACCEPT_ONLY" }`. **`POST /:token/recurring-card-intent` answers the
+same 409 body (Codex round 11), before any Stripe work**: when the effective mode is recurring and the estimate carries an
+area add-on, no SetupIntent is minted or replaced and no payment method is saved (a submitted `replaceSetupIntentId` is
+retired like every other exempt answer; a park or the Bermuda/area gate still answers first, in the order above). Without
+this a checkout that bypassed `/reserve` (an add-on estimate with a linked appointment) saved the customer's card and only
+then met the accept's refusal. Every other endpoint that can mint a Stripe object or take money for an estimate is
+refused or unreachable for a recurring-mode add-on estimate before money or a payment method is touched:
+`POST /:token/card-hold-intent` owes no hold in recurring mode (`resolveCardHoldPolicy` answers `exemptReason: recurring`
+before `createCardHoldSetupIntentForEstimate`), the four `deposit-*` legs are retired 409 stubs with no Stripe code behind
+them, `PUT /:token/accept` refuses before any write (its annual-prepay, pay-after-first-visit and inline autopay-capture
+legs run after that refusal), the admin Mark Won refuses it (`persistedAddOnRefusal`), and annual prepay is never suggested
+for such an estimate (`annualPrepayBlockingAddOnReason`). No admin route sends a payment link for an estimate. The one-time accept (and its reserve) is
+unchanged in shape: one held appointment carries the one-time service mix, its catalog id is stamped by the exact
+`catalogServiceKey` on the add-on row (never by name), and the one-time total is its price. Every sold area add-on
+other than the one the appointment is stamped with becomes a structured `scheduled_service_addons` row on that same
+appointment (catalog id and key snapshot, name, its own price, its engine minutes), written in the accept
+transaction when the held slot graduates (or when the accept adopts an existing booked appointment): nothing is
+written on the hold, so a released or expired hold leaves no row, and a replayed accept writes none twice. The
+appointment price stays the whole one-time total (no add-on is counted twice). The held slot is sized to at least the
+sum of the add-ons' on-site minutes (plus the primary service's usual allowance), with the capacity gate on or off, on
+the slot offers, reserve, extend and commit. No request, response or status code of these routes changes; the
+`serviceProfile.services[]` of the slot payload carries no add-on price (stripped like the engine key). Browse routes
+(`available-slots`, `find-slots`) answer as before. With no add-on on the estimate, every body and status is unchanged.
+`GET /:token/data` one-time rows (`pricing.oneTimeBreakdown.items[]`, and the render rows behind the page) for an
+add-on carry, beside the existing fields: `addOnKey`, `catalogServiceKey` (`area_addon_<addOnKey>`), `addOnCategory`
+(`pest_control` for the web sweep, `lawn_care` for the rest), `areaSqFt` and `tierSqFt` (null on the web sweep) and
+`visitContext` (`standalone` | `sameTripAddOn`; one value for the whole add-on group), `priceUnit` (always `application`: the row's whole price is one application, and the public page and the React page read it as "$X per application", never a bare amount or "per visit") and `carriesVisitDrive` (true on the one add-on of an own visit that carries the visit's drive allowance, false on the others) and `carriesJobAdmin` (true on the one priced add-on that carries the visit's single booking-and-invoicing cost, on either visit), plus a `copy` object from the static pack
+(`server/services/estimate-one-time-copy.json`, `area_addon_*`); the row has no `applications`, `perApplication` or
+`maxPerYear` (one application per estimate; the yearly limit is stated by the catalog payload, below). The engine's `onSiteMinutes` is internal and stripped from the public rows
+(`sanitizePublicOneTimeBreakdown`). Several add-ons on one estimate are ONE visit: the `copy` visit bullet reads "Priced as its own visit" on the add-on that carries the drive, "Done on the same visit as your other add-on treatments" on the others of an own visit, and "Priced for the same visit as your other booked service" when the group rides a service; a row stored before `carriesVisitDrive` existed keeps "Priced as its own visit". An add-on row never unlocks a service-details packet
+(`GET/POST /:token/service-details/...`): the lawn guide still needs a recurring lawn line or a listed one-time lawn row.
+
+**Area add-on yearly limits (`GATE_AREA_ADDONS` on; owner ruling 2026-10-08, add-on-only).** The applications of an add-on's product at the property in any 12 months, program applications and add-on visits already booked and not done included, are limited per add-on (`AREA_ADDONS.items`: Snapshot 4 in 12 months and 60 days apart, Arena 2 and 56 days apart, Topchoice 1, Acelepryn 1, Roundup QuikPro SC 2, web sweep none). The limit only ever holds the ADD-ON; a program visit is never blocked. Three public effects, none of them for an estimate with no add-on:
+- A stored add-on row whose limit was reached when it was quoted is an unpriced custom-quote row in `pricing.oneTimeBreakdown` / `quoteRequiredItems` (the estimator's save only), with `customQuoteReason` `area_addon_yearly_limit_reached` (or `area_addon_history_unavailable` when the history could not be read) and a `detail` naming the last application date and the next allowed day. The customer page reads the reason as "This treatment was applied at your property too recently to repeat — Waves will confirm what can be scheduled and the price before it’s finalized." The dates are the property's own treatment history, shown to the person who holds the estimate link.
+- `PUT /:token/accept` rechecks every sold (priced) add-on inside the accept transaction, after the customer lock, before the estimate is marked accepted. History can change between the quote and the accept (a program visit applies the product, or another estimate books the add-on), so a limit now reached answers HTTP 409 `{ "error": "One of the add-on treatments on this estimate was applied at your property too recently to repeat. Please contact our office and we will confirm what can be scheduled.", "code": "AREA_ADDON_YEARLY_LIMIT_REACHED" }`, and a history that cannot be read answers HTTP 409 `{ "error": "We could not confirm the treatment history for the add-ons on this estimate. Please contact our office and we will finish booking.", "code": "AREA_ADDON_HISTORY_UNAVAILABLE" }` (fail closed for the chemical add-ons; the web sweep alone reads nothing). Nothing is written. The day judged is the held slot's date when the accept books one, else today.
+- `POST /:token/reserve` runs the same recheck inside the reserve transaction (`revalidateEstimate`) and answers the same two 409 bodies before any hold is kept.
+Staff Mark Won and the schedule's booking from a linked estimate recheck the same limits with a staff message naming the last application and the next allowed day (HTTP 409, same codes).
+Who the history belongs to (Codex round 8): an estimate can have no `customer_id` (a lead or standalone quote) while the request or the estimate's links name a customer. The recheck reads the history of the first customer it can name, in this order: the caller's verified customer (the staff booking's customer and property; the accept's locked or phone-matched customer), the estimate's own, the customer and property of an appointment linked to the estimate (a staff booking, an adopted appointment), the owner of its estimate group (the accepted sibling), then the customer its phone matches (the reserve). A lookup that fails answers the `AREA_ADDON_HISTORY_UNAVAILABLE` 409 (fail closed). "No customer" passes only when none is known at all (a new lead): it has no history and is never refused here. An unowned estimate that used to pass at reserve, accept, Mark Won or staff booking because its own `customer_id` was empty is now refused when the customer it resolves to is at the limit.
+
+**Area add-on limits: where and when the recheck runs (Codex round 9; no new status or body).** The two 409 bodies above are unchanged. What moved: (1) `PUT /:token/accept` runs the recheck after the estimate row is locked by the accept's compare-and-swap update (the order `POST /:token/reserve` already takes its locks in) and before any other write of the accept, so a refusal still rolls everything back; it is judged on the day of the held slot or adopted appointment (today when the accept books none). (2) A customer who does not exist yet is serialized (since round 18 the address, property and place keys are taken for a named customer too: see the round 18 paragraph below): with no customer named, the recheck first takes the transaction-scoped advisory lock `('area-addon-identity', 'phone:<last 10 digits>')`, `('area-addon-identity', 'address:<letters and digits>')` and, when the estimate names a property, `('area-addon-identity', 'property:<id>')` (a namespace only this check uses), then resolves the customer under it (the accept's own authoritative phone match, the estimate group's owner or a linked appointment's customer, each fenced by the same non-blocking customer lock the account step takes before the history is read; a busy account answers the existing 409 `CUSTOMER_BUSY_RETRY`). Two accepts by one brand-new customer can no longer both read an empty history. (3) The booked-not-done history counts the live (unexpired, within the commit grace) hold of any OTHER estimate AT the place being read, whoever its phone or customer is (Codex round 18 dropped the same-person test; Codex round 17: with a property id on both sides, the hold's own or its estimate's against the property read, the ids decide; otherwise the normalized treatment address must agree and be known on both sides, because one phone can have estimates at several properties); the estimate's own hold and the appointment the accept adopts are left out, nothing else of the estimate is (an accepted estimate booked a second time counts its first booking). (4) `POST /:token/reserve` judges the limit on the day of the selected `slotId`, not on today (an application 360 days ago no longer refuses a slot ten days out), under the same identity lock. (5) The staff booking from a linked estimate and Mark Won recheck the same way, inside their transactions after the customer lock, on the booking date. `POST /:token/reserve/:scheduledServiceId/extend` keeps a hold alive and commits no application: it runs no limit recheck. `GET /:token/data` rows never carry `pricingKnobs` (an area add-on row's price knobs, including the target margin, are stripped at the public boundary like `onSiteMinutes`).
+
+**Area add-on limits: one booking fence per customer (Codex round 11; no new status or body).** `POST /:token/reserve` used to read a matched or named customer's history under the prospect identity lock only, while the staff booking, Mark Won and the accept serialize on that customer's booking fence (`lockCustomerComms`), so a reserve and a staff booking could both pass a one-per-year limit. The reserve now fences the customer (the estimate's own, or the phone match of an unowned one) BEFORE the read, to the end of the reservation (`fenceCustomerBookings` in `area-addon-limits.js`, the non-blocking `tryLockCustomerComms`); a busy account answers the existing 409 `CUSTOMER_BUSY_RETRY` with nothing reserved. Mark Won fences a customer the check finds for itself the same way (the accept already did). Who reads, whose history, and why two callers cannot both pass:
+
+| Caller | Customer read | Fence held when it reads | Why two cannot both pass |
+| --- | --- | --- | --- |
+| `PUT /:token/accept` | the estimate's customer, else the phone match, group owner or linked visit's customer | blocking `lockCustomerComms` at the top of the transaction (before any row lock) for the estimate's or pre-matched customer; a found one by the non-blocking fence; a brand-new person by the identity lock (and, since round 18, every caller by the place keys) | every other booking of that customer holds or waits on the same comms key to the end of its transaction |
+| `POST /:token/reserve` | the estimate's customer, else the phone match | the estimate row `FOR UPDATE`, then the identity lock (the place keys always, the phone key when nobody is named: round 18), then the customer fence (non-blocking) | the hold it inserts is counted by every later reader; a concurrent booking of the customer either holds the key first (the reserve answers `CUSTOMER_BUSY_RETRY`) or waits for the reserve's commit and then counts the hold |
+| `POST /:token/reserve/:id/extend` | none | none | it commits no application: the hold was counted at reserve and stays counted while it is live or inside the commit grace |
+| `POST /:token/card-hold-intent`, `/recurring-card-intent` | none | none | they mint a SetupIntent and book nothing; the accept rechecks under the fence |
+| Mark Won (`markEstimateManuallyAccepted`) | the estimate's customer, else a group owner or linked visit's customer | blocking comms lock on the estimate's customer at the top; a found customer by the non-blocking fence; the identity lock (place keys always) | same comms key as the accept and the staff booking |
+| Staff booking from a linked estimate | the booking's customer | `lockCustomerComms(trx, customerId)` before the recheck, inside the booking transaction (the earlier preflight read is advisory) | same comms key; it waits for a reserve's commit |
+| Estimator calculate / save | the staff-picked or saved customer | none (advisory: a limit reached prices the line as a custom quote) | consumes nothing; every booking above rechecks under its fence |
+
+Lock order relied on: occupancy date lock, then the estimate row, then (blocking; the place keys for every caller, the phone key when no customer is named) the identity advisory locks in their class order, then the customer comms key by a NON-blocking take. The accept's blocking comms take comes before its estimate row and before everything else, as it always did, and the only take that comes after an estimate row is non-blocking, so no waits-for cycle with the merge-undo (comms, then estimate) or the staff booking (comms, then estimate) can form.
+
+**Area add-on limits: the history is the PLACE's, not the customer's (Codex round 18; no new status or body, no new wording).** A label limit is about the treatment property. Two estimate links at one address with two phones (two people, or one person with two numbers) used to read two histories: the first accept turned its hold into a booking owned by customer A, the second phone matched no customer (or customer B), and neither the booked reader nor the hold reader saw the first booking. The history is now property-first, across ALL customers (`loadAreaAddOnHistory`, `server/services/area-addon-limits.js`):
+
+- The place: the property ids the caller names (the staff booking's or Mark Won's verified property, the estimate's `property_id`, a linked appointment's, else the known customer's only active property), widened to every `customer_properties` row (any customer, active or not) whose `address_key` equals that property's key. With no property id, the estimate's (or the quote's) free-text address is parsed with `parseEstimateAddress` (`estimate-property-linkage.js`, the parse the accept links an estimate to a property with) and keyed with `addressKey` (`customer-property-address-keys.js`, the function that writes `customer_properties.address_key`), so suffix, case, punctuation, unit designator and ZIP+4 spellings of one address are one place and a different unit is another. A partial parse (no city or ZIP) has no key: it is compared as letters and digits only, the form the address lock uses.
+- What is counted for the place: the ledger (`property_application_history`) rows of the limit product at one of the place's property ids, for any customer (a row with no frozen property is placed by its visit's property; a row that cannot be placed counts only for the known customer, as before); booked-not-done add-on visits (`scheduled_services` own rows and `scheduled_service_addons` rows) at one of the place's property ids, any customer, and, for another customer's visit with no property id, those whose `source_estimate_id` estimate has the place's address; the live holds at the place (`holdIsHere`: property ids decide when both sides have one, else the address). The known customer's own visits and ledger rows keep their scope (the treated property, an unplaced row counts). Staff wording is unchanged and place-based ("at this property"); it never names another customer record.
+- Nothing is read with the gate off, or for an estimate with no sold limited add-on. A failed property, ledger or visit read is the existing fail-closed `AREA_ADDON_HISTORY_UNAVAILABLE`.
+- Codex round 19: the same customer's other property rows at the place (an older or inactive `customer_properties` row of the same `address_key`) are read too, for the ledger and for booked visits. No new status, body or wording.
+- Codex round 21: another customer's completed ledger row with no property on the row or on its visit is placed by the address of the estimate the visit was booked from (the completed twin of the unplaced booked visit). No new status, body or wording.
+- Codex round 22: a known customer's estimate with no property id that quotes an address provably other than the customer's only property on file is read at the QUOTED address (as for a lead); the on-file property's history is not used. No new status, body or wording.
+
+**Area add-ons need an appointment at accept (Codex round 19).** `POST /:token/accept` of an estimate that carries an area add-on, with no `slotId` and no `existingAppointmentId` (a visit merely linked to the estimate does not count: only a booked slot or an adopted visit gets the add-on rows), answers 400 `{ "error": "Please pick your appointment time to finish booking.", "code": "AREA_ADDON_APPOINTMENT_REQUIRED" }` before any write. Reason: the `/book` fallback link creates no add-on rows, so the limit recheck, the governed rate and the per-add-on closeout would never see the sold treatment. An estimate with no add-on is unchanged.
+
+**Area add-on rules on a freshly read row (Codex round 22; no new status, body or wording).** `POST /:token/reserve` re-judges the add-on gate (409 `AREA_ADDONS_GATED`) and the one-time-only rule (409 `AREA_ADDONS_ONE_TIME_ACCEPT_ONLY`) on the LOCKED estimate row inside the reserve transaction, before the limit recheck and any hold. Both card-intent routes re-judge the gate on the row reloaded after the Stripe work, and `recurring-card-intent` also the one-time-only rule; a refusal there retires the minted intent first and returns no client secret. An adopted appointment (`existingAppointmentId`) that already carries a sold add-on's row has that row brought to the locked estimate's price, minutes and sold scope, and its stored primary-line price cleared, so the completion invoice is the accepted one-time total. A standalone add-on estimate matches its booked appointment by the catalog key (`area_addon_<key>`), also after a Service Library rename. Codex round 26: `POST /:token/accept` reads the add-on gate again inside its transaction, after the estimate row update and before the limit recheck; a gate turned off mid-request rolls the accept back with the same 409 `AREA_ADDONS_GATED`.
+
+| Path | Place it resolves | What it counts |
+| --- | --- | --- |
+| `PUT /:token/accept` | the estimate's `property_id`, else the caller's property, else its address | every customer's ledger rows, booked add-on visits and live holds at the place, the adopted appointment and the graduating hold left out |
+| `POST /:token/reserve` | the locked estimate row's `property_id`, else its address | the same; the estimate's own hold is not counted |
+| Mark Won | the estimate's `property_id`, else its address | the same; the booked rows of this call left out |
+| Staff booking from a linked estimate | the booking's verified property, the estimate's `property_id` (the locked read now carries `address` too) | the same; the rows just made left out |
+| Estimator calculate / save | the staff-picked property or customer, else the quoted `options.address` / `body.address` of a new lead | the same, shown with dates to an admin requester only; anyone else gets the history-unavailable custom-quote line for a known customer and normal pricing for a lead |
+| Job card "Application N of M" | the visit's property | the same, the displayed visit left out; display only, a failed read leaves the card as it was |
+
+Locks (same namespace `area-addon-identity`, transaction-scoped, taken after the estimate row and the customer's blocking comms lock): every limit recheck now takes the place keys for a named customer too, since the customer lock serializes one customer only and two different people at one place hold different customer locks. Class order, fixed for every caller: `phone:<last 10>` (only when no customer is named), `address:<letters and digits>`, `property:<estimate property id>`, then `place:<address_key>` for each canonical key of the place, sorted. The place keys are resolved (one read of `customer_properties`, in a savepoint) after the first three keys are held. Order relied on: occupancy date lock, the customer's blocking comms lock (accept, staff booking, Mark Won, at the top), the estimate row, the identity keys in the class order above, then a found customer by the NON-blocking comms fence. A transaction that holds an identity key takes no blocking lock of another customer afterwards in this module (the fence is a try-lock that answers `CUSTOMER_BUSY_RETRY`), and every waiter on an identity key holds only locks that come before it in the order above, so no waits-for cycle forms with the merge-undo (comms, then estimate) or the staff booking (comms, then estimate). Two keys per class sort to one total order, so two requests sharing several place keys cannot take them in opposite orders.
+
+**Area add-on visit rows on accept.** A one-time accept of an estimate carrying area add-ons writes one `scheduled_service_addons` row per add-on other than the appointment's own service, in the accept transaction. Two refusals roll the accept back with nothing written: HTTP 409 `{ code: 'AREA_ADDON_ROW_UNRESOLVED' }` when a priced add-on has no catalog key or price (a sold add-on is never dropped silently), and HTTP 409 `{ code: 'AREA_ADDON_VISIT_NEEDS_NEW_SLOT' }` when the accept would adopt an appointment that already exists and that appointment is shorter than the visit: its recorded duration, or else its window, must be at least the duration the slot profile sizes a fresh booking to (the sum of the add-ons' on-site minutes, on top of any other one-time service). An accept never resizes an existing appointment. An estimate with no area add-on accepts and adopts exactly as before.
+
+**A booked visit that carries a limited area add-on is rechecked when it MOVES (`GATE_AREA_ADDONS` is not read; Codex round 18).** The reschedule link (`POST /api/public/reschedule/:token`, single visit and series re-anchor), the customer's SMS reschedule reply, the phone agent's reschedule and every other caller of `SmartRebooker.reschedule` judge the add-on's yearly limit for the NEW day at the visit's place, with this visit left out, in the move transaction right after the row's own write (`area-addon-limits.js assertMovedVisitLimitsOpen`). A limit reached answers HTTP 409 `{ "error": "An add-on treatment on this appointment cannot be moved to that day. Please contact our office and we will find a day that works.", "code": "AREA_ADDON_YEARLY_LIMIT_REACHED" }`, and a history that cannot be read answers the same sentence under `"code": "AREA_ADDON_HISTORY_UNAVAILABLE"` (fail closed). The body never names a date or a product to a customer; staff callers (the dispatch board, Update Details, bulk reschedule, the Intelligence Bar, `initiatedBy: 'admin'`) get the dated detail instead. Nothing moves and the transaction rolls back. A visit with no limited add-on, a same-day or time-only change and a technician change are unchanged and read nothing. The app's `POST /api/schedule/:id/reschedule` only files a request (no move) and is unchanged. Automatic movers (rain-out, tech-out, auto-dispatch, the plan hold) already treat a 409 from the rebooker as a visit they could not move: that visit is skipped and reported and the batch goes on.
+
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
 tender, text }` (the exact authorization recorded as shown) beside the existing
 `acceptedRecurringCardConsentVariant` stamp. The inline enrollment and the `setup_intent.succeeded`
@@ -2323,12 +2520,40 @@ hold, water-in or hold-then-water-in: `reportV2.banner`
 `{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
 `hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
 finished customer sentences with absolute Eastern clock times; `holdUntil`,
-`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+`waterInBy` and `expiresAt` are ISO instants or `null`; `waterInBy` is completion
+plus the product's window, or, when a timed hold reaches that (owner 2026-10-09:
+every post-emergent herbicide holds 24 hours), the hold's printed end plus the
+window, so the water-in always follows the hold; an "until the treatment
 has dried" hold has no printed duration and `expiresAt: null` (dryness is a
 condition, so no instruction that waits for drying, including one followed by a
 water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
 `holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
 "ended" note past it; the key is absent when there is no claim).
+A pre-emergent whose label allows 14 days for its water (a water-in window over
+168 hours, owner 2026-10-09) is a long-window water-in: one sentence
+"Today’s treatment needs about ½ inch of water by <date>." and "Rain and your
+regular watering both count.", with no minutes; `waterInBy` and `expiresAt` are
+completion plus that window. It never merges with a short water-in on the same
+visit: the short one keeps its own amount and deadline in `waterInBy`, the long
+sentence follows as a fourth line ("In all, it needs about ½ inch of water by
+<date>. Rain and your regular watering both count."), so `lines` is then at
+most four sentences, and `expiresAt` is the LONG deadline (or `null` beside a
+hold that waits for drying). Such a visit, and only such a visit, also carries
+the optional key `reportV2.banner.later` `{ at, state, lines }`: `at` is the
+short deadline (the same ISO instant as `waterInBy`), `state` is `water_in` or
+`hold_then_water_in`, and `lines` are the two long-window sentences as on a
+long-only visit (after an until-dry hold line, without its clock time, when the
+visit has one). It is frozen with the instruction; nothing is recomputed at
+read time. The live banner prints `later.lines` in place of `lines` once `at`
+has passed (and drops `forecastLine`, `observedRain` and `setupLine`, which are
+about the short run), until `expiresAt`, so a deadline that has passed is never
+shown as current. LIVE VIEW ONLY: the key is removed from every printed / PDF
+render, which keeps `lines` as written at the visit. The key is absent when the
+frozen block is malformed, and once rain has covered the water-in
+(`state: 'water_in_by_rain'`, below; for such a visit the rain is measured from
+completion through the LONG deadline against the larger amount, so rain after
+the short deadline still closes the later phase). No new route, token, privacy or
+rate-limit surface; `reportV2.aftercare` is unchanged by it.
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
@@ -2421,25 +2646,26 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
-`GATE_LAWN_REPORT_CLARITY` (dark, strict `true`; also requires
-`GATE_LAWN_WATERING_RULE`; gate off leaves the payload unchanged, key for key):
-when a water-in is BUILT AT COMPLETION for a customer with no sprinkler head type
-or measured rate on file, its `lines` give the amount and no minutes ("Water in
-today’s treatment with about ½ inch by Fri 8 PM.", then "Run it even if it is not
-your usual day."; hold-then-water-in keeps its hold line and continues "After
-that, water in today’s treatment with about ½ inch by …") and the frozen
-instruction records `amountOnly: true`. The frozen instruction is replayed as
-written whatever the gate says. A LIVE-VIEW-ONLY optional string
+Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
+requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
+customer with no sprinkler head type or measured rate on file, its `lines` give
+the amount and no minutes ("Water in today’s treatment with about ½ inch by Fri
+8 PM.", then "Run it even if it is not your usual day."; hold-then-water-in keeps
+its hold line and continues "After that, water in today’s treatment with about ½
+inch by …") and the frozen instruction records `amountOnly: true`. The frozen
+instruction is replayed as written; an unfrozen re-render prints the generic
+minutes as before. Minutes still print when the customer's portal setup gives
+them (a head type on file, or a measured rate). A LIVE-VIEW-ONLY optional string
 `reportV2.banner.setupLine` ("Add your sprinkler setup and we’ll give you minutes
 for each zone.") exists only under a frozen `amountOnly` water-in or
-hold-then-water-in while the gate is on; it is deleted from every non-live render
+hold-then-water-in; it is deleted from every non-live render
 (`stripLiveOnlyScheduleFields`), is never in `lines`, and counts toward
 `reportV2.lead`'s word budget when present. The client shows it as a link to the
 portal property tab. The watering text, PDF, hero task and Ask Waves read `lines`
 only. No new route, query parameter or customer message.
-`GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
-key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
-optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
+Lawn reports carry `reportV2.lead` (the former `GATE_LAWN_REPORT_LEAD`, live
+since early October 2026 and removed; no gate reads or turns it off now) `{ headline, why, applied, yourPart, next }` (plus the
+optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below),
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
@@ -2458,26 +2684,26 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
+until it fits (the lawn v6 copy is always live, so the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
-not be carried as `lead.next`. While the gate is on the lawn payload also
+not be carried as `lead.next`. The lawn payload also
 drops stock copy (lawn only; every field keeps its key): the unverifiable
 past-tense `insights[].wavesAction` lines and four stock `whyItMatters` lines
 become null (product-grounded `wavesAction` and every watering
 `customerAction` / `nextVisitPlan` are unchanged), and `mowing.recommendation`
 is null for a too-short / too-tall reading when the mowing finding is among the
 three findings the web card shows. The sprinkler-coverage water finding
-carries `kind: 'coverage_watch'` (lead mode only) so the water card knows the
+carries `kind: 'coverage_watch'` so the water card knows the
 finding owns that guidance even after a narrative headline rewrite. The web report folds secondary finding,
 water and photo-note detail into expanders that print open. The lawn PDF, when
 `lead` is present, prints `lead.why` as the status detail, finding bullets as
 headline + what we saw (+ why it matters only for needs_attention) with no
 "What Waves did" line, and skips the follow-up's stock "No action is needed"
-line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
-stamp while the gate is on, so gate-off PDFs are never served after the flip
-(or the reverse on rollback).
+line; tree & shrub ignores `lead`. The lawn PDF cache signature always carries
+a constant `:lead=1` stamp, so a PDF cached before the lead went live is never
+served again.
 `GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES` (dark, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) changes the lawn
 `/api/reports/:token/data` payload and the PDF that share `buildReportV1Data`
@@ -2547,6 +2773,21 @@ for a visit completed or first rendered while the gate is live (the paragraph's 
 gain a `categories` list); every older frozen entry replays unchanged. The lawn PDF
 signature carries `:copyfix=1` only while the gate is live, and the narrative key
 part is the `-tn0` sentinel for a lawn report.
+`GATE_LAWN_NEW_SOD_REPORT_CARD` (dark, strict `true`, read at call time; also needs `GATE_LAWN_NEW_SOD_NOTE`; gate off leaves the payload byte-identical) adds one optional top-level key to the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface): `lawnNewSod: { title, lead, items: [string, ...], rest: string | null, swap: string | null, close }`. Every value is a fixed sentence built by `server/services/lawn-sod-report-card.js` from the block frozen at completion (`structured_notes.lawnNewSod = { v: 1, visitDay, sodLaidOn, covers, planRan, held: [{ kind, until, rootedCheck }], swap: { name } | null }`); the only variable parts are calendar dates (the day the sod was laid and the day each held product class starts again). No staff free text is in the payload: the office's name for the sod area (`property_preferences.sod_area`) is never frozen or sent, and the swap product name is frozen but not printed. `rest` and the long form of `close` ("Everything else ran as normal.") are sent only when the frozen `planRan` is true (every other planned product was applied); else `rest` is null and `close` is "Same visit, same price.". The key is absent when the visit record has no valid frozen block (no planned product was held, the sheet's sod record no longer matched at completion, or the visit completed before the gate was on). The live web report prints it as the "New sod" card; the PDF and static views ignore it.
+
+`GATE_LAWN_REPORT_POLISH` (dark, strict `true`, read at call time; gate off leaves the payload, the PDF and every cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys, absent while the gate is off: top-level `lawnPolish: true`; `reportV2.water.scheduleKind` (`'inches'`, `'runtime_only'` or `'none'`), `reportV2.water.scheduleText` (state `runtime_only` only: what the customer's own portal entries say, "45 min, Mondays"), `reportV2.water.scheduleParts` (state `runtime_only` only: `minutes_and_days` | `minutes_only` | `days_only`) `reportV2.water.irrigationBasis` (a figure derived from minutes and days, one fixed sentence) and `reportV2.water.longerCycles` (`true` only: the one fixed longer-cycles advice sentence prints on the Water card; set from the decision frozen at completion in `lawnReportFacts.waterAdvice`, and only when the visit has no hold or water-in banner, weekly plan or after-visit watering note); the same `scheduleKind` and, for `runtime_only`, `scheduleText` and `scheduleParts` ride `lawnAssessment.waterContext`. Changed values while the gate is live: `reportV2.water.explanation` for `runtime_only` (it no longer says no schedule is on file); `reportV2.water.irrigationInches` and `lawnAssessment.turfProfile.irrigationInchesPerWeek` for a customer whose figure is derived (one turf head type, drip ignored, the owner's rate table); `applications[].product.precaution_summary` for a record whose frozen `lawnReportFacts.labelLines` drops a sentence. The lawn PDF signature carries `:polish=1` only while the gate is live.
+
+`GATE_LAWN_REPORT_STAGE1_FIXES` (dark, strict `true`, read at call time; gate off leaves the payload, the PDF and the PDF cache key of every record with no frozen stage-1 copy byte-identical; see Rollback below for the one frozen exception) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). One new optional top-level key, absent while the gate is off: `lawnStage1Fixes: true`, which the web page reads to leave out the customer's email and phone in the hero and to leave out a "What we applied today" card that repeats `reportV2.todaysResult`. The `customerEmail` and `customerPhone` payload fields themselves are unchanged (the PDF prints them). Changed values while the gate is live: the damage entry in `reportV2.insights` (`headline`, `whatWeSaw` and, when the spot area is recorded, `wavesAction`) and the matching line in `reportV2.snapshot.watching` when a spot insecticide row carries a known pest target: with a frozen technician or sure photo tie for that pest (`structured_notes.lawnReportFacts.ties`, read, never re-derived) the headline is "Chinch bug damage in one area — treated today" and `whatWeSaw` is the Visit Summary sentence "Your technician found chinch bugs and treated that spot today."; with the product target alone (a target is not a sighting) the headline is "Chinch bug spot treated today" and `whatWeSaw` is the product card's own purpose sentence "Applied to protect the turf from southern chinch bugs, where activity, history, or seasonal pressure called for it."; `reportV2.lead.whatToExpect` gains a second approved sentence for a visit whose copy freezes while the gate is live; `techNote` drops the `lawn_irrigation_portal` tip (and is null when no other tip is left) while the Water card says a schedule is on file. The web page leaves out the "What we applied today" card only when its text IS `reportV2.todaysResult` (final period aside) or that sentence plus only the known `, targeting <targets>` and `, with a surfactant added so the treatment coats the foliage evenly` clauses; a text that lists more (another treatment, a second sentence) keeps its card. The only new customer words are the two headlines, built from the Visit Summary's pest label table; every other string is an existing Visit Summary sentence, the product card's purpose sentence, an approved expectation row or the frozen tip copy. The lawn PDF cache key carries `:s1=1` while the gate is live, and `:s1f=1` for a record whose frozen v6 copy carries the stage-1 second line, gate live or not. **Rollback (unsetting the variable) is NOT fully byte-identical.** It undoes, at once and for every record: the damage finding words, the `lawnStage1Fixes` key (so the web hero shows the email and phone again and the applied card returns), the tip filter, and the `:s1=1` key part. It does NOT undo a second "What to expect" line already frozen into `structured_notes.lawnCopyV6[assessmentId]` while the gate was live: that entry replays unchanged (so `reportV2.lead.whatToExpect` and the PDF keep the second line), and its freeze marker `stage1Expect` keeps the PDF cache key part `:s1f=1` on that record, so those records keep a PDF key that differs from the pre-gate key. A record whose copy froze with the gate unset has no marker and returns the pre-gate payload, PDF and key. Removing a frozen second line takes an edit of that record's frozen entry; the gate does not do it.
+`GATE_LAWN_WATER_RAIN` (dark, strict `true`; the freeze needs `GATE_LAWN_REPORT_FACTS` too; a render reads the record's frozen `lawnReportFacts.waterAdvice` version 2, so a record without it, or frozen before the flip, is byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys on `reportV2.water`, present only for a record frozen with the permission and a visit with no hold / water-in instruction: `status` may be `rain_covered` (a new value beside `low`, `high`, `balanced`, `unknown`), `rainCard` (`true`: the explanation is one of the rain card's fixed sentences), `rainSensorLine` (`true` in a rain-covered week only). Changed values for such a record: `reportV2.water.explanation` (the rain-covered, deficit and surplus sentences), the insights and root cause (they read the card's status), and the status itself (counted with each day's rain capped at 0.75 inch). `reportV2.water.rainInches` and `totalInches` stay the measured figures.
+`GATE_LAWN_WATER_IN_RAIN` (dark, strict `true`, read at call time; gate off leaves the payload, the PDF and every cached PDF key byte-identical) can change one existing value on the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface; no new key): `reportV2.banner.state` may be `water_in_by_rain` (with `banner.lines` of one or two fixed rain sentences, after an optional hold line), and `reportV2.aftercare.watering` follows (rain covered it). Read time only, for a visit with a frozen water-in watering instruction; the completion text is unchanged. The PDF cache key gains `:wir=` for such a visit only while the gate is live. Only the `/data` render and the PDF renders (the direct PDF route and the queued PDF) ask for this; `/ask` and `/map.svg` never do and read no rain, so they keep the frozen text.
+
+Two changes exist, both only while the gate is live, only for a frozen instruction in state `water_in` or `hold_then_water_in`, and only on those two renders:
+
+1. Rain has covered it (above): measured rain from completion to the earlier of now and the water-in deadline reaches the water-in amount (the largest water-in product's catalog precaution amount, else 0.5 inch).
+2. The amount line, which applies when rain has NOT covered it, or the rain could not be read, and only when the instruction was frozen with BOTH generic figures (no head type on file; not a head type, a measured rate, mixed heads, drip, or an amount-only instruction). It changes `reportV2.banner.lines` and `reportV2.aftercare.watering` (and the aftercare text copies of the same sentence, such as `holdTask` for hold then water-in). Shape: with no hold, the two lines `Water in today’s treatment by <when>.` and `Run spray heads about <S> minutes a zone and rotors about <R> minutes.` become the one line `Water in today’s treatment by <when>: about <amount> — around <S> minutes on spray heads or <R> on rotors.` (for example `... by Sat 9 AM: about ½ inch — around 30 minutes on spray heads or 80 on rotors.`); after a hold, the line `After that, water in today’s treatment by <when>: run spray heads about <S> minutes a zone and rotors about <R> minutes.` becomes `After that, water in today’s treatment by <when>: about <amount> — around <S> minutes on spray heads or <R> on rotors.` `<S>` and `<R>` are the minutes the instruction was frozen with (spray 15 and rotor 40 minutes per quarter inch, scaled); `<amount>` is the instruction's `waterInInches`. No key is added or removed.
+
+The PDF cache key gains `:wir=c` (rain covered it) or `:wir=a` (the amount line) for such a visit only while the gate is live; the stamp reads the location through the frozen identity map center, like the render.
+
 `GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
 `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
@@ -2589,14 +2830,14 @@ visit whose record cannot be read: each keeps the old peak / shoulder / dormant
 note. The retired per-grass sentences were removed, so a permanent past report
 is never rewritten with a program its visit did not run. The payload shape
 (keys, types, route, token, privacy, rate limit) is unchanged.
-The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
-lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
+A lawn payload with no `lead` (a derive failure) still renders `seasonalNote` in
+the snapshot hero. The lead layout, which never renders `seasonalNote`,
 renders a program line once as a small "This time of year" card above the
 trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
 print `seasonalNote`, so its content and cache signature are unchanged.
 `GATE_LAWN_PROGRAM_DETAIL` (dark, owner 2026-10-06; strict `'true'` only, and
-effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above
-and `GATE_LAWN_REPORT_LEAD` is on, because only the lead layout mounts it; gate
+effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above;
+only the lead layout mounts it; gate
 off leaves the lawn payload unchanged, key for key) adds one key to the lawn
 report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow }`, present only beside `seasonalNoteSource: "program"` (lawn only;
 no new route, token, privacy or rate-limit surface). The text is static copy
@@ -2638,9 +2879,8 @@ and `Object.keys` never see it and the `/api/reports/:token/data` payload is wha
 it was (a test pins that). The block itself never reaches the payload; the only
 thing a customer sees of it is the sentences below. Pure, no read, no write, and
 a failure cannot break a render.
-`GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
-also live, so gate off, or lead off, leaves the lawn payload, render and PDF
-unchanged, key for key, and makes no read or write) swaps the old
+The lawn v6 copy (always on; the `GATE_LAWN_REPORT_COPY_V6` and
+`GATE_LAWN_REPORT_LEAD` gates were removed after they held) swaps the old
 `LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
 (`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
 shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
@@ -2682,11 +2922,11 @@ retryable `lawn_copy_v6_unfrozen` error instead of sending it.
 The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
-key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
-under this gate, so a later assessment correction cannot make the PDF and the
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one,
+so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live.
+and its cache signature carries the constant `:lead=1:copyv6=1` stamp.
 The lawn PDF prints watering only from the reconciled `reportV2` (the `aftercare`
 and customer-action lines the web report prints too): with a lawn `reportV2` it
 prints no "Hold irrigation until ..." line from the raw product-advisory timer
@@ -2712,7 +2952,7 @@ of `whatToExpect` and the rest of the frozen copy stands. The by-next-visit
 sentences are LIVE-VIEW ONLY, like `snapshot.nextVisit` itself: a non-live render
 (PDF, static) prints `whatToExpect` without them (`stripLiveOnlyScheduleFields`),
 so a stored PDF never depends on the customer's bookings and its cache signature
-carries no booking state. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
+carries no booking state. The "Next visit" line reads the same property-scoped lookup. The v6 copy keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an
@@ -2733,6 +2973,8 @@ report captions a photo with `zoneLabel` when present. The lawn PDF
 cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
 off the payload and the signature are byte-identical to before.
+
+`GATE_LAWN_PHOTO_LABEL_PICK` (dark; needs `GATE_LAWN_SHOT_LIST` at capture): a lawn photo whose technician chose another customer label carries one extra payload key, `lawnAssessment.photos[].labelPicked` (the shot list's customer wording, for example "Close-up" on a photo shot in the Shaded area slot), and `reportV2.photos[].label`, the labeled photo set's `label` and the web strip caption print it instead of the slot's wording. The key is absent for a photo with no pick and for every photo while the gate is off; `zone` and `zoneLabel` never change.
 
 `GATE_LAWN_REPORT_PHOTO_SET` (dark): for a lawn visit captured under the shot
 list (`lawn_assessments.photos[].photoVocabulary` is `shot_list_v1`; a visit
@@ -2808,8 +3050,8 @@ printable selection, so other visits keep their key. The web report and the PDF
 never in print or the browser's print of the live page. The server probe
 (`collectRenderedImageUrls`) checks the thumbnails beside the set.
 
-`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
-`GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
+`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
+also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
 `{ priorDate: 'YYYY-MM-DD', lines: string[] }` on LIVE views only
 (`mode: 'live'`), and the web report prints it in the lead as "Since your last
@@ -2841,8 +3083,7 @@ permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
 
 `GATE_LAWN_TECH_PARAGRAPH` (owner 2026-10-05; rebuilt as FIXED SENTENCES 2026-10-06,
-owner "lawn fixed sentences", the tree & shrub design; effective only while
-`GATE_LAWN_REPORT_LEAD` is also live; off leaves the lawn payload, the render, the
+owner "lawn fixed sentences", the tree & shrub design; off leaves the lawn payload, the render, the
 PDF and its cache signature unchanged, key for key, with no model call and no read)
 adds ONE optional string, `reportV2.lead.techParagraph`: the "From your technician"
 paragraph. Every word comes from `LAWN_SENTENCES` in
@@ -3050,13 +3291,13 @@ of these overall numbers, so they can still move when only the light did:
 - the portal's "N pts since first visit" and "+N pts improvement" overall deltas
   (`PortalPage.jsx`; the overall score includes color);
 - the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
-  bypassed whenever `GATE_LAWN_REPORT_COPY_V6` is live);
+  bypassed, since the lawn v6 copy is always live);
 - the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
 
 `GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
-live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
+live; off
 leaves the lawn payload and render unchanged, key for key, with no weather read
 and no write) adds ONE fixed sentence to `reportV2.lead.watching` on LIVE views
 only (`mode: 'live'`): "Our weather data shows rain soon after your treatment,
@@ -3261,6 +3502,8 @@ receipts can be repaired without dispatching again; repair preserves original
 delivery time. Deliberate suppression is terminal. Push-only retries reuse the
 message tag without renotification; provider acceptance followed by a crash
 before receipt persistence remains ambiguous and can repeat a provider handoff.
+
+`GATE_SMS_SHARED_PHONE_LINK` (dark; owner 2026-10-10 "link text"): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, keeps today's behaviour (unlinked, unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Gate off = byte-identical to before. Sends nothing.
 
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
@@ -5442,6 +5685,8 @@ changes. `day_end` carries the stored `booking_config.day_end` (18:00 since
 the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
 start grid is the shared 09:00–17:00 customer grid with 12:00 present unless
 `GATE_BOOKING_LUNCH_BLOCK` is set.
+`GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
+unchanged by it.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

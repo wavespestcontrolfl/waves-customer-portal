@@ -241,6 +241,7 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
   const { ok, reason, svc, profile } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
   const service = recapServiceIdentity(svc, profile);
+  if (svc.hasAreaAddOnRows) return { ok: true, eligible: false, reason: 'area_addon_attached', service };
   if (!profile) return { ok: true, eligible: false, reason: 'profile_unavailable', service };
   if (!isLawnReserviceProfile(profile)) return { ok: false, reason: 'not_lawn_re_service' };
   const ineligibleReason = await lawnReserviceIneligibleReason(svc, profile, knex);
@@ -273,6 +274,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     lawnSqft: await loadLawnSqft(svc, knex),
     stockAdvisory: await loadStockAdvisory(svc, knex),
     lastVisit,
+    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
+    ...(require('../config/feature-gates').fastCompleteWrapUpLive() && { wrapUp: true }),
   };
 }
 

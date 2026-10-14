@@ -4,7 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const dbBridge = require('../services/pricing-engine/db-bridge');
-const { validatePricingConfigData, parseConfigData } = require('./admin-pricing-config');
+const { validatePricingConfigFor, parseConfigData } = require('./admin-pricing-config');
 
 // Reads stay tech-or-admin; the approve/reject MUTATIONS are admin-only —
 // approval writes pricing_config directly (billing-authoritative via
@@ -195,7 +195,8 @@ router.post('/:id/approve', requireAdmin, async (req, res) => {
           throw e;
         }
         const prospective = setAtPath(parseConfigData(row.data), splitConfigKey(proposal.config_key).jsonPath, proposedValue);
-        const verdict = validatePricingConfigData(rowKey, prospective, row);
+        // The PUT's own dispatcher: a key with its own validator (area_addon_pricing) is judged by it here too.
+        const verdict = validatePricingConfigFor(rowKey, prospective, row);
         if (!verdict.ok) {
           const e = new Error(`Proposal ${proposalId} fails pricing validation: ${verdict.error}`);
           e.status = 400;

@@ -70,6 +70,9 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/lawn-assessment\/(service|history|baseline|latest)\/[^/]+$/ },
   // Consultation outcome on a visit (the router pins it to the assigned tech).
   { bucket: 'own-visits', methods: ['GET', 'HEAD', 'POST'], pattern: /^\/api\/admin\/consultations\/[^/]+\/outcome$/ },
+  // The estimate that belongs to an assessment visit, read-only (the router
+  // pins it to the assigned tech and to an assessment; no estimate token).
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/consultations\/[^/]+\/estimate$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/customers(\/.*)?$/ },
   // Intelligence Bar: the router hard-pins a technician token to the isolated
   // tech context (admin-intelligence-bar.js ~2605) and executes tools under

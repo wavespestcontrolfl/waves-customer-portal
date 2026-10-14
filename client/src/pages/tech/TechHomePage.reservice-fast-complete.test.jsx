@@ -22,10 +22,21 @@ vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => 
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service, onFullForm, voiceFillEnabled }) => (
-    <div data-recap-enabled={String(service.recapEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)}>
+  default: ({ service, onFullForm, onViewDetails, voiceFillEnabled, suspended }) => (
+    <div data-recap-enabled={String(service.recapEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)} data-suspended={String(!!suspended)}>
       Fast Complete sheet for {service.id}
       <button type="button" onClick={onFullForm}>Sheet full form</button>
+      {onViewDetails && <button type="button" onClick={onViewDetails}>Sheet details</button>}
+    </div>
+  ),
+}));
+vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({
+  default: ({ service, onEdit, onRescheduled, onClose, adminActions }) => (
+    <div data-admin-actions={String(adminActions)}>
+      Appointment details for {service.id}
+      <button type="button" onClick={() => onClose()}>Close details</button>
+      <button type="button" onClick={() => onEdit(service)}>Edit appointment</button>
+      <button type="button" onClick={() => onRescheduled(service)}>Moved with a warning</button>
     </div>
   ),
 }));
@@ -132,6 +143,37 @@ it.each([
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   const sheet = (await screen.findByText('Fast Complete sheet for svc-recap')).closest('[data-recap-enabled]');
   expect(sheet.getAttribute('data-recap-enabled')).toBe(expected);
+});
+
+// Details (owner 2026-10-09): the sheet's Details pill swaps it for the
+// appointment details sheet (quick move, cancel, reschedule, price edit); the
+// sheet's Dispatch-only destinations reopen it there on the visit's day.
+it('the sheet\'s Details opens the appointment details sheet over the sheet (kept, suspended); Close returns to it, a move closes it, and Edit goes to Dispatch', async () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', { ...window.location, assign });
+  rows = [row('svc-details', { reserviceFastCompleteEnabled: true, scheduledDate: '2026-10-09' })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  await screen.findByText('Fast Complete sheet for svc-details');
+  const sheet = () => screen.queryByText('Fast Complete sheet for svc-details')?.closest('[data-suspended]');
+  fireEvent.click(screen.getByRole('button', { name: 'Sheet details' }));
+  expect(await screen.findByText('Appointment details for svc-details')).toBeInTheDocument();
+  // Option 2 (owner 2026-10-09): the sheet stays mounted behind Details so its entries survive.
+  expect(sheet().getAttribute('data-suspended')).toBe('true');
+  // The fixture login is a technician: the office-only controls stay hidden.
+  expect(screen.getByText('Appointment details for svc-details').closest('[data-admin-actions]').getAttribute('data-admin-actions')).toBe('false');
+  fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
+  await waitFor(() => expect(screen.queryByText('Appointment details for svc-details')).not.toBeInTheDocument());
+  expect(sheet().getAttribute('data-suspended')).toBe('false');
+  // A move refreshes the route and closes the sheet behind (that visit changed), but leaves
+  // Details up: the details sheet closes itself after a clean move and keeps a partial or
+  // not-texted result readable.
+  fireEvent.click(screen.getByRole('button', { name: 'Sheet details' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Moved with a warning' }));
+  expect(screen.getByText('Appointment details for svc-details')).toBeInTheDocument();
+  await waitFor(() => expect(sheet()).toBeFalsy());
+  fireEvent.click(screen.getByRole('button', { name: 'Edit appointment' }));
+  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=svc-details');
 });
 
 it('the recap flag alone never opens the sheet: the routing gate still decides', async () => {

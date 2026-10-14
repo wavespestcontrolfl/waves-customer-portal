@@ -108,6 +108,33 @@ describe('/complete wiring', () => {
       expect(src.slice(identityAt, callAt)).toMatch(/if \(lawnFast != null && !isIncompleteVisit\) \{/);
     });
 
+    test('the new-sod no-product claim: the sod record\'s advisory lock is the FIRST lock of the commit transaction, the recheck runs on the locked rows beside the visit-type check', () => {
+      const persistAt = src.indexOf('const persistRecord = async (trx) => {');
+      const lockCallAt = src.indexOf("require('./lawn-sod-sheet').lockSodRecordForNoProduct(trx, {");
+      const mintAt = src.indexOf('if (systemQuietCloseout) {', persistAt);
+      const shareAt = src.indexOf("const snapshotCustomerRow = await trx('customers')", persistAt);
+      const assertAt = src.indexOf("require('./lawn-sod-sheet').assertNoProductUnderLock(trx, { svc, technicianNotes })");
+      expect(persistAt).toBeGreaterThan(-1);
+      // Before every other lock in the transaction: the mint lock, the invoice gate, baseline, estimate, customer, visit.
+      expect(lockCallAt).toBeGreaterThan(persistAt);
+      expect(lockCallAt).toBeLessThan(mintAt);
+      expect(mintAt).toBeLessThan(shareAt);
+      // After the visit-type check, on the locked rows, inside the same `lawnFast` block.
+      expect(assertAt).toBeGreaterThan(callAt);
+      expect(assertAt - callAt).toBeLessThan(600);
+      expect(src.slice(callAt, assertAt)).not.toMatch(/\n          \}\n/);
+      expect(src.slice(lockCallAt, lockCallAt + 300)).toContain('lawnFast, isIncompleteVisit, products, technicianNotes');
+    });
+
+    test('a stale claim rolls the completion back and answers 409 lawn_sod_no_product_stale, releasing the claim', () => {
+      const at = src.indexOf("if (err && err.code === 'lawn_sod_no_product_stale') {");
+      expect(at).toBeGreaterThan(-1);
+      const block = src.slice(at, at + 400);
+      expect(block).toContain('markCompletionAttemptFailed(completionAttempt, err, db)');
+      expect(block).toContain('status: 409');
+      expect(block).toContain('NO_PRODUCT_STALE.payload');
+    });
+
     test('adds one column to the existing customer FOR SHARE read, only where the column exists, and no second lock or query', () => {
       const shareAt = src.indexOf("const snapshotCustomerRow = await trx('customers')");
       const read = src.slice(shareAt, src.indexOf('if (completionPricingPlan) {', shareAt));

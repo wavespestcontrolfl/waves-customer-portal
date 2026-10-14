@@ -1,8 +1,7 @@
-// Findings card diet, server side (lawn report rebuild P8, GATE_LAWN_REPORT_LEAD).
+// Findings card diet, server side (lawn report rebuild P8).
 // The stock insight sentences that claim an unverified past action or only
 // paraphrase the cause, and the out-of-band mowing recommendation the mowing
-// finding card already says, are null in lead mode. The legacy card and the PDF
-// still print them, so with the gate off every string is unchanged.
+// finding card already says, are null.
 // Synthetic payloads only.
 
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
@@ -15,14 +14,6 @@ const CATS = (status) => [
   { key: 'coverage', status: 'needs_attention' },
   { key: 'water_moisture_stress', status },
 ];
-
-function withGate(value, fn) {
-  const previous = process.env.GATE_LAWN_REPORT_LEAD;
-  if (value === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = value;
-  try { return fn(); } finally {
-    if (previous === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = previous;
-  }
-}
 
 const cardOf = (cards, category) => cards.find((c) => c.category === category);
 
@@ -62,21 +53,21 @@ function allCards() {
   return BUILDS.flatMap((input) => buildLawnInsightCards({ grassLabel: 'St. Augustine', ...input }));
 }
 
-describe('insight stock sentences in lead mode', () => {
+describe('insight stock sentences', () => {
   test('every unverifiable wavesAction and listed whyItMatters is null (key kept, never missing)', () => {
-    const cards = withGate('true', allCards);
+    const cards = allCards();
     for (const card of cards) {
       expect(card).toHaveProperty('wavesAction');
       expect(STOCK_WAVES_ACTIONS).not.toContain(card.wavesAction);
       expect(STOCK_WHY).not.toContain(card.whyItMatters);
     }
-    expect(cardOf(withGate('true', () => buildLawnInsightCards({ water: { status: 'deficit' } })), 'water').wavesAction).toBeNull();
-    expect(cardOf(withGate('true', () => buildLawnInsightCards({})), 'overall')).toMatchObject({ wavesAction: null, whyItMatters: null });
-    expect(cardOf(withGate('true', () => buildLawnInsightCards({ mowing: { status: 'too_short' } })), 'mowing').wavesAction).toBeNull();
+    expect(cardOf(buildLawnInsightCards({ water: { status: 'deficit' } }), 'water').wavesAction).toBeNull();
+    expect(cardOf(buildLawnInsightCards({}), 'overall')).toMatchObject({ wavesAction: null, whyItMatters: null });
+    expect(cardOf(buildLawnInsightCards({ mowing: { status: 'too_short' } }), 'mowing').wavesAction).toBeNull();
   });
 
   test('the product-grounded wavesAction lines and the other whyItMatters lines stay', () => {
-    withGate('true', () => {
+    {
       const fung = cardOf(buildLawnInsightCards({ water: { status: 'surplus' }, treatmentKinds: ['fungicide'] }), 'water');
       expect(fung.wavesAction).toBe('Applied a fungicide and adjusted today’s plan toward drying things out.');
       expect(fung.whyItMatters).toMatch(/Staying too wet drives fungus/);
@@ -84,31 +75,9 @@ describe('insight stock sentences in lead mode', () => {
       expect(cardOf(buildLawnInsightCards({ categories: CATS('watch'), treatmentKinds: ['herbicide'] }), 'weeds').wavesAction).toMatch(/herbicide/);
       expect(cardOf(buildLawnInsightCards({ categories: CATS('needs_attention'), treatmentKinds: ['fertilizer'] }), 'coverage').wavesAction).toMatch(/Fed the lawn/);
       expect(cardOf(buildLawnInsightCards({ mowing: { status: 'too_tall' } }), 'mowing').whyItMatters).toMatch(/Tall mowing/);
-    });
-  });
-
-  test('every watering variant of customerAction and nextVisitPlan is identical with the gate on and off', () => {
-    const pick = (cards) => cards.map((c) => [c.category, c.customerAction, c.nextVisitPlan, c.whatWeSaw, c.headline]);
-    for (const input of BUILDS) {
-      const off = withGate(undefined, () => pick(buildLawnInsightCards({ grassLabel: 'St. Augustine', ...input })));
-      const on = withGate('true', () => pick(buildLawnInsightCards({ grassLabel: 'St. Augustine', ...input })));
-      expect(on).toEqual(off);
     }
   });
 
-  test('gate off keeps every stock sentence (the legacy card and the PDF still print them)', () => {
-    const cards = withGate(undefined, allCards);
-    const waves = cards.map((c) => c.wavesAction);
-    for (const line of ['Documented the moisture and adjusted today’s plan toward drying things out.', 'Flagged the area and will recheck it next visit.', 'Documented the areas for comparison next visit.', 'Completed today’s scheduled treatment and documented the visit.']) {
-      expect(waves).toContain(line);
-    }
-    const why = cards.map((c) => c.whyItMatters);
-    for (const line of STOCK_WHY) expect(why).toContain(line);
-    for (const card of cards) {
-      expect(typeof card.wavesAction).toBe('string');
-      expect(typeof card.whyItMatters).toBe('string');
-    }
-  });
 });
 
 describe('the narrative overlay never refills a nulled line', () => {
@@ -125,7 +94,7 @@ describe('the narrative overlay never refills a nulled line', () => {
     expect(out.insights[0].whyItMatters).toBeNull();
     expect(out.insights[0].wavesAction).toBeNull();
     expect(out.mowing.recommendation).toBeNull();
-    // Written copy still lands where the builder left a sentence (gate-off behavior).
+    // Written copy still lands where the builder left a sentence.
     const kept = mergeNarrative({
       insights: [{ headline: 'H', whatWeSaw: 'S', whyItMatters: 'Builder why.', wavesAction: 'Builder did.' }],
       mowing: { measuredHeightInches: 3, status: 'ideal', recommendation: 'Looks good.' },
@@ -136,7 +105,7 @@ describe('the narrative overlay never refills a nulled line', () => {
   });
 });
 
-describe('mowing recommendation in lead mode', () => {
+describe('mowing recommendation', () => {
   const build = (heightIn, status) => buildLawnReportV2({
     lawnAssessment: { scores: { turfDensity: 80, weedSuppression: 80, colorHealth: 80, stressDamage: 80, fungusControl: 80, overallScore: 80, season: 'peak' }, photos: [] },
     mowingHeight: { heightIn, status, band: { min: 3.5, max: 4.0 } },
@@ -144,7 +113,7 @@ describe('mowing recommendation in lead mode', () => {
 
   test('too_short and too_tall leave the recommendation null; the mowing finding card still says what to do', () => {
     for (const [height, status, step] of [[2, 'below', 'Raise the mower one setting.'], [5.5, 'above', 'Lower the mower one setting.']]) {
-      const report = withGate('true', () => build(height, status));
+      const report = build(height, status);
       expect(report.mowing.status).toBe(status === 'below' ? 'too_short' : 'too_tall');
       expect(report.mowing.recommendation).toBeNull();
       expect(report.mowing.measuredHeightInches).toBe(height);
@@ -153,7 +122,7 @@ describe('mowing recommendation in lead mode', () => {
   });
 
   test('a mowing finding ranked below the three findings on screen keeps the gauge line', () => {
-    const crowded = withGate('true', () => buildLawnReportV2({
+    const crowded = buildLawnReportV2({
       lawnAssessment: {
         scores: { turfDensity: 40, weedSuppression: 35, colorHealth: 42, stressDamage: 38, fungusControl: 80, overallScore: 45, season: 'peak' },
         droughtStress: 'moderate',
@@ -161,29 +130,22 @@ describe('mowing recommendation in lead mode', () => {
         photos: [],
       },
       mowingHeight: { heightIn: 2, status: 'below', band: { min: 3.5, max: 4.0 } },
-    }));
+    });
     const mowCard = cardOf(crowded.insights, 'mowing');
     expect(mowCard.priority).toBeGreaterThan(3);
     expect(crowded.mowing.recommendation).toMatch(/kept a bit short/);
   });
 
   test('the in-range line stays', () => {
-    const report = withGate('true', () => build(3.75, 'in_range'));
+    const report = build(3.75, 'in_range');
     expect(report.mowing.recommendation).toMatch(/Mowing height looks good/);
-  });
-
-  test('gate off keeps the out-of-band recommendation text', () => {
-    expect(withGate(undefined, () => build(2, 'below')).mowing.recommendation).toMatch(/kept a bit short/);
-    expect(withGate(undefined, () => build(5.5, 'above')).mowing.recommendation).toMatch(/kept a bit tall/);
   });
 });
 
 describe('coverage card tag', () => {
   const localized = { water: { status: 'balanced', localizedDry: true, localizedDryConfidence: 'area_estimated' } };
-  test('lead mode tags the sprinkler-coverage card; gate off adds no key', () => {
-    const on = withGate('true', () => buildLawnInsightCards(localized));
+  test('the sprinkler-coverage card is tagged', () => {
+    const on = buildLawnInsightCards(localized);
     expect(on.find((c) => c.headline === 'Water coverage is the main thing to watch').kind).toBe('coverage_watch');
-    const off = withGate(undefined, () => buildLawnInsightCards(localized));
-    expect(off.find((c) => c.headline === 'Water coverage is the main thing to watch')).not.toHaveProperty('kind');
   });
 });

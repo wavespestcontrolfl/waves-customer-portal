@@ -51,6 +51,16 @@ function isFlexTierEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_CONFLICT_MOVES: same call-time, fail-closed convention.
+function isConflictMovesEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_AUTO_DISPATCH_CONFLICT_MOVES');
+  } catch (_) {
+    return false;
+  }
+}
+
 const VALID_MODES = new Set(['dry_run', 'apply']);
 
 /**
@@ -73,6 +83,76 @@ function isCustomerRecurringDispatchEnabled() {
     && isEnabled('cronJobs') && isEnabled('autoDispatch')
     && config.mode === 'apply' && config.maxChangesPerRun > 0
     && !config.requirePortalPreferences;
+}
+
+// GATE_AUTO_DISPATCH_ROAD_CHECK: same call-time, fail-closed convention.
+function isRoadCheckEnabled() {
+  const { gateEnvValue, autoDispatchSharedModelLive } = require('../../config/feature-gates');
+  try {
+    // The road legs are the shared model's own (candidate-slots.js builds
+    // them only on that path), so without that gate there is nothing to measure.
+    return gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK') && autoDispatchSharedModelLive();
+  } catch (_) {
+    return false;
+  }
+}
+
+// GATE_AUTO_DISPATCH_PROOFREADER: same call-time, fail-closed convention.
+function isProofreaderEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER');
+  } catch (_) {
+    return false;
+  }
+}
+
+// The 2026-10-09 move rules (move-rules.js), resolved apart from
+// getAutoDispatchConfig to keep that function inside its complexity budget.
+function moveRuleConfig(overrides) {
+  return {
+    // A DAY move must save at least this many modeled drive minutes on the
+    // visit's own detour (owner 2026-10-09: 16 of 50 moves in a week cleared
+    // the score bar on the default time window and a lighter day alone, some
+    // with no drive saved). A same-day re-time is held to it too. 0 = off.
+    minDayMoveDriveSavingMinutes: overrides.minDayMoveDriveSavingMinutes
+      ?? intEnv('AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES', 6, { min: 0, max: 120 }),
+    // CONFLICT MOVES (GATE_AUTO_DISPATCH_CONFLICT_MOVES): a visit that overlaps
+    // another customer's stop, or sits on an owner blackout day, moves to the
+    // best legal slot without the score bar. See current-conflict.js.
+    conflictMovesEnabled: overrides.conflictMovesEnabled ?? isConflictMovesEnabled(),
+    // The most modeled drive a conflict move may ADD to the visit's own detour
+    // (read-only replay 2026-10-09: 13 of 28 overlap moves added drive, up to
+    // 49 minutes). Past it the visit stays and needs a person. Applies to a
+    // closed-day move too. Owner decision pending on the number.
+    conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
+      ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
+    // The most automatic moves one visit may have (owner 2026-10-09: "at most
+    // two"), counted from the durable reschedule_log (move-limit.js). Day
+    // moves, same-day re-times and forced moves all count. 0 = no limit.
+    maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
+      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 2, { min: 0, max: 20 }),
+    // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
+    // move's drive saving is measured again on Google's traffic-aware roads
+    // before the visit moves. The cap is the most route-matrix legs one run
+    // may buy; past it a move is judged on the model alone.
+    roadCheckEnabled: overrides.roadCheckEnabled ?? isRoadCheckEnabled(),
+    roadCheckMaxElements: overrides.roadCheckMaxElements
+      ?? intEnv('AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS', 600, { min: 0, max: 5000 }),
+    // MOVE PROOFREADER (GATE_AUTO_DISPATCH_PROOFREADER, proofreader/nightly.js;
+    // owner 2026-10-12): one model reads the customer record before a move in
+    // apply mode. Allow moves the visit; hold and unknown leave it, and an
+    // unknown tells a person. The cap is the most model calls one run may
+    // make; past it a move waits for the next run.
+    proofreaderEnabled: overrides.proofreaderEnabled ?? isProofreaderEnabled(),
+    proofreaderMaxCalls: overrides.proofreaderMaxCalls
+      ?? intEnv('AUTO_DISPATCH_PROOFREADER_MAX_CALLS', 60, { min: 0, max: 1000 }),
+    // No proofreader call starts later than this many seconds into the run.
+    // The 04:10 run holds the writer lock the 04:20 route reorder needs; a
+    // call can take two minutes, so 300 ends the last one by about 04:17.
+    proofreaderDeadlineSeconds: overrides.proofreaderDeadlineSeconds
+      ?? intEnv('AUTO_DISPATCH_PROOFREADER_DEADLINE_SECONDS', 300, { min: 0, max: 3600 }),
+  };
 }
 
 /**
@@ -107,6 +187,7 @@ function getAutoDispatchConfig(overrides = {}) {
       ?? intEnv('AUTO_DISPATCH_DATE_TOLERANCE_DAYS', 7, { min: 1, max: 60 }),
     minScoreImprovement: overrides.minScoreImprovement
       ?? intEnv('AUTO_DISPATCH_MIN_SCORE_IMPROVEMENT', 15, { min: 0, max: 100 }),
+    ...moveRuleConfig(overrides),
     maxChangesPerRun: overrides.maxChangesPerRun
       ?? intEnv('AUTO_DISPATCH_MAX_CHANGES_PER_RUN', 100, { min: 0, max: 100000 }),
     // Self-heal: per-run cap on geocoding MISSING_GEO customers (each is a Google
@@ -145,5 +226,5 @@ function getAutoDispatchConfig(overrides = {}) {
 }
 
 module.exports = {
-  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
+  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isConflictMovesEnabled, isRoadCheckEnabled, isProofreaderEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
 };

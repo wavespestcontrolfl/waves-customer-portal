@@ -20,8 +20,10 @@ describe('the recipe file', () => {
   test('the three tracks stay identical except for the name', () => {
     expect(TRACKS).toEqual(['st_augustine', 'bermuda', 'zoysia']);
     for (const track of TRACKS) {
-      const { name, ...rest } = v13[track];
-      expect(rest).toEqual((({ name: _name, ...others }) => others)(v13.st_augustine));
+      // The bermuda removal add-on (visit.addOns, St. Augustine and Zoysia only) is set aside, as in lawn-v13-data.
+      const body = ({ name: _name, visits, ...others }) => ({ ...others, visits: visits.map(({ addOns, ...visit }) => visit) });
+      const { name } = v13[track];
+      expect(body(v13[track])).toEqual(body(v13.st_augustine));
       expect(name).toMatch(/^Waves Lawn Program v13 \(/);
     }
   });

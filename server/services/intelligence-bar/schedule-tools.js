@@ -1376,6 +1376,8 @@ async function moveStopsToDay(input, actionContext = {}) {
       // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [s.id],
         'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.');
+      // A stop carrying a limited area add-on is judged for the new day at its place; a limit reached aborts the batch, nothing moves.
+      await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: s.id, visit: s, scheduledDate: dateStr, staff: true });
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)

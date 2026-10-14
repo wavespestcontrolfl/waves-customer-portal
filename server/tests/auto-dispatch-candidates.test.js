@@ -93,6 +93,7 @@ describe('findValidCandidateSlots', () => {
     const args = findAvailableSlots.mock.calls[0][0];
     expect(args.excludeServiceIds).toEqual(['s1']);
     expect(args.slotStepMinutes).toBe(60); // on-the-hour starts
+    expect(args.strictBlackout).toBe(true); // an unreadable closed-day list stops the search (owner 2026-10-09)
     // search window is bounded to ±7 days of the visit's date (2026-08-04),
     // not the whole horizon — so cadence isn't collapsed.
     expect(args.dateFrom).toBe('2026-07-28');
@@ -379,4 +380,40 @@ test('current placement excludes an ungeocoded secondary-property neighbor', asy
   const result = await computeCurrentPlacement(SERVICE, 'general', { ...ctx(), db });
   expect(result.stops_that_day).toBe(1);
   expect(selected).toContain('scheduled_services.service_address_line1');
+});
+
+test('legacy current placement marks a grouped visit: its detour is measured against its own siblings (Codex #6207 r1 P1)', async () => {
+  const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
+  const withSibling = { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2' }], visitWindowStart: null };
+  const grouped = await computeCurrentPlacement({ ...SERVICE, visit_id: 'v1' }, 'general', { ...ctx(), groupContext: withSibling });
+  expect(grouped.detour_group_blind).toBe(true);
+  // A visit_id whose other members are all terminal: the detour is valid (r7 P2).
+  const alone = { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: null };
+  expect(await computeCurrentPlacement({ ...SERVICE, visit_id: 'v1' }, 'general', { ...ctx(), groupContext: alone })).not.toHaveProperty('detour_group_blind');
+  const standalone = await computeCurrentPlacement(SERVICE, 'general', ctx());
+  expect(standalone).not.toHaveProperty('detour_group_blind');
+});
+
+test('legacy cap keeps a same-day candidate that sits beyond the cap when conflict moves are on (pre-push P1)', () => {
+  const { _internals: { legacyCap } } = require('../services/auto-dispatch/candidate-slots');
+  const other = Array.from({ length: 3 }, (_, i) => ({ date: '2026-08-06', start_time: `0${8 + i}:00` }));
+  const sameDay = { date: '2026-08-04', start_time: '14:00' };
+  const evalConflict = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
+  // The capped set stays; the same-day slot past the cap is added, marked (r11 P2).
+  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2, conflictMoves: true, evalConflict })).toEqual([other[0], other[1], { ...sameDay, past_cap: true }]);
+  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2 })).toEqual([other[0], other[1]]);
+  // Gate on, visit NOT in conflict: find-time's route-ranked order stays (Codex #6207 r8 P2).
+  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2, conflictMoves: true, evalConflict: null })).toEqual([other[0], other[1]]);
+});
+
+// A grouped visit that overlaps another stop may be repaired by a same-day
+// shift into a sibling's old window: find-time must ignore the whole moving
+// unit (Codex #6207 r8 P1). Any other visit excludes itself only.
+test('find-time ignores the whole moving unit for a visit in an overlap, itself only otherwise', async () => {
+  const { _internals: { movingUnitIds } } = require('../services/auto-dispatch/candidate-slots');
+  const groupContext = { excludeIds: new Set(['s1', 'sib1']), siblings: [{ id: 'sib1' }] };
+  const overlap = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
+  expect(await movingUnitIds(SERVICE, { evalConflict: overlap, groupContext })).toEqual(['s1', 'sib1']);
+  expect(await movingUnitIds(SERVICE, { evalConflict: null, groupContext })).toEqual(['s1']);
+  expect(await movingUnitIds(SERVICE, { evalConflict: { kind: 'closed_day', date: '2026-08-04' }, groupContext })).toEqual(['s1']);
 });

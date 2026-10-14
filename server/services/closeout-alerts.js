@@ -18,6 +18,7 @@
  */
 const { getCloseoutStatus } = require('./closeout-status');
 const gates = require('../config/feature-gates');
+const { AREA_ADDONS } = require('./pricing-engine/constants');
 
 // GATE_CLOSEOUT_MONEY_COMMS_ALERTS — the comms / invoice / invoiceDelivery
 // facts become per-visit alert issues (and hold the readability floor).
@@ -191,6 +192,19 @@ function openFact(f) {
     && !['awaiting_completion', 'recap_sms_in_flight'].includes(f.reason);
 }
 
+// The sentence an open application issue reads. A visit with chemical area add-ons names the add-ons that
+// have no application record (each owes its own row; closeout-status areaAddOnApplicationFact), and the
+// visit's own service when it owes one as well.
+function applicationIssueSummary(fact) {
+  if (fact.reason === 'all_application_rows_retracted') return 'Every application row on this job was retracted — the required material log is empty.';
+  const nameOf = (key) => Object.values(AREA_ADDONS.items).find((cfg) => cfg.serviceKey === key)?.name || key;
+  const owed = [...(fact.missingAddOns || []).map(nameOf), ...(fact.missingHostApplication ? ['the visit’s own service'] : [])].join(', ');
+  if (!owed) return 'Completed job is missing the required chemical or material application record.';
+  return fact.reason === 'addon_application_rows_retracted'
+    ? `The application record for ${owed} was retracted.`
+    : `Completed job has no application record for ${owed}.`;
+}
+
 /**
  * Pure: closeout status → alert issues for one visit. Each issue:
  *   { type, fact, reason, summary, requiredPhotoCount?, actualPhotoCount? }
@@ -253,9 +267,7 @@ function closeoutIssuesForVisit(status) {
       type: CLOSEOUT_ALERT_TYPES.application,
       fact: 'application',
       reason: facts.application.reason,
-      summary: facts.application.reason === 'all_application_rows_retracted'
-        ? 'Every application row on this job was retracted — the required material log is empty.'
-        : 'Completed job is missing the required chemical or material application record.',
+      summary: applicationIssueSummary(facts.application),
     });
   }
   if (openFact(facts.photos)) {

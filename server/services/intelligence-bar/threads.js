@@ -20,6 +20,14 @@ const { gateEnvValue } = require('../../config/feature-gates');
 // default 365; override via IB_THREAD_RETENTION_DAYS.
 const DEFAULT_RETENTION_DAYS = 365;
 
+// Idle limit (hours) after which the palette starts a NEW conversation
+// instead of resuming the latest thread (owner 2026-10-12: one thread ran
+// from 2026-09-03 with 178 turns, and an old customer bled into a new ask).
+// Override via IB_THREAD_IDLE_HOURS; 0, negative or invalid = this default.
+// The old thread stays in History and opens by hand (getThread has no limit).
+const DEFAULT_IDLE_HOURS = 4;
+const MAX_IDLE_HOURS = 24 * 365;
+
 // How many trailing turns hydrate the client on resume. The model window
 // stays the route's own trim (~8 turns) — this only bounds what the palette
 // re-displays.
@@ -33,6 +41,8 @@ const SEED_TURN_LIMIT = 8;
 
 // Call-time read (a flip needs no redeploy); registered in
 // config/feature-gates.js (`ibThreads`) for the centralized status listing.
+const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function threadsEnabled() {
   return gateEnvValue('GATE_IB_THREADS');
 }
@@ -40,6 +50,13 @@ function threadsEnabled() {
 function retentionDays() {
   const n = Math.floor(Number(process.env.IB_THREAD_RETENTION_DAYS));
   return Number.isFinite(n) && n >= 30 ? n : DEFAULT_RETENTION_DAYS;
+}
+
+// Call-time read, like retentionDays.
+function idleHours() {
+  const n = Number(process.env.IB_THREAD_IDLE_HOURS);
+  // Capped at a year so a typo can never overflow the interval cast.
+  return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_IDLE_HOURS) : DEFAULT_IDLE_HOURS;
 }
 
 function deriveTitle(userText) {
@@ -117,11 +134,19 @@ async function turnsAsHistory(threadId) {
   };
 }
 
-/** The actor's most recently active thread, hydrated for the palette. */
+/**
+ * The actor's most recently active thread, hydrated for the palette, or null
+ * when there is none OR the newest one has been idle past idleHours(): the
+ * palette then opens a new conversation. Only this "resume the latest" lookup
+ * has the limit: getThread (a thread opened by hand from History, or an
+ * explicit thread_id on /query) is never idle-limited. /query itself never
+ * picks "the latest" thread; with no thread_id it creates a new one.
+ */
 async function latestThread(actorId) {
   if (!actorId) return null;
   const thread = await db('ib_threads')
     .where('admin_actor_id', actorId)
+    .whereRaw("last_active_at >= NOW() - (? || ' hours')::interval", [String(idleHours())])
     .orderBy('last_active_at', 'desc')
     .first();
   if (!thread) return null;
@@ -134,6 +159,22 @@ async function latestThread(actorId) {
     lastSeq,
     conversationHistory: history,
   };
+}
+
+/**
+ * True when this actor's thread exists and has had no exchange for longer than
+ * idleHours(). The /query guard uses it so the limit does not depend on the
+ * client clock: an explicit thread id that is idle, and that the operator did
+ * not reopen on purpose from History, starts a new conversation. A missing,
+ * foreign or malformed id is not "idle" (the normal append path handles it).
+ */
+async function isThreadIdle(actorId, threadId) {
+  if (!actorId || !THREAD_ID_RE.test(String(threadId || ''))) return false;
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .whereRaw("last_active_at < NOW() - (? || ' hours')::interval", [String(idleHours())])
+    .first('id');
+  return !!row;
 }
 
 /** One thread by id, actor-bound. */
@@ -159,6 +200,12 @@ async function getThread(actorId, threadId) {
 // (see admin-intelligence-bar.js); the attachment note stands in for images.
 const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
 const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+// Added to the ASSISTANT turn of an exchange in which the general admin read
+// (read_admin_data) returned data. The server writes it from its own per-request
+// flag and reads it back (hasUntrustedRead) to taint every later request on the
+// thread, so the taint lives in the server's record of the thread, never in
+// anything the client sends. No LIKE wildcards in it.
+const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation and may carry untrusted text]';
 const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
 // The user turn the route persists when a saved task continues; the operator
 // never typed it.
@@ -170,7 +217,7 @@ function operatorText(content) {
   return String(content || '').split('\n')
     .filter((line) => {
       const trimmed = line.trim();
-      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== CONTINUATION_TURN
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== CONTINUATION_TURN
         && !ATTACHMENT_NOTE_RE.test(trimmed);
     })
     .join('\n').trim();
@@ -195,7 +242,6 @@ function operatorText(content) {
  * refuses prior-turn grounding entirely when it has no valid bound to pass —
  * this only enforces whatever bound it IS given.
  */
-const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30, maxSeq = null } = {}) {
   // Nothing to read when threads are off, or for a missing actor or a
   // malformed thread id (never sent to the uuid column).
@@ -217,6 +263,24 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
 }
 
 /** Recent threads for the picker (no turns). */
+/**
+ * Did an earlier exchange on this thread read admin screen data? Answered from
+ * the server's own turns (the marker the route appended), for the life of the
+ * thread. Returns false for a thread of this actor with no such turn; throws
+ * when the thread cannot be read (not found for this actor, or a database
+ * error) so the caller can fail closed.
+ */
+async function hasUntrustedRead(actorId, threadId) {
+  // ONE query: the thread's primary key plus an EXISTS over that thread's own
+  // turns (the thread_id index). Cost: one indexed lookup and a scan of one
+  // thread's rows per owner-direct request that carries a thread id.
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${UNTRUSTED_READ_MARKER}%`]));
+  if (!row) throw new Error('thread not readable');
+  return row.marked === true;
+}
+
 async function listThreads(actorId, limit = 20) {
   if (!actorId) return [];
   return db('ib_threads')
@@ -240,6 +304,8 @@ async function purgeExpiredThreads() {
 
 module.exports = {
   threadsEnabled,
+  idleHours,
+  isThreadIdle,
   appendExchange,
   latestThread,
   getThread,
@@ -247,6 +313,8 @@ module.exports = {
   recentOperatorTurns,
   IMAGE_TAINT_MARKER,
   PII_TAINT_MARKER,
+  UNTRUSTED_READ_MARKER,
+  hasUntrustedRead,
   CONTINUATION_TURN,
   purgeExpiredThreads,
   deriveTitle,

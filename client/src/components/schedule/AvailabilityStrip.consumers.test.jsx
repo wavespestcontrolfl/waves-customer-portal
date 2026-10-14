@@ -133,6 +133,37 @@ it('rain-out: asks for the best-times rows and shows each chip with its hourly r
   expect(screen.getByText('74% rain that day')).toBeInTheDocument();
 });
 
+// sameDayOnly (a technician on a recurring visit under GATE_COLLECTIVE_SERIES_ANCHOR):
+// POST /rain-out refuses a date change, so a suggestion on another day must not
+// move the custom date off today.
+it('rain-out, same day only: a chip on another day does not change the custom date', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/rain-out-options')
+    ? json({
+      sameDay: [{ kind: 'same_day', date: DATE, window: { start: '14:00', end: '15:00' }, display: 'Today, 2:00 PM-3:00 PM' }],
+      days: [],
+      sameDayOnly: true,
+      service: { window: { start: '08:00', end: '09:00' } },
+    })
+    : json({}))));
+  hooks.availability = {
+    ...missAt('14:00'),
+    best: { day: [], week: [hour('10:00', { date: '2035-01-09' })], weekCovered: true },
+  };
+  render(<RainOutSheet service={{ id: 'svc-1', technicianId: 'tech-1', customerId: 'cust-1', scheduledDate: '2035-01-01' }} onClose={vi.fn()} onDone={vi.fn()} />);
+  await screen.findByText('Today, 2:00 PM-3:00 PM');
+  fireEvent.click(screen.getByText('Custom time'));
+  await waitFor(() => expect(document.querySelector('input[type="date"]')).toBeDisabled());
+  const dateInput = document.querySelector('input[type="date"]');
+  const before = dateInput.value;
+  expect(before).toBeTruthy();
+  const futureChip = screen.getAllByTestId('availability-hour').find((chip) => chip.textContent.includes('10'));
+  expect(futureChip).toBeTruthy();
+  expect(futureChip).not.toBeDisabled();
+  fireEvent.click(futureChip);
+  expect(document.querySelector('input[type="date"]').value).toBe(before);
+  expect(document.querySelector('input[type="date"]').value).not.toBe('2035-01-09');
+});
+
 it('new appointment: taking a chip sets the date, the hour and the technician it was scored for', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     const u = String(url);

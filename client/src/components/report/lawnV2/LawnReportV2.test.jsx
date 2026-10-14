@@ -434,6 +434,55 @@ describe('LawnWateringBanner', () => {
     }
   });
 
+  describe('a short water-in beside a 14-day one (banner.later)', () => {
+    const LATER_LINES = ['Today’s treatment needs about ½ inch of water by Wed, Oct 14 at 2 PM.', 'Rain and your regular watering both count.'];
+    const twoWindows = (laterAt, extra = {}) => ({
+      state: 'water_in',
+      lines: ['Water in today’s treatment by Thu 2 PM.', 'Run each zone about 40 minutes.', 'Run it even if it is not your usual day.', `In all, it needs about ½ inch of water by Wed, Oct 14 at 2 PM. Rain and your regular watering both count.`],
+      expiresAt: FUTURE,
+      later: { at: laterAt, state: 'water_in', lines: LATER_LINES },
+      ...extra,
+    });
+
+    it('before the short deadline: every line as written', () => {
+      renderBanner(twoWindows(FUTURE));
+      expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('Water in today’s treatment by Thu 2 PM.');
+      expect(screen.getByText('Run each zone about 40 minutes.')).toBeInTheDocument();
+    });
+
+    it('after the short deadline: only the long line, the note is not ended, and the short run’s extras are gone', () => {
+      renderBanner(twoWindows(PAST, { forecastLine: 'Rain is likely before then.', setupLine: 'Add your watering schedule' }));
+      expect(screen.getByTestId('lawn-watering-banner')).toHaveAttribute('data-ended', 'false');
+      expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(LATER_LINES[0]);
+      expect(screen.getByText(LATER_LINES[1])).toBeInTheDocument();
+      expect(screen.queryByText(/Thu 2 PM|40 minutes|usual day|In all/)).toBeNull();
+      expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+      expect(screen.queryByTestId('lawn-watering-banner-setup')).toBeNull();
+    });
+
+    it('an open tab drops the short step when its deadline passes, then ends at the long one', () => {
+      vi.useFakeTimers();
+      try {
+        const laterAt = new Date(Date.now() + 60 * 1000).toISOString();
+        const expiresAt = new Date(Date.now() + 180 * 1000).toISOString();
+        renderBanner(twoWindows(laterAt, { expiresAt }));
+        expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('Water in today’s treatment by Thu 2 PM.');
+        act(() => { vi.advanceTimersByTime(62 * 1000); });
+        expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(LATER_LINES[0]);
+        expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
+        act(() => { vi.advanceTimersByTime(120 * 1000); });
+        expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('print / PDF keeps the lines as written at the visit', () => {
+      renderBanner(twoWindows(PAST), { print: true });
+      expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('Water in today’s treatment by Thu 2 PM.');
+    });
+  });
+
   it('print / PDF keeps the lines even past expiry, in the same block', () => {
     renderBanner({ ...BANNERS.hold, expiresAt: PAST }, { print: true });
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold.lines[0]);
