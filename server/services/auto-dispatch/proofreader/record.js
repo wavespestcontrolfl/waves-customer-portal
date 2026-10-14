@@ -159,7 +159,7 @@ const TIME_WORDS_RE = new RegExp([
   // The hour alone is the match, the AM / PM a look-ahead: the mask can take
   // the hour and leave "A.M.", which counts by its own pattern (r21).
   // Not a mix ratio ("mix ratio 1:10"): r27.
-  '(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})\\b\\d{1,2}:\\d{2}(?=\\s?[ap]\\.?m\\.?(?![\\w])|(?![\\w:]))',
+  '(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})\\b\\d{1,2}:\\d{2}(?=\\s?[ap]\\.?m\\.?(?![\\w])|-?ish\\b|(?![\\w:]))',
   '\\b\\d{1,2}(?=\\s?[ap]\\.?m\\.?(?![\\w]))',
   // The lead word alone is the match, the anchor a look-ahead: in "BEFORE
   // lunch" the mask takes BEFORE and leaves lunch, and a match that took
@@ -180,8 +180,8 @@ const TIME_WORDS_RE = new RegExp([
   // A day of the month after a word that limits the visit to it ("ONLY ON
   // THE 20TH", "except the 5th"): r17. "on the 20th" alone is history.
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
-  // ...and the date first ("on 10/20 only"): r20.
-  `(?<![\\w/-])${DATE_SHAPES}(?=[\\s,]{1,5}only\\b)`,
+  // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
+  `(?<![\\w/-])${DATE_SHAPES}(?=[\\s,]{1,5}(?:only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
