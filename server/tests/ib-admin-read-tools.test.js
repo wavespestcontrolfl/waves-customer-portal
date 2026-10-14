@@ -1388,3 +1388,22 @@ describe('access passcodes in the assignment pass', () => {
     expect(scrub('App passcode: 998877')).toBe('App passcode: [removed]');
   });
 });
+
+// Codex r10: identifier-style account PINs and values after status verbs.
+describe('identifier PINs and status verbs', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  const v = ['hun', 'ter', '2v'].join('');
+  test.each(['PORTAL_PIN=4821', 'APP_PASSCODE=998877', '{"portal_pin":"4821"}'])('an account PIN is removed: %s', (text) => {
+    expect(scrub(text)).not.toMatch(/4821|998877/);
+  });
+  test.each(['GATE_PIN=4821', 'Lockbox passcode: 7788', 'PIN: 4821 for the gate'])('an access PIN stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+  test.each([`Password: changed to ${v}`, `Password: reset to ${v}`, `API_TOKEN: updated to ${v}`])('the new value is removed: %s', (text) => {
+    expect(scrub(text)).not.toContain(v);
+  });
+  test.each(['Password: changed', 'Password: reset to the same', 'Password: required before login'])('status prose stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+});

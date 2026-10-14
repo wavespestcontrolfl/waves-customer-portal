@@ -53,19 +53,36 @@ const proseName = (identifier, value) => PROSE_NAMES.has(identifier.toLowerCase(
   && !(!/\s/.test(value) && (/[\d%=+/\\_-]/.test(value) || value.length >= 16));
 
 const hasCredentialPart = (identifier) => isCredentialName(identifier, FREE_TEXT_EXEMPT_WORDS);
+// A PIN or passcode name ("PORTAL_PIN", "portal_pin", "APP_PASSCODE") is a
+// credential unless it names an entry device or its clause is an access code.
+const PIN_NAME_RE = /(?:^|[_.-])(?:pin|passcode)(?:$|[_.-])/i;
+const ACCESS_NAME_RE = /(?:^|[_.-])(?:gate|door|lockbox|garage|keypad|callbox)(?:$|[_.-])/i;
+const isPinName = (identifier) => PIN_NAME_RE.test(identifier);
+const accessPinName = (identifier, text, offset, valueEnd) => ACCESS_NAME_RE.test(identifier) || accessCodeLine(text, offset, valueEnd);
 
 // The value after the separator: to the closing quote, else its first token
 // plus up to 20 plain words that follow it in the same clause, so a dotenv
 // passphrase goes whole ("DB_PASSWORD=correct horse battery staple") while a
 // following assignment or quoted value is still examined on its own
 // ("DB_PASSWORD=hunter2 OTHER_VAR=\"value\"").
-const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:}\]](?:[ \t]+[A-Za-z][A-Za-z'-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:}\]]*(?=[\s"'`,;]|$)))/y;
+const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:}\]](?:[ \t]+[A-Za-z0-9][A-Za-z0-9'!@#$%^&*+-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:}\]]*(?=[\s"'`,;]|$)))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
 // An optional quote on each side of the identifier covers a JSON or JS key ("password": "x", 'api_key': 'x').
 const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])["'\`]?([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)["'\`]?(${AFTER_SEPARATOR})`, 'g');
 
 // Returns { text, removed }. A non-credential identifier ("Pasted:") does not
 // swallow what follows it, so the next identifier is still examined.
+// Is this credential-named assignment's value kept? An empty or already
+// removed value, status prose, an access PIN, a prose name with a plain value,
+// or a small counter ("password_attempts: 3").
+function keepAssignment({ identifier, value, pinName, input, offset, valueEnd }) {
+  if (!value || value.startsWith('[removed') || proseOnly(value)) return true;
+  if (pinName && accessPinName(identifier, input, offset, valueEnd)) return true;
+  if (proseName(identifier, value)) return true;
+  const last = identifier.toLowerCase().split(/[_.-]/).pop();
+  return COUNTER_PARTS.has(last) && /^\d{1,6}$/.test(value);
+}
+
 function scrubIdentifierAssignments(input) {
   let out = '';
   let cursor = 0;
@@ -75,7 +92,8 @@ function scrubIdentifierAssignments(input) {
   while ((match = IDENT_SEP_RE.exec(input)) !== null) {
     const identifier = match[1];
     const valueStart = match.index + match[0].length;
-    if (!hasCredentialPart(identifier)) continue;
+    const pinName = isPinName(identifier);
+    if (!pinName && !hasCredentialPart(identifier)) continue;
     VALUE_RE.lastIndex = valueStart;
     const found = VALUE_RE.exec(input);
     if (!found) continue;
@@ -84,10 +102,7 @@ function scrubIdentifierAssignments(input) {
     const rawBare = found[4] || '';
     const tail = quote ? '' : (rawBare.match(/[.!?:}\]]+$/) || [''])[0];
     const value = quote ? found[2] : (tail ? rawBare.slice(0, -tail.length) : rawBare);
-    const last = identifier.toLowerCase().split(/[_.-]/).pop();
-    const keep = !value || value.startsWith('[removed') || proseOnly(value) || proseName(identifier, value)
-      || (COUNTER_PARTS.has(last) && /^\d{1,6}$/.test(value));
-    if (keep) continue;
+    if (keepAssignment({ identifier, value, pinName, input, offset: match.index, valueEnd: valueStart + found[0].length })) continue;
     out += input.slice(cursor, valueStart) + (quote ? `${quote}${REMOVED}${quote}` : `${open}${REMOVED}${tail}`);
     cursor = valueStart + found[0].length;
     removed += 1;
@@ -205,6 +220,10 @@ const statusWord = (word) => {
 function proseOnly(clause) {
   const words = clause.toLowerCase().split(/\s+/).filter(Boolean);
   if (!statusWord(words[0])) return false;
+  // "changed to hunter2", "reset to X", "set as X": the word after "to" / "as"
+  // / "into" is the new value unless it is itself a status word.
+  const connector = words.findIndex((word) => ['to', 'as', 'into'].includes(word));
+  if (connector >= 0 && words[connector + 1] && !statusWord(words[connector + 1])) return false;
   return AMBIGUOUS_FIRST.has(words[0].replace(/[^a-z/]/g, '')) ? words.every(statusWord) : true;
 }
 
