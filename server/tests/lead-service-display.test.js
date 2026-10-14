@@ -15,7 +15,7 @@ const catalogNames = catalogNameIndex([
   'WDO Inspection Service', 'Bee / Wasp Nest Removal Service', 'Flea Control Service',
   'Termite Inspection Service', 'Termite Monitoring Service', 'Rodent Trapping Service',
   'Quarterly Rodent Bait Station Service', 'Waves Assessment', 'Semiannual Pest Control Service',
-  'Every 6 Weeks Lawn Care Service', 'Seasonal Mosquito Control Service', 'Monthly Mosquito Control Service',
+  'Every 6 Weeks Lawn Care Service', 'Semiannual Palm Injection Service', 'Termite Bait Station Service', 'Seasonal Mosquito Control Service', 'Monthly Mosquito Control Service',
   'Every 6 Weeks Tree & Shrub Care Service', 'Bi-Monthly Tree & Shrub Care Service', 'Bi-Monthly Pest Control Service', 'Lawn + Tree & Shrub Service',
 ]);
 const name = (text) => leadServiceDisplay(text, { catalogNames });
@@ -38,6 +38,7 @@ describe('leadServiceDisplay', () => {
     ['Recurring Cockroach Control', 'Quarterly Pest Control Service'],
     ['Rodent Bait Stations', 'Quarterly Rodent Bait Station Service'],
     ['Tree & Shrub Care', 'Bi-Monthly Tree & Shrub Care Service'], // quote wizard's recurring program
+    ['Palm Injections', 'Semiannual Palm Injection Service'], // quote wizard's recurring program
     ['Recurring Termite Bait Stations', 'Termite Bait Station Service'],
     ['Recurring Lawn Care + One-Time Lawn Care Service', 'Monthly Lawn Care Service'],
     ['Quarterly Pest Control Service + One-Time Lawn Care Service', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
@@ -125,6 +126,37 @@ describe('leadServiceDisplay', () => {
     ['Pest control and lawn care, monthly or quarterly'],
   ])('a sentence is shown as written, never guessed at: %s', (text) => {
     expect(name(text)).toBe(text);
+  });
+
+  test('a configured package name is shown as written, whole or as one part', () => {
+    const opts = { catalogNames, asWritten: ['Roach Package', 'Roach Package + Lawn Care'] };
+    expect(leadServiceDisplay('Quarterly Pest Control + Roach Package', opts)).toBe('Quarterly Pest Control Service + Roach Package');
+    expect(leadServiceDisplay('Roach Package + Lawn Care', opts)).toBe('Roach Package + Lawn Care');
+    expect(leadServiceDisplay('Roach Package + Recurring Lawn Care', opts)).toBe('Roach Package + Monthly Lawn Care Service');
+    expect(leadServiceDisplay('Quarterly Pest Control + Roach Package + Lawn Care', opts))
+      .toBe('Quarterly Pest Control Service + Roach Package + Lawn Care');
+  });
+
+  test('a configured name counts only when it is about roaches, and keeps its cadence', () => {
+    expect(leadServiceDisplay('Lawn Care', { catalogNames, asWritten: ['Lawn Care'] })).toBe('Waves Assessment (Lawn)');
+    expect(leadServiceDisplay('One-Time Roach Package + Lawn Care', { catalogNames, asWritten: ['One-Time Roach Package'] }))
+      .toBe('One-Time Roach Package + One-Time Lawn Care Service');
+    expect(leadServiceDisplay('Monthly Roach Program + Lawn Care', { catalogNames, asWritten: ['Monthly Roach Program'] }))
+      .toBe('Monthly Roach Program + Monthly Lawn Care Service');
+  });
+
+  test('aliases of one service stay one name', () => {
+    expect(name('Recurring Cockroach Control + Pest Control')).toBe('Quarterly Pest Control Service');
+    expect(name('Recurring Lawn Care + One-Time Lawn Treatment')).toBe('Monthly Lawn Care Service');
+  });
+
+  test('a default name the live catalog does not have is not shown', () => {
+    const renamed = catalogNameIndex(['Monthly Lawn Care Service']);
+    expect(leadServiceDisplay('Palm Injections', { catalogNames: renamed })).toBe('Palm Injections');
+    // recurring wins even when the default name is missing
+    const noLawn = catalogNameIndex(['Quarterly Pest Control Service']);
+    expect(leadServiceDisplay('Recurring Pest Control + One-Time Lawn Treatment', { catalogNames: noLawn }))
+      .toBe('Quarterly Pest Control Service + Monthly Lawn Care Service');
   });
 
   test('empty text has no name, and a missing catalog still passes a "… Service" pick through', () => {
