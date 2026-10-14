@@ -148,6 +148,10 @@ const TIME_WORDS_RE = new RegExp([
   // A look-ahead: the phrase is not consumed, so its own time word still
   // counts on both sides and the hour alone tells the loss.
   '\\b(?:[01]?\\d|2[0-3])(?=\\s{1,5}(?:in\\s{1,5}the\\s{1,5}(?:morning|afternoon|evening)|at\\s{1,5}night|sharp|onwards?|or\\s{1,5}so)(?![\\w]))',
+  // The same with the hour spelled out, and a spelled hour with spelled
+  // minutes ("TEN THIRTY in the morning"): r13.
+  `\\b(?:${SPELLED_HOURS})(?=\\s{1,5}(?:in\\s{1,5}the\\s{1,5}(?:morning|afternoon|evening)|at\\s{1,5}night|sharp|onwards?|or\\s{1,5}so)(?![\\w]))`,
+  `\\b(?:${SPELLED_HOURS})(?=\\s{1,5}(?:fifteen|thirty|forty[\\s-]?five|forty|twenty|o\\W?clock)(?![\\w]))`,
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   '\\b\\d{1,3}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])',
