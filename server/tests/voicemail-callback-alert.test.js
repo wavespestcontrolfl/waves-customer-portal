@@ -104,33 +104,15 @@ describe('voicemailCallbackAlertPlan', () => {
     expect(voicemailCallbackAsked(v2({ ...asked, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
     expect(voicemailCallbackAsked(v2({ ...asked, recommended_disposition: 'voicemail_processed' }), primary)).toBe(false);
     expect(voicemailCallbackAsked(null, primary)).toBe(false);
-    // The caller's own words are a second basis: the model filed the same
-    // message under the other voicemail label (call audit 2026-10-13).
+    // A left message is a second basis: the model files the same voicemail
+    // under either label (call audit 2026-10-13).
     const filed = { recommended_disposition: 'voicemail_processed', call_nature: 'voicemail_message', spam_verdict: { spam_kind: 'not_spam' } };
-    const words = { ...primary, transcript: 'Caller: Hi, this is Sam. Please call me back on this number. This is urgent.' };
-    expect(voicemailCallbackAsked(v2(filed), words)).toBe(true);
-    expect(voicemailCallbackAsked(v2(filed), { ...primary, transcript: 'Caller: I will return your call tomorrow.' })).toBe(false);
-    expect(voicemailCallbackAsked(v2(filed), { ...primary, transcript: 'Caller: just checking in, no need to do anything.' })).toBe(false);
-    expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'existing_customer_service' }), words)).toBe(false);
-    expect(voicemailCallbackAsked(v2({ ...filed, spam_verdict: { spam_kind: 'solicitation' } }), { ...primary, transcript: 'Please return this call at your earliest convenience.' })).toBe(false);
-    expect(voicemailCallbackAsked(v2(filed, 'invalid'), words)).toBe(false);
-    const heard = (transcript) => voicemailCallbackAsked(v2(filed), { ...primary, transcript });
-    // A refusal is the opposite ask.
-    expect(heard('Caller: Do not call me back, I found someone.')).toBe(false);
-    expect(heard("Caller: Please don't call me.")).toBe(false);
-    expect(heard('Caller: There is no need to call us back.')).toBe(false);
-    expect(heard('Caller: No me llame, gracias.')).toBe(false);
-    expect(heard("Caller: Don't worry about the gate. Call me back after five.")).toBe(true);
-    // Spanish voicemail branch.
-    expect(heard('Caller: Por favor llámeme al nueve cuatro uno.')).toBe(true);
-    expect(heard('Caller: Devuélvame la llamada cuando pueda.')).toBe(true);
-    expect(heard('Caller: Me pueden llamar mañana.')).toBe(true);
-    // Only the caller's turns: relay dialogue ahead of the message carries agent turns.
-    expect(heard('Agent: If you need anything else, give us a call.\nCaller: Okay, goodbye.')).toBe(false);
-    expect(heard('Agent: Leave a message.\nCaller: Please call me back.')).toBe(true);
-    // No labels at all: the whole message is the caller.
-    expect(heard('Hi, this is Sam, call me back please.')).toBe(true);
-    expect(voicemailCallbackAsked(v2(filed), { v2Primary: false, transcript: words.transcript })).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed), primary)).toBe(true);
+    expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'silent_or_noise' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'other', recommended_disposition: 'no_action_needed' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed, 'invalid'), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed), { v2Primary: false })).toBe(false);
     // Shadow mode (V2 on, routing off): the verdict is evaluation data and rings nothing.
     expect(voicemailCallbackAsked(v2(asked), { v2Primary: false })).toBe(false);
     // The default reads the live mode; this test process runs with V2 off.
