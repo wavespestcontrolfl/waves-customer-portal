@@ -4332,10 +4332,19 @@ const shutdownStampSql = (conn) => conn.raw(
 // production voicemails: the verdict alone rings for the same 3 unknown-caller
 // messages the wording rule did. Dead air and noise carry other call_nature
 // values and still ring nothing; the plan still requires spoken content.
-function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled() } = {}) {
+// Not spam is read from the schema's required boolean; the spam_kind label is
+// optional and, when present, must agree (a wrong number is not a message for
+// us). A voicemail that asks not to be contacted rings nothing on this basis:
+// both shapes of the flag, the V2 consent object and the legacy flat field.
+function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled(), extracted = {} } = {}) {
   if (!v2Primary) return false;
   const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
-  if (v2?.spam_verdict?.spam_kind !== 'not_spam') return false;
+  const verdict = v2?.spam_verdict;
+  const notSpam = verdict?.spam_kind
+    ? verdict.spam_kind === 'not_spam' && verdict.is_spam_content !== true
+    : verdict?.is_spam_content === false;
+  if (!notSpam) return false;
+  if (v2.consent?.do_not_contact_request === true || extracted?.do_not_contact_request === true) return false;
   return v2.recommended_disposition === 'callback_task_created' || v2.call_nature === 'voicemail_message';
 }
 // A voicemail landing on the TERMINAL skip path despite concrete service
@@ -12322,7 +12331,7 @@ const CallRecordingProcessor = {
             outbound: isOutboundCall(call),
             knownCustomer: Boolean(vmAlertCustomer?.id),
             transcript: transcription,
-            callbackAsked: voicemailCallbackAsked(v2Result),
+            callbackAsked: voicemailCallbackAsked(v2Result, { extracted }),
           });
           if (alertPlan) {
             // One alert per call even across reprocessing (retranscription
