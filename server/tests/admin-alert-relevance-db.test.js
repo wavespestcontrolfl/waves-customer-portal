@@ -148,6 +148,35 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect(retired.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'A visit was booked' });
   });
 
+  test('an add-a-service portal chat bell closes on a real handoff to its customer after the bell, never on sent_at alone, an earlier delivery or another customer\'s estimate (owner 2026-10-03)', async () => {
+    const now = new Date();
+    const bellAt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const after = new Date(bellAt.getTime() + 60 * 60 * 1000);
+    const before = new Date(bellAt.getTime() - DAY);
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    const customer = await insert('customers', { first_name: 'Chat', phone: '+15555557004' });
+    const other = await insert('customers', { first_name: 'Other', phone: '+15555557005' });
+    const chat = (topic, key) => bell({ category: 'alert', created_at: bellAt,
+      metadata: { dedupeKey: `portal-chat-escalation:${key}`, customerId: customer.id, topic } });
+    const asked = await chat('add_service', `${customer.id}:a`);
+    const cancel = await chat('cancellation', `${customer.id}:b`);
+    // A suppressed send (sent_at stamped, nothing delivered), a delivery from
+    // before the question, and another customer's delivery: still open.
+    await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: after });
+    await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: before, estimate_data: delivered(before) });
+    await insert('estimates', { status: 'sent', customer_id: other.id, sent_at: after, estimate_data: delivered(after) });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    expect((await get(asked.id)).done_at).toBeNull();
+    // Delivered after the question with sent_at still null (accepted during
+    // its first send): the handoff witness, so the bell closes. The
+    // cancellation bell for the same customer is never judged.
+    await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: delivered(after) });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    const closed = await get(asked.id);
+    expect([closed.done_by, closed.resolution]).toEqual(['relevance', 'Estimate was sent']);
+    expect((await get(cancel.id)).done_at).toBeNull();
+  });
+
   test('a quote sent to the lead\'s customer after the bell keeps its bell retired when a newer draft takes over the lead\'s estimate pointer', async () => {
     const now = new Date();
     const bellAt = new Date(now.getTime() - 3 * 60 * 60 * 1000);

@@ -17,6 +17,7 @@ const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../serv
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const logger = require('../services/logger');
+const { nanpPhoneProblem } = require('../utils/phone');
 
 // Format/length validation for manual lead creation. Permissive by design — it
 // validates shape (email/phone format, string caps, types) without changing
@@ -155,86 +156,9 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // membership.
 const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal, unlessHandledSince } = require('../services/lead-statuses');
 
-// Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
-async function ensureLeadsTables(db) {
-  const tables = [
-    { name: 'lead_sources', sql: `CREATE TABLE IF NOT EXISTS lead_sources (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      name varchar(200) NOT NULL, source_type varchar(30) NOT NULL DEFAULT 'other',
-      channel varchar(50), twilio_phone_number varchar(20), twilio_phone_sid varchar(255),
-      domain varchar(255), landing_page_url varchar(255), gbp_location_id varchar(255),
-      cost_type varchar(20) DEFAULT 'free', monthly_cost decimal(10,2) DEFAULT 0,
-      cost_per_lead decimal(10,2) DEFAULT 0, setup_cost decimal(10,2) DEFAULT 0,
-      is_active boolean DEFAULT true, notes text,
-      created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-    )` },
-    { name: 'leads', sql: `CREATE TABLE IF NOT EXISTS leads (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      lead_source_id uuid, first_name varchar(255), last_name varchar(255),
-      phone varchar(255), email varchar(255), address varchar(255), city varchar(255), zip varchar(255),
-      lead_type varchar(30), service_interest varchar(255), urgency varchar(20) DEFAULT 'normal',
-      is_residential boolean DEFAULT true, is_commercial boolean DEFAULT false,
-      first_contact_at timestamptz DEFAULT NOW(), first_contact_channel varchar(255),
-      twilio_call_sid varchar(255), twilio_message_sid varchar(255),
-      call_duration_seconds integer, call_recording_url varchar(255),
-      transcript_summary text, extracted_data jsonb,
-      is_qualified boolean, disqualification_reason varchar(255),
-      status varchar(30) DEFAULT 'new',
-      assigned_to uuid, estimate_id uuid, customer_id uuid, converted_at timestamptz,
-      monthly_value decimal(10,2), initial_service_value decimal(10,2),
-      waveguard_tier varchar(255), lost_reason varchar(255), lost_to_competitor varchar(255), lost_notes text,
-      next_follow_up_at timestamptz, follow_up_count integer DEFAULT 0,
-      last_follow_up_at timestamptz, response_time_minutes integer,
-      deleted_at timestamptz, deleted_by uuid,
-      created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-    )` },
-    { name: 'lead_activities', sql: `CREATE TABLE IF NOT EXISTS lead_activities (
-      id serial PRIMARY KEY, lead_id uuid NOT NULL,
-      activity_type varchar(30), description text, performed_by varchar(100),
-      metadata jsonb, created_at timestamptz DEFAULT NOW()
-    )` },
-    { name: 'lead_source_costs', sql: `CREATE TABLE IF NOT EXISTS lead_source_costs (
-      id serial PRIMARY KEY, lead_source_id uuid NOT NULL,
-      month date NOT NULL, cost_amount decimal(10,2) NOT NULL,
-      cost_category varchar(30), notes text, created_at timestamptz DEFAULT NOW(),
-      UNIQUE(lead_source_id, month, cost_category)
-    )` },
-    { name: 'marketing_campaigns', sql: `CREATE TABLE IF NOT EXISTS marketing_campaigns (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      name varchar(200) NOT NULL, channel varchar(50), lead_source_id uuid,
-      status varchar(20) DEFAULT 'active', start_date date, end_date date,
-      budget decimal(10,2), spend_to_date decimal(10,2) DEFAULT 0,
-      target_leads integer, target_conversions integer,
-      offer_details text, utm_source varchar(255), utm_medium varchar(255), utm_campaign varchar(255),
-      notes text, created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-    )` },
-  ];
-  for (const { name, sql } of tables) {
-    try { await db.raw(sql); } catch (e) { console.error(`[leads] Create ${name} error:`, e.message); }
-  }
-  // Add indexes safely
-  const indexes = [
-    'CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_customer_id ON leads(customer_id)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_first_contact_at ON leads(first_contact_at)',
-    'CREATE INDEX IF NOT EXISTS idx_leads_deleted_at ON leads(deleted_at) WHERE deleted_at IS NOT NULL',
-    'CREATE INDEX IF NOT EXISTS idx_lead_sources_is_active ON lead_sources(is_active)',
-  ];
-  for (const idx of indexes) {
-    try { await db.raw(idx); } catch (e) { /* index may exist */ }
-  }
-}
-
-let _tablesChecked = false;
-router.use(async (req, res, next) => {
-  if (!_tablesChecked) {
-    _tablesChecked = true;
-    try { await ensureLeadsTables(db); } catch (e) { console.error('[leads] Auto-create error:', e.message); }
-  }
-  next();
-});
+// The leads tables (lead_sources, leads, lead_activities, lead_source_costs, marketing_campaigns) and their
+// indexes are created by migrations 20260401000095_lead_attribution and 20260701000004_leads_soft_delete. A request
+// never runs DDL.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ANALYTICS (must be before /:id to avoid param catch)
@@ -735,7 +659,7 @@ router.get('/', async (req, res, next) => {
   try {
     const {
       status, source, source_name, channel, search, sort = 'first_contact_at',
-      order = 'desc', page = 1, limit = 50, start_date, end_date, id,
+      order = 'desc', page = 1, limit = 50, start_date, end_date, id, estimate_attachable,
     } = req.query;
     if (id && Joi.string().uuid().validate(id).error) return res.status(400).json({ error: 'Invalid lead id' });
 
@@ -783,6 +707,19 @@ router.get('/', async (req, res, next) => {
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
     if (search) query.modify(applyLeadSearch, search);
+    // The estimate tool's lookup lists only leads a NEW estimate can attach to:
+    //   - no customer record (a lead that has one is found through that customer);
+    //   - no estimate yet (a save against a lead already linked to an estimate
+    //     is refused by createOrReuseAdminEstimate);
+    //   - a phone or an email (leadMatchesEstimateContact needs one to match).
+    // Filtered here, before LIMIT, so a page of ineligible matches cannot hide
+    // an eligible lead.
+    const attachableOnly = estimate_attachable === '1' || estimate_attachable === 'true';
+    const whereEstimateAttachable = (qb) => qb
+      .whereNull('leads.customer_id')
+      .whereNull('leads.estimate_id')
+      .whereRaw("(NULLIF(TRIM(COALESCE(leads.phone, '')), '') IS NOT NULL OR NULLIF(TRIM(COALESCE(leads.email, '')), '') IS NOT NULL)");
+    if (attachableOnly) query = whereEstimateAttachable(query);
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
@@ -835,6 +772,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(countQuery);
     }
     if (search) countQuery.modify(applyLeadSearch, search);
+    if (attachableOnly) whereEstimateAttachable(countQuery);
     const { count } = await countQuery.count('* as count').first();
 
     const leads = await query
@@ -885,6 +823,9 @@ router.post('/', async (req, res, next) => {
       is_residential, is_commercial, notes,
       builder_warranty_provider, builder_warranty_expires_on,
     } = validated;
+
+    const createPhoneProblem = nanpPhoneProblem(phone);
+    if (createPhoneProblem) return res.status(400).json({ error: createPhoneProblem, code: 'INVALID_PHONE' });
 
     const [lead] = await db('leads').insert({
       first_name, last_name,
@@ -1136,6 +1077,12 @@ router.put('/:id', async (req, res, next) => {
         return res.status(400).json({ error: 'builder_warranty_expires_on must be a real YYYY-MM-DD date' });
       }
       updates.builder_warranty_expires_on = expires || null;
+    }
+    // Only a number the operator is entering now is refused; an unchanged stored
+    // number echoed back by a full-form save is not a new write.
+    if (updates.phone && String(updates.phone).trim() !== String(existingLead.phone || '').trim()) {
+      const phoneProblem = nanpPhoneProblem(updates.phone);
+      if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
     }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     // Codex round-6 P2: email_confirmed_at (below) is the sole provenance
@@ -2043,8 +1990,8 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }
       }
 
-      // ---- SLOT-OVERLAP GUARD, part 2: tech-blind conflict probe exactly as
-      // booking.js createSelfBooking, immediately before the insert — after
+      // ---- SLOT-OVERLAP GUARD, part 2: conflict probe as booking.js
+      // createSelfBooking, immediately before the insert — after
       // the converted-lead guard and DUPLICATE_VISIT dedupe above (see part 1
       // merge note). Runs for first conversions and rebooks alike. A hit is
       // ADVISORY (owner ruling 2026-08-25, same as routes/admin-schedule.js —
@@ -2060,6 +2007,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           // false overlap note — same admin exclusion set every other staff
           // probe uses (one copy: scheduling/window-rules.js).
           excludeStatuses: require('../services/scheduling/window-rules').ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+          // The technician the row is inserted with below (staff-picked, no
+          // offer side): with two technicians, another technician's customer
+          // is not an overlap warning. Gate-dark (occupancy.js header);
+          // unassigned rows still warn.
+          technicianId: technicianId || null,
         });
         if (clash.length) {
           bookingWarnings.push(slotOverlapWarning(occupancyDate));
@@ -2094,6 +2046,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // (no property_id on this insert ⇒ inert until linkage; explicit so
       // every booking path answers the stamping audit).
       await require('../services/visit-groups').maybeGroupRow(appt.id, { database: trx, createdBy: 'dispatch' });
+      // Two-treatment package (cockroach / flea): visit 2 books with visit 1
+      // — gate-dark, savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: appt, cols });
 
       // Inspection credit: mark the qualifying booking IN-TRANSACTION so
       // the evidence commits with the booking (Codex #3178 P1). Dark behind

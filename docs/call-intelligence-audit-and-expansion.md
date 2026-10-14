@@ -112,7 +112,7 @@ Per file, with the proving test.
 - `client/src/components/admin/CallIntelligencePanel.jsx` + mount and
   evidence highlight in `CallLogTabV2.jsx`. Test:
   `CallIntelligencePanel.test.jsx` (vitest).
-- `CLAUDE.md` — `GATE_CALL_COMMITMENTS` documented.
+- `docs/gates-and-env.md` — `GATE_CALL_COMMITMENTS` documented.
 - Pre-push Codex round (3 P1s, all fixed in the same PR): the recording
   `replace` write re-checks that no pass claimed the row since the read and
   parks the recording if one did (race test in the webhook suite); office-

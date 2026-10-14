@@ -115,9 +115,18 @@ async function createScratchDb() {
     source_estimate_id uuid,
     annual_prepay_term_id uuid,
     property_id uuid,
+    paf_held_term_id uuid,
     status text,
     service_type text,
     scheduled_date date
+  )`);
+  // Read by the after-installation charge scans (the visit's closeout).
+  await db.raw(`CREATE TABLE service_records (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    scheduled_service_id uuid,
+    status text,
+    structured_notes jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
   )`);
   await db.raw(`CREATE TABLE annual_prepay_terms (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

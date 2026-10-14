@@ -6,7 +6,7 @@ const { TREE_SHRUB_MAIN_REPORT_PROMPT, RECURRING_PEST_MAIN_REPORT_PROMPT } = req
 const {
   selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION, REMAINING_SERVICE_MODIFIERS,
 } = require('./remaining-service-copy-prompts');
-const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt } = require('./report-writer-rules');
+const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt, PEST_WRITER_ADAPTER } = require('./report-writer-rules');
 
 const LAWN_COPY_CORE = `## ROLE AND PURPOSE
 
@@ -139,8 +139,7 @@ The title WHAT WE FOUND does not authorize inventing a finding. When findings ar
 
 The application already appends selected next-step copy. When that instruction is present, do not repeat or paraphrase it as your closing line. Spend the available space explaining the recorded work and what remains to be assessed.`;
 
-// Lawn result timing (P15, only while GATE_LAWN_REPORT_COPY_V6 is live, so the
-// gate-off prompt is byte-identical): the writer states no result timing; the
+// Lawn result timing (P15, the v6 copy): the writer states no result timing; the
 // report's "What to expect" carries it in owner-approved words, built from the
 // final products (owner rulings 2026-10-01 / 10-02). generate-report screens
 // the output with report-writer-rules lawnResultTimingViolation.
@@ -161,6 +160,12 @@ const DEDICATED_SERVICE_PROFILES = new Map(Object.entries({
   lawn_care_one_time: ['lawn', 'one_time_lawn_treatment'],
   lawn_pest_knockdown: ['lawn', 'one_time_lawn_treatment'],
   lawn_tree_shrub_combo: ['lawn', null],
+  // Area add-ons (20261008200000), generic lane: the lawn writer, never a typed
+  // form. The fire-ant broadcast and the web sweep are remaining-service modules.
+  area_addon_bed_pre_emergent: ['lawn', null],
+  area_addon_lawn_insect_spot: ['lawn', null],
+  area_addon_lawn_insect_preventive: ['lawn', null],
+  area_addon_hardscape_weed: ['lawn', null],
   tree_shrub_program: ['tree_shrub', 'tree_shrub'],
   tree_shrub_quarterly: ['tree_shrub', 'tree_shrub'],
   tree_shrub_6week: ['tree_shrub', 'tree_shrub'],
@@ -224,7 +229,7 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
     palm: ['# SERVICE REPORT COPY — TREE AND SHRUB v1', TREE_SHRUB_MAIN_REPORT_PROMPT],
     pest: ['# SERVICE REPORT COPY — RECURRING PEST v1', RECURRING_PEST_MAIN_REPORT_PROMPT],
   };
-  const selected = writer === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live()
+  const selected = writer === 'lawn'
     ? [...modules.lawn, LAWN_RESULT_TIMING_RULE]
     : modules[writer];
   if (!selected) return null;
@@ -233,7 +238,10 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   const callback = writerRules && writer === 'pest'
     && (context.isCallback === true || context.serviceKey === 'pest_re_service')
     ? [REMAINING_SERVICE_MODIFIERS.callback] : [];
-  return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback]);
+  // The pest writer's own fill-in block comes last, after the constraints
+  // and the module it builds on (owner 2026-10-09).
+  const adapter = writerRules && writer === 'pest' ? [PEST_WRITER_ADAPTER] : [];
+  return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback, ...adapter]);
 }
 
 module.exports = {

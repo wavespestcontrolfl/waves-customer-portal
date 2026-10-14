@@ -136,9 +136,13 @@ async function logPost(row) {
     for (const [key, value] of Object.entries(row)) {
       if (cols[key]) insert[key] = value;
     }
-    if (Object.keys(insert).length) await db('social_media_posts').insert(insert);
+    if (!Object.keys(insert).length) return null;
+    const [logged] = await db('social_media_posts').insert(insert).returning('id');
+    // The row id, for the photo privacy shadow; null when the log failed.
+    return (logged && typeof logged === 'object' ? logged.id : logged) || null;
   } catch (err) {
     logger.warn(`[tech-social] post log failed: ${err.message}`);
+    return null;
   }
 }
 
@@ -400,12 +404,21 @@ router.post('/publish', async (req, res, next) => {
     const safeNote = noteIssues.length ? '' : rawNote;
 
     const location = WAVES_LOCATIONS.find((l) => l.id === locationId) || null;
-    await logPost(buildPostLogRow({
+    const postId = await logPost(buildPostLogRow({
       techNote: safeNote,
       captions: loggedCaptions, results: loggedResults, imageUrl, location,
       model: typeof model === 'string' ? model.slice(0, 80) : null, // ai_model is varchar(80)
       publishId: typeof publishId === 'string' ? publishId : null,
     }));
+
+    // Photo privacy shadow (dark behind GATE_PHOTO_PRIVACY=shadow): the hosted
+    // photo is put to Clef after the post is logged. Evidence only: nothing is
+    // held or changed and the response does not wait on it.
+    if (postId && imageUrl) {
+      void require('../services/typed-decisions/photo-privacy-shadow')
+        .shadowSocialPostPhoto({ postId, imageUrl, photoData: photo.data, captions: loggedCaptions })
+        .catch((err) => logger.warn(`[tech-social] photo privacy shadow failed: ${err.message}`));
+    }
 
     // Keep the shared consecutive-failure alert current — tech-field posts land
     // in the same social_media_posts table checkAndRaiseAlert() reads. Explicit

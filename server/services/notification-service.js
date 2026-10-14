@@ -1100,7 +1100,7 @@ const NotificationService = {
   // Retire superseded call alerts without crossing triggers: voicemail
   // supersedes a missed call; a booking supersedes a repeat-caller alert.
   // System writer (no role scoping): every admin copy is retired.
-  async supersedeMissedCallAdmin({ callLogId, callSid, triggerKey = 'customer_missed_call' } = {}) {
+  async supersedeMissedCallAdmin({ callLogId, callSid, triggerKey = 'customer_missed_call', resolution = 'Superseded by a newer event on the same call' } = {}) {
     if (!callLogId && callSid) {
       const row = await db('call_log').where('twilio_call_sid', callSid).first('id');
       callLogId = row?.id || null;
@@ -1112,7 +1112,7 @@ const NotificationService = {
       .where({ recipient_type: 'admin', category: 'missed_call' })
       .whereRaw("metadata->>'triggerKey' = ?", [triggerKey]), 'supersede')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
-      .update(doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call', keepExisting: true }));
+      .update(doneColumns({ by: 'supersede', resolution, keepExisting: true }));
   },
 
   // Mark all read for customer

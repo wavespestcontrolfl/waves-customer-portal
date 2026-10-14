@@ -32,6 +32,7 @@ jest.mock('../services/lead-attribution', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' }),
+  classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
 }));
 jest.mock('../services/messaging/send-manual-customer-sms', () => ({
   sendManualCustomerSms: jest.fn((...args) => (
@@ -39,6 +40,7 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
   )),
   manualSmsDeliveryState: (value) => value?.manualSmsInterlock?.deliveryState || null,
 }));
+
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -159,12 +161,14 @@ describe('resolveCustomer (comms)', () => {
 
     expect(result).toMatchObject({
       success: false,
-      blocked: true,
+      outcome_unknown: true,
       code: 'PROVIDER_OUTCOME_UNCERTAIN',
       mayHaveSent: true,
       retry: false,
       retryable: false,
     });
+    // Unknown, not blocked: the text may have gone out.
+    expect(result.blocked).toBeUndefined();
     expect(result.error).toMatch(/do not retry/i);
   });
 
@@ -181,12 +185,14 @@ describe('resolveCustomer (comms)', () => {
 
     expect(result).toMatchObject({
       success: false,
-      blocked: true,
+      outcome_unknown: true,
       code: 'SMS_DELIVERY_UNCERTAIN',
       mayHaveSent: true,
       retry: false,
       retryable: false,
     });
+    // Unknown, not blocked: the text may have gone out.
+    expect(result.blocked).toBeUndefined();
     expect(result.error).toMatch(/do not retry/i);
   });
 

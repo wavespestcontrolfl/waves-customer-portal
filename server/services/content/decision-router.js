@@ -23,6 +23,7 @@
  */
 
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, isTransactionalQuery } = require('./scoring-config');
+const { isBlogSearchSuggestion } = require('../service-report/report-blog-suggestion');
 
 // ── action priorities (which actions are "safer" defaults) ──────────
 
@@ -95,6 +96,24 @@ function isOperatorPinned(opportunity = {}) {
   return !!(meta && typeof meta === 'object' && meta.operator_pinned === true);
 }
 
+// The SERP's terminal safety demotions: a public-health or navigational
+// SERP, or the profiler's explicit do_not_publish, stops a topic. Shared by
+// the ordinary path and "Suggest a post" rows (below), so the two can never
+// read the same SERP differently.
+function serpSafetyStop(serp_profile) {
+  if (!serp_profile) return null;
+  if (serp_profile.dominant_intent === 'public-health') {
+    return { reason: 'SERP dominated by public-health resources; Waves cannot displace .gov', note: 'blocked: public-health SERP', serpMismatch: true };
+  }
+  if (serp_profile.dominant_intent === 'navigational') {
+    return { reason: 'navigational intent (brand match) — no content opportunity', note: 'blocked: navigational intent', serpMismatch: false };
+  }
+  if (serp_profile.recommended_asset_type === 'do_not_publish') {
+    return { reason: 'SERP profiler explicit do_not_publish', note: 'blocked: profiler do_not_publish', serpMismatch: false };
+  }
+  return null;
+}
+
 // ── main entry ──────────────────────────────────────────────────────
 
 /**
@@ -126,6 +145,25 @@ function route(opportunity, signals = {}) {
   // operator's action runs as seeded, at the seeded score. Profiler or
   // customer-signal data (even if gathered) cannot change the action.
   if (isOperatorPinned(opportunity)) {
+    // A "Suggest a post" row (report-blog-suggestion.js) is pinned only so the
+    // chain takes a new topic without search-traffic history; nobody authored
+    // its brief, so the SERP's terminal safety demotions still apply to it
+    // (GitHub Codex P1 on ba9bed50fc). Its action is otherwise fixed, as any
+    // pinned row's. With no SERP profile the quality gate's SERP evidence
+    // check holds it.
+    const stop = isBlogSearchSuggestion(opportunity) ? serpSafetyStop(signals.serp_profile) : null;
+    if (stop) {
+      const stopBreakdown = { base: opportunity.score || 0, ...(stop.serpMismatch ? { serpMismatch: -WEIGHTS.serpMismatch } : {}) };
+      return {
+        action_type: 'do_not_publish',
+        page_type: derivePageType('do_not_publish', null),
+        final_score: Object.values(stopBreakdown).reduce((a, b) => a + b, 0),
+        score_breakdown: stopBreakdown,
+        human_review_required: true,
+        human_review_reason: stop.reason,
+        router_notes: `operator-pinned (${opportunity.bucket}) suggestion: ${stop.note}`,
+      };
+    }
     return {
       action_type: opportunity.action_type,
       page_type: derivePageType(opportunity.action_type, null),
@@ -147,26 +185,16 @@ function route(opportunity, signals = {}) {
 
   // ── SERP-driven overrides ─────────────────────────────────────────
   if (serp_profile) {
-    const intent = serp_profile.dominant_intent;
     const dominantPage = serp_profile.dominant_page_type;
     const recommended = serp_profile.recommended_asset_type;
 
-    if (intent === 'public-health') {
+    const stop = serpSafetyStop(serp_profile);
+    if (stop) {
       action = 'do_not_publish';
       humanReview = true;
-      humanReason = 'SERP dominated by public-health resources; Waves cannot displace .gov';
-      breakdown.serpMismatch = -WEIGHTS.serpMismatch;
-      notes.push('blocked: public-health SERP');
-    } else if (intent === 'navigational') {
-      action = 'do_not_publish';
-      humanReview = true;
-      humanReason = 'navigational intent (brand match) — no content opportunity';
-      notes.push('blocked: navigational intent');
-    } else if (recommended === 'do_not_publish') {
-      action = 'do_not_publish';
-      humanReview = true;
-      humanReason = 'SERP profiler explicit do_not_publish';
-      notes.push('blocked: profiler do_not_publish');
+      humanReason = stop.reason;
+      if (stop.serpMismatch) breakdown.serpMismatch = -WEIGHTS.serpMismatch;
+      notes.push(stop.note);
     } else {
       // If profiler's recommended action differs from miner's, defer
       // to the profiler — it has the live SERP data. Page-anchored buckets

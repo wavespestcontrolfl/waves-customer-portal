@@ -64,7 +64,22 @@ const {
 } = require('../services/project-completion');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
 const { wdoReportCopyEmails } = require('../services/wdo-report-copies');
-const { getInvoiceEmailRecipients } = require('../services/customer-contact');
+const { getInvoiceEmailRecipients, withAccountPrimaryContactStrict } = require('../services/customer-contact');
+
+// The project's customer row with its account role resolved: the project
+// report recipient (ProjectEmail.resolveProjectEmailRecipient with
+// applyReportRule) withholds the report from an occupant on a property
+// manager's account and falls back to the account holder, so a property row
+// with no email of its own takes the account primary's email and first name.
+// The phone stays the row's own (project texts are unchanged). An unreadable
+// account primary leaves the role unknown, which withholds.
+async function loadProjectCustomer(customerId) {
+  const row = await db('customers').where({ id: customerId }).first();
+  if (!row) return row;
+  const full = await withAccountPrimaryContactStrict(row).catch(() => null);
+  if (!full || full === row) return row;
+  return { ...row, email: full.email, first_name: full.first_name, account_contact_role: full.account_contact_role };
+}
 const { normalizeAddendumPhoto } = require('../services/pdf/addendum-photo');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
@@ -3305,7 +3320,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
 
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
 
     const readiness = evaluateProjectSendReadiness({ project, customer });
@@ -3335,7 +3350,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // report-only send is no longer a blind fire. No side effects: nothing
     // claimed, no token minted, nothing sent.
     if (req.body?.dry_run) {
-      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true });
       let previewCopies = [];
       if (project.project_type === 'wdo_inspection') {
         const prefs = customer
@@ -3481,7 +3496,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // A WDO report's FDACS-13645 PDF rides on the email only, so it can't be
     // delivered without an email address — fail up front rather than text a bare
     // link and record the official report as sent.
-    if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
+    if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true }).email) {
       await revertManualHoldClaim();
       await revertSendClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
@@ -3543,7 +3558,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     // Email first (through editable Waves template library). For WDO it carries
     // the FDACS PDF, so the SMS link is only sent after the email succeeds.
-    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true });
     const isResendSend = Boolean(project.sent_at || project.status === 'sent');
     if (emailRecipient.email) {
       try {
@@ -3976,7 +3991,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     }
 
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     if (!customer) return await revertToHeld('customer_missing');
 
@@ -4003,7 +4018,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
       return await revertToHeld(`Missing required certificate details: ${readiness.missing.map((m) => m.label).join('; ')}`);
     }
 
-    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
     if (project.project_type === 'wdo_inspection' && !emailRecipient.email) {
       return await revertToHeld('No email on file — the FDACS-13645 PDF is delivered by email');
     }
@@ -4257,7 +4272,7 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'FDACS-13645 PDF is only available for WDO inspections' });
     }
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     const [baseApplicator, photoRows] = await Promise.all([
       resolveProjectApplicator(project),
@@ -4617,7 +4632,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
 
-    const customer = await db('customers').where({ id: project.customer_id }).first();
+    const customer = await loadProjectCustomer(project.customer_id);
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // The filled FDACS-13645 PDF rides on the email only (SMS can't carry it),
@@ -4625,7 +4640,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // than text a bare link and record the official report as sent. Non-WDO
     // reports deliver the report as a link in the text itself, so SMS-only is
     // fine and email isn't required.
-    if (isWdoProject && !ProjectEmail.resolveProjectEmailRecipient(customer).email) {
+    if (isWdoProject && !ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true }).email) {
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
 
@@ -4732,7 +4747,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // email), the billing-contact copy (same email, when a distinct billing
       // contact is configured), and the report-only third-party copies parsed
       // from the FDACS "Report Sent to Requestor and to:" line.
-      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
       const previewPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [previewBilling] = getInvoiceEmailRecipients(customer, previewPrefs || {});
       const previewRecipientEmail = String(previewRecipient.email || '').trim().toLowerCase();
@@ -5065,7 +5080,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // customer with a bare pay-link text while the report is recorded not-sent
     // (and retries can't duplicate that text). For non-WDO the email is a bonus
     // (the report link rides in the SMS), so its failure doesn't block the text.
-    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
     if (holdActive && isPayerInvoice) {
       // Payer-billed hold: the homeowner receives nothing until the payer's
       // invoice settles — the release delivers their report. The payer AP leg
@@ -5516,7 +5531,7 @@ router.post('/:id/send-prep-guide', requireAdmin, async (req, res, next) => {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     if (!customer) return res.status(400).json({ error: 'Project has no customer' });
 
@@ -5609,7 +5624,7 @@ router.post('/:id/send-portal-invite', requireAdmin, async (req, res, next) => {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     if (!customer) return res.status(400).json({ error: 'Project has no customer' });
 
@@ -5771,7 +5786,7 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       : project.recommendations) || '';
     const projectDate = normalizeDateOnly(req.body.project_date) || normalizeDateOnly(project.project_date) || normalizeDateOnly(project.created_at);
 
-    const customer = await db('customers').where({ id: project.customer_id }).first();
+    const customer = await loadProjectCustomer(project.customer_id);
     const tech = project.created_by_tech_id
       ? await db('technicians').where({ id: project.created_by_tech_id }).first()
       : null;

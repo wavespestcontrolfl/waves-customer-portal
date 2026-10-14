@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
+const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
@@ -27,6 +28,7 @@ const {
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
+const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
 const {
   buildEstimatePricingAudit,
@@ -56,7 +58,7 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
-const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+const { gatedAddOnStaffRefusal } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
@@ -78,7 +80,7 @@ const {
 const {
   CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
-  PROTOCOL_VERSION,
+  protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
 
@@ -608,15 +610,15 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
-  // A persisted bermuda-suppression estimate is only sendable while the gate
-  // is LIVE: the send path serves stored rows without re-entering
-  // priceLawnCare, so a save-then-gate-off sequence would otherwise publish
-  // a disabled add-on (codex #3272 r2). Same fail-closed rail as pricing.
-  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-    const err = new Error('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before sending.');
+  // A persisted bermuda-suppression or area add-on estimate is only sendable while its gate
+  // is LIVE: the send path serves stored rows without re-entering the pricer, so a
+  // save-then-gate-off sequence would otherwise publish a disabled add-on (codex #3272 r2).
+  // Same fail-closed rail as pricing.
+  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority });
+  if (gatedAddOn) {
+    const err = new Error(gatedAddOn.message);
     err.statusCode = 409;
-    err.code = 'BERMUDA_SUPPRESSION_GATED';
+    err.code = gatedAddOn.code;
     throw err;
   }
   // Estimator-engine YELLOW drafts carry review reasons (fallback sqft
@@ -664,6 +666,17 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
+    throw err;
+  }
+  // GATE_LAWN_V13 has no bahia program. A recurring bahia lawn plan that was never issued is
+  // reviewed before it goes out, even when the draft was saved before the gate went live (its
+  // stored flags are absent); an estimate already sent is honored. Staff clear it through the
+  // authored-proposal path like any other review flag.
+  if (!isAuthoredProposal && require('../config/feature-gates').lawnV13Live?.() === true && estimateNeverIssued(estimate)
+    && estimateHasBahiaLawn(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+    const err = new Error('Bahia lawn plans need manual review before they can be sent to the customer (the lawn program has no bahia track).');
+    err.statusCode = 400;
+    err.code = 'LAWN_V13_BAHIA_REVIEW_REQUIRED';
     throw err;
   }
   if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
@@ -867,6 +880,14 @@ function estimateEmailPriceLine(estimate) {
 // Uses the same template renderers as delivery, without minting tracked links,
 // auditing a template issue, or calling a transport. Only the link is shortened
 // at handoff; the manual send pins the base SMS template shown here.
+// A readable refusal when the estimate's saved phone is a US-shaped number that
+// cannot exist; null when absent (the "No phone on file" leg handles that),
+// valid, or not US-shaped.
+function estimateSmsPhoneProblem(estimate) {
+  const problem = nanpPhoneProblem(estimate.customer_phone);
+  return problem ? `${problem} Fix the phone on the contact or the estimate, then send again. Nothing was sent.` : null;
+}
+
 async function buildEstimateSendPreview(estimate) {
   const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
@@ -894,6 +915,7 @@ async function buildEstimateSendPreview(estimate) {
     id: estimate.id, status: estimate.status, editVersion: estimateEditVersion(estimate),
     customerName: estimate.customer_name, customerPhone: estimate.customer_phone,
     customerEmail: estimate.customer_email, address: estimate.address,
+    smsBlockReason: estimateSmsPhoneProblem(estimate),
     updatedAt: estimate.updated_at,
     uncertainAttempt: uncertain,
     groupVersions: estimate.estimate_group_id ? Object.fromEntries((await db('estimates')
@@ -1246,6 +1268,21 @@ router.get('/:id/edit-source', async (req, res, next) => {
       notes: estimate.notes,
       serviceInterest: estimate.service_interest,
       showOneTimeOption: !!estimate.show_one_time_option,
+      // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the saved tier mark
+      // and whether the stored result may carry one, so a reopened estimate
+      // shows its checkbox and a revise keeps the mark without a regenerate.
+      offerTiersRequested: estData?.offerTiersRequested === true,
+      offerTiersAvailable: (() => {
+        try {
+          const OfferTiers = require('../services/estimate-offer-tiers');
+          const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+          // A marked row already on the pest plan (lawn parked at send or
+          // removed by the customer) keeps its choice on reopen.
+          return OfferTiers.offerTiersSaveEligibility({
+            estData, commercial: isCommercialEstimateData(estData),
+          }).eligible === true || OfferTiers.offerTiersMarkedPestOnlyState(estData);
+        } catch (_) { return false; }
+      })(),
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
       propertyId: estimate.property_id || null,
@@ -1366,6 +1403,13 @@ router.post('/:id/send', async (req, res, next) => {
       reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged });
+    // An impossible US number refuses the WHOLE send (400, nothing leaves, no
+    // claim taken) rather than letting the email go and the text fail at the
+    // provider: a resend after the fix would deliver the email twice.
+    if (sendMethod !== 'email') {
+      const smsProblem = estimateSmsPhoneProblem(estimate);
+      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
+    }
 
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
@@ -1763,7 +1807,18 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserve
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
     const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
       .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
-    const leadKey = selectedOrder.find((k) => recurringKeys.includes(k));
+    // Good / Better / Best: an estimate the office marked for tiers leads
+    // with PEST whatever the selection order (the tool lists lawn first), so
+    // lawn is the parked line and the customer lands on the pest plan with
+    // Best one tap away. Parking pest instead would leave a lawn-only quote
+    // and no picker.
+    const OfferTiersForSend = require('../services/estimate-offer-tiers');
+    const leadKey = OfferTiersForSend.offerTiersGateLive()
+      && OfferTiersForSend.optOutRailGateLive()
+      && OfferTiersForSend.offerTiersRequested(estData)
+      && recurringKeys.includes('pest_control')
+      ? 'pest_control'
+      : selectedOrder.find((k) => recurringKeys.includes(k));
     if (!leadKey) return untouched;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (toPark.length !== 1) return untouched;
@@ -2830,12 +2885,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     if (!estimate.customer_phone) {
       channels.sms = { ok: false, error: 'No phone on file' };
     } else {
-      const digits = String(estimate.customer_phone).replace(/\D/g, '');
-      const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
-        : digits.length === 10 ? `+1${digits}`
-        : null;
+      // Shared NANP rule (utils/phone): a ten-digit number whose area code or
+      // exchange starts with 0/1 can never be texted, so refuse the leg here,
+      // before any provider call, rather than at Twilio (21211).
+      const smsNational = nanpNationalDigits(estimate.customer_phone);
+      const normalized = smsNational && isValidNanpNumber(smsNational) ? `+1${smsNational}` : null;
       if (!normalized) {
-        channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
+        channels.sms = { ok: false, error: nanpPhoneProblem(estimate.customer_phone) || `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
           const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
@@ -3746,7 +3802,7 @@ router.get('/', async (req, res, next) => {
           const stats = outlineEventStats.get(row.id) || {};
           const staleReasons = [
             row.content_library_version !== CONTENT_LIBRARY_VERSION ? 'content library updated' : null,
-            row.protocol_version !== PROTOCOL_VERSION ? 'protocol updated' : null,
+            row.protocol_version !== protocolVersion() ? 'protocol updated' : null,
             row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
             row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
           ].filter(Boolean);
@@ -3770,7 +3826,7 @@ router.get('/', async (req, res, next) => {
             productRegistryVersion: row.product_registry_version,
             templateVersion: row.template_version,
             currentContentLibraryVersion: CONTENT_LIBRARY_VERSION,
-            currentProtocolVersion: PROTOCOL_VERSION,
+            currentProtocolVersion: protocolVersion(),
             currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
             currentTemplateVersion: TEMPLATE_VERSION,
             stale: staleReasons.length > 0,
@@ -5074,6 +5130,10 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+    {
+      const smsProblem = estimateSmsPhoneProblem(estimate);
+      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
+    }
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
     assertEstimateSendable(estimate);
     // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
@@ -5152,6 +5212,10 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+    {
+      const smsProblem = estimateSmsPhoneProblem(estimate);
+      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
+    }
 
     // Status gate — only active offers can be booked. Drafts aren't real
     // offers yet; declined/expired/archived are intentionally closed and
@@ -5355,7 +5419,8 @@ router.post('/:id/extend', async (req, res, next) => {
 // POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.
 // This is intentionally separate from PATCH status edits so accepted_at is
 // stamped for funnel reporting and acceptance side effects run once.
-router.post('/:id/mark-accepted', async (req, res, next) => {
+router.post('/:id/mark-accepted', markAcceptedHandler);
+async function markAcceptedHandler(req, res, next) {
   try {
     // The DURABLE call-side verdict blocks a MANUAL acceptance too (codex
     // P0, PR #3304 GH r10b): when estimate-side invalidation failed — the
@@ -5388,7 +5453,15 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
       adminUserId: req.technicianId,
       source: req.body?.source || 'verbal_yes',
       billingTerm: req.body?.billingTerm || 'standard',
+      // The Intelligence Bar card's pins and the dry-run switch are internal
+      // arguments, set only by markEstimateAcceptedAsStaff on the request
+      // object. NOTHING here reads them from req.body: a caller of the HTTP
+      // route cannot supply pins (for example an approved "no email") or
+      // switch the accept into a dry run.
+      ...(req.acceptExpected && typeof req.acceptExpected === 'object' ? { expected: req.acceptExpected } : {}),
+      ...(req.acceptDryRun === true ? { dryRun: true } : {}),
     });
+    if (result.dryRun) return res.json({ success: true, ...result });
     clearRouteCacheForRequest(req, ['/admin/dashboard']);
     res.json({ success: true, ...result });
   } catch (err) {
@@ -5399,7 +5472,27 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
-});
+}
+
+// Mark accepted without an HTTP request — the Intelligence Bar's
+// accept_estimate tool (owner ruling 2026-10-07, Q5) runs this so the bar and
+// the estimate page accept through the SAME handler (the call-linkage
+// preflight, markEstimateManuallyAccepted, the dashboard cache clear). It runs
+// the handler with the only request fields it reads and resolves the reply it
+// would send: { status, json }. An error the handler passes to next() rejects.
+function markEstimateAcceptedAsStaff({ estimateId, body, actor, dryRun = false, expected = null }) {
+  const req = {
+    params: { id: estimateId }, body, technicianId: actor.technicianId, acceptDryRun: dryRun === true, acceptExpected: expected,
+  };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    markAcceptedHandler(req, res, reject).catch(reject);
+  });
+}
 
 // Estimate status values backed by the estimates_status_check constraint
 // (models/migrations/20260518000003_estimate_scheduled_send_claims.js).
@@ -5554,12 +5647,19 @@ router.patch('/:id', async (req, res, next) => {
     // the row still holds the status we validated against, so a customer
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
+    // The row must still be in the archive state this handler read: an edit
+    // that waited behind an archive (staff, or the draft-retire sweep) must
+    // not land on the now-hidden row and report success.
+    updateQuery = estimate.archived_at ? updateQuery.whereNotNull('archived_at') : updateQuery.whereNull('archived_at');
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
     const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
     if (changesDeliveryOptions) {
       updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
-      updates.updated_at = db.fn.now();
     }
+    // Every staff edit stamps updated_at (priority and disposition too): the
+    // draft-retire sweep reads it to keep a draft someone touched after a
+    // newer estimate was delivered.
+    if (Object.keys(updates).length) updates.updated_at = db.fn.now();
     // Turning invoice mode OFF is predicated on the stored proposal STILL
     // having no structured payment term at write time — the pre-read guard
     // above can race a concurrent proposal PUT that saves one (the PUT's
@@ -5690,3 +5790,6 @@ module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
 module.exports.clearEstimateDeliveryClaim = clearEstimateDeliveryClaim;
 module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims;
+
+// Same handler as POST /:id/mark-accepted — see markEstimateAcceptedAsStaff above.
+module.exports.markEstimateAcceptedAsStaff = markEstimateAcceptedAsStaff;

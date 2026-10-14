@@ -1629,3 +1629,329 @@ test.each([
   const out = validateFill(answer({ customerNote: note }), ctx, t);
   expect(out.customerNote).toBe('');
 });
+
+describe('live run findings (2026-10-03)', () => {
+  const T = 'Alright, this is the re-service at the house. Did the perimeter with Taurus, four ounces, and Talstar, four ounces, and a quarter ounce of surfactant. Ants were the issue, mostly out front by the entry. Activity was light.';
+
+  test('a visit quote longer than the display cap is still grounded: the cut never invents a word', () => {
+    const heard = 'Did the perimeter with Taurus, four ounces, and Talstar, four ounces, and a quarter ounce of surfactant. Ants were the issue, mostly out front by the entry. Activity was light.';
+    expect(heard.length).toBeGreaterThan(CAPS.heard);
+    const out = validateFill(answer({ visit: visit({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light', heard }) }), ctx, T);
+    expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light' });
+    expect(out.visit.heard.length).toBeLessThanOrEqual(CAPS.heard);
+    expect(out.visit.heard.endsWith('…')).toBe(true);
+    expect(out.unclear.map((u) => u.reason)).not.toContain('not_heard');
+  });
+
+  test('a tank mix said with one method: the other rows follow How with no Check', () => {
+    const row = (productId, amount, heard) => ({ productId, amount, unit: 'fl_oz', sameAsLast: false, method: 'perimeter_spray', heard });
+    const out = validateFill(answer({ products: [row('p-taurus', 4, 'Did the perimeter with Taurus, four ounces'), row('p-talak', 4, 'Talstar, four ounces')] }), ctx, T);
+    expect(out.products.map((p) => p.method)).toEqual(['perimeter_spray', '']);
+    expect(out.unclear.map((u) => u.reason)).not.toContain('method_not_heard');
+  });
+
+  test('a method with no word for it in the product\'s sentence is still a Check', () => {
+    const t = 'Used Taurus, four ounces. Then swept the garage.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: 'perimeter_spray', heard: 'Used Taurus, four ounces' }] }), ctx, t);
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+});
+
+test('a visit quote that joins two separate phrases with a comma is grounded phrase by phrase', () => {
+  const t = 'Taurus four ounces on the perimeter and a little Termidor along the slab. Spiders outside.';
+  const out = validateFill(answer({ visit: visit({ pests: ['Spiders'], areas: ['Outside'], method: 'perimeter_spray', heard: 'Taurus four ounces on the perimeter, Spiders outside.' }) }), ctx, t);
+  expect(out.visit).toMatchObject({ pests: ['Spiders'], areas: ['Outside'], method: 'perimeter_spray' });
+  // a phrase never said still refuses the visit
+  const made = validateFill(answer({ visit: visit({ pests: ['Spiders'], heard: 'Taurus four ounces on the perimeter, Spiders everywhere.' }) }), ctx, t);
+  expect(made.visit.pests).toEqual([]);
+});
+
+describe('Codex #5698 round 1', () => {
+  test('a different method in the product\'s own clause keeps the Check', () => {
+    const t = 'Spot treated with Taurus and sprayed Talstar around the perimeter.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Spot treated with Taurus' }] }), ctx, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('a stitched quote cannot borrow "same as last time" from another product\'s sentence', () => {
+    const t = 'Used Taurus today. Talstar was same as last time.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus, same as last time' }] }), ctx, t);
+    // the flag is read from Taurus's own sentence, never from the stitched phrase
+    expect(out.products.some((p) => p.sameAsLast)).toBe(false);
+    expect(out.unclear.map((u) => u.reason)).toContain('same_as_last_not_heard');
+    const own = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was same as last time' }] }), ctx, t);
+    expect(own.products[0].sameAsLast).toBe(true);
+  });
+});
+
+test('same-as-last is read where the product is named: a reversed stitched quote borrows nothing', () => {
+  const t = 'Used Taurus today. Talstar was same as last time.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'same as last time, Taurus' }] }), ctx, t);
+  expect(out.products.some((p) => p.sameAsLast)).toBe(false);
+  // and with a quote that IS one run, the flag is read from Taurus's own sentence
+  const own = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Used Taurus today' }] }), ctx, t);
+  expect(own.products[0].sameAsLast).toBe(false);
+  expect(own.unclear.map((u) => u.reason)).toContain('same_as_last_not_heard');
+});
+
+test('"Taurus isn\'t the same as last time" is no same-as-last flag', () => {
+  const t = "Taurus isn't the same as last time.";
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+});
+
+test('a product\'s own catalog method in its clause is a competing method too', () => {
+  const withDrench = { ...ctx, products: ctx.products.map((p) => (p.id === 'p-taurus' ? { ...p, catalogMethod: 'soil_drench' } : p)) };
+  withDrench.productMethods = [...ctx.productMethods, 'soil_drench'];
+  const t = 'Drenched the soil with Taurus and sprayed Talstar around the perimeter.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Drenched the soil with Taurus' }] }), withDrench, t);
+  expect(out.products[0].method).toBe('');
+  expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+});
+
+describe('Codex #5698 round 3', () => {
+  test('a quote cut exactly at the end of a word keeps that word', () => {
+    const lead = 'x'.repeat(CAPS.heard - 8);
+    const t = `${lead} Taurus was used outside today.`;
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: t }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
+    expect(out.products[0].heard).toContain('Taurus');
+  });
+
+  test('words from different pieces of a stitched quote never combine into a product name', () => {
+    // every word of this name is a generic kind word: only the whole name, in one piece, names it
+    const withPlus = { ...ctx, products: [...ctx.products, { id: 'p-pgp', name: 'Pro Gel Plus', fullName: 'Pro Gel Plus', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const row = (heard) => ({ productId: 'p-pgp', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard });
+    const scattered = 'This was a pro account. Put gel under the sink. Plus the garage.';
+    expect(validateFill(answer({ products: [row('pro, gel, plus')] }), withPlus, scattered).products).toEqual([]);
+    const said = 'Used Pro Gel Plus under the sink.';
+    expect(validateFill(answer({ products: [row('Used Pro Gel Plus')] }), withPlus, said).products.map((p) => p.productId)).toEqual(['p-pgp']);
+  });
+
+  test('a product named twice: a later question never authorizes same-as-last for the application', () => {
+    const t = 'Used Taurus today. I asked whether Taurus should be the same as last time next visit.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+  });
+});
+
+test('the live model\'s stitched product quote ("Same mix as last time, Talstar") keeps the product and its flag', () => {
+  const t = 'Same mix as last time, Taurus, Talstar and the surfactant. Spot treated the garage.';
+  const row = (productId, heard) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard });
+  const out = validateFill(answer({ products: [row('p-taurus', 'Same mix as last time, Taurus'), row('p-talak', 'Same mix as last time, Talstar'), row('p-surf', 'Same mix as last time, the surfactant')] }), ctx, t);
+  expect(out.products.map((p) => [p.productId, p.sameAsLast])).toEqual([['p-taurus', true], ['p-talak', true], ['p-surf', true]]);
+});
+
+test('a stitched quote with shorthand then the full name is the full name\'s product', () => {
+  const alpines = { ...ctx, products: [...ctx.products,
+    { id: 'p-alp-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] },
+    { id: 'p-alp-pt', name: 'Alpine PT', fullName: 'Alpine PT', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+  const t = 'Used the Alpine, Alpine WSG, in the kitchen.';
+  const out = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Alpine, Alpine WSG' }] }), alpines, t);
+  expect(out.products.map((p) => p.productId)).toEqual(['p-alp-wsg']);
+  // shorthand alone is still ambiguous
+  const short = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Used the Alpine' }] }), alpines, 'Used the Alpine in the kitchen.');
+  expect(short.products).toEqual([]);
+});
+
+describe('Codex #5698 round 5', () => {
+  test('the naming piece must sit on a use: a negated full name is not rescued by shared shorthand', () => {
+    const alpines = { ...ctx, products: [...ctx.products,
+      { id: 'p-alp-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] },
+      { id: 'p-alp-pt', name: 'Alpine PT', fullName: 'Alpine PT', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const t = 'Used Alpine PT. Alpine WSG was not used.';
+    const out = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Alpine, Alpine WSG' }] }), alpines, t);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('negated_product');
+  });
+
+  test('another product\'s catalog method in this product\'s clause is a competing method', () => {
+    const withDrench = { ...ctx, productMethods: [...ctx.productMethods, 'soil_drench'], products: [...ctx.products, { id: 'p-dom', name: 'Dominion 2L', fullName: 'Dominion 2L', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'], catalogMethod: 'soil_drench' }] };
+    const t = 'Drenched Taurus and sprayed Dominion around the perimeter.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Drenched Taurus' }] }), withDrench, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+});
+
+describe('Codex #5698 round 6', () => {
+  test('a piece with a negated canonical name and a positive alias keeps the product', () => {
+    const t = 'Did not use Atticus Talak but used Talstar P.';
+    const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Did not use Atticus Talak but used Talstar P' }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-talak']);
+  });
+
+  test('a stitched quote\'s first phrase singles out the mention for same-as-last', () => {
+    const t = 'I used Taurus in the kitchen, same as last time. Taurus worked well.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'I used Taurus, same as last time' }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(true);
+  });
+});
+
+test.each(['Atticus Talak … Talstar P', 'Talstar P … Atticus Talak'])('a negated name and a positive alias in separate quote pieces keep the product, in either order (%s)', (heard) => {
+  const t = 'Did not use Atticus Talak. Used Talstar P.';
+  const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard }] }), ctx, t);
+  expect(out.products.map((p) => p.productId)).toEqual(['p-talak']);
+});
+
+describe('Codex #5698 round 7: which mention a quote points at', () => {
+  const row = (heard, over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard, ...over });
+
+  test('a quote of the negated mention never carries same-as-last from the positive one', () => {
+    const t = 'Taurus was same as last time. Taurus was not used.';
+    const out = validateFill(answer({ products: [row('Taurus was not used')] }), ctx, t);
+    expect(out.products.some((p) => p.sameAsLast)).toBe(false);
+  });
+
+  test('the product-bearing piece of a stitched quote picks the mention ("Same mix as last time, Taurus")', () => {
+    const t = 'I used Taurus in the kitchen. Same mix as last time, Taurus outside.';
+    const out = validateFill(answer({ products: [row('Same mix as last time, Taurus')] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(true);
+  });
+
+  test('words past the display cap are still grounded: a fabricated tail refuses the quote', () => {
+    const real = `Used Taurus ${'around the back of the house '.repeat(5)}today`.replace(/\s+/g, ' ').trim();
+    expect(real.length).toBeGreaterThan(CAPS.heard - 15);
+    const out = validateFill(answer({ products: [row(`${real} fabricatedlongword and more invented words`, { sameAsLast: false })] }), ctx, `${real}.`);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('not_heard');
+  });
+});
+
+describe('voice test findings (real recordings, 2026-10-03)', () => {
+  const row = (amount, heard) => ({ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+
+  test('"four ounces per meter" (possibly a misheard "perimeter") is treated as a rate: a Check, never a guess', () => {
+    const t = 'Treated the front only. Taurus four ounces per meter.';
+    const out = validateFill(answer({ products: [row(4, 'Taurus four ounces per meter')] }), ctx, t);
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear.map((u) => u.reason)).toContain('amount_not_spoken');
+  });
+
+  test('real rates are still rates', () => {
+    for (const t of ['Taurus four ounces per gallon.', 'Taurus four ounces per 1,000 square feet.', 'Taurus four ounces per thousand.', 'Taurus four ounces per 100 linear feet.', 'Taurus four ounces per ten liters.']) {
+      expect(validateFill(answer({ products: [row(4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+    }
+  });
+
+  test('"four ounces, no weight, five ounces" (a misheard "no wait") corrects the four', () => {
+    const t = 'Use Taurus, four ounces, no weight, five ounces, along the foundation.';
+    expect(validateFill(answer({ products: [row(5, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+    expect(validateFill(answer({ products: [row(4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+});
+
+test('"per meter squared" is a rate; "no weight" with no replacement number corrects nothing', () => {
+  const row = (amount, heard) => ({ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+  for (const rate of ['Taurus four ounces per meter squared.', 'Applied Taurus at four ounces per minute for ten minutes.']) {
+    expect(validateFill(answer({ products: [row(4, rate.replace(/\.$/, ''))] }), ctx, rate).products[0].amount).toBeNull();
+  }
+  const kept = 'Taurus four ounces, no weight limit on the truck.';
+  expect(validateFill(answer({ products: [row(4, 'Taurus four ounces')] }), ctx, kept).products[0].amount).toBe(4);
+});
+
+describe('Codex #5698 round 8', () => {
+  const row = (productId, heard, over = {}) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard, ...over });
+
+  test('same-as-last governs only the product whose clause it is in', () => {
+    const t = 'Used Taurus today and Talstar was same as last time.';
+    const taurus = validateFill(answer({ products: [row('p-taurus', 'Used Taurus today', { sameAsLast: true })] }), ctx, t);
+    expect(taurus.products[0].sameAsLast).toBe(false);
+    const talstar = validateFill(answer({ products: [row('p-talak', 'Talstar was same as last time', { sameAsLast: true })] }), ctx, t);
+    expect(talstar.products[0].sameAsLast).toBe(true);
+  });
+
+  test('a lead-in before the list still covers every product in it', () => {
+    const t = 'Same mix as last time, Taurus, Talstar and the surfactant.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'Same mix as last time, Taurus', { sameAsLast: true }), row('p-surf', 'Same mix as last time, the surfactant', { sameAsLast: true })] }), ctx, t);
+    expect(out.products.map((p) => p.sameAsLast)).toEqual([true, true]);
+  });
+
+  test('a sentence naming two ways shares neither: the unsupported method is a Check', () => {
+    const withDom = { ...ctx, products: [...ctx.products, { id: 'p-dom', name: 'Dominion 2L', fullName: 'Dominion 2L', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'] }] };
+    const t = 'Used Taurus and Talstar was spot treated, while Dominion was sprayed around the perimeter.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'Used Taurus', { method: 'perimeter_spray' })] }), withDom, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+});
+
+test('a negation in the sentence before does not reach a product that opens the next one', () => {
+  const t = 'Did not use Talstar. Taurus four ounces outside.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces outside' }] }), ctx, t);
+  expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: 4 });
+  const comma = 'Skipped the Talstar, Taurus four ounces outside.';
+  const out2 = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces outside' }] }), ctx, comma);
+  expect(out2.products[0]).toMatchObject({ productId: 'p-taurus', amount: 4 });
+});
+
+test('a list lead-in does not carry same-as-last across a "but"', () => {
+  const t = 'Same mix as last time for Taurus, but Talstar was new today.';
+  const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was new today' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+  const taurus = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Same mix as last time for Taurus' }] }), ctx, t);
+  expect(taurus.products[0].sameAsLast).toBe(true);
+});
+
+describe('Codex #5698 round 9', () => {
+  const row = (productId, heard, over = {}) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard, ...over });
+
+  test('a way said after another product\'s name is that product\'s: the Check stays', () => {
+    const t = 'Used Taurus and sprayed Talstar around the perimeter.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'Used Taurus', { method: 'perimeter_spray' })] }), ctx, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('a way said in the lead-in is shared by the list, with no Check', () => {
+    const t = 'Did the perimeter with Taurus, four ounces, and Talstar, four ounces.';
+    const out = validateFill(answer({ products: [row('p-talak', 'Talstar, four ounces', { amount: 4, unit: 'fl_oz', method: 'perimeter_spray' })] }), ctx, t);
+    expect(out.unclear.map((u) => u.reason)).not.toContain('method_not_heard');
+  });
+
+  test('"No two ounces of Taurus were used" is a negation, not a correction', () => {
+    const t = 'No two ounces of Taurus were used. Talstar outside.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'two ounces of Taurus', { amount: 2, unit: 'fl_oz' })] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus' && p.amount === 2)).toBe(false);
+  });
+});
+
+test('a number in the sentence before does not turn "No two ounces of Taurus were used" into a correction', () => {
+  const t = 'Used four ounces of Talstar. No two ounces of Taurus were used.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'two ounces of Taurus' }] }), ctx, t);
+  expect(out.products.some((p) => p.productId === 'p-taurus' && p.amount === 2)).toBe(false);
+  // the cross-sentence correction still works
+  const fix = 'Used Taurus, four ounces. No, it was five ounces.';
+  const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, fix).products[0].amount;
+  expect(run(4)).toBeNull();
+});
+
+test('"Taurus four ounces, no, five ounces of Taurus": the four is corrected away', () => {
+  const t = 'Taurus four ounces, no, five ounces of Taurus.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces' }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+});
+
+describe('Codex #5698 round 10: "then" ends a shared lead-in', () => {
+  const row = (productId, heard, over = {}) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard, ...over });
+
+  test('a way before the first product does not reach a product after "then"', () => {
+    const t = 'Spot treated with Taurus, then used Talstar.';
+    const out = validateFill(answer({ products: [row('p-talak', 'then used Talstar', { method: 'spot_treatment' })] }), ctx, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('same-as-last before the first product does not reach a product after "then"', () => {
+    const t = 'Same mix as last time for Taurus, then today used Talstar.';
+    const out = validateFill(answer({ products: [row('p-talak', 'today used Talstar', { sameAsLast: true })] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+  });
+});
+
+test('"then" ends a product\'s own clause: a phrase after it belongs to the next product', () => {
+  const t = 'Used Taurus, then same mix as last time for Talstar.';
+  const row = (productId, heard) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard });
+  expect(validateFill(answer({ products: [row('p-taurus', 'Taurus, same mix as last time')] }), ctx, t).products.some((p) => p.productId === 'p-taurus' && p.sameAsLast)).toBe(false);
+});

@@ -51,6 +51,23 @@ test('rings the staff phone from the chosen line; the customer rides the prompt 
   expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', channel: 'voice', ourEndpointId: '+19413529161', direction: 'outbound', adminUserId: 'tech-1', twilioSid: 'CA-bridge' }));
 });
 
+// bridgeFrom splits the two legs: the staff ring presents it while `from`
+// stays the customer-facing caller ID (prompt URL, call_log.from_phone,
+// touchpoint). The admin bridge rings the staff cell from the main line this
+// way while the customer leg carries their home line.
+test('bridgeFrom: the staff leg rings from it; the customer leg, the row and the touchpoint keep `from`', async () => {
+  const { inserted } = primeDb();
+  await placeBridgeCall({
+    to: '+19415550100', bridgePhone: '+19415550101', from: '+19412972817', bridgeFrom: '+19412975749',
+    customer: null, source: 'admin-click',
+  });
+  const args = mockCallsCreate.mock.calls[0][0];
+  expect(args.from).toBe('+19412975749');
+  expect(args.url).toContain(`callerIdNumber=${encodeURIComponent('+19412972817')}`);
+  expect(inserted[0]).toEqual(expect.objectContaining({ from_phone: '+19412972817' }));
+  expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ ourEndpointId: '+19412972817' }));
+});
+
 test('an unlinked number keeps the contact phone on the touchpoint', async () => {
   primeDb();
   await placeBridgeCall({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19412975749', customer: null, source: 'admin-click' });

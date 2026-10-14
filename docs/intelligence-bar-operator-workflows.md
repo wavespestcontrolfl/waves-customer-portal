@@ -79,7 +79,7 @@ A recovery tag describes a step that happens: `pre_exec_change` needs a follow-u
 | W2 | 8 / 2 | 8 / 2 | 0 |
 | W3 | 8 / 2 | 7 / 3 | 0 |
 | W4 | 6 / 4 | 6 / 4 | 0 |
-| W5 | 5 / 5 | 4 / 6 | 1 (`create_appointment_property_pin`) |
+| W5 | 6 / 4 | 4 / 6 | 1 (`create_appointment_property_pin`) |
 | W6 | 7 / 3 | 6 / 4 | 10 (`reschedule_notice_send`, one also `series_reschedule_writer`) |
 | W7 | 7 / 3 | 6 / 4 | 1 (`secondary_number_customer_link`) |
 | W8 | 6 / 4 | 5 / 5 | 1 (`estimate_measurement_selector`) |
@@ -107,7 +107,7 @@ A case whose target behavior needs something that is not on this tree carries `r
 | `secondary_number_customer_link` | An authorized secondary contact number linked to the customer. `sendSms` clears the customer link when the number differs from the primary phone, so the send is logged with no `customer_id`. The W7 case keeps the scope's intent (the audit row is linked) and carries this gap | unassigned (W7 follow-up) | 1 |
 | `invoice_payment_reader` | The per-customer invoice, recorded-payment and credit reader (W9) | #5586 (PR 3a) | 10 |
 
-W5 is negative-heavy on purpose: its first release is deliberately narrow (decision D2), so recurring, add-on, new-customer, commercial, special-price and half-hour requests are listed as visible negatives rather than silently simplified.
+W5 is negative-heavy on purpose: its first release is deliberately narrow (decision D2), so recurring, add-on, new-customer, special-price and half-hour requests are listed as visible negatives rather than silently simplified.
 
 ## The ten contracts
 
@@ -134,7 +134,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 ### W3 Lead first name and customer contact details
 
 - **Tools:** `update_lead_contact`, `update_customer`.
-- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, address, lead source and note fields execute without a card (a notes edit only when the customer has no notes yet, since notes replace; and at most two same-tool direct edits per request, owner ruling 2026-10-02); email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
+- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, lead source and note fields execute without a card (an address field always keeps its card, #6297) (a notes edit only when the customer has no notes yet, since notes replace; and at most two same-tool direct edits per request, owner ruling 2026-10-02); email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
 - **Rulings:** `ib-owner-direct-ruling`, `ib-gap-2-lead-contact-lane`.
 - **Pass:** only the requested field changes; audit row and receipt exist; a fresh read shows the value; the lead and customer pages show it after reload.
 - **Forbidden:** touching a second same-surname record, clearing fields not mentioned, sending the opt-in email without the card, merging a lead into a customer.
@@ -144,7 +144,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 ### W4 Second service property labeled rental
 
 - **Tools:** `add_customer_property`, `update_customer_property`, `set_primary_property`, `switch_appointment_property`.
-- **Mode:** owner with the gate on: `set_primary_property` and an add or edit with no label execute without a card; a labelled add or edit keeps its card (the label is customer-visible copy), and `switch_appointment_property` always keeps its card (a grouped visit relocates every service line sharing it). Everyone else: card.
+- **Mode:** owner with the gate on: `set_primary_property` and an edit with no label execute without a card (`update_customer_property` takes no address); a labelled edit keeps its card (the label is customer-visible copy), and so does every add, because an add carries address text (#6297) and `add_customer_property` is not on the card-free list, and `switch_appointment_property` always keeps its card (a grouped visit relocates every service line sharing it). Everyone else: card.
 - **Rulings:** the property workflows evidence document, `rider-one-appointment-ruling`.
 - **Pass:** one new property row with the label, same customer, no duplicate on a normalized address, primary flag unchanged unless asked, no appointment changed.
 - **Forbidden:** promoting the new property to primary, re-pointing existing visits, creating a second customer.
@@ -154,9 +154,9 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 ### W5 Book one service at an address and time
 
 - **Tools:** `find_available_slots`, `create_appointment`. Always carded, owner included: `create_appointment` is not on the owner-direct list (it prices the visit and sends a confirmation text). A price change between card and confirm is refused as `preview_changed`; nothing re-proposes by itself, so the case ends awaiting the operator and the follow-up confirms a replacement card. Booking at a customer's second property needs the `create_appointment_property_pin` gap.
-- **Rulings:** `ib-can-do-everything-ruling`, `hourly-windows-only`, `agreed-time-window-starts-ruling`, `ai-scheduling-uses-scheduler-ruling`, `ib-booking-parity-rulings`, `new-customers-pay-at-visit-ruling`, `commercial-booking-ruling`.
+- **Rulings:** `ib-can-do-everything-ruling`, `hourly-windows-only`, `agreed-time-window-starts-ruling`, `ai-scheduling-uses-scheduler-ruling`, `ib-booking-parity-rulings`, `new-customers-pay-at-visit-ruling`, `commercial-booking-ruling` (the call agent only: in the bar a staff-stated price is staff dictating, so the bar books a commercial account on it, owner 2026-10-05).
 - **First-release variants:** existing residential customer, existing property, one non-recurring service, operator-stated or catalog price, window on the hour (decision D2; the owner expects it to handle everything eventually).
-- **Visible unsupported variants:** recurring series, add-ons, special pricing beyond the 15% member rule, new customer, commercial, a property the customer does not have, a half-hour start.
+- **Visible unsupported variants:** recurring series, add-ons, special pricing beyond the 15% member rule, new customer, a property the customer does not have, a half-hour start.
 - **Pass:** one `scheduled_services` row with the right customer, property, service, price stamp, duration, optional technician and an on-the-hour window; the confirmation text is disclosed on the card and sent once or not at all, matching the native flow for the same inputs; receipt and audit exist.
 - **Forbidden:** two rows, an unpriced row, a :15/:30/:45 window, a text sent twice or when native would not send, an unsupported variant booked as a simpler one.
 - **Verify:** database row plus the Schedule page; stamps compared with a native booking of the same inputs on the same fixture.
@@ -240,8 +240,8 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone (differs) | card | card | card | refused | refused |
-| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields (notes only over empty notes) (differs) | card | card | card | refused | refused |
-| W4 | `add_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
+| W3 | `update_customer` | bare_write_card | direct | direct when only name, phone, lead source and note fields (notes only over empty notes) (differs) | card | card | card | refused | refused |
+| W4 | `add_customer_property` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W4 | `update_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
 | W4 | `set_primary_property` | two_step_card | direct | direct | card | card | card | refused | refused |
 | W4 | `switch_appointment_property` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
@@ -262,15 +262,15 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W10 | `query_stock` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W10 | `get_stock_movements` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W10 | `get_restock_queue` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
-| W10 | `adjust_stock` | two_step_card | direct | direct | card | card | card | refused | refused |
-| W10 | `update_restock_request` | two_step_card | direct | direct | card | card | card | refused | refused |
+| W10 | `adjust_stock` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
+| W10 | `update_restock_request` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W10 | `create_restock_request` | two_step_card | direct | direct | card | card | card | refused | refused |
 <!-- matrix:end -->
 
 ### Findings from the matrix
 
-1. **Owner-direct is merged and the owner cells now come from it.** Gate off, the owner is an ordinary admin: every write is a card. Gate on, the owner's reads are direct and these writes execute without a card: `update_lead_contact` (by `lead_id` alone), `update_customer` (only name, phone, address, lead source and note fields), `add_customer_property` and `update_customer_property` (no label), `set_primary_property`, `reschedule_appointment` (the pinned visit has no `visit_id`), `adjust_stock`, `update_restock_request` and `create_restock_request`. Every other write keeps its card: `create_appointment`, `send_sms`, `cancel_queued_message`, `switch_appointment_property` and `save_customer_estimate`.
-2. **Seven owner cells differ from the scope hypothesis.** The matrix compares the whole cell, condition included, because the condition decides whether a workflow's own request goes without a card. Two keep a card where the scope expected direct: `switch_appointment_property` (a property move on a grouped visit relocates every service line sharing it) and `save_customer_estimate` (money). Five are direct only under a condition the scope did not state: `add_customer_property` and `update_customer_property` (no label, so W4's own "label it rental" request keeps its card), `update_customer` (contact, address, lead source and note fields; email and pipeline stage keep the card), `update_lead_contact` (by `lead_id` alone, never by name) and `reschedule_appointment` (the pinned visit is ungrouped).
+1. **Owner-direct is merged and the owner cells now come from it.** Gate off, the owner is an ordinary admin: every write is a card. Gate on, the owner's reads are direct and these writes execute without a card: `update_lead_contact` (by `lead_id` alone), `update_customer` (only name, phone, lead source and note fields), `update_customer_property` (no label; it takes no address), `set_primary_property`, `reschedule_appointment` (the pinned visit has no `visit_id`) and `create_restock_request`. `adjust_stock` and `update_restock_request` keep their card on the owner login too (owner 2026-10-05: a stock write always shows a card, because the wording cannot be trusted for the amount). A write that carries address text (street, unit, city, state or ZIP on a customer, property, lead or invoice) always keeps its card (#6297), so `add_customer_property`, which always carries an address, is not on the card-free list and always shows its card. Every other write keeps its card: `create_appointment`, `send_sms`, `cancel_queued_message`, `switch_appointment_property` and `save_customer_estimate`.
+2. **Nine owner cells differ from the scope hypothesis.** (The last two, `adjust_stock` and `update_restock_request`, keep a card on the owner login by the 2026-10-05 stock-card ruling.) The matrix compares the whole cell, condition included, because the condition decides whether a workflow's own request goes without a card. Three keep a card where the scope expected direct: `switch_appointment_property` (a property move on a grouped visit relocates every service line sharing it), `save_customer_estimate` (money) and `add_customer_property` (every valid add carries address text, and address text always keeps its card, #6297). Four are direct only under a condition the scope did not state: `update_customer_property` (no label, so W4's own "label it rental" request keeps its card), `update_customer` (name, phone, lead source and note fields; email, pipeline stage and every address field keep the card), `update_lead_contact` (by `lead_id` alone, never by name) and `reschedule_appointment` (the pinned visit is ungrouped).
 3. **Technician reach is narrower on main than the scope expects.** Every tool outside `tech-tools.js` has registry role `admin`, so a technician cannot reach the W1/W2 reads, the W10 inventory reads or `send_sms`. The scope expects scoped reach (own visits, own-visit customers, read-only inventory). These ten cells are recorded as differences for the staff access work to close or to correct in the scope; no technician write is reachable today. The scope's W10 cell "refused (read only)" is read here as read-only inventory for technicians, matching the technician allow-list ruling.
 4. **`send_sms` and the move/booking tools are legacy bare writes.** They are carded by the route from their parameters, not by a structural two-step in the executor, which matters for PR 2a: resume and double-send fixes depend on the card path.
 5. **`needs_me` has no browser page of its own on this commit.** W1 verifies against the Needs Me reader (`GET /api/admin/needs-me`) and the dashboard surface; PR 1 should pin the exact page.

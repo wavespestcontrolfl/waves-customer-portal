@@ -32,6 +32,11 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 
+const mockEstimateSummary = jest.fn();
+jest.mock('../services/assessment-estimate-summary', () => ({
+  assessmentEstimateSummary: (...args) => mockEstimateSummary(...args),
+}));
+
 const mockRecordOutcome = jest.fn();
 const mockConsultationStats = jest.fn();
 jest.mock('../services/consultation-outcomes', () => ({
@@ -46,6 +51,8 @@ jest.mock('../services/consultation-outcomes', () => ({
 const TODAY_ET = require('../utils/datetime-et').etDateString(new Date());
 let mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID, status: 'confirmed', scheduled_date: TODAY_ET };
 let mockOutcomeRow = null;
+let mockVisitServiceType = 'Waves Assessment';
+let mockVisitSourceEstimate = null;
 // Set to simulate a dispatch reassignment landing right after the route's
 // ownership check (the next scheduled_services read sees it).
 let mockVisitRowAfterFirstRead = null;
@@ -66,6 +73,12 @@ jest.mock('../models/db', () => {
           const row = mockVisitRow;
           if (mockVisitRowAfterFirstRead) { mockVisitRow = mockVisitRowAfterFirstRead; mockVisitRowAfterFirstRead = null; }
           return Promise.resolve(row);
+        }
+        // The estimate route's guarded visit read: coupled to the current
+        // technician in its own query.
+        if (table === 'scheduled_services as ss') {
+          if (techFilter !== undefined && mockVisitRow?.technician_id !== techFilter) return Promise.resolve(null);
+          return Promise.resolve(mockVisitRow ? { ...mockVisitRow, customer_id: 'cust-1', source_estimate_id: mockVisitSourceEstimate, service_type: mockVisitServiceType, service_id: null } : null);
         }
         if (table === 'consultation_outcomes' || table === 'consultation_outcomes as co') {
           if (techFilter !== undefined && mockVisitRow?.technician_id !== techFilter) return Promise.resolve(null);
@@ -112,6 +125,8 @@ beforeEach(() => {
   mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID, status: 'confirmed', scheduled_date: TODAY_ET };
   mockOutcomeRow = null;
   mockVisitRowAfterFirstRead = null;
+  mockVisitServiceType = 'Waves Assessment';
+  mockVisitSourceEstimate = null;
   jest.clearAllMocks();
 });
 
@@ -267,5 +282,73 @@ describe('GET /stats — admin only', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(message);
     expect(mockConsultationStats).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /:scheduledServiceId/estimate (Fast Complete estimate line)', () => {
+  const ID = '11111111-1111-4111-8111-111111111111';
+  const savedGate = process.env.GATE_ASSESSMENT_FAST_COMPLETE;
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_ASSESSMENT_FAST_COMPLETE;
+    else process.env.GATE_ASSESSMENT_FAST_COMPLETE = savedGate;
+  });
+
+  test('does not exist while GATE_ASSESSMENT_FAST_COMPLETE is off', async () => {
+    delete process.env.GATE_ASSESSMENT_FAST_COMPLETE;
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(404);
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
+  });
+
+  test('returns the summary for a technician on their own visit', async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = 'technician';
+    mockEstimateSummary.mockResolvedValue({ state: 'found', estimate: { id: 'est-1' } });
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ estimate: { state: 'found', estimate: { id: 'est-1' } } });
+    // A technician's read asks for no estimate identity.
+    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID }), { identify: false });
+  });
+
+  test('a technician reassigned right after the ownership check gets 403 and no estimate fields', async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = 'technician';
+    mockEstimateSummary.mockResolvedValue({ state: 'found', estimate: { id: 'est-1', monthlyTotal: 59 } });
+    mockVisitRowAfterFirstRead = { id: ID, technician_id: 'someone-else', status: 'confirmed', scheduled_date: TODAY_ET };
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(403);
+    expect(res.body).not.toHaveProperty('estimate');
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
+  });
+
+  test("an admin reads any technician's visit estimate, from the guarded visit row", async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockVisitRow = { id: ID, technician_id: 'someone-else', status: 'confirmed', scheduled_date: TODAY_ET };
+    mockEstimateSummary.mockResolvedValue({ state: 'none' });
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(200);
+    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID, customer_id: 'cust-1' }), { identify: true });
+  });
+
+  test.each([['technician'], ['admin']])('a visit that is not a Waves Assessment is 404 for %s, and no estimate is read', async (role) => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = role;
+    mockVisitServiceType = 'Quarterly Pest Control';
+    mockVisitSourceEstimate = 'est-9';
+    mockEstimateSummary.mockResolvedValue({ state: 'found', estimate: { id: 'est-9', monthlyTotal: 59 } });
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(404);
+    expect(res.body).not.toHaveProperty('estimate');
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
+  });
+
+  test("a technician cannot read another technician's visit estimate (403, summary never read)", async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = 'technician';
+    mockVisitRow = { id: ID, technician_id: 'someone-else', status: 'confirmed', scheduled_date: TODAY_ET };
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(403);
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
   });
 });

@@ -759,6 +759,213 @@ describe('validateVoiceFacts', () => {
   });
 });
 
+// The sweep (owner ruling 2026-10-08): "swept eaves and webs" is read from the
+// note, never ticked. It stands only on a quote that names a web-removal action
+// and a web or eave, that the note does not deny or put on another day.
+describe('validateVoiceFacts: the web sweep', () => {
+  const readSweep = (note, sweep) => validateVoiceFacts({ areas: [], pests: [], spray: { method: 'not_said', quote: '' }, sweep }, note).sweep || null;
+  const said = (note, quote) => readSweep(note, { done: true, quote });
+
+  test.each([
+    ['Sprayed the perimeter. Swept the eaves and knocked down the webs.', 'Swept the eaves and knocked down the webs'],
+    ['Brushed cobwebs off the lanai ceiling, sprayed around the house.', 'Brushed cobwebs off the lanai ceiling'],
+    ['Sprayed outside and removed the spider webs from the soffits.', 'removed the spider webs from the soffits'],
+    ['Dewebbed the front entry. Sprayed the perimeter.', 'Dewebbed the front entry'],
+    ['Customer asked about webs; I swept the eaves.', 'I swept the eaves'],
+    ['Customer was not home and I swept the eaves.', 'I swept the eaves'],
+  ])('a sweep done today stands: %s', (note, quote) => {
+    expect(said(note, quote)).toEqual({ quote: quote.toLowerCase() });
+  });
+
+  test.each([
+    ["Sprayed the perimeter. Didn't sweep the eaves today.", "sweep the eaves"],
+    ['No webs to sweep this time. Sprayed the perimeter.', 'No webs to sweep'],
+    ['Customer asked us not to knock down webs. Sprayed the perimeter.', 'knock down webs'],
+    ['Customer asked us not to knock down webs. Sprayed the perimeter.', 'not to knock down webs'],
+    ['Sprayed the perimeter. Will sweep the eaves next time.', 'sweep the eaves'],
+    ['Sprayed the perimeter. Need to sweep the eaves.', 'sweep the eaves'],
+    ['Swept the eaves last visit. Sprayed the perimeter today.', 'Swept the eaves'],
+    ['Sprayed the perimeter. Eaves swept, not done today.', 'Eaves swept'],
+    ['Unable to sweep the eaves, ladder was locked up.', 'sweep the eaves'],
+  ])('a sweep the note denies or puts on another day is not a sweep: %s', (note, quote) => {
+    expect(said(note, quote)).toBeNull();
+  });
+
+  test('an eave with no web named needs a sweeping word; a long-winded denial still denies', () => {
+    expect(readSweep('Cleaned the eaves and sprayed the perimeter.', { done: true, quote: 'Cleaned the eaves' })).toBeNull();
+    expect(readSweep('Removed debris from the soffit.', { done: true, quote: 'Removed debris from the soffit' })).toBeNull();
+    expect(readSweep('Brushed the eaves and sprayed the perimeter.', { done: true, quote: 'Brushed the eaves' })).toEqual({ quote: 'brushed the eaves' });
+    expect(readSweep('Cleaned the webs off the eaves.', { done: true, quote: 'Cleaned the webs off the eaves' })).toEqual({ quote: 'cleaned the webs off the eaves' });
+    expect(readSweep('Did not manage to get around to sweep the eaves.', { done: true, quote: 'sweep the eaves' })).toBeNull();
+    expect(readSweep("Didn't have time to sweep the eaves.", { done: true, quote: 'sweep the eaves' })).toBeNull();
+  });
+
+  test('the removal must be of the webs: a nest removed beside webs only seen is no sweep (Codex P2 on #6147)', () => {
+    const note = 'Removed a wasp nest and saw webs on the eaves.';
+    expect(readSweep(note, { done: true, quote: note })).toBeNull();
+    expect(readSweep('Swept the lanai and noticed webs on the eaves.', { done: true, quote: 'Swept the lanai and noticed webs on the eaves' })).toBeNull();
+    expect(readSweep('Removed the trash. Webs are on the eaves.', { done: true, quote: 'Removed the trash. Webs are on the eaves' })).toBeNull();
+    // A passive is not a plain statement of the tech's own work: the chip adds it.
+    expect(readSweep('Webs on the eaves were knocked down.', { done: true, quote: 'Webs on the eaves were knocked down' })).toBeNull();
+  });
+
+  test('another day said of another action leaves today\'s sweep standing (Codex P2 on #6147)', () => {
+    expect(readSweep('Inspected the eaves last visit and swept the eaves today.', { done: true, quote: 'swept the eaves today' })).toEqual({ quote: 'swept the eaves today' });
+    expect(readSweep('Sprayed the perimeter last visit and swept the webs this time.', { done: true, quote: 'swept the webs' })).toEqual({ quote: 'swept the webs' });
+    // The sweep's own other day still is not today.
+    expect(readSweep('Swept the eaves and webs last visit.', { done: true, quote: 'Swept the eaves and webs' })).toBeNull();
+    expect(readSweep('Last visit we swept the eaves.', { done: true, quote: 'swept the eaves' })).toBeNull();
+    expect(readSweep('Last visit we sprayed and swept the eaves.', { done: true, quote: 'swept the eaves' })).toBeNull();
+    expect(readSweep('Swept the eaves, will spray tomorrow.', { done: true, quote: 'Swept the eaves' })).toEqual({ quote: 'swept the eaves' });
+  });
+
+  // Codex round 2 on #6147.
+  test.each([
+    ['another action stands between the removal and the webs', 'Removed ant bait stations and sprayed the webs on the eaves.'],
+    ['the sweep is said as not completed', 'Sweeping the eaves was not completed.'],
+    ['the sweep is said as not performed', 'Web sweep was not performed.'],
+    ['the sweep is called incomplete', 'Web sweep incomplete, ladder was locked up.'],
+    ['a word that only contains "web"', 'Removed the Weber grill from the lanai.'],
+    ['the webs were not swept', 'Sprayed the perimeter. Webs were not swept.'],
+    ['the webs wait for another day', 'Webs will be swept next time.'],
+    ['a sweep only if needed', 'Will knock down webs if needed.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test.each([
+    ['a prior day said of an earlier look, then today\'s sweep', 'Yesterday inspected the eaves and swept the eaves today.'],
+    ['one sweep denied and another done', "Didn't sweep the rear eaves, but swept the front eaves."],
+    ['a dewebbing', 'Dewebbed the lanai and entry.'],
+    ['cobwebs knocked down', 'Knocked down the cobwebs today and sprayed the perimeter.'],
+    ['spider webs brushed off', 'Brushed spider webs off the front entry.'],
+  ])('a sweep stands with %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
+  });
+
+  // Codex round 3 on #6147.
+  test.each([
+    ['the homeowner did it', 'The homeowner removed cobwebs from the front entry.'],
+    ['the customer did it', 'Customer swept the eaves before I got there.'],
+    ['it was done by someone else', 'Webs were knocked down by the landscaper.'],
+    ['the webs were inside', 'Removed cobwebs from the kitchen ceiling.'],
+    ['the webs were in the garage', 'Knocked down webs inside the garage.'],
+    ['a nest knocked off the eaves', 'Knocked down a wasp nest from the eaves.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test.each([
+    ['a nest removed elsewhere in the same sentence', 'Swept the eaves and removed a wasp nest from the entry.'],
+    ['a customer named before the technician', 'Customer was not home and I swept the eaves.'],
+    ['a possessive customer', "Swept the customer's eaves and lanai."],
+    ['webs outside after work inside', 'Sprayed inside and knocked down the webs outside.'],
+    ['webs on the eaves and in the garage', 'Swept webs from the eaves and the garage.'],
+    ['the sweep done for the customer', 'Knocked down the cobwebs for the customer.'],
+  ])('a sweep stands with %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
+  });
+
+  // Codex round 4 on #6147. The sheet's chip now corrects any read; these
+  // keep the plain cases right.
+  test.each([
+    ['one denial over two actions', "Didn't sweep or knock down webs."],
+    ['a sweep done before the technician came', 'The eaves had been swept before I arrived.'],
+    ['webs already down', 'Webs were already knocked down.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+  test('another task left incomplete does not undo the sweep', () => {
+    const note = 'Swept the eaves and left the garage treatment incomplete.';
+    expect(readSweep(note, { done: true, quote: 'Swept the eaves and left the garage treatment incomplete' })).not.toBeNull();
+  });
+
+  // Codex round 5 on #6147: the read takes a plain statement of the tech's
+  // own work on the webs or eaves outside, and nothing else.
+  test.each([
+    ['another direct object', 'Removed bait stations below cobwebs.'],
+    ['rain did it', 'Rain knocked down the webs on the eaves.'],
+    ['maintenance did it', 'Maintenance removed the webs outside.'],
+    ['a room that is not outside', 'Removed cobwebs from the foyer wall.'],
+    ['a place that is not the home', 'Knocked down webs in the shed.'],
+    ['another doer carried over an "and"', 'Customer brushed the porch and swept the eaves.'],
+    ['rain carried over an "and"', 'Rain washed the walls and knocked down the webs.'],
+    ['another doer, said for today', 'Customer brushed the porch and swept the eaves today.'],
+    // Codex round 6 on #6147.
+    ['"the home" is not outside', 'Removed cobwebs in the home.'],
+    ['a room named with "front"', 'Removed cobwebs from the front bedroom.'],
+    ['a ceiling with no outside fixture', 'Knocked down webs on the ceiling.'],
+    ['a bare "by" someone', 'Removed cobwebs from the porch by homeowner.'],
+    ['a weekday', 'Swept the eaves on Monday.'],
+    ['the previous service', 'Swept the eaves during the previous service. Sprayed today.'],
+    ['days ago', 'Knocked down the webs two days ago.'],
+    ['a date', 'Swept the eaves 10/2.'],
+    ['rain, said for this morning', 'Rain washed the walls and knocked down the webs this morning.'],
+    ['a denial before a sweep said for today', "Didn't spray and swept the eaves today."],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test.each([
+    'Sprayed the perimeter and swept the eaves.',
+    'I treated the garage and knocked down the webs outside.',
+    'Then sprayed the lanai and brushed the cobwebs off the entry.',
+    'Customer was not home and I swept the eaves.',
+    'Knocked down the webs around the house.',
+    'Swept the webs off the front door and the back of the house.',
+    'Brushed the cobwebs by hand off the lanai.',
+    'Swept the eaves today, last service was in August.',
+  ])('the tech\'s own work carried over an "and" stands: %s', (note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
+  });
+
+  test('a long quote is not scanned, and a note of repeated sweep words costs little (Codex security P2 on #6147)', () => {
+    const long = `${'swept the webs and the eaves '.repeat(40)}today`;
+    expect(long.length).toBeGreaterThan(600);
+    expect(readSweep(`${long}.`, { done: true, quote: long })).toBeNull();
+    const noisy = `${'webs eaves swept brushed removed '.repeat(120)}. Swept the eaves.`;
+    const started = process.hrtime.bigint();
+    expect(readSweep(noisy, { done: true, quote: 'Swept the eaves' })).not.toBeNull();
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(250);
+  });
+
+  test('webs only seen are not a sweep', () => {
+    const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
+    expect(said(note, 'Saw webs on the eaves')).toBeNull();
+    expect(said(note, 'webs on the eaves and under the lanai')).toBeNull();
+  });
+
+  test('a quote needs both an action word and a web or eave word', () => {
+    expect(said('Swept the lanai floor. Sprayed the perimeter.', 'Swept the lanai floor')).toBeNull();
+    expect(said('Removed the ant bait stations. Sprayed the perimeter.', 'Removed the ant bait stations')).toBeNull();
+    expect(said('Removed a wasp nest from the eaves.', 'Removed a wasp nest from the eaves')).toBeNull();
+    // The read takes a plain statement only; this one is the chip's to add.
+    expect(said('Removed a wasp nest and webs from the eaves.', 'Removed a wasp nest and webs from the eaves')).toBeNull();
+    expect(said('Removed the webs from the eaves.', 'Removed the webs from the eaves')).not.toBeNull();
+  });
+
+  test('a quote the note does not hold, a done:false answer and a missing answer are no sweep', () => {
+    const note = 'Sprayed the perimeter. Swept the eaves.';
+    expect(said(note, 'Swept the porch ceiling and webs')).toBeNull();
+    expect(readSweep(note, { done: false, quote: 'Swept the eaves' })).toBeNull();
+    expect(readSweep(note, { done: true, quote: '' })).toBeNull();
+    expect(readSweep(note, undefined)).toBeNull();
+    expect(readSweep(note, 'yes')).toBeNull();
+  });
+
+  test('a sweep said twice stands when one saying is not denied', () => {
+    const note = "Didn't sweep the eaves out back, but swept the eaves out front.";
+    expect(said(note, 'swept the eaves out front')).toEqual({ quote: 'swept the eaves out front' });
+    // The quote as the whole sentence: its second part stands.
+    expect(said(note, "Didn't sweep the eaves out back, but swept the eaves out front")).not.toBeNull();
+  });
+
+  test('a reading with no sweep keeps the facts it always had', () => {
+    const facts = validateVoiceFacts({ areas: [], pests: [], spray: { method: 'not_said', quote: '' } }, 'Sprayed the perimeter.');
+    expect(facts).not.toHaveProperty('sweep');
+  });
+});
+
 describe('readVoiceFacts', () => {
   test('reads the note through the fast structured lane and returns what the sheet records', async () => {
     dispatchWithFallback.mockResolvedValue(answer({
@@ -774,6 +981,29 @@ describe('readVoiceFacts', () => {
     expect(payload).toMatchObject({ laneId: 'visit_voice_facts', jsonSchema: expect.any(Object) });
     expect(payload.text).toContain('Baited the counter edge');
     expect(options).toEqual({ reserveFallbackBudget: true });
+  });
+
+  test('returns the sweep as sweptEaves with its quote, false when the note does not hold it', async () => {
+    const note = 'Sprayed around the outside of the house. Swept the eaves and webs.';
+    const base = { areas: [{ area: 'outside', quote: 'Sprayed around the outside of the house' }], pests: [], spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' } };
+    dispatchWithFallback.mockResolvedValueOnce(answer({ ...base, sweep: { done: true, quote: 'Swept the eaves and webs' } }));
+    const swept = await readVoiceFacts(note);
+    expect(swept.sweptEaves).toBe(true);
+    expect(swept.heard.sweep).toEqual({ quote: 'swept the eaves and webs' });
+    expect(swept.version).toBe('visit-voice-facts-v7');
+    expect(dispatchWithFallback.mock.calls[0][1].jsonSchema.required).toContain('sweep');
+    // An older answer with no sweep, and a sweep the note does not hold.
+    dispatchWithFallback.mockResolvedValueOnce(answer(base));
+    expect((await readVoiceFacts(note)).sweptEaves).toBe(false);
+    dispatchWithFallback.mockResolvedValueOnce(answer({ ...base, sweep: { done: true, quote: 'Swept the porch webs' } }));
+    expect((await readVoiceFacts(note)).sweptEaves).toBe(false);
+  });
+
+  test('a failed, empty or too long read has no sweep', async () => {
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+    expect((await readVoiceFacts(NOTE)).sweptEaves).toBe(false);
+    expect((await readVoiceFacts('  ')).sweptEaves).toBe(false);
+    expect((await readVoiceFacts(`Swept the eaves. ${'x'.repeat(9000)}`)).sweptEaves).toBe(false);
   });
 
   test('access codes never reach the provider', async () => {

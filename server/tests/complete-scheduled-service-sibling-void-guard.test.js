@@ -80,7 +80,9 @@ describe('complete-scheduled-service.js — in-lock covered-member mint guard', 
   test('the guard is shape-gated and passed to both completion mint lanes', () => {
     expect(source).toMatch(/const coveredMemberMintGuard = isSiblingCoverageEligibleVisit\(\{\s*\n\s*sourceEstimateId: svc\.source_estimate_id, hasOwnPrice: false, isCallback: svc\.is_callback, serviceType: svc\.service_type,/);
     expect(source).toContain('? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)');
-    expect(source.match(/recheckInTrx: coveredMemberMintGuard,/g)).toHaveLength(2);
+    // Both mint lanes pass the combined in-lock check: the covered-member guard first, then the lane-drift check.
+    expect(source.match(/recheckInTrx: mintRecheckInTrx,/g)).toHaveLength(2);
+    expect(source).toMatch(/const mintRecheckInTrx = async \(trx\) => \{\s*\n\s*if \(coveredMemberMintGuard\) await coveredMemberMintGuard\(trx\);/);
   });
 
   test('a covered-member refusal releases for resume (the retry reuses the combined invoice) and never rings the manual-billing bell', () => {
@@ -91,7 +93,8 @@ describe('complete-scheduled-service.js — in-lock covered-member mint guard', 
     expect(branchAt).toBeGreaterThan(-1);
     expect(bellAt).toBeGreaterThan(branchAt);
     const branch = source.slice(branchAt, bellAt);
-    expect(branch).toContain('} else {');
+    // (B08: the non-blocking else also skips a dues month covered under the dues lock.)
+    expect(branch).toContain('} else if (!duesCoveredUnderLock) {');
     // Codex r5 P1: never a quiet finalize without the combined invoice.
     expect(branch).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
     expect(branch).toContain("code: 'first_application_coverage_changed',");

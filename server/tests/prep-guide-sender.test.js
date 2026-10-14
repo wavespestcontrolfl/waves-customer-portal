@@ -1510,6 +1510,12 @@ describe('sprinkler timer guide', () => {
     expect(PREP_CONFIG.sprinkler_timer.guide).toBe(true);
   });
 
+  test('the cockroach guide skips the car roach rows (prep.cockroach is about the kitchen)', () => {
+    const { PREP_CONFIG } = require('../services/prep-guide-sender');
+    expect(PREP_CONFIG.cockroach.serviceKeywords).toEqual(['roach']);
+    expect(PREP_CONFIG.cockroach.excludeKeywords).toEqual(['vehicle']);
+  });
+
   test('text only needs no visit (unlike the visit-prep guides with no inline text)', async () => {
     mockNotificationPrefsRow = { seasonal_tips: true };
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });

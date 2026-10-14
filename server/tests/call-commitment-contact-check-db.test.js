@@ -59,7 +59,9 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
   // One customer, one call that ended about three days ago, one open promise.
   async function world({ kind = 'other', party = 'waves', customer = true, human_state = null, source = 'ai', status = 'open', callExtra = {}, commitmentExtra = {} } = {}) {
     seq += 1;
-    const n = `${Date.now().toString().slice(-5)}${String(seq).padStart(3, '0')}`;
+    // Never let the clock digits spell 4111: the card-number witness test
+    // asserts /4111/ never reaches the provider (CI flake on #6057, 41115217).
+    const n = `${Date.now().toString().slice(-5)}${String(seq).padStart(3, '0')}`.replace(/4111/g, '4101');
     const phone = `+1555${n.padStart(7, '0').slice(-7)}`;
     let customerId = null;
     if (customer) {
@@ -589,6 +591,78 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       expect(reopened).toMatchObject({ status: 'open', human_state: 'confirmed' });
       await run();
       expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('the medium rule: a promise channelled call takes only call witnesses, one channelled sms only text witnesses, and a promise naming neither takes both', async () => {
+      const byCall = await world({ commitmentExtra: { channel: 'call' } });
+      await addSms(byCall);
+      expect(await run()).toBeTruthy();
+      expect(asked(byCall)).toHaveLength(0); // a text is no witness for a call promise
+      const callWitness = await addCall(byCall);
+      say(byCall, fulfilledBy(`call:${callWitness}`, 'it covers the retreatment'));
+      await run();
+      expect((await row(byCall.commitment.id)).status).toBe('fulfilled');
+
+      const byText = await world({ commitmentExtra: { channel: 'sms' } });
+      await addCall(byText);
+      await run();
+      expect(asked(byText)).toHaveLength(0); // a call is no witness for a text promise
+      const textWitness = await addSms(byText);
+      say(byText, fulfilledBy(`sms:${textWitness}`, 'the warranty covers the retreatment'));
+      await run();
+      expect((await row(byText.commitment.id)).status).toBe('fulfilled');
+
+      // The words never decide: an email channel takes no witness at all, whatever it says.
+      const mail = await world({ commitmentExtra: { channel: 'email', description: `Text and call the customer ${Date.now()}` } });
+      await addSms(mail);
+      await addCall(mail);
+      await run();
+      expect(asked(mail)).toHaveLength(0);
+      expect((await row(mail.commitment.id)).status).toBe('open');
+      // ... and neither does an unknown channel's wording: it takes both.
+      const unknownWorded = await world({ commitmentExtra: { channel: 'unknown', description: `Call the customer back ${Date.now()}` } });
+      await addSms(unknownWorded);
+      await run();
+      expect(asked(unknownWorded)).toHaveLength(1);
+
+      const both = await world();
+      await addSms(both);
+      await addCall(both);
+      await run();
+      expect(asked(both)).toHaveLength(1);
+      expect(JSON.stringify(asked(both)[0][1].text)).toMatch(/\\"records\\"/);
+    });
+
+    test.each([
+      ['an sms close on a promise now channelled call', 'sms', { channel: 'call' }],
+      ['a call close on a promise now channelled sms', 'call', { channel: 'sms' }],
+      ['an sms close on a promise now channelled email', 'sms', { channel: 'email' }],
+      ['a call close on a promise now channelled email', 'call', { channel: 'email' }],
+      ['an sms close on a promise now channelled in_person', 'sms', { channel: 'in_person' }],
+    ])('%s: the lapse scan lists it and the re-judge reopens the promise', async (_name, kind, patch) => {
+      const w = await closedBy(kind);
+      expect(await lapsed()).not.toContain(w.call.id);
+      await db('call_commitments').where({ id: w.commitment.id }).update(patch);
+      expect(await lapsed()).toContain(w.call.id);
+      expect((await cc.refreshFulfillment(db, w.call.id)).reopened).toBe(1);
+      expect((await row(w.commitment.id)).status).toBe('open');
+      // The next tick never offers an email promise a witness.
+      if (patch.channel === 'email' || patch.channel === 'in_person') {
+        await run();
+        expect((await row(w.commitment.id)).status).toBe('open');
+      }
+    });
+
+    test('a close on the medium the promise names (or on either, when its channel is unknown) stays', async () => {
+      const text = await closedBy('sms');
+      await db('call_commitments').where({ id: text.commitment.id }).update({ channel: 'sms' });
+      const call = await closedBy('call');
+      await db('call_commitments').where({ id: call.commitment.id }).update({ channel: 'unknown' });
+      const unknownText = await closedBy('sms');
+      await db('call_commitments').where({ id: unknownText.commitment.id }).update({ channel: null });
+      const ids = await lapsed();
+      for (const w of [text, call, unknownText]) expect(ids).not.toContain(w.call.id);
+
     });
 
     test('a close another writer stored (a report text) is not taken for a model-judged one by the lapse scan', async () => {

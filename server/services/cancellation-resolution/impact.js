@@ -219,7 +219,12 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     visitsCancelled,
     nextVisitCancelled,
     pulledVisitKeys,
+    // Filled by the customer preview route from the shared card-fee preview
+    // (visit-fees.js customerLateFeeFacts); the office dialog carries its own
+    // visitFees block beside this impact.
     lateCancelFee: null,
+    lateCancelFeeVisits: 0,
+    lateCancelFeeMayApply: false,
     openBalance,
     payUrl: null,
     prepay,

@@ -425,15 +425,27 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
     // notice (and its guarded snapshot semantics) live inside
     // sendRescheduleNoticeForVisit, which captures its own guards, rechecks
     // the slot at the provider handoff, and re-arms on any non-send.
-    const single = src.slice(src.indexOf('await SmartRebooker.reschedule(req.params.serviceId', seriesEnd));
-    const syncIdx = single.indexOf('await syncRescheduleReminder(req.params.serviceId');
-    const helperIdx = single.indexOf('sendRescheduleNoticeForVisit(');
+    // The single path is moveVisitForStaff (the route and Edit appointment
+    // both call it); it sits above the route in the file.
+    // Its effects stage syncs the reminder, then hands the notice to its
+    // own step, which is the only place the shared helper is called.
+    const noticeStart = src.indexOf('async function sendVisitMoveNotice(');
+    const effectsStart = src.indexOf('async function applyVisitMoveEffects(');
+    const routeStart = src.indexOf("router.post('/:serviceId/reschedule'", effectsStart);
+    expect(noticeStart).toBeGreaterThan(-1);
+    expect(effectsStart).toBeGreaterThan(noticeStart);
+    const single = src.slice(noticeStart, routeStart);
+    const effects = src.slice(effectsStart, routeStart);
+    const syncIdx = effects.indexOf('await syncRescheduleReminder(serviceId');
+    const helperIdx = effects.indexOf('return sendVisitMoveNotice(');
     expect(syncIdx).toBeGreaterThan(-1);
     expect(helperIdx).toBeGreaterThan(syncIdx);
+    expect(src.slice(noticeStart, effectsStart)).toContain('await sendRescheduleNoticeForVisit(');
+    expect(effects).toContain('await SmartRebooker.reschedule(serviceId');
     // The old inline machinery must stay gone — its unguarded send/mark was
     // the bug the helper replaced.
-    expect(single).not.toContain('await captureReminderGuards(req.params.serviceId)');
-    expect(single).not.toContain('markRescheduleReminderNotified(req.params.serviceId)');
+    expect(single).not.toContain('await captureReminderGuards(');
+    expect(single).not.toContain('markRescheduleReminderNotified(');
     expect(single).not.toContain('formatRescheduleTemplateVars(');
   });
 });

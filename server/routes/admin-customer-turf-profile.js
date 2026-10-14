@@ -20,9 +20,12 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const featureGates = require('../config/feature-gates');
+const { BERMUDA_REMOVAL_TRACKS, cultivarState, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
+const { GRASS_SOURCE } = require('../services/lawn-grass-context');
 const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
 
 router.use(adminAuthenticate);
@@ -53,6 +56,17 @@ const PROFILE_COLUMNS = [
   'known_chinch_history', 'known_disease_history', 'known_drought_stress',
   'annual_n_budget_target', 'active',
 ];
+
+// GATE_LAWN_BERMUDA_REMOVAL: the staff switch's columns ride the profile row only
+// while the gate is on, so a gate-off response is the old payload. Only the
+// dedicated PUT below writes them (never PROFILE_COLUMNS).
+const BERMUDA_COLUMNS = ['bermuda_removal', 'bermuda_removal_set_by', 'bermuda_removal_set_at'];
+// Admins only: a technician never sees the switch or its columns.
+const showsBermudaRemoval = (req) => featureGates.lawnBermudaRemovalLive?.() === true && req.techRole === 'admin';
+function profileForResponse(profile, req) {
+  if (!profile || showsBermudaRemoval(req)) return profile;
+  return Object.fromEntries(Object.entries(profile).filter(([key]) => !BERMUDA_COLUMNS.includes(key)));
+}
 
 function pickProfileFields(body) {
   const out = {};
@@ -144,7 +158,18 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
     // Freshness token for the PUT (codex #3565 gh-r44): the panel echoes the
     // move stamp it was rendered against, so a save that races a primary-
     // address change cannot confirm the former home's county/grass.
-    res.json({ profile: profile || null, irrigation_home_changed_at: prefs?.irrigation_home_changed_at || null });
+    // lawn_v13_no_program: GATE_LAWN_V13 is on and this lawn records bahia (any spelling, in any
+    // field), so the v13 program has none for it. The server decides, so the Schedule page applies
+    // bahia precedence only when it is true and keeps its old resolution otherwise.
+    const { lawnV13NoBahiaProgram } = require('../services/lawn-program');
+    const { recordedGrassNamesBahia } = require('../services/lawn-grass-context');
+    res.json({
+      profile: profileForResponse(profile, req) || null,
+      irrigation_home_changed_at: prefs?.irrigation_home_changed_at || null,
+      lawn_v13_no_program: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer.lawn_type),
+      // Gate on and an admin only: tells the editor to show the bermuda removal switch.
+      ...(showsBermudaRemoval(req) ? { bermudaRemovalAvailable: true } : {}),
+    });
   } catch (err) {
     next(err);
   }
@@ -203,33 +228,30 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
       // an unchanged value proves nothing (same lesson as the county —
       // codex #3565 gh-r32/r41).
       const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'lawn_sqft');
+      // A grass staff changed or explicitly reviewed on this save is theirs:
+      // a later photo AI read never replaces it. The form re-sends every
+      // loaded field, so an unchanged, unreviewed grass keeps its source.
+      const staffGrass = typeof fields.grass_type === 'string' && !!fields.grass_type.trim()
+        && (fields.grass_type !== (priorRow ? priorRow.grass_type : null) || grassReviewed);
+      const sourceField = staffGrass ? { grass_type_source: GRASS_SOURCE.STAFF } : {};
       const rows = await trx('customer_turf_profiles')
-        .insert(insertRow)
+        .insert({ ...insertRow, ...sourceField })
         .onConflict('customer_id')
-        .merge({ ...fields, updated_at: new Date() })
+        .merge({ ...fields, ...sourceField, updated_at: new Date() })
         .returning('*');
       const nextLawnSqft = fields.lawn_sqft == null ? null : Number(fields.lawn_sqft);
-      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)
-        // Ships dark: before the service-areas migration there is no review
-        // to withdraw and the column predicate below would error.
-        && await require('../services/property-service-areas').hasAreaMeasurementsColumn(trx)) {
+      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)) {
         // This older editor does not review service areas. A changed turf
         // amount withdraws any lawn review (its stamp must not sit on a
         // different number) and moves the lawn mirrors — property and
         // customer property_sqft — to the same amount on every edit, so no
         // reader keeps pricing a former value. Only the primary property at
         // the customer's own address carries those mirrors (the shared
-        // editor's rule). Same customer fence as the shared editor.
-        const { addressKey } = require('../services/customer-properties');
-        const customer = await trx('customers').where({ id: customerId }).first();
-        const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
-        if (primary && customer && addressKey(customer) === addressKey(primary)) {
-          await trx('customer_properties').where({ id: primary.id }).update({
-            service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"),
-            property_sqft: nextLawnSqft, updated_at: trx.fn.now(),
-          });
-          await trx('customers').where({ id: customerId }).update({ property_sqft: nextLawnSqft, updated_at: trx.fn.now() });
-        }
+        // editor's rule). Same customer fence as the shared editor. The
+        // mirror rule lives in lawn-size-sync (shared with the estimate
+        // acceptance write); it is a no-op before the service-areas
+        // migration, where there is no review to withdraw.
+        await require('../services/lawn-size-sync').syncLawnSqftMirrors(trx, customerId, nextLawnSqft);
       }
       // The fence already holds the prefs advisory lock, so this read is
       // serialized against the address fan-out's stamp write (gh-r44).
@@ -261,6 +283,58 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     });
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
+    res.json({ profile: profileForResponse(saved, req) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// PUT /:customerId/turf-profile/bermuda-removal — the staff switch
+// (GATE_LAWN_BERMUDA_REMOVAL). Admin only. Gate off: 404, as if the route did
+// not exist. Turning it ON needs an existing active profile whose grass is St.
+// Augustine or Zoysia (any other grass never gets the step); turning it OFF is
+// always allowed. Stamps who and when, and moves updated_at so a completion
+// built on the older profile re-reads it.
+// =========================================================================
+router.put('/:customerId/turf-profile/bermuda-removal', requireAdmin, async (req, res, next) => {
+  try {
+    if (featureGates.lawnBermudaRemovalLive?.() !== true) return res.status(404).json({ error: 'Not found' });
+    const { customerId } = req.params;
+    const enabled = (req.body || {}).enabled;
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
+    const customer = await db('customers').where({ id: customerId }).first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const profile = await db('customer_turf_profiles').where({ customer_id: customerId }).first('id', 'grass_type', 'cultivar', 'active');
+    if (!profile) return res.status(400).json({ error: 'Create the turf profile first' });
+    if (enabled) {
+      if (profile.active !== true) return res.status(400).json({ error: 'The turf profile is inactive; reactivate it first' });
+      if (!BERMUDA_REMOVAL_TRACKS.includes(profile.grass_type)) {
+        return res.status(400).json({ error: 'Bermuda removal runs on St. Augustine and Zoysia lawns only' });
+      }
+      if (cultivarState(profile.grass_type, profile.cultivar) === 'excluded') {
+        return res.status(400).json({ error: 'This St. Augustine cultivar (ProVista, Captiva or Seville) never gets bermuda removal' });
+      }
+    }
+    // Turning it on re-checks the active profile, the eligible grass and the cultivar inside the
+    // UPDATE itself, so a profile edit that lands between the read and the write wins.
+    const query = db('customer_turf_profiles').where({ customer_id: customerId });
+    if (enabled) {
+      // The excluded-cultivar rule rides the UPDATE too, so a cultivar changed to an excluded
+      // one after the read above makes the update hit no row (409), never a switched-on lawn.
+      const cultivarRule = excludedCultivarSql();
+      query.where({ active: true }).whereIn('grass_type', BERMUDA_REMOVAL_TRACKS).whereRaw(cultivarRule.sql, cultivarRule.bindings);
+    }
+    const [saved] = await query
+      .update({
+        bermuda_removal: enabled,
+        bermuda_removal_set_by: String(req.technicianId || '').slice(0, 80) || null,
+        bermuda_removal_set_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!saved) return res.status(409).json({ error: 'The turf profile changed; reload and try again' });
+    logger.info?.(`[turf-profile] bermuda_removal=${enabled} customer=${customerId} by=${req.technicianId}`);
     res.json({ profile: saved });
   } catch (err) {
     next(err);

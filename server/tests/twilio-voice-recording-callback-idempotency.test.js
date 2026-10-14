@@ -125,6 +125,11 @@ function makeDb(tables) {
           row[k] = (before.transcription_status === 'rejected' && before[k] === 'voicemail') ? null : before[k];
           continue;
         }
+        if (v.sql.startsWith("jsonb_build_object('ended_at', ?::text) ||")) {
+          // /call-status's end stamp: the row's existing key wins.
+          row.metadata = { ended_at: v.bindings[0], ...metaOf(row) };
+          continue;
+        }
         const meta = metaOf(row);
         const appended = JSON.parse(v.bindings[0]);
         if (v.sql.includes("'{superseded_recordings}'")) {
@@ -838,6 +843,38 @@ describe('nextCallStatus (pure) and POST /call-status', () => {
     await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });
     expect(tables.call_log[0].status).toBe('completed');
     expect(tables.call_log[0].duration_seconds).toBe(61);
+  });
+
+  test('a terminal callback stamps Twilio\'s event time as the call end, once; never our receipt time', async () => {
+    const createdAt = new Date(Date.now() - 10 * 60 * 1000);
+    const hungUpAt = new Date(createdAt.getTime() + 3 * 60 * 1000);
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'outbound-api', status: 'initiated', duration_seconds: 0, created_at: createdAt });
+    const event = (CallStatus, Timestamp) => post('/call-status', {
+      CallSid: PARENT, CallStatus, CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101',
+      ...(Timestamp ? { Timestamp } : {}),
+    });
+    await event('ringing', hungUpAt.toUTCString());
+    // No Timestamp, an unreadable one, one before the call and one in the future: no stamp.
+    await event('completed');
+    await event('completed', 'soon');
+    await event('completed', new Date(createdAt.getTime() - 60 * 1000).toUTCString());
+    await event('completed', new Date(Date.now() + 60 * 60 * 1000).toUTCString());
+    expect(tables.call_log[0].metadata).toBeUndefined();
+    // Delivered minutes late: the end is still when Twilio says the call ended.
+    await event('completed', hungUpAt.toUTCString());
+    expect(tables.call_log[0].metadata.ended_at).toBe(new Date(Math.floor(hungUpAt.getTime() / 1000) * 1000).toISOString());
+    const first = tables.call_log[0].metadata.ended_at;
+    await event('completed', new Date(hungUpAt.getTime() + 60 * 1000).toUTCString());
+    expect(tables.call_log[0].metadata.ended_at).toBe(first);
+  });
+
+  test('a row inserted after the call was over still takes an end time earlier than its created_at', async () => {
+    const createdAt = new Date(Date.now() - 60 * 1000);
+    const hungUpAt = new Date(createdAt.getTime() - 20 * 1000);
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'inbound', status: 'completed', duration_seconds: 120,
+      created_at: createdAt, metadata: { source: 'status_callback', inserted_on_status: 'completed' } });
+    await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '120', Direction: 'inbound', From: '+15555550100', To: '+15555550101', Timestamp: hungUpAt.toUTCString() });
+    expect(tables.call_log[0].metadata.ended_at).toBe(new Date(Math.floor(hungUpAt.getTime() / 1000) * 1000).toISOString());
   });
 });
 

@@ -106,6 +106,37 @@ describe('validateReading — grounded vs invented numbers (complete title token
   });
 });
 
+// A real SiteOne invoice: both lines held for a person.
+describe('validateReading — granular formulation codes and "GM"', () => {
+  test('"6.2 G" on a granular title does not conflict with the bag size', () => {
+    expect(validateReading({ size_number: 30, size_unit: 'lb', pack_count: 1 }, { rawTitle: 'DYLOX 6.2 G CONTACT GRANULAR INSECTICIDE 30 LB. BAG', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 30, unit: 'lb', amount: 30 });
+  });
+
+  test('the formulation code itself is never a size the reading may claim', () => {
+    expect(validateReading({ size_number: 6.2, size_unit: 'g', pack_count: 1 }, { rawTitle: 'DYLOX 6.2 G CONTACT GRANULAR INSECTICIDE 30 LB. BAG', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
+  });
+
+  test('without granular wording the two sizes still conflict', () => {
+    expect(validateReading({ size_number: 30, size_unit: 'lb', pack_count: 1 }, { rawTitle: 'Dylox 6.2 G Contact Insecticide 30 LB. BAG', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'conflicting_size_claims' });
+  });
+
+  test('a UOM:BG marker is not leftover pack wording; UOM:CS still is', () => {
+    const reading = { size_number: 50, size_unit: 'lb', pack_count: 1 };
+    expect(validateReading(reading, { rawTitle: 'LESCO Dimension Granular Herbicide 50 LB. BAG UOM:BG', lineQuantity: 3 }))
+      .toMatchObject({ ok: true, amount: 150 });
+    expect(validateReading(reading, { rawTitle: 'LESCO Dimension Granular Herbicide 50 LB. BAG UOM:CS', lineQuantity: 3 }))
+      .toMatchObject({ ok: false, reason: 'leftover_pack_wording' });
+  });
+
+  test('"500 GM." is a full title claim of 500 grams', () => {
+    expect(validateReading({ size_number: 500, size_unit: 'g', pack_count: 1 }, { rawTitle: 'ANTAPEX WSG BROAD SPECTURM WATER DISPERSIBLE GRANULE (WDG/WG) INSECTICIDE 500 GM. BOTTLE', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 500, unit: 'g', amount: 500 });
+  });
+});
+
 describe('validateReading — pack_count must come from recognized pack syntax, not digit presence', () => {
   test('"2 x 78 oz" with pack_count 2 validates (the recognized "N x" marker)', () => {
     const title = 'Taurus SC 2 x 78 oz';

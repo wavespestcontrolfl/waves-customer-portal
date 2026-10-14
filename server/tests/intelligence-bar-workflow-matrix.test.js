@@ -95,10 +95,11 @@ describe('execution-mode matrix on main', () => {
     expect(exec('update_customer', { updates: { notes: 'x' } })).toBe(false);
     for (const field of ['email', 'waveguard_tier', 'monthly_rate', 'active', 'pipeline_stage']) expect(exec('update_customer', { updates: { [field]: 'x' } })).toBe(false);
     expect(exec('update_customer', { updates: { phone: 'x', email: 'y' } })).toBe(false);
-    for (const tool of ['add_customer_property', 'update_customer_property']) {
-      expect(exec(tool, { label: null })).toBe(true);
-      expect(exec(tool, { label: 'rental' })).toBe(false);
-    }
+    expect(exec('update_customer_property', { label: null })).toBe(true);
+    expect(exec('update_customer_property', { label: 'rental' })).toBe(false);
+    // Every valid add carries an address (#6297), so it is always a card and not on the direct list.
+    expect(ownerDirect.OWNER_DIRECT_TOOL_NAMES.has('add_customer_property')).toBe(false);
+    for (const input of [{ label: null }, { address_line1: '100 Example Way' }, { relationship: 'rental' }]) expect(exec('add_customer_property', input)).toBe(false);
     expect(exec('reschedule_appointment', { appointment_id: 'a' }, { pinned_appointment: { id: 'a' } })).toBe(true);
     expect(exec('reschedule_appointment', { appointment_id: 'a' }, { pinned_appointment: { id: 'a', visit_id: 'v' } })).toBe(false);
     expect(exec('reschedule_appointment', { appointment_id: 'a' }, null)).toBe(false);
@@ -228,6 +229,16 @@ describe('request tally script', () => {
     expect(s.operators['(none)'].days['2026-10-01']).toEqual({ needs_me: 2 });
     expect(s.operators['(none)'].turns).toBe(4);
     expect(s.failures).toEqual(failures);
+  });
+
+  test('a failed tool lists the machine codes its refusals recorded, most frequent first', () => {
+    const failures = [
+      { tool: 'query_leads', events: 4, failures: 3, circuit_open: 0, codes: { invalid_input: 1, capability_not_loaded: 2 } },
+      { tool: 'query_stock', events: 5, failures: 0, circuit_open: 0, codes: {} },
+    ];
+    const text = tally.formatText({ days: 14, generated_at: '2026-10-03T00:00:00.000Z', summary: tally.summarize([], [], failures) });
+    expect(text).toContain('query_leads  [capability_not_loaded x2, invalid_input x1]');
+    expect(text).toMatch(/query_stock$/m);
   });
 
   test('turns are kept per operator and day, including a day whose turns called no tool', () => {

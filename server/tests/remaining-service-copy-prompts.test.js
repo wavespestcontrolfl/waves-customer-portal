@@ -66,7 +66,7 @@ describe('remaining service copy prompt registry', () => {
     ['pest_inspection', 'pest_inspection'], ['new_customer_inspection', 'pest_inspection'],
     ['termite_inspection', 'termite_inspection'], ['rodent_inspection', 'rodent_inspection'],
     ['rodent_general_one_time', 'rodent_inspection'], ['cockroach_control', 'cockroach'],
-    ['german_roach', 'cockroach'], ['german_roach_initial', 'cockroach'],
+    ['german_roach', 'cockroach'], ['german_roach_initial', 'cockroach'], ['vehicle_german_roach', 'cockroach'],
     ['pest_initial_german_knockdown', 'german_roach_knockdown'],
     ['pest_initial_palmetto_knockdown', 'palmetto_roach_knockdown'],
   ])('%s accepts only its migrated schema even when another schema shares the prompt module', (serviceKey, expected) => {

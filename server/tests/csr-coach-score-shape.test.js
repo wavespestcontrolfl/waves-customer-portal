@@ -37,7 +37,6 @@ describe('isUsableCsrScore', () => {
   });
 
   test.each([
-    'total_score', 'core_score', 'rescue_score',
     'control_score', 'warmth_score', 'clarity_score', 'objection_handling_score', 'closing_strength_score',
     'lead_quality_score',
   ])('rejects a missing or non-finite %s (the exact field the insert writes)', (field) => {
@@ -45,12 +44,11 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, [field]: 'great job' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: NaN })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: '' })).toBe(false);
-    // A numeric string stands for its number (the sum fields keep the
-    // total = core + rescue equation by restating GOOD's own values).
+    // A numeric string stands for its number.
     expect(isUsableCsrScore({ ...GOOD, [field]: String(GOOD[field]) })).toBe(true);
   });
 
-  test.each(['total_score', 'core_score', 'rescue_score', 'lead_quality_score'])('rejects a fractional %s (INTEGER column)', (field) => {
+  test.each(['lead_quality_score'])('rejects a fractional %s (INTEGER column)', (field) => {
     expect(isUsableCsrScore({ ...GOOD, [field]: 2.5 })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: '2.5' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: String(GOOD[field]) })).toBe(true);
@@ -60,24 +58,18 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, warmth_score: 3.25 })).toBe(true);
   });
 
-  // Codex r13 on #4884: values outside the rubric's documented ranges used to
-  // be accepted and persisted into CSR averages.
-  const triple = (core, rescue, total = core + rescue) => ({ ...GOOD, core_score: core, rescue_score: rescue, total_score: total, point_details: pointsFor(Math.max(0, Math.min(core, 10)), Math.max(0, Math.min(rescue, 5))) });
-  test('enforces the documented ranges of core (0-10), rescue (0-5) and total (0-15)', () => {
-    expect(isUsableCsrScore(triple(0, 0))).toBe(true);
-    expect(isUsableCsrScore(triple(10, 5))).toBe(true);
-    expect(isUsableCsrScore(triple(11, 0))).toBe(false);
-    expect(isUsableCsrScore(triple(-1, 1))).toBe(false);
-    expect(isUsableCsrScore(triple(5, 6))).toBe(false);
-    expect(isUsableCsrScore(triple(9, -4))).toBe(false);
-    expect(isUsableCsrScore(triple(10, 5, 16))).toBe(false);
-  });
-
-  // Codex r14 on #4884: the rubric's total IS core + rescue.
-  test('rejects a total that is not core + rescue (e.g. 15 = 0 + 0)', () => {
-    expect(isUsableCsrScore(triple(0, 0, 15))).toBe(false);
-    expect(isUsableCsrScore(triple(8, 4, 11))).toBe(false);
-    expect(isUsableCsrScore(triple(8, 4, 12))).toBe(true);
+  // The model's own core/rescue/total are not read: they are summed from the
+  // points (a prod-ledger read showed 31% of answers rejected as schema_invalid
+  // on the model's arithmetic alone).
+  test('derives core, rescue and total from point_details, whatever the model wrote', () => {
+    const wrong = normalizeCsrScore({ ...GOOD, total_score: 15, core_score: 0, rescue_score: 0 });
+    expect(wrong).toMatchObject({ core_score: 8, rescue_score: 4, total_score: 12 });
+    const absent = { ...GOOD };
+    delete absent.total_score; delete absent.core_score; delete absent.rescue_score;
+    expect(normalizeCsrScore(absent)).toMatchObject({ core_score: 8, rescue_score: 4, total_score: 12 });
+    expect(normalizeCsrScore({ ...GOOD, total_score: 999, core_score: -4, rescue_score: 'x', point_details: pointsFor(10, 5) }))
+      .toMatchObject({ core_score: 10, rescue_score: 5, total_score: 15 });
+    expect(normalizeCsrScore({ ...GOOD, point_details: pointsFor(0, 0) })).toMatchObject({ core_score: 0, rescue_score: 0, total_score: 0 });
   });
 
   test.each([
@@ -159,18 +151,18 @@ describe('isUsableCsrScore', () => {
 
   // Codex r15 on #4884: point_details {} beside core_score 10 was stored,
   // and the weekly insight reads a missing core point as missed.
-  test('point_details: every core point present as 0/1, adding up to core_score and rescue_score', () => {
+  test('point_details: every core point must be present as 0/1', () => {
     expect(isUsableCsrScore({ ...GOOD, point_details: {} })).toBe(false);
     const { greeting, ...missingCore } = GOOD.point_details;
     expect(isUsableCsrScore({ ...GOOD, point_details: missingCore })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, greeting: 2 } })).toBe(false);
-    expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, greeting: 0 } })).toBe(false); // sums to 7, not 8
-    expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, objection_save: 0 } })).toBe(false); // rescue 3, not 4
+    expect(isUsableCsrScore({ ...GOOD, point_details: { ...GOOD.point_details, objection_save: 'maybe' } })).toBe(false);
   });
 
   test('point_details: absent rescue points count as 0; keys and values are canonicalized', () => {
     const coreOnly = Object.fromEntries(CORE.map((k, i) => [k, i < 8 ? 1 : 0]));
-    const n = normalizeCsrScore({ ...GOOD, rescue_score: 0, total_score: 8, point_details: coreOnly });
+    const n = normalizeCsrScore({ ...GOOD, point_details: coreOnly });
+    expect(n).toMatchObject({ core_score: 8, rescue_score: 0, total_score: 8 });
     expect(n.point_details).toMatchObject({ greeting: 1, strong_close: 0, objection_save: 0, follow_up_offer: 0 });
     const loose = { ...Object.fromEntries(CORE.map((k, i) => [k.replace(/_/g, ' ').toUpperCase(), i < 8 ? '1' : false])), Objection_Save: true, 'upsell-attempt': 1, urgency_creation: '1', referral_mention: 1, extra_key: 1 };
     const m = normalizeCsrScore({ ...GOOD, point_details: loose });
@@ -186,9 +178,9 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, point_details: 'greeting:1' })).toBe(false);
   });
 
-  test('the exact regression: an object missing total_score passes the old "not_an_object" check but fails this one', () => {
-    const { total_score, ...missingTotal } = GOOD;
-    expect(isUsableCsrScore(missingTotal)).toBe(false);
+  test('the exact regression: an object missing its points passes the old "not_an_object" check but fails this one', () => {
+    const { point_details, ...missingPoints } = GOOD;
+    expect(isUsableCsrScore(missingPoints)).toBe(false);
   });
 });
 
@@ -196,5 +188,5 @@ describe('isUsableCsrScore', () => {
 // re-parent the key map and let omitted points resolve through it.
 test('point_details: a "__proto__" key cannot stand in for the real points', () => {
   const polluted = JSON.parse(`{"__proto__": ${JSON.stringify(Object.fromEntries(CORE.map((k, i) => [k, i < 8 ? 1 : 0])))}}`);
-  expect(isUsableCsrScore({ ...GOOD, rescue_score: 0, total_score: 8, point_details: polluted })).toBe(false);
+  expect(isUsableCsrScore({ ...GOOD, point_details: polluted })).toBe(false);
 });

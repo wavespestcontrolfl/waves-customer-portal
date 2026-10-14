@@ -8,6 +8,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+  SLOT_CHANGED_SQL: '(1 = 1)',
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -16,7 +18,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
   })),
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
-jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
@@ -42,7 +44,7 @@ const CAND_DATE = shiftDateStr(TODAY, 22);
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count'];
+    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;

@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { etDateString } = require('../utils/datetime-et');
 
 // Pull a gate/lockbox/garage code out of free-form access notes when the model
 // heard one ("front gate code is 4545", "lockbox 6214"). Conservative: 3-8
@@ -48,12 +49,42 @@ function petDetailsFrom(pets) {
   return raw ? String(raw).slice(0, 1000) : null;
 }
 
-function appendWithProvenance(existing, addition, callDate) {
-  const tag = `[call ${String(callDate).slice(0, 10)}]`;
+// The dated tag on a note line: the call's EASTERN calendar day, YYYY-MM-DD.
+// A day already in that form is kept; anything else (the pipeline passes the
+// call's created_at as a Date) is read as an instant. The old form sliced
+// String(date), which for a Date printed "[call Thu Oct 08]".
+function callDayTag(callDate) {
+  if (typeof callDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(callDate)) return `[call ${callDate}]`;
+  const instant = new Date(callDate);
+  return Number.isNaN(instant.getTime()) ? legacyCallDayTag(callDate) : `[call ${etDateString(instant)}]`;
+}
+// The tag notes carried before callDayTag: lines already written keep it.
+const legacyCallDayTag = (callDate) => `[call ${String(callDate).slice(0, 10)}]`;
+
+function appendWithProvenance(existing, addition, callDate, separator = '\n') {
+  const tag = callDayTag(callDate);
   const line = `${tag} ${addition}`.trim();
   if (!existing || !String(existing).trim()) return line;
   if (String(existing).includes(addition)) return existing; // idempotent reprocess
-  return `${existing}\n${line}`;
+  return `${existing}${separator}${line}`;
+}
+
+// The provider bit stays append-only, like every other line here. A reprocess
+// under a changed label ("Switching from" → "Other provider named") must not
+// add a second, contradicting statement, so a provider this day's line already
+// names is not named again. The date tag is not unique to one call, so nothing
+// already written is rewritten or removed: the earlier line stands.
+const PROVIDER_NOTE_LABELS = ['Switching from', 'Other provider named'];
+function providerAlreadyNoted(existing, callDate, name) {
+  if (!existing || !name) return false;
+  // This day's line under the tag written now, or under the old tag a line
+  // written before the tag fix still carries.
+  const tags = [...new Set([callDayTag(callDate), legacyCallDayTag(callDate)])].map((tag) => `${tag} `);
+  const bits = PROVIDER_NOTE_LABELS.map((label) => `${label}: ${name}`);
+  return String(existing).split('\n').some((line) => {
+    const tag = tags.find((t) => line.startsWith(t));
+    return !!tag && line.slice(tag.length).split(' | ').some((part) => bits.includes(part));
+  });
 }
 
 /**
@@ -117,12 +148,25 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
     const colorBits = [];
     if (legacy?.referred_by) colorBits.push(`Referred by: ${legacy.referred_by}`);
     if (Array.isArray(legacy?.pain_points) && legacy.pain_points.length) colorBits.push(`Context: ${legacy.pain_points.slice(0, 3).join('; ')}`);
-    const compName = extraction.customer_history?.competitor_name || legacy?.competitor_name;
-    if (compName) colorBits.push(`Switching from: ${compName}`);
-    if (colorBits.length) {
+    // A V2 customer_history block governs the provider: its null (a home
+    // inspector, a realtor — no pest or lawn provider named) must not be
+    // refilled from the legacy extraction, whose JSON has no such contract.
+    // "Switching from" only when the caller is leaving that provider; one they
+    // used years ago or only got a quote from is named without that claim.
+    const history = extraction.customer_history && typeof extraction.customer_history === 'object'
+      ? extraction.customer_history
+      : null;
+    const compName = history ? history.competitor_name : legacy?.competitor_name;
+    const providerBit = compName
+      ? `${history?.status === 'switching_from_competitor' ? 'Switching from' : 'Other provider named'}: ${compName}`
+      : null;
+    if (colorBits.length || providerBit) {
       const cust = await db('customers').where({ id: customerId }).first('internal_notes');
       if (cust) {
-        const appended = appendWithProvenance(cust.internal_notes, colorBits.join(' | ').slice(0, 500), callCreatedAt);
+        if (providerBit && !providerAlreadyNoted(cust.internal_notes, callCreatedAt, compName)) colorBits.push(providerBit);
+        const appended = colorBits.length
+          ? appendWithProvenance(cust.internal_notes, colorBits.join(' | ').slice(0, 500), callCreatedAt)
+          : cust.internal_notes;
         if (appended !== cust.internal_notes) {
           await db('customers').where({ id: customerId }).update({ internal_notes: appended, updated_at: new Date() });
           applied.push('internal_notes');
@@ -135,4 +179,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance } };
+module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted, callDayTag } };

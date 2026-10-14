@@ -1,4 +1,4 @@
-import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
+import LawnAssessmentCompletionBlock, { LAWN_ASSESSMENT_METRICS } from "../../components/lawn/LawnAssessmentCompletionBlock";
 import PropertyServiceAreas from "../../components/tech/PropertyServiceAreas";
 import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
@@ -46,6 +46,9 @@ import {
   termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
+// The station labels and the typed station counts are shared with the Fast Complete
+// sheet (lib/station-checks.js): one copy of each rule.
+import { STATION_PROGRAM_UI, STATION_STATUS_UI, stationAutoCounts, stationStatusLabel } from "../../lib/station-checks";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
 // here for existing importers.
@@ -59,8 +62,27 @@ import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
-import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
+import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
+import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
+import {
+  MAX_REVIEW_DELAY_MS,
+  REVIEW_TIMING_DEFAULT,
+  REVIEW_TIMING_OPTIONS,
+  completionReviewHint,
+  completionReviewSuppressionReason,
+  completionTimeOnSiteBody,
+  completionWillReview,
+  customReviewTimeProblem,
+  formatReentryStepperMinutes,
+  normalizeReviewTiming,
+  reviewDelayMinutesOf,
+  reviewPreviewSubmitVerdict,
+  reviewScheduledForOf,
+} from "../../lib/completion-review-timing";
+import { completionInvoicePrediction, isCallbackVisit } from "../../lib/completion-invoice-prediction";
+import { sprayEvidence, sprayProductFromSelection } from "../../lib/spray-evidence";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
@@ -81,6 +103,7 @@ import {
   amountInUnit,
   markTankEntry,
   tankPropagates,
+  productRowId,
   followTank,
   clearTankOnUnitChange,
   joinTankOnUnitChange,
@@ -88,6 +111,8 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -107,7 +132,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -127,6 +152,7 @@ import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.js
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import useDictationPending from "../../hooks/dictationPending";
 import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
@@ -157,7 +183,9 @@ import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
-import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
+import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-next-visit-note";
+import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
@@ -357,6 +385,92 @@ function parseMarkerLine(line) {
   const match = String(line || "").trim().match(MARKER_LINE_RX);
   return match ? { tag: match[1].toLowerCase(), text: match[2].trim() } : null;
 }
+// Picked chip labels by the marker tags they ride under, as the server files
+// them: actions under [Protocol] / [Protocol optional] / [Action],
+// observations under [Found], recommendations under [Next]. A label only
+// marks a chip line under its own tags.
+export function chipLabelsByTag({ actions = [], observations = [], recommendations = [] } = {}) {
+  const keys = (labels) => new Set((labels || []).map((label) => String(label || "").trim().toLowerCase()).filter(Boolean));
+  const actionKeys = keys(actions);
+  return { protocol: actionKeys, "protocol optional": actionKeys, action: actionKeys, found: keys(observations), next: keys(recommendations) };
+}
+function isPickedChipLine(line, labelsByTag) {
+  const entry = parseMarkerLine(line);
+  return Boolean(entry && labelsByTag?.[entry.tag]?.has(entry.text.toLowerCase()));
+}
+// A chip line with more words after it: where the chip ends in the line and
+// how much whitespace separates the words, or null.
+function gluedChipSplit(line, labelsByTag) {
+  const entry = parseMarkerLine(line);
+  const labels = entry ? labelsByTag?.[entry.tag] : null;
+  if (!labels?.size) return null;
+  const label = [...labels]
+    .sort((x, y) => y.length - x.length)
+    .find((candidate) => (
+      entry.text.length > candidate.length
+      && entry.text.slice(0, candidate.length).toLowerCase() === candidate
+      && /^\s+\S/.test(entry.text.slice(candidate.length))
+    ));
+  if (!label) return null;
+  const afterTag = line.indexOf("]") + 1;
+  const textStart = afterTag + (line.slice(afterTag).length - line.slice(afterTag).trimStart().length);
+  const chipEnd = textStart + label.length;
+  return { chipEnd, gap: line.slice(chipEnd).match(/^\s+/)[0].length };
+}
+// Dictated words join the notes box's last line, except a picked chip line
+// ([Protocol] Web sweep, [Found] Ants): joined there, the spoken note would
+// be read back as part of that completed action / finding at submit, and a
+// normal-length note trips the 240-character entry cap. labelsByTag is null
+// once an AI draft detached the chip lines (markers left are the tech's own).
+export function appendDictatedText(notes, text, labelsByTag = null) {
+  if (!notes) return text;
+  const lastLine = notes.slice(notes.lastIndexOf("\n") + 1);
+  return isPickedChipLine(lastLine, labelsByTag) ? `${notes.trimEnd()}\n${text}` : `${notes} ${text}`;
+}
+// Typing onto a chip line works the same way: when the edited line was a
+// picked chip line before this edit and now has words after a space, the
+// words move to their own line, so the label stays selected and the words
+// stay a note. Every other line, a tech-typed "[Found] Ants by the lanai",
+// and an edit inside the label itself are left alone. Returns the caret
+// shifted by the characters the split changed.
+export function splitTypedChipLineTails(prevNotes, nextNotes, labelsByTag, caret = null) {
+  const prev = String(prevNotes || "");
+  const next = String(nextNotes || "");
+  if (!labelsByTag) return { notes: next, caret };
+  let edit = 0;
+  while (edit < prev.length && edit < next.length && prev[edit] === next[edit]) edit += 1;
+  const start = next.lastIndexOf("\n", edit - 1) + 1;
+  const prevEnd = prev.indexOf("\n", start);
+  const prevLine = prev.slice(start, prevEnd < 0 ? prev.length : prevEnd);
+  if (!isPickedChipLine(prevLine, labelsByTag)) return { notes: next, caret };
+  const nextEnd = next.indexOf("\n", start);
+  const line = next.slice(start, nextEnd < 0 ? next.length : nextEnd);
+  const split = gluedChipSplit(line, labelsByTag);
+  if (!split || line.slice(0, split.chipEnd).trim().toLowerCase() !== prevLine.trim().toLowerCase()) {
+    return { notes: next, caret };
+  }
+  const gapStart = start + split.chipEnd;
+  let nextCaret = caret;
+  if (nextCaret !== null && nextCaret > gapStart) nextCaret += 1 - Math.min(split.gap, nextCaret - gapStart);
+  return { notes: `${next.slice(0, gapStart)}\n${next.slice(gapStart + split.gap)}`, caret: nextCaret };
+}
+// A draft saved before the splits above can still hold a glued chip line
+// ("[Protocol] Web sweep treated the yard"). On restore (chip lines still
+// attached), a marker line that is a picked label for its own tag plus more
+// words splits back into the chip line and a note line. It is left alone
+// when the notes already hold that chip line on its own, since the longer
+// line is then the tech's own typed marker.
+export function splitGluedChipLines(notes, labelsByTag) {
+  const lines = String(notes || "").split("\n");
+  const whole = new Set(lines.map((line) => line.trim().toLowerCase()));
+  return lines.map((line) => {
+    const split = gluedChipSplit(line, labelsByTag);
+    if (!split) return line;
+    const chip = line.slice(0, split.chipEnd);
+    if (whole.has(chip.trim().toLowerCase())) return line;
+    return `${chip.trimEnd()}\n${line.slice(split.chipEnd + split.gap)}`;
+  }).join("\n");
+}
 function markerLines(notes) {
   return String(notes || "").split("\n").map(parseMarkerLine).filter(Boolean);
 }
@@ -470,6 +584,53 @@ export function productAreaChoices(areasServiced, currentValue) {
   }
   return choices;
 }
+// The visit's areas on a regular pest visit (owner 2026-10-04): there is no
+// visit-level "Areas treated" field, so the areas sent at completion are the
+// union of the product rows' own areas, in the area list's order. An area
+// that is not on the list (a restored legacy value) follows the list ones,
+// so it still shows and submits instead of vanishing.
+const PRODUCT_ROW_AREAS_SEP = "\u0001";
+export function areasFromProductRows(selectedProducts, orderedAreas) {
+  const used = new Set();
+  const offList = [];
+  for (const row of selectedProducts || []) {
+    for (const area of parseApplicationAreas(row?.applicationArea)) {
+      if (orderedAreas.includes(area)) used.add(area);
+      else if (!offList.includes(area)) offList.push(area);
+    }
+  }
+  return [...orderedAreas.filter((area) => used.has(area)), ...offList];
+}
+// A seeded default product row on a regular pest visit starts on an area
+// (owner 2026-10-05, "prefill areas"): with no row area the report's exterior
+// re-entry line drops off, and a tech would tap Perimeter on nearly every
+// visit. An exterior method starts on "Perimeter"; any other method starts
+// empty (the interior defaults only seed on typed visits such as cockroach,
+// which keep their own area field). The value must sit on the pest area list
+// AND on the exterior side of treatment-area-scopes.json, or it is not
+// offered. Fills an empty area only, and is marked applicationAreaDefault
+// like the lawn prefill: it follows a method change until the tech picks an
+// area (which clears the mark), and a tech's own pick is never replaced.
+const PEST_ROW_DEFAULT_AREAS = {
+  exterior: ["Perimeter"],
+};
+const PEST_ROW_METHOD_SCOPE = {
+  perimeter_spray: "exterior",
+  broadcast_spray: "exterior",
+  granular_broadcast: "exterior",
+};
+export function pestRowDefaultArea(applicationMethod) {
+  const scope = PEST_ROW_METHOD_SCOPE[normalizeApplicationMethod(applicationMethod)];
+  if (!scope) return "";
+  return PEST_ROW_DEFAULT_AREAS[scope]
+    .filter((area) => AREAS_BY_SERVICE.pest.includes(area) && AREA_SCOPES[scope].includes(area))
+    .join(", ");
+}
+export function withPestRowDefaultArea(row) {
+  if (!row || row.applicationArea) return row;
+  const applicationArea = pestRowDefaultArea(row.applicationMethod);
+  return applicationArea ? { ...row, applicationArea, applicationAreaDefault: true } : row;
+}
 function toggleProductAreaValue(currentValue, area, orderedChoices) {
   const selected = parseApplicationAreas(currentValue);
   const next = selected.includes(area)
@@ -477,216 +638,16 @@ function toggleProductAreaValue(currentValue, area, orderedChoices) {
     : orderedChoices.filter((a) => selected.includes(a) || a === area);
   return next.join(", ");
 }
+// A fresh completion opens on "home — spoke with them" (owner 2026-10-04; the
+// Fast Complete sheets' DEFAULT_CUSTOMER_HOME is the same value). The tech
+// changes it only when it was not so.
+const DEFAULT_CUSTOMER_INTERACTION = "tech_home_spoke_with_them";
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
   { value: "not_home_full_access", label: "Customer not home — full access" },
   { value: "not_home_partial_access", label: "Customer not home — partial access" },
   { value: "customer_specific_concern", label: "Customer had specific concern" },
 ];
-// Completion panel review timing (owner decisions 2026-09-07). "Automatic"
-// is the cadence's smart send window — the server's calculateReviewSendPlan,
-// previewed through /admin/reviews/send-time-preview so the panel shows the
-// decision dispatch will make. "Customer asked for the link" is recorded on
-// the sequence (who/when/source) and goes at the next cadence tick; it is
-// never immediate, and the panel says so. The old "Now" / "In 2 hours"
-// values are gone: saved drafts carrying them fall back to Automatic.
-const REVIEW_TIMING_OPTIONS = [
-  { value: "auto", label: "Automatic (recommended)" },
-  { value: "customer_requested", label: "Customer asked for the link" },
-  { value: "tomorrow_8", label: "Tomorrow at 8 AM" },
-  { value: "custom", label: "Custom time" },
-];
-const REVIEW_TIMING_DEFAULT = "auto";
-function normalizeReviewTiming(value) {
-  return REVIEW_TIMING_OPTIONS.some((o) => o.value === value) ? value : REVIEW_TIMING_DEFAULT;
-}
-// What the chosen timing means, from the server preview (never a client
-// approximation of the smart window).
-function reviewTimingHint(options) {
-  const hint = reviewTimingHintDetails(options);
-  if (options.preview?.schedulerEnabled === true && options.reviewTiming !== "customer_requested") {
-    return `For a new eligible enrollment: ${hint} An existing cadence keeps its schedule.`;
-  }
-  return hint;
-}
-function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
-  // An unpaid completion invoice holds the ask until payment lands (the
-  // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
-  // relative timing is re-derived from the payment time; an absolute one is
-  // kept if it is still ahead (codex #4140 r10 P2).
-  // The master cron gate is dark: nothing automated sends at all — not the
-  // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
-  // Only a link bundled into the completion text itself still goes.
-  // An UNKNOWN gate state (preview still loading, or failed) is not a
-  // promise either: fail closed and say so until the preview succeeds
-  // (codex #4140 r18 P1) — the same rule the Reviews page applies.
-  if (!(reviewTiming === "customer_requested" && bundled)) {
-    if (preview?.schedulerEnabled === false) return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
-    if (preview?.schedulerEnabled !== true) return "Whether automated review texts can send is not known yet (the send-time preview has not loaded). If the scheduler is off nothing sends; the choice is recorded on this visit.";
-  }
-  // Automatic after payment: enrollForPaidInvoice recovers no explicit
-  // delay, so cadence mode computes the smart window from the payment and
-  // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
-  // Customer requested stores a zero delay, so it goes at the next tick.
-  if (awaitsPayment && reviewTiming === "auto") {
-    return preview?.reviewSequencesEnabled
-      ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
-      : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
-  }
-  if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
-  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
-  return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
-}
-function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
-  if (reviewTiming === "auto") {
-    if (!preview?.at) return "Review text goes out separately at the smart send window.";
-    // In cadence mode `at` is a jitter-free eligibility time: enrollment
-    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
-    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
-    // The legacy path has no jitter but its own worker ticks (the */15
-    // scheduler): the row is eligible just after `at` and texts at the next
-    // tick, so name that tick too (codex #4140 r18 P2).
-    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
-    const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
-    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
-    // The legacy +120 lands wherever the completion did — an evening visit's
-    // 9:15 PM tick is refused by the send window and the row is re-queued for
-    // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
-    // fenced inside the window by the server.
-    const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
-    if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
-    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
-  }
-  if (reviewTiming === "customer_requested") {
-    // `bundled` is the panel's own bundling condition (legacy path, completion
-    // text going out) — the same shape as dispatch's shouldBundleReview. No
-    // bounded time is promised: the next cadence tick still waits for the
-    // 8 AM–8 PM send window (codex #4140 r2).
-    return bundled
-      ? "Review link is included in the completion text."
-      : "The request is recorded on this visit. An existing cadence keeps its schedule; otherwise an eligible visit queues a separate review text, subject to the send window.";
-  }
-  if (reviewTiming === "tomorrow_8") {
-    // In cadence mode 8:00 is the eligibility time; the worker's first tick
-    // after it is 8:14 (codex #4140 r6).
-    // The legacy path likewise: the target becomes a whole-minute delay and
-    // the eligibility instant is rebuilt from a later Date.now(), so the row
-    // is eligible just after 8:00 and the */15 scheduler sends at 8:15 (r18 P2).
-    const tick = windowOpenTickISO(addETDays(new Date(), 1), preview, { after: true });
-    return tick ? `Review text goes out separately tomorrow at the first ${tickNoun(preview)} after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
-  }
-  if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
-  return "";
-}
-const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
-// The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
-const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
-// The first cadence tick after the 8 AM send window opens on `day` (an ET
-// date); null with cadences off or when the server did not name the ticks.
-function windowOpenTickISO(day, preview, opts) {
-  const openISO = etDatetimeLocalToISO(`${etDateString(day)}T08:00`);
-  return openISO ? nextCadenceTickISO(openISO, workerTickMinutes(preview), opts) : null;
-}
-// The minutes of the hour the worker that will pick the row up runs on: the
-// cadence ticks (:14/:44) in cadence mode, the legacy scheduler's */15
-// otherwise — both named by the server (codex #4140 r18 P2). Null when it
-// did not name them, so no tick is promised.
-function workerTickMinutes(preview) {
-  if (!preview) return null;
-  return (preview.reviewSequencesEnabled ? preview.cadenceTickMinutesOfHour : preview.legacyTickMinutesOfHour) || null;
-}
-const tickNoun = (preview) => (preview?.reviewSequencesEnabled ? "cadence tick" : "scheduler tick");
-// The worker tick a send at `iso` is held to when it falls outside the
-// 8 AM–8 PM window (8 PM exclusive): the first tick after the window opens
-// that morning, or the next morning after an evening send. Null inside it.
-function heldToWindowOpenISO(iso, preview) {
-  const { hour } = etParts(new Date(iso));
-  if (hour >= 8 && hour < 20) return null;
-  return windowOpenTickISO(addETDays(new Date(iso), hour >= 20 ? 1 : 0), preview);
-}
-// The custom-time mode: the one whose hint parses operator input and has to
-// reconcile it with the send window and the worker's ticks.
-// A spring-forward gap wall clock (2:30 AM on the DST day) does not exist in
-// ET: the client helper and the server's parseETDateTime resolve it to
-// different instants, so the hint would promise a tick an hour off the real
-// send (codex #4140 r24 P2). Reject it instead of guessing.
-const ET_GAP_TIME_MESSAGE = "That time does not exist in Eastern time (clocks spring forward) — choose another time.";
-function etWallClockExists(value, iso) {
-  if (!iso) return false;
-  const [, timePart = ""] = String(value).split("T");
-  const [h, mi] = timePart.split(":").map(Number);
-  const et = etParts(new Date(iso));
-  return et.hour === h && et.minute === mi;
-}
-function customReviewTimingHint(reviewCustomAt, preview) {
-  // The datetime-local value is an ET wall clock (the server parses it with
-  // parseETDateTime) — never `new Date(value)`, which reads it in the
-  // browser's zone (codex #4140 r1).
-  const iso = etDatetimeLocalToISO(reviewCustomAt);
-  if (!iso) return "Choose a time for the review text.";
-  if (!etWallClockExists(reviewCustomAt, iso)) return ET_GAP_TIME_MESSAGE;
-  // The server clamps every review delay to 30 days after completion
-  // (MAX_REVIEW_DELAY_MINUTES): a later date would send ~30 days out, not
-  // on the chosen day. Say so instead of promising the date (codex #4140 r10 P2).
-  if (new Date(iso).getTime() > Date.now() + MAX_REVIEW_DELAY_MS) return `Review times can be at most 30 days after completion (by ${fmtReviewTime(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}) — choose an earlier time.`;
-  // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
-  // outside it is held to the next window (codex #4140 r3) — but only
-  // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
-  // checkSendWindow passes everything, so the copy must not promise a
-  // hold it will not get (codex #4140 r4 P2). The preview says which.
-  const windowOn = preview?.smsSendWindowEnabled === true;
-  const { hour } = etParts(new Date(iso));
-  // In cadence mode the custom time is when the row becomes ELIGIBLE; the
-  // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
-  // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
-  // `after: true`: the server turns the chosen time into a whole-minute delay
-  // and rebuilds the eligibility instant from a later Date.now(), so the row
-  // becomes eligible just AFTER the chosen minute — a time typed exactly on
-  // :14 goes out at :44 (codex #4140 r6).
-  // The legacy */15 scheduler has the same shape (r18 P2).
-  const tick = nextCadenceTickISO(iso, workerTickMinutes(preview), { after: true });
-  // The window is checked on the TICK when there is one: 7:50 PM is inside
-  // the window but its 8:14 PM tick is not, and the validator holds that
-  // send to the next morning (codex #4140 r8). 8:00 PM is exclusive.
-  const sendHour = tick ? etParts(new Date(tick)).hour : hour;
-  if (windowOn && (sendHour < 8 || sendHour >= 20)) {
-    // The window opens at 8:00; in cadence mode the worker's first tick
-    // after that is 8:14 (codex #4140 r7).
-    const openTick = heldToWindowOpenISO(tick || iso, preview);
-    const textHint = openTick
-      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first ${tickNoun(preview)} after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
-      : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
-    if (preview?.reviewSequencesEnabled) {
-      return `${textHint} If the cadence uses email instead, it can send at the next cadence tick${tick ? `, about ${fmtReviewTime(tick)}` : ""}, without waiting for the SMS window.`;
-    }
-    return textHint;
-  }
-  if (tick && tick !== iso) return `Review text goes out separately at the next ${tickNoun(preview)} after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
-  return `Review text goes out separately ${fmtReviewTime(iso)}.`;
-}
-
-// The first worker tick on or after `iso` (ticks are minutes of the hour; every
-// ET offset is a whole hour, so UTC minutes are the same minutes). Null when
-// the server did not name the ticks.
-function nextCadenceTickISO(iso, tickMinutes, { after = false } = {}) {
-  if (!Array.isArray(tickMinutes) || !tickMinutes.length) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  const minute = d.getUTCMinutes();
-  // `after`: the eligibility instant lands strictly after this minute.
-  const pastTheMinute = after || d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
-  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
-  const t = new Date(d.getTime());
-  t.setUTCSeconds(0, 0);
-  if (next != null) t.setUTCMinutes(next);
-  else t.setUTCHours(t.getUTCHours() + 1, tickMinutes[0]);
-  return t.toISOString();
-}
-
-// The key two "Automatic" previews are compared by: the server's `bucket`,
-// the rule behind the time (a relative answer's instant moves every request).
-const reviewPreviewBucket = (preview) => preview?.bucket ?? null;
-
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: "tech_home_spoke_with_them",
   not_home_full: "not_home_full_access",
@@ -800,6 +761,19 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
   mosquito: "mosquito",
   termite: "termite",
 };
+
+// An appointment whose own service is an area add-on (GATE_AREA_ADDONS) is generic work. The name
+// reads "lawn" for "Lawn Insect Spot Treatment" and "pest" for "Web Sweep", and
+// neither takes that line's completion form: the visit's catalog key decides. A normal
+// pest or lawn visit with add-on rows attached keeps its own lane (AreaAddOnFields adds the
+// add-on's product beside it); only the lightweight shortcuts stay off for it.
+const AREA_ADDON_LINE = "general";
+function visitServiceCategory(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
+}
+function visitServiceLine(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+}
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
@@ -1083,17 +1057,6 @@ export function completionReportRulesPrompt(error) {
   return `Heads-up on your edits:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
 }
 
-// Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
-// "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
-export function formatReentryStepperMinutes(min) {
-  const n = Math.max(0, Math.round(Number(min) || 0));
-  if (n === 0) return "No wait";
-  const hr = Math.floor(n / 60);
-  const rem = n % 60;
-  if (!hr) return `${n} min`;
-  return rem ? `${hr} hr ${rem} min` : `${hr} hr`;
-}
-
 const DEFAULT_PEST_RATING_SCALE = ["none", "very low", "low", "moderate", "elevated", "high"];
 
 // "0 = none · 1 = very low · … · 5 = high" from the active labels (the
@@ -1149,35 +1112,6 @@ export function completionPreferencesNeedDraft({
     || reentryInteriorDirty;
 }
 
-// timeOnSite fragment of the completion POST body. The panel's running
-// `elapsed` derives from the visit's ORIGINAL check-in — for a stale on_site
-// row that's days or weeks — and the server books any submitted timeOnSite
-// as explicit operator input (persisted service duration + job-costing
-// labor). Under a backdated closeout only an operator-TYPED positive number
-// of minutes may travel; blank/invalid omits the key so the duration stays
-// unknown. On a live completion the wire contract is TYPE-based: a NUMBER
-// is an admin-typed override of the running timer (validated 1..720 —
-// out-of-range falls back to the elapsed string so a stray value never
-// ships as operator input; handleSubmit blocks it with an alert first), a
-// string is the auto-elapsed timer, recorded exactly as before. A prepared
-// combined-visit form omits only that automatic string so packet save can
-// allocate the shared canonical duration across members; explicit numeric
-// operator input remains attached to its member.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "", preparing = false }) {
-  if (!backfill) {
-    const trimmed = String(adjustedMinutes ?? "").trim();
-    if (trimmed !== "") {
-      const minutes = Math.round(Number(trimmed));
-      if (Number.isFinite(minutes) && minutes >= 1 && minutes <= 720) {
-        return { timeOnSite: minutes };
-      }
-    }
-    return preparing ? {} : { timeOnSite: elapsed };
-  }
-  const minutes = Math.round(Number(typedMinutes));
-  return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
-}
-
 // Restore leg of the draft snapshot for the backdated-closeout choices. A
 // draft that predates these fields restores the panel default (missing ≠
 // false: for a ≥7-days-stale visit the default is CHECKED, and restoring
@@ -1203,41 +1137,6 @@ export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = fa
   };
 }
 
-// Why the review ask will not go out for this completion, or null when it
-// follows the operator's toggle. "backfill" mirrors the server forcing
-// requestReview=false under a backdated quiet closeout — with the reason set,
-// the review checkbox shows the suppressed state and the custom-review-time
-// validation never blocks a submit the server would silence anyway.
-export function completionReviewSuppressionReason({
-  isIncompleteVisit = false,
-  backfillQuietCloseout = false,
-  visitOutcome = "completed",
-  customerConcernInteraction = false,
-} = {}) {
-  if (isIncompleteVisit) return "incomplete";
-  if (backfillQuietCloseout) return "backfill";
-  if (visitOutcome === "customer_declined") return "customer_declined";
-  if (visitOutcome === "customer_concern" || customerConcernInteraction) {
-    return "customer_concern";
-  }
-  // NOTE (coverage fix, 2026-07-30): an invoiced completion is deliberately
-  // NOT a client-side suppression anymore. The server owns the invoice rule —
-  // a completion-time ask is blocked only while the invoice is UNPAID
-  // (admin-dispatch effectiveRequestReview), and the paid-invoice webhook
-  // queues the ask when payment lands. The old blanket willInvoice=false here
-  // posted requestReview=false, which killed the ask on BOTH sides — including
-  // completions paid on the spot — and drove review coverage to near zero.
-  return null;
-}
-
-export function completionWillReview({
-  oneTimeRecapOnly = false,
-  requestReview = true,
-  reviewSuppressionReason = null,
-} = {}) {
-  return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
-}
-
 // Durable discard marker: set BEFORE the IndexedDB delete is issued and
 // removed only once that delete commits. A page killed in between leaves
 // the full photo-bearing row behind with no metadata; the loader would
@@ -1246,6 +1145,18 @@ export function completionWillReview({
 // is never suppressed.
 function completionDraftTombstoneKey(serviceId) {
   return `${completionDraftKey(serviceId)}_discarded`;
+}
+
+function completionDraftTombstoneMatches(tombstone, draftId) {
+  if (tombstone === null) return false;
+  if (!tombstone) return true;
+  if (tombstone === String(draftId)) return true;
+  try {
+    const ids = JSON.parse(tombstone);
+    return Array.isArray(ids) && ids.map(String).includes(String(draftId));
+  } catch {
+    return tombstone === draftId;
+  }
 }
 
 // The signed-in admin's id. Unsubmitted drafts (photos, captions, notes) are
@@ -1342,6 +1253,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
+  "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1396,6 +1308,27 @@ export function buildPhotoRecoveryOutcome({
   };
 }
 
+export function buildPhotoReconcileFailureOutcome(draft, errorCode) {
+  const handedOff = errorCode === "photo_reconciliation_handed_off";
+  const result = {
+    ...draft.pendingPhotoCompletion,
+    completionPhotoUpload: { failed: 0, reconcileOwed: true, handedOff },
+  };
+  return {
+    draft: {
+      ...draft,
+      servicePhotos: [],
+      reconcileOwed: true,
+      reconciliationHandedOff: handedOff,
+      pendingPhotoCompletion: result,
+    },
+    result,
+    message: handedOff
+      ? "Report repair was handed to the office. You can dismiss this recovery on this device."
+      : "Photos uploaded, but the report could not be updated yet. Retry when connected.",
+  };
+}
+
 // Whether the success overlay should auto-dismiss, and after how long. A
 // required follow-up suggestion keeps it open so the tech can act on the
 // CTA — it dismisses via the Done button. Keep the panel open when a pest
@@ -1427,7 +1360,7 @@ export function completionAutoCloseDelay(completion, photosOwed, recapEligible) 
 // from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
 // panel's shape, not the completion body's: derive the body fields the same
 // way.
-export function buildPhotoRetryFormBody(photo, index) {
+export function buildPhotoRetryFormBody(photo, index, expectedVisit = null, expectedServiceRecordId = null) {
   const [header, encoded] = photo.data.split(",");
   const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
   const form = new FormData();
@@ -1437,6 +1370,11 @@ export function buildPhotoRetryFormBody(photo, index) {
   if (photo.caption) form.append("caption", photo.caption);
   const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
   if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+  // New completion receipts carry the visit identity frozen under the
+  // completion lock. Older persisted drafts predate that receipt; omission
+  // deliberately retains the optional deployed API contract for them.
+  if (expectedVisit) form.append("expectedVisit", JSON.stringify(expectedVisit));
+  if (expectedServiceRecordId) form.append("expectedServiceRecordId", expectedServiceRecordId);
   return form;
 }
 
@@ -1507,20 +1445,6 @@ function minutesToTime(total) {
   const h = Math.floor(total / 60);
   const m = total % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-function elapsedSince(isoTime) {
-  if (!isoTime) return "0:00";
-  const diff = Math.max(
-    0,
-    Math.floor((Date.now() - new Date(isoTime).getTime()) / 1000),
-  );
-  const m = Math.floor(diff / 60);
-  const s = diff % 60;
-  const h = Math.floor(m / 60);
-  if (h > 0)
-    return `${h}:${String(m % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 const btnBase = {
@@ -1931,9 +1855,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return derived != null ? String(derived) : "";
     })(),
   });
+  // Auto-dispatch lock (recurring occurrences only). Sent with the save as
+  // the box's value and the value it opened with; the server acts only on a
+  // flip, and may also set the lock itself when the date or time changes.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const [saveError, setSaveError] = useState("");
+  const [saveError, setSaveErrorState] = useState("");
+  const setSaveError = setSaveErrorState;
   const saveErrorRef = useRef(null);
   useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
   // "Apply price & service change to" — series rows only, rendered only when
@@ -2122,8 +2052,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // and the range chip would move the finished (or cancelled / skipped /
   // no-show) visit onto a live day (update-details allows the edit) — no
   // hint at all (Codex #4120 r4 P2, r5 P2).
+  // How a shared stop moves (the choice box near the date and time). Declared
+  // here because the availability search below answers for that move.
+  const [comboMove, setComboMove] = useState("together");
+  const editServices = [
+    { name: form.serviceType, key: form.serviceKey },
+    ...serviceLines.map((line) => ({ name: line.serviceType, key: line.serviceKey })),
+  ].filter((item) => typeof item.name === "string" && item.name.trim());
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
+    moveScope: comboMove,
     // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
     // days around the picked date. Gate off = no `availability`, and the
     // three-line hint below renders exactly as before.
@@ -2148,6 +2086,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
+    // The same two best-times rows as New Appointment (owner 2026-10-08),
+    // ranked for what the save will book: the form's primary service (it can
+    // be re-picked here) and its add-on lines, in the same order as their
+    // catalog keys. The server adds a shared stop's other services when they
+    // move with it (moveScope).
+    serviceTypes: editServices.map((item) => item.name),
+    serviceKeys: editServices.map((item) => item.key || ""),
+    bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -2166,6 +2112,71 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   ].join("|");
   const openedSlotKey = useRef(slotKey).current;
   const slotEdited = slotKey !== openedSlotKey;
+  // A stop shared by two or more services (lawn + pest). update-details
+  // writes ONE row, so a date, time or technician change on it would leave
+  // the other services behind. The operator chooses here (owner rulings
+  // 2026-10-03: a combo can be moved together or separated from this form,
+  // and a technician-only change asks too) and the ONE save request carries
+  // the choice (`comboMove`). The server does the rest: it checks the move
+  // before it writes anything, saves the other changes, then moves the whole
+  // stop and sends the one customer text, or splits the service off first.
+  // The stop is read live on open, so every screen that opens this form
+  // (Day, 5-Day, Week, List, the dispatch board) sees a combo the same way;
+  // `service.visit` (the Day feed) only fills the moment before the read.
+  // Not known to be a combo = today's behavior, server guard included.
+  const [comboVisitInfo, setComboVisitInfo] = useState(service.visit || null);
+  // Resolves to the live summary (null = not shared), or undefined when the
+  // read failed or answered without one. A failed read on open is not fatal:
+  // the server still refuses a slot change on a shared stop, and that
+  // refusal re-reads the stop and shows the choice (handleSave's catch).
+  const readComboVisit = () => adminFetch(`/admin/schedule/${service.id}/visit-summary`)
+    .then((r) => (r && Object.prototype.hasOwnProperty.call(r, "visit") ? (r.visit || null) : undefined))
+    .catch(() => undefined);
+  useEffect(() => {
+    let live = true;
+    readComboVisit().then((visit) => { if (live && visit !== undefined) setComboVisitInfo(visit); });
+    return () => { live = false; };
+  }, [service.id]);
+  // Counted by LIVE services: a stop whose other service is cancelled or
+  // done is an ordinary single visit (the server moves it as one row).
+  const comboCount = Number(comboVisitInfo?.liveCount ?? comboVisitInfo?.serviceCount);
+  const comboVisit = comboVisitInfo && comboVisitInfo.id && comboCount > 1 ? comboVisitInfo : null;
+  // The slot and technician the form opened on: where the stop is.
+  const comboOpened = useRef({
+    date: form.scheduledDate,
+    start: String(form.windowStart || "").slice(0, 5),
+    end: String(form.windowEnd || "").slice(0, 5),
+    duration: slotCheckDuration,
+    technicianId: form.technicianId,
+    serviceType: form.serviceType,
+    serviceKey: form.serviceKey,
+  }).current;
+  const comboStart = String(form.windowStart || "").slice(0, 5);
+  const comboEnd = String(form.windowEnd || "").slice(0, 5);
+  const comboPlaceChanged = form.scheduledDate !== comboOpened.date || comboStart !== comboOpened.start;
+  const comboTechChanged = form.technicianId !== comboOpened.technicianId;
+  const spanOf = (start, end) => {
+    const [h1, m1] = String(start).split(":").map(Number);
+    const [h2, m2] = String(end).split(":").map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? h2 * 60 + m2 - (h1 * 60 + m1) : null;
+  };
+  // The whole-stop move keeps every service's own length. A stop that opened
+  // with no time has no span to keep: giving it a time (a suggested slot
+  // fills both bounds) is a move, not a length change.
+  const comboOpenedSpan = spanOf(comboOpened.start, comboOpened.end);
+  const comboLengthChanged = slotCheckDuration !== comboOpened.duration
+    || (comboOpenedSpan != null && spanOf(comboStart, comboEnd) !== comboOpenedSpan);
+  // The choice is owed whenever the save would move or reassign the stop.
+  const comboSlotChanged = !!comboVisit && (comboPlaceChanged || comboLengthChanged || comboTechChanged);
+  // The whole-stop move re-dates THIS visit's stop only: the server never
+  // widens a grouped recurring visit to its series, so no later visit moves
+  // and no series ack is owed. Separate leaves an ordinary row, with the
+  // ordinary series rules.
+  const comboTogether = comboSlotChanged && comboMove === "together";
+  // A different service can take this one off the shared stop (the server
+  // regroups by family), which "together" cannot then honour. The server
+  // refuses a different address itself.
+  const comboRegroupingEdit = form.serviceType !== comboOpened.serviceType || form.serviceKey !== comboOpened.serviceKey;
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
   const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
@@ -3137,6 +3148,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (form.scheduledDate !== initialScheduledDate ||
       (form.windowStart || "") !== initialWindowStart) &&
     !!form.windowStart;
+  const moveNotifyOffered = scheduleMoved;
 
   // See lineDiscountSaveBlocked's own comment for the compounding hazard
   // this guards against. Also the ONE condition (interaction between the
@@ -3315,6 +3327,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
     discountType, discountAmount, discountPresetId, storedDiscountCleared, createInvoice, assignmentScope,
     priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
+    // How a combo stop moves (together / separate) decides which write runs.
+    comboMove,
   };
   const saveInputsDrifted = (before) => {
     const after = saveInputsRef.current;
@@ -3439,6 +3453,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       }
     }
+    let saveRequestSent = false;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3449,16 +3464,36 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // payload's gross convention apart from MobileServiceEditModal's net
       // convention by the field's presence, never by guessing from the number.
       const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
-      const notifyOnMove = scheduleMoved && notificationType === "sms";
+      const notifyOnMove = moveNotifyOffered && notificationType === "sms";
+      // Refusals the server also makes, said here before the request.
+      if (comboTogether && comboLengthChanged) {
+        throw new Error("Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.");
+      }
+      if (comboTogether && form.scheduledDate !== comboOpened.date && isRecurring && !serviceIsRecurringTemplate) {
+        throw new Error("Make this visit recurring in its own save, then move the stop: the plan is built from the visit's date.");
+      }
+      if (comboTogether && comboRegroupingEdit) {
+        throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
+      }
+      saveRequestSent = true;
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          // The auto-dispatch box and the value it opened with; the server acts only on a flip.
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
+          // A shared stop: the server runs the choice in this one request.
+          comboMove: comboSlotChanged ? comboMove : undefined,
+          // The stop this form showed; the server refuses if it changed.
+          comboVisit: comboSlotChanged && Array.isArray(comboVisit.liveMemberIds)
+            ? { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, liveMemberIds: comboVisit.liveMemberIds }
+            : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
-          ...seriesAckPayload(seriesPreview.preview),
+          ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
           // Sent unconditionally (see primaryLinePriceValue's own comment) —
           // NOT only when sendAddons — so the server can tell this payload's
           // gross-Price convention apart from MobileServiceEditModal's net
@@ -3550,9 +3585,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : (storedDiscountCleared ? null : undefined),
           estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
+          // The whole-stop move reassigns this stop only (the choice box
+          // says so and the scope picker is hidden for it).
           assignmentScope:
             form.technicianId !== (service.technicianId || "")
-              ? assignmentScope
+              ? (comboTogether ? "this_only" : assignmentScope)
               : undefined,
           priceServiceScope: priceServiceScopeActive
             ? priceServiceScope
@@ -3583,6 +3620,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
+      // The whole-stop move's outcome rides in the saved answer: the other
+      // changes are saved either way.
+      const stopMove = result?.comboMove || null;
+      // Not moved (refused, partly, or not confirmed): the details ARE saved,
+      // so the form closes on them like any save and the notice says what
+      // happened to the move. Reopening reads the appointment fresh; nothing
+      // is retried from this form's now-stale state.
+      if (stopMove && stopMove.moved !== true) {
+        const reason = stopMove.needsAttention?.message || stopMove.error || "The stop was not moved.";
+        showScheduleSaveNotice(stopMove.needsAttention
+          ? `The other changes were saved. ${reason}`
+          : stopMove.moved === null
+            ? `The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule. If it moved and the customer has not been told, text them. (${reason})`
+            : `The other changes were saved, but the stop was not moved: ${reason} Reopen the appointment to move it.`);
+      }
+      let comboMoveWarnings = stopMove?.moved === true && Array.isArray(stopMove.warnings) ? stopMove.warnings : [];
+      if (stopMove?.moved === true && notifyOnMove && stopMove.notificationSent === false) {
+        comboMoveWarnings = [...comboMoveWarnings, stopMove.notificationSkipped === "already_at_target"
+          ? "The stop was already at this time, so no new text was sent. If the customer has not been told about the move, text them."
+          : `The customer was not texted about the move: ${stopMove.notificationError || "the text could not be sent"}.`];
+      }
       if (notifyOnMove && result?.notificationSent === false) {
         showScheduleSaveNotice(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
@@ -3591,8 +3649,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // Advisory schedule-overlap notes: the save COMMITTED (conflicts no
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        showScheduleSaveNotice(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+      if (comboMoveWarnings.length || (Array.isArray(result?.warnings) && result.warnings.length)) {
+        showScheduleSaveNotice(`Appointment saved.\n\n${[...comboMoveWarnings, ...(result?.warnings || [])].join("\n\n")}`);
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
@@ -3742,7 +3800,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       onSaved?.();
     } catch (e) {
       const ack = parseSeriesAckError(e);
-      if (ack?.code === SERIES_ACK_REQUIRED) {
+      // The server refused a date/time change because the stop is shared and
+      // this form did not know it (the read on open was slow, failed, or the
+      // stop was grouped since). Nothing was changed. Read the stop now and
+      // show the choice.
+      const sharedStopNow = e.code === "VISIT_EDIT_SCHEDULE_UNSUPPORTED" && !comboVisit ? await readComboVisit() : null;
+      // A shared-stop save is one request that can split or move the stop and
+      // text the customer. No answer at all (the connection dropped) does not
+      // mean nothing happened: never call it a plain failed save.
+      if (saveRequestSent && comboSlotChanged && e.status == null) {
+        setSaveError("The save did not confirm, so it may or may not have gone through, including the move and any customer text. Close this and check the schedule before you save again.");
+      } else if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
+        setComboVisitInfo(sharedStopNow);
+        setSaveError("This stop has more than one service. Choose how to move it below the date and time, then save again. Nothing was changed.");
+      } else if (ack?.code === SERIES_ACK_REQUIRED) {
         // Nothing saved, nothing moved — the server refused up front. Show
         // the refreshed recurring-plan line; the operator saves again.
         seriesPreview.replace(ack.preview);
@@ -3771,6 +3842,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // field. Invalidate it and re-run the dry-run now.
         setPreviewNonce((n) => n + 1);
       } else {
+        // The stop already moved (its own committed action); say so, so the
+        // operator fixes the rest instead of re-doing the move.
         setSaveError("Save failed: " + e.message);
       }
     }
@@ -3926,6 +3999,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // source wins) — a transition here must invalidate any cached preview
     // even when nothing else on the form changed (:3659).
     stackingEnabled, stackingKnown,
+    // The whole-stop choice changes which date the money is planned on.
+    comboTogether,
   });
   useEffect(() => {
     const requestId = ++previewRequestRef.current;
@@ -3941,6 +4016,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           signal: controller.signal,
           body: JSON.stringify({
             ...form,
+            // The save plans the money on the stop's current date when the
+            // whole stop moves together; the preview must do the same.
+            comboMove: comboTogether ? "together" : undefined,
             isRecurring,
             ...(sendAddons ? { addons: addonsPayload } : {}),
             primaryLinePrice: parseFinitePrice(form.price) ?? undefined,
@@ -4544,7 +4622,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </option>
                 ))}
               </select>
-              {serviceHasSeries &&
+              {serviceHasSeries && !comboTogether &&
                 technicianId !== (service.technicianId || "") && (
                   <div style={{ marginTop: 10 }}>
                     <label style={labelStyle}>Apply staff change to</label>
@@ -4729,6 +4807,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}
+        // Frozen for the whole save: a save is up to three writes, and a
+        // field changed between them would not be in any of them.
+        inert={saving ? "" : undefined}
+        data-testid="edit-appointment-body"
         style={{
           height: "100%",
           overflow: "auto",
@@ -5849,13 +5931,41 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
-              <SeriesMoveNotice
-                tone="inline"
-                preview={seriesPreview.preview}
-                loading={seriesPreview.loading}
-                stale={seriesStale}
-                style={{ marginTop: -2, marginBottom: 14 }}
-              />{" "}
+              {comboSlotChanged && (
+                <div
+                  role="group"
+                  aria-label="How to move this stop"
+                  data-testid="combo-move-choice"
+                  style={{ marginTop: -2, marginBottom: 14, padding: "10px 12px", borderRadius: 6, background: "#F4F4F5", color: "#18181B", fontSize: 14, lineHeight: 1.5 }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    This stop has {comboCount} services
+                    {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length === comboCount ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} disabled={saving} />
+                    Move all of them together
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} disabled={saving} />
+                    Separate: move only this service
+                  </label>
+                  {comboTogether && (service.isRecurring ?? service.is_recurring) ? (
+                    <div data-testid="combo-move-scope" style={{ color: "#52525B" }}>
+                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are{comboTechChanged ? ", with their technician" : ""}.
+                    </div>
+                  ) : null}
+                </div>
+              )}
+              {!comboTogether && (
+                <SeriesMoveNotice
+                  tone="inline"
+                  preview={seriesPreview.preview}
+                  loading={seriesPreview.loading}
+                  stale={seriesStale}
+                  style={{ marginTop: -2, marginBottom: 14 }}
+                />
+              )}{" "}
               <SlotConflictNotice
                 // The strip states the route problem itself; the
                 // double-booking notice (no `warning`) always stays.
@@ -5865,6 +5975,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
+                bestRows
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -6007,7 +6118,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {scheduleMoved && (
+              {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
                   <label style={labelStyle}>Client booking notifications</label>{" "}
@@ -6027,6 +6138,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
+              <AutoDispatchLockBox
+                service={service}
+                checked={autoDispatchLocked}
+                onChange={setAutoDispatchLocked}
+                disabled={saving}
+                helperColor={D.muted}
+                rowProps={{ style: { marginBottom: 14 } }}
+              />
               <div
                 style={{
                   display: "flex",
@@ -6747,12 +6866,13 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D }) {
+function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
       <button
         type="button"
+        id={domId}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         style={{
@@ -6841,6 +6961,12 @@ function JobCardStrip({ strip, D }) {
   );
 }
 
+// A card's title: the product, and for a sold add-on's own card the add-on, so two cards of one product read apart.
+const jobCardProductTitle = (p) => (p.source ? `${p.name} · ${p.source}` : p.name);
+// A card's identity: the product, and the add-on for a sold add-on's own card (the server's rowId; the product ID alone for a
+// card without one). Keys the list, the DOM ids and every lookup of a card by product.
+const jobCardRowId = (p) => p.rowId || p.id;
+
 function JobCardSprayCheck({ sprayCheck, products, D }) {
   const f = sprayCheck?.forecast;
   const range = f?.tempF && f.tempF[0] != null ? `${f.tempF[0]}–${f.tempF[1]}°F` : null;
@@ -6863,8 +6989,8 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
             {products.map((p) => (
-              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <div key={jobCardRowId(p)} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{jobCardProductTitle(p)}</span>
                 <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                   {p.verdict !== "ok" && p.verdictReason && (
                     <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
@@ -6940,6 +7066,24 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
   );
 }
 
+// A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
+// basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
+// grass sends the reason in place of the rate.
+export function JobCardGoverned({ governed, D }) {
+  if (!governed) return null;
+  return (
+    <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
+      {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
+      {governed.grass && <div>{governed.grass}</div>}
+      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      <div>Area: {governed.area}</div>
+      <div>Limit: {governed.limit}</div>
+      {governed.use && <div>{governed.use}</div>}
+      {governed.safety && <div style={{ fontWeight: 500 }}>Safety: {governed.safety}</div>}
+    </div>
+  );
+}
+
 function JobCardProduct({ p, serviceId, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
@@ -6953,9 +7097,10 @@ function JobCardProduct({ p, serviceId, D }) {
     </>
   );
   return (
-    <JobCardCollapsible title={p.name} right={right} D={D}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        <JobCardGoverned governed={p.governed} D={D} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
@@ -7153,6 +7298,11 @@ function JobCardTank({ tank, serviceId, D }) {
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
+            {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
+              <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
+                {mix.rotationWarnings.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
+              </div>
+            )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
@@ -7255,7 +7405,7 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
   );
 }
 
-function JobCardTab({ card, loading, error, D }) {
+export function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7300,7 +7450,7 @@ function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={p.id} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7397,7 +7547,7 @@ export function ProtocolPanel({ service, onClose }) {
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
   // classified from the raw value — the panel must agree with them.
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
-  const serviceCategory = detectServiceCategory(panelServiceType);
+  const serviceCategory = visitServiceCategory(service, panelServiceType);
   const isLawn = serviceCategory === "lawn";
   // Fail closed: only an affirmative { enabled: true } opens the gated tab and
   // ask bar. A failed request is shown as a notice under the header instead.
@@ -7487,8 +7637,12 @@ export function ProtocolPanel({ service, onClose }) {
       const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
         ? profileLawnTypes
         : [service.lawnType, service.lawn_type];
+      // The server says when GATE_LAWN_V13 is on and this lawn records bahia in any field (any
+      // spelling): the v13 program has none, so the track is bahia and the server answers no program
+      // instead of another grass's program. Otherwise the resolution is the old one, unchanged.
+      const noBahiaProgram = profileResponse?.lawn_v13_no_program === true;
       const trackKey = isLawn && !failedSections.includes("Turf profile")
-        ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
+        ? (noBahiaProgram ? "bahia" : recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean))
           || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
         : null;
       const lawnSqft = isLawn
@@ -7526,7 +7680,7 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         isLawn && trackKey && lawnSqft
           ? adminFetch(
-              `/admin/protocols/lawn-mix?track=${trackKey}&month=${month}&lawnSqft=${encodeURIComponent(lawnSqft)}`,
+              `/admin/protocols/lawn-mix?track=${trackKey}&month=${visitMonth || month}&lawnSqft=${encodeURIComponent(lawnSqft)}${service.id ? `&scheduledServiceId=${encodeURIComponent(service.id)}` : ""}`,
             )
           : Promise.resolve(null),
         !isLawn && protocolProgram
@@ -8070,6 +8224,51 @@ export function ProtocolPanel({ service, onClose }) {
                                 key={`${step.step}-${step.productId}`}
                                 style={{
                                   fontSize: 11,
+                                  color: D.text,
+                                  marginBottom: 3,
+                                }}
+                              >
+                                {" "}
+                                <strong>
+                                  {step.step}. {step.productName}
+                                </strong>
+                                {step.instruction && (
+                                  <div
+                                    style={{ color: D.muted, marginLeft: 14 }}
+                                  >
+                                    {step.instruction}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {lawnMix.bermudaMixingOrder?.length > 0 && (
+                          <div
+                            style={{
+                              marginTop: 10,
+                              paddingTop: 10,
+                              borderTop: `1px solid ${D.border}`,
+                            }}
+                          >
+                            {" "}
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 500,
+                                color: D.muted,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.6,
+                                marginBottom: 6,
+                              }}
+                            >
+                              Bermuda backpack mix
+                            </div>
+                            {lawnMix.bermudaMixingOrder.map((step) => (
+                              <div
+                                key={`${step.step}-${step.productId}`}
+                                style={{
+                                  fontSize: 14,
                                   color: D.text,
                                   marginBottom: 3,
                                 }}
@@ -9155,6 +9354,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    // The server reads what the visit books from its own rows (serviceId).
+    bestRows: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -9670,6 +9872,9 @@ export function TypedFindingsSection({
   // EPA numbers, gallons and traced feet). Off by default.
   voiceFill = false,
   sources = null,
+  // { customerId, serviceId } of the visit: the finding mics send it so server
+  // dictation spells this customer's name.
+  dictationContext,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9757,6 +9962,7 @@ export function TypedFindingsSection({
         )}
       </div>
       <ProjectFindingFieldInput
+        dictationContext={dictationContext}
         /* Owner directive 2026-08-27: no chip walls anywhere on the
            completion panel — chips-type findings render as the same
            multi_select dropdown the T&S closeout proved out (same
@@ -9906,143 +10112,6 @@ export function TypedFindingsSection({
   );
 }
 
-// The four scores the tech reviews/adjusts, matching the customer report's
-// consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
-// assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
-// stay on the assessment row for analytics + folding into stress_damage — but the
-// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
-const LAWN_ASSESSMENT_METRICS = [
-  { key: "turf_density", label: "Density" },
-  { key: "weed_suppression", label: "Weed control" },
-  { key: "color_health", label: "Color" },
-  { key: "stress_damage", label: "Condition" },
-];
-
-// Owner ruling 2026-09-24: an optional per-photo slot label. All optional —
-// no count requirement, no blocking. 'front' is the only slot the report's
-// before/after slider pairs across visits (server/services/lawn-visit-input.js
-// PHOTO_ZONES); close_up/trouble are a different spot every visit and never
-// pair. Kept in parity with PHOTO_ZONE_LABELS in
-// client/src/components/lawn/LawnVisitReview.jsx.
-const LAWN_PHOTO_ZONES = [
-  { value: "front", label: "Front" },
-  { value: "close_up", label: "Close-up" },
-  { value: "trouble", label: "Trouble / watch area" },
-];
-
-// Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
-// nematode/large-patch pills, Soil K, protocol notes) were removed from this
-// sheet entirely (owner trim 2026-08-07) — nearly all were captured on every
-// visit and read by nothing, and the owner ruled the rest off too. The
-// completion capture is now photos, the gauge reading, and the four score
-// counters. The server endpoints still accept the retired keys from old
-// payloads. Soil K no longer has a client input anywhere, so the plan
-// engine's profile-completeness check no longer requires it; drought_stress
-// likewise no longer reaches the planner's drought-prep selection — both are
-// deliberate owner rulings, not oversights.
-
-function lawnScoreColor(value) {
-  const n = Number(value) || 0;
-  if (n >= 75) return D.green;
-  if (n >= 50) return D.amber;
-  return D.red;
-}
-
-function resizeLawnAssessmentImage(dataUrl, maxEdge = 1600, quality = 0.85) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const longEdge = Math.max(img.width, img.height);
-      if (longEdge <= maxEdge) return resolve(dataUrl);
-      const scale = maxEdge / longEdge;
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", quality));
-    };
-    img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
-  });
-}
-
-function readLawnAssessmentPhoto(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const resized = await resizeLawnAssessmentImage(reader.result);
-      resolve({
-        data: resized,
-        preview: resized,
-        name: file.name,
-        mimeType: resized.match(/data:([^;]+)/)?.[1] || file.type || "image/jpeg",
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-function parseAssessmentScores(row = {}) {
-  const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
-  const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
-  const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
-  // Preserve known AI components. Missing components get explicit controls
-  // during confirmation so unknown values never become invented scores.
-  const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
-  const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
-  // Legacy assessments (created before the stress_damage column) have a null
-  // stress_damage. Coercing that to 0 would make a plain re-confirm POST
-  // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
-  // override and persists an artificially low score. Instead derive it exactly the
-  // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
-  // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
-  const rawStress = lawnScores.lawnScoreValue(row.stress_damage ?? row.stressDamage);
-  const components = [fungus_control, thatch_level].filter((value) => value != null);
-  const stress_damage = rawStress != null
-    ? rawStress
-    : (components.length ? Math.min(...components, 95) : null);
-  return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
-}
-
-// The AI's own read — used ONLY to decide which metrics stay editable, never
-// what's displayed (that's techScores/scoreSource, which may already hold a
-// technician's earlier fill of a genuinely blank metric from a prior partial
-// save). Run-backed: the run's immutable scores_adjusted snapshot
-// (visitAssessment.aiScores from the server), which a save never touches —
-// so a metric a technician already filled correctly stays editable instead
-// of looking "AI-known" just because it now has a value (Codex P1
-// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
-// own RAW columns, mirroring the server's legacy /confirm rule exactly —
-// including that stress_damage is read raw, never parseAssessmentScores's
-// derived worst-of-fungus/thatch guess, which could already be non-null
-// while the server still considers Stress unknown.
-// Locked metrics always show the AI's own read. A row adjusted before the
-// read-only ruling can still carry an old technician value in its columns;
-// only AI-blank metrics keep the saved technician fill.
-function withAiScores(scores, aiScores) {
-  const out = { ...(scores || {}) };
-  for (const [key, value] of Object.entries(aiScores || {})) {
-    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
-  }
-  return out;
-}
-
-function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
-  if (visitAssessment?.aiScores) return visitAssessment.aiScores;
-  // Legacy rows: the reload route sends the server's own AI read.
-  if (serverAiScores) return serverAiScores;
-  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
-  return {
-    turf_density: raw("turf_density", "turfDensity"),
-    weed_suppression: raw("weed_suppression", "weedSuppression"),
-    color_health: raw("color_health", "colorHealth"),
-    fungus_control: raw("fungus_control", "fungusControl"),
-    thatch_level: raw("thatch_level", "thatchLevel"),
-    stress_damage: raw("stress_damage", "stressDamage"),
-  };
-}
-
 function LawnPreviousVisitCard({ service }) {
   const [state, setState] = useState({ loading: true, row: null, error: false });
   const customerId = service.customerId || service.customer_id;
@@ -10124,575 +10193,13 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
   );
 }
 
-function LawnAssessmentCompletionBlock({
-  service,
-  disabled,
-  onConfirmed,
-  // Fires false while the existing-assessment lookup is in flight and true
-  // once it settles — the parent must not treat the pre-load null confirmed
-  // id as "retake pending".
-  onReady,
-  // Height measurement stays optional; separate lawn-length photo capture is retired.
-  showGaugeReading = false,
-  gaugeHeightIn = null,
-  onGaugeHeight,
-  // The tech's free-text visit notes (owned by CompletionPanel) — passed through
-  // so the AI photo analysis can factor them in alongside the images.
-  technicianNotes = "",
-}) {
-  const [photos, setPhotos] = useState([]);
-  const [result, setResult] = useState(null);
-  const [visitReview, setVisitReview] = useState(null);
-  const [techScores, setTechScores] = useState(null);
-  // Keys the technician actually typed this session. Only these are posted:
-  // the server ignores AI-known keys anyway, and resending a server-derived
-  // value (e.g. Stress) would read as an explicit entry and freeze it.
-  const [typedKeys, setTypedKeys] = useState(() => new Set());
-  const [confirmedId, setConfirmedId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [error, setError] = useState("");
-  const fileRef = useRef(null);
-  useEffect(() => {
-    let cancelled = false;
-    setPhotos([]);
-    setResult(null);
-    setVisitReview(null);
-    setTechScores(null);
-    setTypedKeys(new Set());
-    setConfirmedId(null);
-    setError("");
-    onConfirmed?.(null);
-    onReady?.(false);
-    if (!service?.id) {
-      onReady?.(true);
-      return () => { cancelled = true; };
-    }
-
-    setLoading(true);
-    adminFetch(`/admin/lawn-assessment/service/${service.id}`)
-      .then((data) => {
-        if (cancelled || !data?.assessment) return;
-        const assessment = data.assessment;
-        const scores = parseAssessmentScores(assessment);
-        setResult({
-          success: true,
-          visitAssessment: data.visitAssessment,
-          assessment,
-          adjustedScores: scores,
-          displayScores: scores,
-          aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
-          observations: assessment.observations || "",
-        });
-        // A confirmed row shows exactly what was saved (and what the customer
-        // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
-        setTypedKeys(new Set());
-        setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
-        if (assessment.confirmed_by_tech) {
-          setConfirmedId(assessment.id);
-          onConfirmed?.(assessment.id);
-        }
-      })
-      .then(() => {
-        if (!cancelled) onReady?.(true);
-      })
-      .catch(() => {
-        // The lookup learned NOTHING — report failed, never ready: the parent
-        // omits lawnAssessmentId so the server's visit-linked fallback (DB
-        // truth) still grounds any existing confirmed scores.
-        if (!cancelled) onReady?.("failed");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [service?.id]);
-
-  async function addPhotos(event) {
-    const files = Array.from(event.target.files || []);
-    const remaining = Math.max(0, 3 - photos.length);
-    if (!files.length || remaining === 0) return;
-    setError("");
-    try {
-      const nextPhotos = await Promise.all(
-        files.slice(0, remaining).map(readLawnAssessmentPhoto),
-      );
-      setPhotos((prev) => [...prev, ...nextPhotos.map((photo) => ({ ...photo, zone: null }))].slice(0, 3));
-      setResult(null);
-      setTechScores(null);
-      setTypedKeys(new Set());
-      setConfirmedId(null);
-      onConfirmed?.(null);
-    } catch (err) {
-      setError(err.message || "Photo read failed");
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  }
-
-  // Only one photo may carry the "front" slot at a time — the before/after
-  // slider pairs on it, so picking Front on another photo clears the prior
-  // one. Picking the same slot again clears it (every slot, including none,
-  // is a valid choice).
-  function setPhotoZone(index, zone) {
-    setPhotos((prev) => {
-      const current = prev[index]?.zone || null;
-      const next = current === zone ? null : zone;
-      return prev.map((photo, i) => {
-        if (i === index) return { ...photo, zone: next };
-        if (next === "front" && photo.zone === "front") return { ...photo, zone: null };
-        return photo;
-      });
-    });
-  }
-
-  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
-  // The only manual entry allowed is filling a metric the AI left blank —
-  // this never touches a metric the AI already scored (the server enforces
-  // the same rule independently; this just keeps the tech from typing into
-  // a metric that won't take effect).
-  function fillScore(key, rawValue) {
-    setTypedKeys((prev) => new Set(prev).add(key));
-    setTechScores((prev) => {
-      if (!prev) return prev;
-      if (rawValue === "") return { ...prev, [key]: null };
-      const n = Number(rawValue);
-      if (!Number.isFinite(n)) return prev;
-      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(n))) };
-    });
-  }
-
-  async function analyze() {
-    if (!service?.customerId || photos.length === 0) return;
-    setAnalyzing(true);
-    // Same suspension as the confirmation POST: the vision analysis can run
-    // long, and a report generated mid-analysis would carry an explicit-null
-    // assessment state for scores that are about to be reviewed.
-    onReady?.(false);
-    setError("");
-    try {
-      const response = await adminFetch("/admin/lawn-assessment/assess", {
-        method: "POST",
-        body: JSON.stringify({
-          customerId: service.customerId,
-          serviceId: service.id,
-          photos: photos.map((photo) => ({
-            data: photo.data.split(",")[1],
-            mimeType: photo.mimeType || "image/jpeg",
-            ...(photo.zone ? { zone: photo.zone } : {}),
-          })),
-          // Extra context for the vision model (see buildVisionPrompt server-side).
-          turfHeightIn: gaugeHeightIn,
-          technicianNotes,
-        }),
-      });
-      if (response.success === false) {
-        setError(response.message || "Assessment failed. Retake photos and try again.");
-        return;
-      }
-      const scores = response.adjustedScores || response.displayScores || {};
-      setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
-      setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
-      setTechScores({ ...scores });
-      setTypedKeys(new Set());
-      setConfirmedId(null);
-      onConfirmed?.(null);
-    } catch (err) {
-      setError(err.message || "Assessment failed");
-    } finally {
-      setAnalyzing(false);
-      // Settled either way: post-analysis the row is unconfirmed (or the
-      // analysis failed with photos pending) — explicit null IS the true
-      // "review outstanding" state.
-      onReady?.(true);
-    }
-  }
-
-  async function confirm() {
-    if (!result?.assessment?.id) return;
-    setConfirming(true);
-    // Readiness is suspended while the confirmation POST is in flight — the
-    // parent's id is stale until it lands, and generating meanwhile would
-    // send an explicit null that suppresses the assessment being confirmed.
-    onReady?.(false);
-    setError("");
-    try {
-      const { confirmed: confirmationComplete, assessment: savedAssessment, visitAssessment } = await adminFetch("/admin/lawn-assessment/confirm", {
-        method: "POST",
-        body: JSON.stringify({
-          assessmentId: result.assessment.id,
-          adjustedScores: Object.fromEntries([...typedKeys].map((key) => [key, techScores?.[key] ?? null])),
-          ...visitReviewPayload(visitReview),
-        }),
-      });
-      setResult((prev) => ({
-        ...prev,
-        assessment: savedAssessment || prev.assessment,
-        visitAssessment: visitAssessment ?? prev.visitAssessment,
-      }));
-      // Show what the server actually saved.
-      if (savedAssessment) {
-        const saved = parseAssessmentScores(savedAssessment);
-        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
-        setTypedKeys(new Set());
-      }
-      if (visitAssessment) {
-        setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
-      }
-      const assessmentId = confirmationComplete === false ? null : savedAssessment?.id || result.assessment.id;
-      setConfirmedId(assessmentId);
-      onConfirmed?.(assessmentId);
-      onReady?.(true);
-      setError(assessmentId ? "" : "Scores saved. Complete the missing scores before confirming.");
-    } catch (err) {
-      setError(err.message || "Confirm failed");
-      // A definitive 4xx rejection means the write did NOT commit — null is
-      // the true state (retake still pending), so readiness returns true and
-      // the explicit-null payload keeps any superseded row suppressed.
-      // Ambiguous failures (network, 5xx, lost response) report failed: the
-      // write may have committed, so the server grounds from DB truth.
-      const definitiveRejection =
-        Number(err?.status) >= 400 && Number(err?.status) < 500;
-      onReady?.(definitiveRejection ? true : "failed");
-    } finally {
-      setConfirming(false);
-    }
-  }
-
-  const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
-  const hasResult = !!result?.assessment?.id;
-  const confirmed = !!confirmedId;
-  // Keep the usual four controls; expose underlying scores only when the
-  // saved assessment lacks them. Keep them editable until the save completes.
-  // Same rule as the aiValue check below: whether an underlying signal is
-  // AI-blank comes from result.aiScores (the immutable read), never the
-  // mutable assessment row — otherwise a prior save's fill of a genuinely
-  // blank Fungus/Thatch would hide the tile entirely on reload instead of
-  // keeping it open for correction (Codex P1 2026-09-24).
-  const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
-    { key: "fungus_control", label: "Fungus control" },
-    { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {loading && (
-        <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
-      )}
-      {/* Capture row — always visible so the mowing-height reading can be
-          added even after the assessment is analyzed (Codex P1). "Add turf photos" +
-          "Analyze lawn" stay pre-analysis only. */}
-      <input
-        ref={fileRef}
-        type="file"
-        aria-label="Add turf photos"
-        accept="image/*"
-        multiple
-        onChange={addPhotos}
-        style={{ display: "none" }}
-      />
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        {!hasResult && (
-          <>
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              disabled={disabled || photos.length >= 3 || analyzing}
-              style={{
-                height: 38,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.heading,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
-                opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
-              }}
-            >
-              Add turf photos
-            </button>
-            <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
-          </>
-        )}
-            {showGaugeReading && (
-              <>
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Lawn length</span>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.25"
-                  min="0.5"
-                  max="8"
-                  value={gaugeHeightIn ?? ""}
-                  disabled={disabled || analyzing}
-                  placeholder="e.g. 4"
-                  onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-                  style={{
-                    width: 64,
-                    height: 38,
-                    padding: "0 10px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: D.white,
-                    color: D.heading,
-                    fontSize: 13,
-                  }}
-                />
-                <span style={{ fontSize: 12, color: D.muted }}>inches</span>
-              </>
-            )}
-          </div>
-          {!hasResult && (
-            <>
-          {photos.length > 0 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {photos.map((photo, index) => (
-                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 96 }}>
-                  <img
-                    src={photo.preview}
-                    alt=""
-                    style={{
-                      display: "block",
-                      width: 96,
-                      height: 78,
-                      objectFit: "cover",
-                      borderRadius: 8,
-                      border: `1px solid ${D.border}`,
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setPhotos((prev) => prev.filter((_, i) => i !== index))}
-                    aria-label="Remove assessment photo"
-                    style={{
-                      position: "absolute",
-                      top: -7,
-                      right: -7,
-                      width: 22,
-                      height: 22,
-                      borderRadius: "50%",
-                      border: "none",
-                      background: D.heading,
-                      color: "#fff",
-                      cursor: "pointer",
-                      lineHeight: 1,
-                    }}
-                  >
-                    x
-                  </button>
-                  {/* Optional slot label — all optional, no count requirement.
-                      Only one photo may hold "front" at a time (setPhotoZone). */}
-                  <select
-                    value={photo.zone || ""}
-                    disabled={disabled || analyzing}
-                    onChange={(e) => setPhotoZone(index, e.target.value || null)}
-                    aria-label={`Slot for photo ${index + 1}`}
-                    style={{
-                      display: "block",
-                      width: "100%",
-                      marginTop: 4,
-                      height: 34,
-                      borderRadius: 6,
-                      border: `1px solid ${D.border}`,
-                      background: D.white,
-                      color: D.heading,
-                      fontSize: 14,
-                      padding: "0 2px",
-                    }}
-                  >
-                    <option value="">No slot</option>
-                    {LAWN_PHOTO_ZONES.map((zone) => (
-                      <option key={zone.value} value={zone.value}>{zone.label}</option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-          )}
-          {/* A soft hint, never a requirement (owner 2026-10-02): the report's
-              "since your last visit" score line needs 2+ usable photos on both
-              visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
-              can never show it. Analyze stays enabled at one photo. */}
-          {photos.length < 2 && (
-            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
-              2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={analyze}
-            disabled={disabled || photos.length === 0 || analyzing}
-            style={{
-              height: 40,
-              borderRadius: 8,
-              border: "none",
-              background: D.green,
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
-              opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
-            }}
-          >
-            {analyzing ? "Analyzing..." : "Analyze lawn"}
-          </button>
-        </>
-      )}
-      {hasResult && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
-            {metrics.map((metric) => {
-              const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
-              // Whether the AI itself knew this metric — from result.aiScores
-              // (the run's immutable snapshot, or the assessment's raw
-              // columns for a legacy no-run row; see resolveAiScores), never
-              // from scoreSource or the mutable assessment row a reload
-              // reads back. A prior save's tech fill of a genuinely blank
-              // metric must not look "AI-known" just because it now has a
-              // value (Codex P1 2026-09-24) — and a fill-in input stays open
-              // (still editable, still shows what was typed) once the tech
-              // starts typing, instead of collapsing to read-only the moment
-              // it first has a value.
-              const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
-              return (
-                <div
-                  key={metric.key}
-                  style={{
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    padding: "8px 4px",
-                    textAlign: "center",
-                    background: D.white,
-                    minWidth: 0,
-                  }}
-                >
-                  <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value == null ? "—" : `${value}/100`}
-                  </div>
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
-                      A metric the AI left blank (aiValue == null) is the one
-                      the tech can fill — the server enforces this too. */}
-                  {!confirmed && aiValue == null && (
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={100}
-                      value={techScores?.[metric.key] ?? ""}
-                      aria-label={`Enter ${metric.label}`}
-                      placeholder="0-100"
-                      onChange={(e) => fillScore(metric.key, e.target.value)}
-                      style={{
-                        width: "100%",
-                        marginTop: 6,
-                        height: 28,
-                        padding: "0 6px",
-                        borderRadius: 6,
-                        border: `1px solid ${D.border}`,
-                        background: D.white,
-                        color: D.heading,
-                        fontSize: 13,
-                        textAlign: "center",
-                        boxSizing: "border-box",
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <LawnVisitReview
-            visitAssessment={result.visitAssessment}
-            value={visitReview}
-            onChange={setVisitReview}
-            disabled={disabled || confirming || analyzing || confirmed}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            {confirmed ? (
-              <div
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  background: `${D.green}14`,
-                  color: D.green,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  textAlign: "center",
-                }}
-              >
-                Assessment confirmed
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={confirm}
-                disabled={disabled || confirming}
-                style={{
-                  flex: 1,
-                  height: 40,
-                  borderRadius: 8,
-                  border: "none",
-                  background: D.green,
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: disabled || confirming ? "not-allowed" : "pointer",
-                  opacity: disabled || confirming ? 0.55 : 1,
-                }}
-              >
-                {confirming ? "Confirming..." : "Confirm assessment"}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                setPhotos([]);
-                setResult(null);
-                setTechScores(null);
-                setTypedKeys(new Set());
-                setConfirmedId(null);
-                setError("");
-                onConfirmed?.(null);
-              }}
-              disabled={disabled || analyzing || confirming}
-              style={{
-                height: 40,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.text,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
-                opacity: disabled || analyzing || confirming ? 0.55 : 1,
-              }}
-            >
-              Retake
-            </button>
-          </div>
-        </>
-      )}
-      {error && <div style={{ fontSize: 14, color: D.red, lineHeight: 1.45 }}>{error}</div>}
-    </div>
-  );
-}
-
 // The one line a visit's shared property coverage describes. A combined
 // visit ("Lawn + Tree & Shrub") normalizes to one line while its raw type —
 // what the server classifies the frozen coverage from — names another; it
 // covers two areas, so it records no single shared coverage (null) and its
 // products and findings keep their own areas.
 function propertyAreaLineFor(service) {
+  if (isAreaAddOnVisit(service)) return null;
   const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
   const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
   return raw === normalized ? normalized : null;
@@ -10761,6 +10268,42 @@ function requiredApplicationArea(method, serviceType = "", includeOptionalLawnAr
 
 function effectiveApplicationMethod(method) {
   return normalizeApplicationMethod(method) || "perimeter_spray";
+}
+
+// The first product row of a completion that cannot be saved yet, as the sentence to show, or null: a row whose method
+// needs a treated area that is missing, and a row recorded for a chemical area add-on without its rate, unit, treated square
+// feet or amount (the server refuses it too, the row being that add-on's application record). `typeFor` is the row's service type.
+// The completion group a removed product row belongs to: the ROW's own persisted id (a restored draft has it before any
+// protocol action loads), else the loaded action's for that product. An add-on's own row of a product is never part of the
+// host's completion group.
+export function completionGroupOfRemovedRow(removedRow, productId, protocolActions) {
+  if (removedRow?.group) return removedRow.group;
+  if (removedRow?.areaAddOnKey) return undefined;
+  return (protocolActions || []).find((a) => a.group && a.product?.id === productId)?.group;
+}
+// The rest of a completion group: the product ids that come off with it (every row with that group plus the loaded
+// actions' products) and the chip labels handleProtocolActionSelect added for each member (a member's label is its
+// product name). No group: nothing.
+export function completionGroupMates(group, selectedProducts, protocolActions) {
+  if (!group) return { productIds: new Set(), labels: new Set() };
+  const members = (selectedProducts || []).filter((p) => p.group === group);
+  const actions = (protocolActions || []).filter((a) => a.group === group);
+  return {
+    productIds: new Set([...members.map((p) => p.productId), ...actions.filter((a) => a.product?.id).map((a) => a.product.id)]),
+    labels: new Set([...members.map((p) => String(p.name)), ...actions.map((a) => String(a.note || a.label || a.raw || "Completed protocol item"))]),
+  };
+}
+
+function completionProductRowProblem(service, rows, typeFor) {
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
+  const missingArea = rows.find((p) => {
+    const requirement = areaOf(p);
+    if (!requirement) return false;
+    const value = Number(p.areaValue);
+    return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
+  });
+  // (This helper runs for a COMPLETED visit only: every chemical add-on the visit carries then needs its product row.)
+  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : (addOnActualsProblem(service, rows) || addOnRecordMissingProblem(service, rows));
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
@@ -11893,37 +11436,6 @@ function clampStationView(view) {
     y: round(Math.min(Math.max(0, view.y), STATION_FRAME_H - view.h)),
   };
 }
-const STATION_STATUS_UI = {
-  ok: { color: "#10b981", label: "OK" },
-  activity: { color: "#ef4444", label: "Activity" },
-  serviced: { color: "#f59e0b", label: "Serviced" },
-  inaccessible: { color: "#94a3b8", label: "No access" },
-};
-const STATION_PROGRAM_UI = {
-  termite: {
-    title: "Bait station map",
-    hint: "Every station starts as OK — tap a pin to flag activity, service, or no access.",
-    activityLabel: "Activity",
-    activityCounter: "with activity",
-  },
-  rodent: {
-    title: "Rodent bait station map",
-    hint: "Every station starts as OK — tap a pin to flag consumption, service, or no access.",
-    activityLabel: "Consumption",
-    activityCounter: "with consumption",
-  },
-  trapping: {
-    title: "Rodent trap map",
-    hint: "Every trap starts as OK — tap a pin to record a capture, service, or no access.",
-    activityLabel: "Capture",
-    activityCounter: "with captures",
-  },
-};
-function stationStatusLabel(status, program) {
-  if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
-  return STATION_STATUS_UI[status]?.label || status;
-}
-
 export function StationMarkingStep({
   map,
   stations, // [{ key, id?, number, label?, shape: {cx,cy,r}|null, stale }]
@@ -12579,6 +12091,12 @@ function PestRecapCard({ serviceId }) {
   );
 }
 
+// Shown beside the Additional work selector while the bermuda removal mix carries the
+// server's spray conditions; the test-patch line is the short wording for a CitraBlue or
+// unconfirmed St. Augustine cultivar.
+const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "zoysia2eeOnHand", "testPatchFirst"];
+const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
+
 export function CompletionPanel({
   service,
   products,
@@ -12613,6 +12131,10 @@ export function CompletionPanel({
   const [notes, setNotes] = useState("");
   const [completionPricing, setCompletionPricing] = useState(null);
   const [pricingReloadKey, setPricingReloadKey] = useState(0);
+  // The picked chip labels by marker tag (chipLabelsByTag), or null once an AI
+  // draft detached the chip lines. Set each render below, read by the notes
+  // mic and the notes textareas so a chip line keeps only its label.
+  const chipLabelsRef = useRef(null);
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
   // only free-text input — the AI report copy is generated from it + photos.)
@@ -12620,16 +12142,24 @@ export function CompletionPanel({
   // .stop() can still deliver a final result asynchronously, which would mutate
   // notes after the payload was snapshotted and then be lost when the response
   // replaces the notes.
+  // The visit's ids for server dictation (GATE_SERVER_DICTATION): the notes mic
+  // and the finding-field mics send them so this customer's name is spelled right.
+  const findingsDictationContext = { customerId: service?.customerId || service?.customer_id, serviceId: service?.id };
   const dictation = useSpeechDictation(
     (text) => {
       if (generating) return;
-      setNotes((b) => (b ? `${b} ${text}` : text));
+      setNotes((b) => appendDictatedText(b, text, chipLabelsRef.current));
     },
     // GATE_TECH_DICTATION_UPLOAD: where the browser has no SpeechRecognition
     // (iOS home-screen PWA) the mic records a clip and the server transcribes
     // it into this same notes box. Typing always works — the mic is optional.
-    { uploadServiceId: service?.id },
+    // GATE_SERVER_DICTATION: with it on, every browser records and the server
+    // spells this customer's name right (ids only).
+    { uploadServiceId: service?.id, dictationContext: findingsDictationContext },
   );
+  // A finding-field mic (DictationButton) recording or transcribing: its words are still on the
+  // way, so Generate and Complete wait for them like they do for the notes mic above.
+  const anyDictationPending = useDictationPending();
   // Customer email isn't on the schedule payload (only name/phone are), so fetch
   // it for the header contact card's tap-to-email link. The same fetch surfaces
   // the account's default payer for the third-party-billing banner below.
@@ -12742,16 +12272,17 @@ export function CompletionPanel({
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
   const currentLawnPlanReady = lawnPlanReady === service.id;
-  const reviewedLawnArea = currentPropertyAreas?.areas.lawn?.reviewedAt ? currentPropertyAreas.areas.lawn.sqft : undefined;
+  // A lawn visit treats the whole recorded lawn, reviewed or not.
+  const recordedLawnAreaSqft = recordedLawnArea(currentPropertyAreas?.areas.lawn);
   const propertyAreasIdentity = currentPropertyAreas ? `${currentPropertyAreas.propertyId}|${currentPropertyAreas.addressKey ?? ""}` : null;
   // A lawn area entered for one property (e.g. restored from a draft) never
   // applies to another, including the same row at a new address.
   const effectiveLawnAreaOverride = lawnAreaOverride !== undefined
     && (!propertyAreasIdentity || lawnAreaOverrideFor === null || lawnAreaOverrideFor === propertyAreasIdentity)
     ? lawnAreaOverride : undefined;
-  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
+  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? recordedLawnAreaSqft ?? null : undefined) : undefined;
   const lawnVisitArea = effectiveLawnAreaOverride !== undefined ? effectiveLawnAreaOverride
-    : currentPropertyAreas ? reviewedLawnArea ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
+    : currentPropertyAreas ? recordedLawnAreaSqft ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);
@@ -12948,7 +12479,7 @@ export function CompletionPanel({
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
-  const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
+  const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
   const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
   const lawnAreasInitializedRef = useRef(completionImprovements);
@@ -12986,7 +12517,7 @@ export function CompletionPanel({
   // footage the trace already measured. Fail-soft — no trace (or gate off)
   // just leaves the field manual.
   const [tracedLinearFt, setTracedLinearFt] = useState(null);
-  const [customerInteraction, setCustomerInteraction] = useState("");
+  const [customerInteraction, setCustomerInteraction] = useState(DEFAULT_CUSTOMER_INTERACTION);
   const [customerConcern, setCustomerConcern] = useState("");
 
   // Bait station map (station-map-v1). Only station-typed completions
@@ -13316,40 +12847,17 @@ export function CompletionPanel({
     // let the termite report (which falls back to the typed counts when a
     // visit has no check rows) tell the declined customer every station
     // was inspected (codex round-2 P1).
-    const isInspectionOnly = visitOutcome === "inspection_only";
-    const isCustomerDeclined = visitOutcome === "customer_declined";
-    const checkedKeys = isCustomerDeclined
-      ? []
-      : isInspectionOnly
-        ? activeKeys.filter((key) => stationMoves[key]
-          || stationNew.some((station) => station.key === key)
-          || Object.prototype.hasOwnProperty.call(stationStatuses, key))
-        : activeKeys;
-    const statusOf = (key) => stationStatuses[key] || "ok";
-    const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
-    // Each program maps to ITS schema's count keys — never auto-write a key
-    // the schema doesn't own, or submit validation rejects the unknown
-    // field. Trapping owns traps_checked only: captures is a tech-judgment
-    // count (one trap can hold multiple captures), and the schema has no
-    // total/inaccessible keys.
-    const counts = stationProgram === "trapping"
-      ? { traps_checked: String(checkedKeys.length - inaccessible) }
-      : {
-        // total_stations is termite-only since 2026-07-23: the rodent
-        // schema retired it (the map's pins ARE the roster), and writing it
-        // there would trip the unknown-field rejection at submit
-        // (codex P1 on #2963).
-        ...(stationProgram === "termite"
-          ? { total_stations: String(activeKeys.length) }
-          : {}),
-        stations_checked: String(checkedKeys.length - inaccessible),
-        stations_inaccessible: String(inaccessible),
-        // Only the termite schema carries a per-station activity COUNT; the
-        // rodent flow records consumption as a select (tech judgment).
-        ...(stationProgram === "termite"
-          ? { stations_with_activity: String(checkedKeys.filter((key) => statusOf(key) === "activity").length) }
-          : {}),
-      };
+    // The counts rule (and why an inspection_only or declined visit counts only
+    // what was explicitly checked) lives in lib/station-checks.js.
+    const counts = stationAutoCounts({
+      program: stationProgram,
+      activeKeys,
+      statuses: stationStatuses,
+      visitOutcome,
+      isExplicit: (key) => stationMoves[key]
+        || stationNew.some((station) => station.key === key)
+        || Object.prototype.hasOwnProperty.call(stationStatuses, key),
+    });
     // Snapshot the last auto-written values BEFORE scheduling the state
     // updates: the updater callbacks run after this effect finishes, so
     // reading the ref inside them would see the values we're about to
@@ -13707,6 +13215,11 @@ export function CompletionPanel({
   // arrays are authoritative and selections render as removable pills instead
   // of tagged lines inside the report text. Persisted with the draft.
   const [chipLinesDetached, setChipLinesDetached] = useState(false);
+  chipLabelsRef.current = chipLinesDetached ? null : chipLabelsByTag({
+    actions: selectedProtocolActionLabels,
+    observations: selectedObservationLabels,
+    recommendations: selectedRecommendationLabels,
+  });
   // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
   // from the notes (each field's words) and the groups it left for a person.
   const [laneHeard, setLaneHeard] = useState(null);
@@ -13783,6 +13296,7 @@ export function CompletionPanel({
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
   const [photoRetrying, setPhotoRetrying] = useState(false);
   const [photoRetryError, setPhotoRetryError] = useState("");
+  const [photoRetryConflict, setPhotoRetryConflict] = useState(false);
   const photoRetryLockRef = useRef(false);
   // Synchronous lock for the restore await in handleSubmit: `submitting` is
   // state and may not have re-rendered between two quick taps, so without
@@ -13839,7 +13353,7 @@ export function CompletionPanel({
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
-    !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+    !isTypedFindings && visitServiceCategory(service, service.serviceType) === "lawn";
   // The tracer's capture mode follows the SERVER's eligibility variant
   // when the feed carries one (codex P2 r3): typed lawn visits
   // (aeration/fungicide/insect control) set isTypedFindings, which forces
@@ -13867,7 +13381,12 @@ export function CompletionPanel({
   // compliance gate still requires its own completion photos (T&S needs >=2),
   // so keep the uploader whenever any companion is present.
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
-  const serviceTypeForArea = service?.serviceType || service?.service_type || "";
+  // A lawn-family area add-on that IS the visit is recorded by area on a lawn product ("Fire Ant
+  // Yard Treatment" reads as pest). On a host visit, only the rows recorded for a chemical add-on
+  // are lawn-family (typeFor); every other row keeps the host's own type.
+  const ownServiceType = service?.serviceType || service?.service_type || "";
+  const serviceTypeForArea = areaAddOnRowServiceType(service, ownServiceType, null);
+  const typeFor = (row) => areaAddOnRowServiceType(service, ownServiceType, row);
   const calibrationRequired = isLawn && !!service.waveguardTier;
   // Advisory inventory posture is member-tier only — mirrors the server's
   // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
@@ -13885,7 +13404,7 @@ export function CompletionPanel({
     }
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  const serviceCategory = visitServiceCategory(service, service.serviceType);
   // Bed bug closeouts get interior-specific treated-area chips, skip the
   // satellite spray-trace (a perimeter trace has no meaning for an interior
   // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
@@ -13915,7 +13434,7 @@ export function CompletionPanel({
   // pest visit keeps the tracer, because that visit really did spray.
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
-  const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const serviceLineForCloseout = visitServiceLine(service, serviceTypeForArea);
   // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
   // flag): the visit's photos and their descriptions sit inside the notes
   // box and the separate photo section goes away. Never on lawn or tree,
@@ -14000,27 +13519,15 @@ export function CompletionPanel({
   // station-lane hide only applies while nothing sprayed is recorded
   // (codex inline r5 on #3516). Mirrors the server's
   // isSprayApplicationMethod exclusions (bait / station check / injection).
-  // Product IDENTITY counts too, mirroring the server's
-  // isNonBaitPesticideProduct: a non-bait pesticide (pesticide-class
-  // category, EPA number on the catalog row, or a listed active) is
-  // evidence even under the defaulted station_check the panel assigns to
-  // methodless termite products (codex inline r10). Bait / station /
-  // cartridge / monitor families never count.
-  const isNonBaitPesticideSelection = (p) => {
-    const catalogRow = (products || []).find((row) => String(row.id) === String(p?.productId)) || {};
-    const identity = `${p?.category || ""} ${catalogRow.product_type || ""} ${p?.name || ""}`;
-    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
-    return /pestic|termitic|insectic|herbic|fungic|rodentic/i.test(`${p?.category || ""} ${catalogRow.product_type || ""}`)
-      || !!String(catalogRow.epa_reg_number || "").trim()
-      || !!String(p?.activeIngredient || "").trim();
-  };
-  const sprayEvidenceInForm = selectedProducts.some((p) => {
-    const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
-    return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
-      || isNonBaitPesticideSelection(p);
-  }) || activeSelectedLabels(selectedProtocolActionLabels).some((label) => (
-    actionScopeByLabel[label]?.treatmentApplied === true && actionScopeByLabel[label]?.dryDown !== false
-  ));
+  // Product IDENTITY counts too, mirroring the server's isNonBaitPesticideProduct (lib/spray-evidence.js,
+  // shared with the Fast Complete sheets): a non-bait pesticide (pesticide-class category, EPA number on
+  // the catalog row, or a listed active) is evidence even under the defaulted station_check the panel
+  // assigns to methodless termite products (codex inline r10). Bait / station / cartridge / monitor
+  // families never count.
+  const sprayEvidenceInForm = sprayEvidence({
+    products: selectedProducts.map((p) => sprayProductFromSelection(p, products)),
+    actionScopes: activeSelectedLabels(selectedProtocolActionLabels).map((label) => actionScopeByLabel[label]),
+  });
   // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
   // completion would persist for this visit. Re-fetched whenever spray
   // evidence appears/disappears so a bait/inspection identity that gains a
@@ -14074,14 +13581,40 @@ export function CompletionPanel({
   // request indefinitely (local audit P1 on #3701).
   const typedAreaKey = typedTreatmentArea?.key || null;
   const typedAreaValue = typedAreaKey ? (findingsValues?.[typedAreaKey] ?? "") : "";
+  // Real treated areas only — the generic status chips ("No issues found" /
+  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
+  // they aren't areas and don't belong in the treated-areas list.
+  const specialtyCompletion = specialtyCompletionFor(service);
+  // A regular pest visit (owner 2026-10-04): the recurring and one-time
+  // general pest services and pest re-services, the same visits that open on
+  // the house tank mix (isPestDefaultMixVisit). Not a typed form, bed bug
+  // or specialty lane. It takes no Protocol actions field and no visit-level
+  // Areas treated field: the product rows say what went where.
+  const isRegularPestVisit = !isTypedFindings && !isBedBugVisit && !specialtyCompletion
+    && isPestDefaultMixVisit(service);
+  // A string key keeps the memo (an effect dependency downstream) steady
+  // while a product row's other fields change.
+  // `areasServiced` is empty here except for an old draft's ticks waiting
+  // for a product row to carry them (the migration effect below).
+  const productRowAreasKey = isRegularPestVisit
+    ? areasFromProductRows(
+      [...selectedProducts, { applicationArea: areasServiced.join(", ") }],
+      AREAS_BY_SERVICE.pest,
+    ).join(PRODUCT_ROW_AREAS_SEP)
+    : "";
   const completionAreasServiced = useMemo(
-    () => completionAreasForTypedFindings({
-      typedAreaKey,
-      findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
-      genericAreas: areasServiced,
-    }),
-    [typedAreaKey, typedAreaValue, areasServiced],
+    () => (isRegularPestVisit
+      ? (productRowAreasKey ? productRowAreasKey.split(PRODUCT_ROW_AREAS_SEP) : [])
+      : completionAreasForTypedFindings({
+        typedAreaKey,
+        findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
+        genericAreas: areasServiced,
+      })),
+    [isRegularPestVisit, productRowAreasKey, typedAreaKey, typedAreaValue, areasServiced],
   );
+  // The areas a product row's picker offers: the whole pest list on a regular
+  // pest visit, else only the areas ticked at the visit level.
+  const productAreaPickerChoices = isRegularPestVisit ? AREAS_BY_SERVICE.pest : completionAreasServiced;
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
     // Station visits have no meaningful "areas treated" — the station
@@ -14090,6 +13623,10 @@ export function CompletionPanel({
     // records spray evidence gets the picker back (typedFormTakesPlaces,
     // shared with the tech sheet).
     || !typedFormTakesPlaces(service.completionProfile?.findingsType, { sprayed: sprayEvidenceInForm });
+  // The visit-level field is also gone on a regular pest visit, but its areas
+  // live on the product rows there, so this never clears them (unlike
+  // areasTreatedHidden above).
+  const areasTreatedFieldHidden = areasTreatedHidden || isRegularPestVisit;
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -14156,6 +13693,32 @@ export function CompletionPanel({
       ));
     }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
+  // A regular pest visit has no visit-level areas either (owner 2026-10-04):
+  // the areas belong on the product rows. A draft saved before the change
+  // carries visit-level ticks, which say where the visit went but not which
+  // product went there, so the ticks no row names go onto ONE row (the
+  // first with no area, else the first), where the technician sees and can
+  // move them: none dropped (Codex P2 r1 #5889), none copied onto every row
+  // (Codex P2 r2). With no product row yet the ticks stay in the hidden
+  // state, still sent by completionAreasServiced, until a row exists.
+  useEffect(() => {
+    if (!isRegularPestVisit || !areasServiced.length) return;
+    const carried = areasFromProductRows([{ applicationArea: areasServiced.join(", ") }], AREAS_BY_SERVICE.pest);
+    if (carried.length) {
+      if (!selectedProducts.some(Boolean)) return;
+      setSelectedProducts((prev) => {
+        const named = new Set(prev.flatMap((p) => (p ? parseApplicationAreas(p.applicationArea) : [])));
+        const missing = carried.filter((area) => !named.has(area));
+        const empty = prev.findIndex((p) => p && !p.applicationArea);
+        const target = empty >= 0 ? empty : prev.findIndex(Boolean);
+        if (!missing.length || target < 0) return prev;
+        return prev.map((p, index) => (index === target
+          ? { ...p, applicationArea: [...parseApplicationAreas(p.applicationArea), ...missing].join(", ") }
+          : p));
+      });
+    }
+    setAreasServiced([]);
+  }, [isRegularPestVisit, areasServiced, selectedProducts]);
   // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
   // recurring general-pest, one-time pest, and pest re-service completions
   // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
@@ -14199,7 +13762,9 @@ export function CompletionPanel({
     const rows = pestDefaultMixSelections(products)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
-      ...buildSelectedProduct(product),
+      // A regular pest visit's seeded rows start on their area (owner
+      // 2026-10-05): Perimeter for the exterior mix and its surfactant.
+      ...(isRegularPestVisit ? withPestRowDefaultArea(buildSelectedProduct(product)) : buildSelectedProduct(product)),
       totalAmount,
       totalAmountManual: true,
       // Marked manual so a rate or area edit cannot recompute the house
@@ -14214,7 +13779,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -14266,12 +13831,15 @@ export function CompletionPanel({
       // A row the tech already removed by hand never comes back, even
       // into a freshly emptied list (a sibling's removal, or the outage
       // clearing effect, both restart from empty).
-      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)));
+      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)))
+      // On a regular pest visit a seeded row starts on its area (owner
+      // 2026-10-05); every other line keeps its rows as built.
+      .map((row) => (isRegularPestVisit ? withPestRowDefaultArea(row) : row));
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
     protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, isRegularPestVisit, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
   // Pre-push audit P1, PR #5049 r1 (cockroach/protocol rows) + Codex r3 P1
   // (pest-mix rows): an inspection_only / customer_declined outcome bills
   // as NOTHING applied (shared/specialty-service-closeouts.js's own
@@ -14337,7 +13905,7 @@ export function CompletionPanel({
       if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
       const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
       const activeDefaults = lawnDefaultsSeedSuppressed
-        ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
+        ? defaults.filter(row => selectedProducts.some(product => !product.areaAddOnKey && String(product.productId) === String(row.productId))) : defaults;
       const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
       lawnDefaultMixSeededRef.current = true;
       lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
@@ -14427,10 +13995,6 @@ export function CompletionPanel({
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
   };
-  // Real treated areas only — the generic status chips ("No issues found" /
-  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
-  // they aren't areas and don't belong in the treated-areas list.
-  const specialtyCompletion = specialtyCompletionFor(service);
   // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): the
   // schedule payload says when Generate first fills this visit's own record
   // (its places and findings) from the notes.
@@ -14518,134 +14082,23 @@ export function CompletionPanel({
         ? AREAS_BY_SERVICE.bed_bug
         : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest))),
   ];
-  const onSiteEntry = (service.statusLog || []).find(
-    (e) => e.status === "on_site",
-  );
-  const onSiteTime = onSiteEntry ? onSiteEntry.at : service.checkInTime;
+  const onSiteTime = onSiteTimeOf(service);
 
-  const svcTypeLower = (service.serviceType || "").toLowerCase();
-  const isCallback =
-    svcTypeLower.includes("re-service") ||
-    svcTypeLower.includes("callback") ||
-    service.isCallback;
+  const isCallback = isCallbackVisit(service);
   const completionPricingPending = visitOutcome === "completed" && !backfillCloseout
     && (completionPricing?.serviceId !== service.id || completionPricing?.ready !== true);
   const reviewedPricing = completionPricing?.serviceId === service.id && completionPricing?.review
     && visitOutcome === "completed" && !backfillCloseout ? completionPricing : null;
   const applyingCompletionDiscounts = reviewedPricing?.apply === true;
   const completionVisitPrice = applyingCompletionDiscounts ? reviewedPricing.amount : service.estimatedPrice;
-  const hasVisitPrice = applyingCompletionDiscounts
-    || (completionVisitPrice != null && Number(completionVisitPrice) > 0);
-  // Callbacks (re-services) are free by definition for recurring/WaveGuard
-  // customers — the server suppresses the monthly_rate fallback for them
-  // (admin-dispatch completion + Charge-now). Mirror that here so the tech UI's
-  // willInvoice / pay-link prediction, AI recap framing, and review suppression
-  // match the report-only/no-invoice completion the server actually performs.
-  // For an unpriced visit, monthlyRate is only ever the right fallback for a
-  // monthly-membership customer — everywhere else (per_application's own
-  // acceptance fee, a plain per_visit/one_time lane, sibling-covered
-  // first-application visits…) the AUTHORITATIVE amount is the schedule
-  // payload's own billingLane.prediction, computed server-side by the exact
-  // same predictCompletionBilling / completionInvoiceAmount (billing-lane.js)
-  // completion itself uses — never re-derived locally, so this can't drift
-  // from what completion actually bills (codex pre-push P1: a local
-  // tier/lane guard either showed the wrong monthlyRate for a legacy
-  // inferred lane, or zeroed a real per-application fee).
-  //
-  // The prediction's `amount` is ALREADY net of prepaidAmount for an
-  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
-  // server-side), and a 'prepaid' kind's amount is what was ALREADY
-  // collected, not a new balance — so `usingUnpricedPrediction` keeps
-  // prepaidCovered below from netting the SAME prepayment a second time
-  // against a figure that's already final (codex pre-push P1: double-
-  // netting misclassified a partially-prepaid visit as fully covered and
-  // suppressed the invoice for its real remaining balance).
-  const predictionKind = service.billingLane?.prediction?.kind || null;
-  const usingUnpricedPrediction = !hasVisitPrice && !isCallback;
-  // Round-8 P1: `billingLane.siblingCoverage` (the server's ONE canonical
-  // per-visit collection verdict — owner decision, narrow + fail closed) in
-  // state 'collect_on_combined_invoice' means completion REUSES that
-  // sibling invoice (complete-scheduled-service.js) exactly like an
-  // existing outstanding invoice — never a fresh mint, but still a real
-  // amount due, a pay link, and a held review — so this panel must not
-  // treat it as `usingUnpricedPrediction`'s ordinary $0/no-invoice path.
-  const siblingCoverage = service.billingLane?.siblingCoverage || null;
-  const collectOnSiblingInvoice = siblingCoverage?.state === 'collect_on_combined_invoice';
-  // Codex pre-push P2: a covering sibling invoice reads `state: 'settled'`
-  // for FIVE distinct reasons (billing-lane.js siblingCoverageForSchedule) —
-  // 'invoice_settled' (literal paid/prepaid), 'invoice_processing' (money in
-  // flight, e.g. a pending ACH debit), 'withdrawn_from_customer' /
-  // 'payer_billed' (draft/sent, but not collectible from this homeowner at
-  // all), and 'credit_applied' (draft/sent, covered by account credit, never
-  // marked literally paid). A technician collects nothing at the door for
-  // any of the five — but complete-scheduled-service.js's own
-  // invoiceBlocksReview holds the review ask for every invoice status
-  // EXCEPT literal 'paid'/'prepaid', which only 'invoice_settled' actually
-  // is. This used to recognize 'invoice_processing' alone (codex round-9
-  // P2's own fix), which correctly held the ask for THAT one reason but
-  // missed the other three draft/sent-but-not-collectible reasons — the
-  // panel promised an immediate review request the server still withheld
-  // pending manual reconciliation. Every reason except the literal
-  // paid/prepaid one now holds the preview the same way.
-  const siblingInvoiceNotYetSettled = siblingCoverage?.state === 'settled'
-    && siblingCoverage?.reason !== 'invoice_settled';
-  const invoiceAmount = hasVisitPrice
-    ? Number(completionVisitPrice)
-    : isCallback
-      ? 0
-      : collectOnSiblingInvoice
-        ? Number(siblingCoverage.amountDue) || 0
-        : (predictionKind === 'prepaid' ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
-  // Codex round-2 P1 (sweep): this used to infer "dues cover it" from
-  // autopayActive + a tier + a positive monthlyRate + no stamped visit
-  // price — the SAME shape as MobileAppointmentDetailSheet's
-  // coveredByMembership bug. A tiered per_application (or per_visit)
-  // customer can have autopay on AND carry a real, positive invoice/
-  // auto_charge prediction for an unpriced row (e.g. the $97.20
-  // acceptance-fee case in this file's own billing-lane-amount test) —
-  // that heuristic never looked at the prediction at all, so it would
-  // report-only a visit completion (and the schedule sheet's own Charge
-  // Now mint) actually bills. `covered_membership` is the ONLY signal
-  // this panel may treat as "dues cover it, no invoice."
-  const autopayCoversVisit = predictionKind === 'covered_membership';
-  const prepaidCovered = usingUnpricedPrediction
-    ? predictionKind === 'prepaid'
-    : (service.prepaidAmount != null &&
-      Number(service.prepaidAmount) > 0 &&
-      Number(service.prepaidAmount) >= invoiceAmount);
-  // paid and prepaid are both settled to the server (invoiceBlocksReview,
-  // report-only completion) — codex #4140 r15 P2.
-  const invoiceAlreadyPaid =
-    ["paid", "prepaid"].includes(service.checkoutInvoiceStatus) ||
-    ["paid", "prepaid"].includes(service.invoiceStatus);
-  const reportOnlyCompletion =
-    prepaidCovered ||
-    invoiceAlreadyPaid ||
-    autopayCoversVisit ||
-    !!service.completionInvoiceAlreadySent;
-  // Typed one-time completions bill by PROFILE: since the billing pre-gate
-  // removal (2026-07-27) the server mints the completion invoice at the row
-  // price for a billingType 'one_time' profile even without the scheduler
-  // flag or a tier. Mirror that conjunction here (row-priced, performed,
-  // non-callback, not an included follow-up) so the SMS preview, pay-link
-  // toggle, and review controls show the completion the server actually
-  // performs.
-  const typedOneTimeBilling =
-    String(service.completionProfile?.billingType || "").toLowerCase() ===
-      "one_time" &&
-    service.followupIncluded !== true &&
-    hasVisitPrice &&
-    !isCallback &&
-    visitOutcome !== "inspection_only" &&
-    visitOutcome !== "customer_declined";
-  const willInvoice =
-    !oneTimeRecapOnly &&
-    !reportOnlyCompletion &&
-    (collectOnSiblingInvoice ||
-      !!service.createInvoiceOnComplete ||
-      !!service.waveguardTier ||
-      typedOneTimeBilling) &&
-    invoiceAmount > 0;
+  const { willInvoice, reviewAwaitsPayment } = completionInvoicePrediction({
+    service,
+    visitPrice: completionVisitPrice,
+    applyingDiscounts: applyingCompletionDiscounts,
+    isCallback,
+    oneTimeRecapOnly,
+    visitOutcome,
+  });
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
   // Payer-billed visits never text the homeowner a pay link (the server
@@ -14685,31 +14138,16 @@ export function CompletionPanel({
   // as it can be known before the completion exists (legacy path AND no
   // service-report-v1 delivery) — not a client re-derivation of one of its
   // predicates (codex #4140 r4 P2). Unknown reads as "not bundled".
-  // The server's invoiceBlocksReview: an UNPAID invoice after completion —
-  // one minted now (willInvoice) or one already sent from dispatch and still
-  // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
-  // paid invoices never hold the ask. A covering sibling invoice awaiting
-  // payment or reconciliation holds it too (siblingInvoiceNotYetSettled
-  // above) — the reused invoice completion actually checks is the
-  // SIBLING's, and invoiceBlocksReview clears only on its literal
-  // 'paid'/'prepaid' status, not this row's own.
-  const reviewAwaitsPayment = willInvoice || siblingInvoiceNotYetSettled
-    || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
-  // An unpaid invoice holds the customer-requested ask server-side
-  // (invoiceBlocksReview gates effectiveRequestReview, so shouldBundleReview
-  // is false) — the preview must not promise the link the timing hint says
-  // waits for payment (codex #4140 r22 P2). The one-time recap path is exempt
-  // server-side (recapReviewOnly) and stays exempt here.
-  const reviewSendsWithCompletionSms =
-    willReview &&
-    effectiveSendSms &&
-    (oneTimeRecapOnly ||
-      (reviewTiming === "customer_requested" &&
-        reviewSendPreview?.bundlesImmediateAsk === true &&
-        !reviewAwaitsPayment));
-  const reviewTimingHintText = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: reviewAwaitsPayment })
-    : "";
+  // The review hint and whether the link rides in the text (lib/completion-review-timing.js).
+  const { text: reviewTimingHintText, bundled: reviewSendsWithCompletionSms } = completionReviewHint({
+    willReview,
+    oneTimeRecapOnly,
+    effectiveSendSms,
+    reviewTiming,
+    reviewCustomAt,
+    preview: reviewSendPreview,
+    reviewAwaitsPayment,
+  });
   const smsPreview = [
     smsRecapPreview(customerRecap),
     !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
@@ -14723,25 +14161,8 @@ export function CompletionPanel({
   // a second LLM call for hidden state. Kept as a const so dependent effects/deps
   // stay inert.
   const canAutoDraftRecap = false;
-  const reviewScheduledFor = () => {
-    if (!willReview || oneTimeRecapOnly) return null;
-    if (reviewTiming === "tomorrow_8") {
-      return `${etDateString(addETDays(new Date(), 1))}T08:00`;
-    }
-    if (reviewTiming === "custom") return reviewCustomAt || null;
-    return null;
-  };
-  const reviewDelayMinutes = () => {
-    if (!willReview) return null;
-    if (oneTimeRecapOnly || reviewTiming === "customer_requested") return 0;
-    if (reviewTiming === "custom") {
-      const target = new Date(reviewCustomAt);
-      return reviewCustomAt && !Number.isNaN(target.getTime()) ? 0 : null;
-    }
-    if (reviewTiming === "tomorrow_8") return 0;
-    // Automatic: no explicit delay — the server picks the smart send window.
-    return undefined;
-  };
+  const reviewScheduledFor = () => reviewScheduledForOf({ willReview, oneTimeRecapOnly, reviewTiming, reviewCustomAt });
+  const reviewDelayMinutes = () => reviewDelayMinutesOf({ willReview, oneTimeRecapOnly, reviewTiming, reviewCustomAt });
   const reviewSendPreviewRef = useRef(null);
   reviewSendPreviewRef.current = reviewSendPreview;
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
@@ -14816,9 +14237,10 @@ export function CompletionPanel({
   const nLimitSummaryText = treatmentPlanAnnualN
     ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || "lb N / 1,000 sqft / year"}.`
     : "";
+  // An area add-on's product row belongs to the add-on, not to the host's protocol: it is never "off protocol".
   const offProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter(
-        (p) => !treatmentPlanProductIds.includes(String(p.productId)),
+        (p) => !p.areaAddOnKey && !treatmentPlanProductIds.includes(String(p.productId)),
       )
     : [];
   const selectedProductIds = new Set(
@@ -14837,7 +14259,7 @@ export function CompletionPanel({
       !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
-      (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
+      (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product))),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -15154,7 +14576,7 @@ export function CompletionPanel({
   // changes, so this never loops).
   useEffect(() => {
     if (techTips?.available !== true) return;
-    const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
+    const known = pickableTipIds(techTips);
     setSelectedTipIds((prev) => {
       const kept = prev.filter((id) => known.has(id));
       return kept.length === prev.length ? prev : kept;
@@ -15185,6 +14607,12 @@ export function CompletionPanel({
   const blogPostShown = blogPostOffer === "yes" || blogPostKept;
   const searchBlogPosts = useCallback(
     (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
+    [service.id],
+  );
+  // A search no post covers, suggested as a new post for the autonomous blog
+  // queue (GATE_BLOG_SEARCH_SUGGEST; the search answer says when it's taken).
+  const suggestBlogPost = useCallback(
+    (phrase) => adminFetch(`/admin/dispatch/${service.id}/blog-suggestions`, { method: "POST", body: JSON.stringify({ phrase }) }),
     [service.id],
   );
 
@@ -15313,7 +14741,7 @@ export function CompletionPanel({
       }
       if (lawnDefaultsEnabled) {
         setProtocolActions(lawnPlanActionOptions(lawnCompletionDefaults.options));
-        setProtocolActionMeta({ source: "appointment_plan" });
+        setProtocolActionMeta({ source: "appointment_plan", ...(lawnCompletionDefaults.planWarnings ? { warnings: lawnCompletionDefaults.planWarnings } : {}) });
         setProtocolActionsLoaded(true);
         setProtocolActionsLoading(false);
         return () => { cancelled = true; };
@@ -15330,6 +14758,8 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
+      // The server reads the visit's account (bermuda removal) itself.
+      if (service.id) params.set("scheduledServiceId", service.id);
     }
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
@@ -15425,7 +14855,11 @@ export function CompletionPanel({
       .then((data) => {
         if (cancelled) return;
         lawnPlanVerifiedRef.current = service.id;
-        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
+        // The plan's own bermuda removal warnings (why the mix is not offered) ride with the completion
+        // defaults, so the drawer shows them beside the Additional work selector like the actions list's.
+        const planWarnings = (Array.isArray(data?.plan?.propertyGate?.warnings) ? data.plan.propertyGate.warnings : [])
+          .filter((warning) => String(warning?.code || "").startsWith("lawn_bermuda_"));
+        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id, ...(planWarnings.length ? { planWarnings } : {}) });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
           data?.plan?.protocol?.blocked ||
@@ -15523,10 +14957,14 @@ export function CompletionPanel({
   }
 
   function clearSavedDraft() {
-    const discardedId = draftSnapshotRef.current?.draftId || savedDraft?.draftId || "";
+    const discarded = draftSnapshotRef.current || savedDraft;
+    const discardedIds = [...new Set([
+      discarded?.draftId, discarded?.discardedPhotoDraftId,
+    ].filter(Boolean).map(String))];
+    const tombstone = discardedIds.length > 1 ? JSON.stringify(discardedIds) : discardedIds[0] || "";
     draftSnapshotRef.current = null;
     try {
-      localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
+      localStorage.setItem(completionDraftTombstoneKey(service.id), tombstone);
       localStorage.removeItem(completionDraftKey(service.id));
     } catch { /* unavailable */ }
     void deleteCompletionDraft(service.id, completionDraftScope()).then((deleted) => {
@@ -15571,7 +15009,7 @@ export function CompletionPanel({
       let stored = loaded;
       // A residual row whose delete never committed (page killed mid-discard)
       // is not a draft: drop it and finish the delete now.
-      if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
+      if (stored && completionDraftTombstoneMatches(tombstone, stored.draftId)) {
         stored = null;
         void deleteCompletionDraft(service.id, scope).then((deleted) => {
           if (!deleted) return;
@@ -15652,7 +15090,8 @@ export function CompletionPanel({
       (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
       lawnRemovedDefaultIds.length > 0 ||
       protocolCompletionDefaultsRemovedIds.length > 0 ||
-      customerInteraction ||
+      // The default is the opening state, not tech input.
+      (customerInteraction && customerInteraction !== DEFAULT_CUSTOMER_INTERACTION) ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
       selectedObservationLabels.length ||
@@ -16019,7 +15458,12 @@ export function CompletionPanel({
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
       : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
-    setNotes(savedDraft.notes || "");
+    const savedNotes = savedDraft.notes || "";
+    setNotes(savedDraft.chipLinesDetached === true ? savedNotes : splitGluedChipLines(savedNotes, chipLabelsByTag({
+      actions: Array.isArray(savedDraft.selectedProtocolActionLabels) ? savedDraft.selectedProtocolActionLabels : [],
+      observations: Array.isArray(savedDraft.selectedObservationLabels) ? savedDraft.selectedObservationLabels : [],
+      recommendations: Array.isArray(savedDraft.selectedRecommendationLabels) ? savedDraft.selectedRecommendationLabels : [],
+    })));
     // A draft restored while the plan request has already failed carries the
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
@@ -16028,7 +15472,7 @@ export function CompletionPanel({
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
-            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            const normalized = normalizeProductArea(product, typeFor(product));
             // Bed bug: a pre-migration draft carries the old inferred
             // perimeter default — reclassify it to the interior default so
             // a restored draft can't demand perimeter footage or record
@@ -16188,8 +15632,11 @@ export function CompletionPanel({
         setStationNumberBase(Number(savedDraft.stationNumberBase));
       }
     }
+    // A draft's own answer wins; one saved with none (before the default
+    // existed) opens on the default (owner 2026-10-04).
     setCustomerInteraction(
-      normalizeCustomerInteractionValue(savedDraft.customerInteraction),
+      normalizeCustomerInteractionValue(savedDraft.customerInteraction)
+        || DEFAULT_CUSTOMER_INTERACTION,
     );
     setCustomerConcern(savedDraft.customerConcern || "");
     setSelectedProtocolActionLabels(
@@ -16629,6 +16076,23 @@ export function CompletionPanel({
     }
   }
 
+  // Both notes textareas: keep typed words off a picked chip line
+  // (splitTypedChipLineTails), restoring the caret the split moved.
+  function handleNotesInput(event) {
+    const el = event.target;
+    const { notes: nextNotes, caret } = splitTypedChipLineTails(
+      notes,
+      el.value,
+      chipLabelsRef.current,
+      el.selectionStart,
+    );
+    setNotes(nextNotes);
+    if (nextNotes !== el.value && caret !== null) {
+      requestAnimationFrame(() => {
+        if (document.activeElement === el) el.setSelectionRange(caret, caret);
+      });
+    }
+  }
   function addChipNote(prefix, text) {
     // Once an AI draft has replaced the notes, the label arrays are the
     // selection source of truth and selections render as removable pills —
@@ -17058,7 +16522,7 @@ export function CompletionPanel({
     // chunk (and the mic is disabled). Upload-mode dictation transcribes
     // AFTER the mic stops (an async server round-trip), so a snapshot taken
     // now would miss it. Hold the action until the transcript has landed.
-    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+    if (anyDictationPending || (dictation.mode === "upload" && (dictation.starting || dictation.listening || dictation.uploading))) {
       alert("Stop dictation and wait for the transcript to appear in your notes first.");
       return;
     }
@@ -17250,10 +16714,10 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
-        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationMethod: productApplicationMethod(p, typeFor(p)),
         applicationArea:
           p.applicationArea ||
-          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+          (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
         areaValue: p.areaValue ?? null,
         areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
@@ -17360,7 +16824,7 @@ export function CompletionPanel({
     if (
       activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
-        || selectedProducts.find((p) => p.productId === action.product.id))
+        || selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id))
     ) {
       return;
     }
@@ -17382,9 +16846,15 @@ export function CompletionPanel({
     }
     if (
       action.product?.id &&
-      !selectedProducts.find((p) => p.productId === action.product.id)
+      !selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id)
     ) {
-      addProduct(action.product);
+      addProduct({
+        ...action.product,
+        ...(action.prefillAmount === false ? { prefillAmount: false } : {}),
+        group: action.group,
+        // A spot action (the bermuda removal mix, /completion-actions path) records as spot work.
+        ...(action.applicationMode === "spot" ? { applicationMode: "spot", applicationMethod: action.product.applicationMethod || "spot_treatment" } : {}),
+      });
     }
   }
   function handleOneTimeRecapOnlyChange(checked) {
@@ -17402,7 +16872,7 @@ export function CompletionPanel({
     // The duplicate check runs FIRST (codex r81): re-clicking an
     // already-selected product's search result changes nothing and must
     // not clear a valid untouched report.
-    if (selectedProducts.find((p) => p.productId === product.id)) return;
+    if (selectedProducts.find((p) => !p.areaAddOnKey && p.productId === product.id)) return;
     // Products feed the generation grounding (and T&S derives its treatments
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
@@ -17415,10 +16885,11 @@ export function CompletionPanel({
     // r6 P1) — under the protocol row's application mode: the catalog
     // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
     // method, area requirement and rate prefill all follow the mode (r7 P1).
-    const catalogProduct = lawnDefaultsEnabled
+    const spotAction = product.applicationMode === "spot";
+    const catalogProduct = lawnDefaultsEnabled || spotAction
       ? products.find((row) => String(row.id) === String(product.id)) || product
       : product;
-    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+    let row = buildSelectedProduct((lawnDefaultsEnabled || spotAction) && product.applicationMethod
       ? { ...catalogProduct, application_method: product.applicationMethod }
       : catalogProduct);
     if (lawnDefaultsEnabled) {
@@ -17436,6 +16907,11 @@ export function CompletionPanel({
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
+    }
+    // A spot line (the bermuda removal mix) has no catalog-derived amount: no rate, area or
+    // total is suggested; the tech enters the area treated and the amount used.
+    if (product.prefillAmount === false) {
+      row = { ...row, rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used.", areaUnit: "sqft", ...(product.group ? { group: product.group } : {}) };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
@@ -17459,6 +16935,8 @@ export function CompletionPanel({
   // whole-lawn broadcast quantity: only a broadcast method takes it; any other
   // method on a lawn visit (a soil drench, spot work) stays manual.
   function productUsesPropertyArea(product, applicationMethod) {
+    // An add-on's product is entered with the area the add-on was sold for, never the host line's property area.
+    if (product.areaAddOnKey) return false;
     if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
@@ -17473,12 +16951,14 @@ export function CompletionPanel({
     // default falls to 'perimeter_spray' and wrongly demands linear
     // footage for an interior placement. Passed in by the protocol
     // completion-defaults seed only; every other caller is unaffected.
+    // A product recorded for a chemical add-on carries its key (areaAddOnKey) and is judged lawn-family.
+    const rowType = typeFor(product);
     const applicationMethod = applicationMethodOverride
-      || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+      || defaultApplicationMethod(product, rowType, { interiorLane: isBedBugVisit });
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -17492,7 +16972,7 @@ export function CompletionPanel({
       labelMaxRate,
     } = resolveRatePrefill(product, {
       applicationMethod,
-      serviceLine: serviceLineFromType(serviceTypeForArea),
+      serviceLine: serviceLineFromType(rowType),
     });
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
@@ -17532,7 +17012,9 @@ export function CompletionPanel({
         : perBasisUnit || areaRequirement?.unit === "linear_ft"
           ? ""
           : derivedTotalAmount(prefillRate, prefillArea);
-    return {
+    // A row recorded for an area add-on starts at the add-on's GOVERNED rate, never the catalog default
+    // (withGovernedAddOnRate); every other row passes through unchanged.
+    return withGovernedAddOnRate(service, product, {
         productId: product.id,
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
@@ -17580,9 +17062,10 @@ export function CompletionPanel({
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
+        areaAddOnKey: product.areaAddOnKey,
         areaValue: prefillArea,
         propertyServiceAreaField: !!currentPropertyAreas && productUsesServiceArea,
-        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, serviceTypeForArea, false, true)?.unit === "sqft"
+        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, rowType, false, true)?.unit === "sqft"
           ? { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId ?? null, kind: propertyAreaKey, pending: !currentPropertyAreas } : null,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
@@ -17608,7 +17091,7 @@ export function CompletionPanel({
           ),
           allowedTargetLinesForVisit(service),
         ),
-    };
+    });
   }
   function addSubstitutionProduct(substitution) {
     if (!substitution?.substituteProductId) return;
@@ -17631,8 +17114,8 @@ export function CompletionPanel({
     setSelectedProducts((prev) =>
       prev.map((p) => {
         const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
+          productApplicationMethod(p, typeFor(p)),
+          typeFor(p),
         );
         if (areaRequirement?.unit !== "linear_ft") return p;
         if (Number(p.areaValue) > 0) return p;
@@ -17640,32 +17123,71 @@ export function CompletionPanel({
       }),
     );
   }
-  function removeProduct(productId) {
+  // Records a chemical area add-on's product on a host visit (AreaAddOnFields): an ordinary product
+  // row tagged with the add-on, so its method and treated area follow the lawn rules (typeFor)
+  // whatever line the host visit is, and the server saves it like any other application row.
+  function addAreaAddOnProduct(product, addOn) {
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
+    lawnDefaultMixSeededRef.current = true;
+    const row = buildSelectedProduct({ ...product, areaAddOnKey: addOn.key });
+    setSelectedProducts((prev) => [...prev.filter((p) => productRowId(p) !== productRowId(row)), row]);
+  }
+  // `rowId` is productRowId(row): the product and, for an add-on's row, the add-on, so the host's row of a
+  // product and the add-on's row of the same product are removed and edited separately.
+  // A removed lawn plan default is remembered by product, with its name (a governed row restored while the plan request
+  // failed is still a plan default: its removal must survive a successful retry, pre-push audit).
+  function rememberRemovedLawnDefault(removedRow, productId) {
+    if (!(lawnDefaultsEnabled || removedRow?.lawnPlanDefaults)) return;
+    const removedName = removedRow?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+    if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+    setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+  }
+  function removeProduct(rowId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
-    // A governed row restored while the plan request failed is still a plan
-    // default: its removal must survive a successful retry (pre-push audit).
-    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
-    if (governed) {
-      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
-      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
-      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
-    }
+    const removedRow = selectedProducts.find((p) => productRowId(p) === rowId);
+    const productId = removedRow?.productId ?? rowId;
+    rememberRemovedLawnDefault(removedRow, productId);
     // Same ledger, for the protocol-defaults seed (pre-push audit P1, PR
     // #5049 r2) — a deliberate removal of a seeded default must survive
     // the list going empty, or a later open re-seeds what the tech took
     // off. Only THIS function (the tech's own tap) records one; the
     // non-performed-outcome clearing effect deliberately does not.
-    const removedRow = selectedProducts.find((p) => p.productId === productId);
     if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
+    // Products that share a completion group (the bermuda removal mix) come off together, with the group's chips.
+    const group = completionGroupOfRemovedRow(removedRow, productId, protocolActions);
+    const mates = completionGroupMates(group, selectedProducts, protocolActions);
+    for (const label of mates.labels) removeSelectedLabel("protocol", label);
     setSelectedProducts((prev) =>
-      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
+      // The row itself goes by its row id (an add-on's row of a product and the host's row are separate); the rest of a
+      // completion group goes by product, and never takes an add-on's tagged row with it.
+      promoteTankOwner(prev.filter((p) => productRowId(p) !== rowId && !(mates.productIds.has(p.productId) && !p.areaAddOnKey))),
     );
   }
-  function updateProduct(productId, field, value) {
+  // The x on a report pill. A label that belongs to a completion group (the bermuda
+  // removal mix) takes the whole group with it: every label, scope and note line, and
+  // every product row, the same as removing one of its product rows.
+  function removeSelectionPill(kind, label) {
+    if (generating) return;
+    // A pill of a group row: found by the row's own group and name first (works before the actions load).
+    const row = kind === "protocol" ? selectedProducts.find((p) => p.group && String(p.name) === label) : null;
+    const member = kind === "protocol" && !row
+      ? protocolActions.find((a) => a.group && String(a.note || a.label || a.raw || "Completed protocol item") === label)
+      : null;
+    const groupProductId = row?.productId
+      || (member && protocolActions.find((a) => a.group === member.group && a.product?.id)?.product.id);
+    if (groupProductId) removeProduct(groupProductId);
+    else if (member) {
+      for (const mate of protocolActions.filter((a) => a.group === member.group)) {
+        removeSelectedLabel("protocol", String(mate.note || mate.label || mate.raw || "Completed protocol item"));
+      }
+    } else removeSelectedLabel(kind, label);
+  }
+  function updateProduct(rowId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
@@ -17674,13 +17196,13 @@ export function CompletionPanel({
       // live in lib/product-rate-prefill. Only the owner's corrections travel,
       // so a row given its own gallons detaches alone.
       const tankOwner = tankOwnerRow(prev);
-      const propagateTank = tankPropagates(prev, productId, field);
+      const propagateTank = tankPropagates(prev, rowId, field);
       // An owner that leaves per-gallon frees the slot the same way removing
       // it does, and the rows still on its mix keep the tank: without an heir
       // the next gallons edit — a detached row's included — would propagate
       // over them (pre-push audit P1). Idempotent while an owner remains.
       return promoteTankOwner(prev.map((p) => {
-        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
+        if (productRowId(p) !== rowId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
@@ -17704,13 +17226,20 @@ export function CompletionPanel({
           if (!p.totalAmountManual) next.totalAmount = "";
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // An untouched pest default area follows the method (Codex P2 #5978):
+        // spot treatment never keeps "Perimeter" it did not choose.
+        if (field === "applicationMethod" && isRegularPestVisit && p.applicationAreaDefault) {
+          // The mark stays until the tech edits the area itself, so a method
+          // switched away and back restores "Perimeter" (Codex P2 #5978 r2).
+          next.applicationArea = pestRowDefaultArea(value);
+        }
         // The row the tech typed into owns its gallons from here on, and the
         // first such row owns the tank.
         if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            serviceTypeForArea, false, next.propertyServiceAreaField,
+            typeFor(next), false, next.propertyServiceAreaField,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17735,9 +17264,9 @@ export function CompletionPanel({
           }
         } else if (field === "areaValue") {
           const areaRequirement = requiredApplicationArea(
-            productApplicationMethod(next, serviceTypeForArea),
-            serviceTypeForArea,
-            governed, next.propertyServiceAreaField,
+            productApplicationMethod(next, typeFor(next)),
+            typeFor(next),
+            governed || !!next.group, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -17949,25 +17478,51 @@ export function CompletionPanel({
   }
 
   async function retryCompletionPhotos() {
-    if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (!draft?.servicePhotos?.length && !draft?.reconcileOwed) return;
+    if ([
+      photoRetryLockRef.current,
+      ![draft?.servicePhotos?.length, draft?.reconcileOwed].some(Boolean),
+    ].some(Boolean)) return;
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
+    setPhotoRetryConflict(false);
     const failedPhotos = [];
+    let reconciliationNeeded = draft.reconcileOwed === true;
+    let retryPermanentlyBlocked = false;
     try {
-      for (const [index, photo] of (draft.servicePhotos || []).entries()) {
+      const { servicePhotos: photos = [], pendingPhotoCompletion = {} } = draft;
+      for (const [index, photo] of photos.entries()) {
         try {
-          const form = buildPhotoRetryFormBody(photo, index);
+          const form = buildPhotoRetryFormBody(
+            photo,
+            index,
+            pendingPhotoCompletion.servicePhotoVisit,
+            pendingPhotoCompletion.serviceRecordId,
+          );
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
           await adminFetch(`/tech/services/${service.id}/photos`, {
             method: "POST", body: form,
             headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
           });
-        } catch {
+          reconciliationNeeded = true;
+        } catch (error) {
           failedPhotos.push(photo);
+          const uploadDefinitelyRejected = [
+            error?.code === "visit_identity_changed",
+            Number(error?.status) === 403,
+          ].some(Boolean);
+          // A transport/server failure can arrive after the attachment row
+          // committed but before the response reached this device. Preserve
+          // the reconciliation obligation until the server confirms it, so
+          // discarding the local copy cannot leave a stale report behind.
+          reconciliationNeeded = [reconciliationNeeded, !uploadDefinitelyRejected].some(Boolean);
+          if (uploadDefinitelyRejected) {
+            retryPermanentlyBlocked = true;
+            failedPhotos.push(...photos.slice(index + 1));
+            break;
+          }
         }
       }
       if (!failedPhotos.length) {
@@ -17977,39 +17532,98 @@ export function CompletionPanel({
         // until the server reconciles them. Keep the marker (photos already
         // uploaded, reconciliation owed) if that step fails (Codex #4091 P1).
         try {
-          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, { method: "POST" });
-        } catch {
-          const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
-            pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
-          draftSnapshotRef.current = owed;
-          await saveDraftSnapshot(owed);
+          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, {
+            method: "POST",
+            body: JSON.stringify({
+              abandonMissingPhotos: draft.abandonMissingPhotos === true,
+              expectedVisit: pendingPhotoCompletion.servicePhotoVisit,
+              expectedServiceRecordId: pendingPhotoCompletion.serviceRecordId,
+            }),
+          });
+        } catch (error) {
+          const outcome = buildPhotoReconcileFailureOutcome(draft, error?.code);
+          draftSnapshotRef.current = outcome.draft;
+          await saveDraftSnapshot(outcome.draft);
           if (!completionPanelClosedRef.current) {
-            setCompletionResult(owed.pendingPhotoCompletion);
-            setPhotoRetryError("Photos uploaded, but the report could not be updated yet. Retry when connected.");
+            setCompletionResult(outcome.result);
+            setPhotoRetryError(outcome.message);
           }
           return;
         }
         await finishCompletionSuccess({
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: 0 },
         });
       } else {
         const result = {
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: failedPhotos.length },
         };
-        const remaining = { ...draft, servicePhotos: failedPhotos, reconcileOwed: false, pendingPhotoCompletion: result };
+        // A partially successful retry has already changed the visit's photo
+        // set. Keep that reconciliation obligation beside the failed local
+        // copies so discarding those copies cannot leave the report stale.
+        const remaining = {
+          ...draft,
+          servicePhotos: failedPhotos,
+          reconcileOwed: reconciliationNeeded,
+          pendingPhotoCompletion: result,
+        };
         draftSnapshotRef.current = remaining;
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
           setCompletionResult(result);
-          setPhotoRetryError("Some photos still could not upload. Your copies are retained on this device; retry when connected.");
+          setPhotoRetryConflict(retryPermanentlyBlocked);
+          setPhotoRetryError(retryPermanentlyBlocked
+            ? "This visit changed or is no longer accessible, so these photos can’t be attached safely. Your copies remain on this device until you discard them."
+            : "Some photos still could not upload. Your copies are retained on this device; retry when connected.");
         }
       }
     } finally {
       photoRetryLockRef.current = false;
       if (!completionPanelClosedRef.current) setPhotoRetrying(false);
     }
+  }
+
+  function discardRetainedCompletionPhotos() {
+    if (photoRetryLockRef.current) return;
+    const draft = draftSnapshotRef.current;
+    if (draft?.reconcileOwed && !draft?.reconciliationHandedOff) {
+      const result = {
+        ...draft.pendingPhotoCompletion,
+        completionPhotoUpload: { failed: 0, reconcileOwed: true },
+      };
+      // Mint a new photo revision before the asynchronous IndexedDB write.
+      // If the page dies, metadata for this revision cannot reattach the
+      // discarded photos from the older stored revision.
+      const owed = {
+        ...draft,
+        draftId: crypto.randomUUID(),
+        discardedPhotoDraftId: draft.draftId,
+        savedAt: new Date().toISOString(),
+        servicePhotos: [],
+        generationPhotoCount: 0,
+        reconcileOwed: true,
+        abandonMissingPhotos: true,
+        pendingPhotoCompletion: result,
+      };
+      draftSnapshotRef.current = owed;
+      void saveDraftSnapshot(owed);
+      setPhotoRetryConflict(false);
+      setPhotoRetryError("");
+      setCompletionResult(result);
+      return;
+    }
+    clearSavedDraft();
+    clearCompletionResumeOwed(service.id);
+    sideEffectsCommittedRef.current = false;
+    lastSubmitBodyRef.current = null;
+    setCommittedReplayReady(false);
+    setPhotoRetryConflict(false);
+    setPhotoRetryError("");
+    setCompletionResult((current) => current ? {
+      ...current,
+      completionPhotoUpload: { ...current.completionPhotoUpload, failed: 0, reconcileOwed: false, handedOff: false },
+    } : current);
   }
 
   // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
@@ -18140,7 +17754,7 @@ export function CompletionPanel({
     if (completionPricingPending) return;
     // Upload-mode dictation lands asynchronously after the mic stops; a
     // completion posted now would ship notes without it (pre-push P1).
-    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+    if (anyDictationPending || (dictation.mode === "upload" && (dictation.starting || dictation.listening || dictation.uploading))) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
       return;
     }
@@ -18543,23 +18157,11 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
-        alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
-        return;
-      }
-      // The re-check itself failed (codex #4140 r13 P2, r18 P1): a shown
-      // Automatic time can no longer be vouched for, so drop it, and the
-      // scheduler's state is still unknown, so nothing is promised — stop
-      // ONCE and say so. The next submit proceeds: the server computes the
-      // window itself, and the ask is recorded either way. Completion is
-      // never blocked by the preview endpoint for more than one click; a
-      // later successful load re-arms the notice.
-      if (!fresh && !previewFailureNoticedRef.current) {
-        previewFailureNoticedRef.current = true;
-        if (shown) setReviewSendPreview(null);
-        alert(reviewTiming === "auto" && shown
-          ? "The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue."
-          : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.");
+      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current });
+      if (verdict) {
+        if (verdict.noticed) previewFailureNoticedRef.current = true;
+        if (verdict.dropShown) setReviewSendPreview(null);
+        alert(verdict.message);
         return;
       }
     }
@@ -18575,44 +18177,21 @@ export function CompletionPanel({
       willReview &&
       reviewTiming === "custom"
     ) {
-      // The datetime-local value is an ET wall clock, as the server parses
-      // it (parseCompletionReviewDelayMinutes) — never `new Date(value)`,
-      // which reads it in the browser's zone (codex #4140 r13 P1).
-      const targetISO = etDatetimeLocalToISO(reviewCustomAt);
-      const target = new Date(targetISO || NaN);
-      if (
-        !reviewCustomAt ||
-        Number.isNaN(target.getTime()) ||
-        target.getTime() <= Date.now()
-      ) {
-        alert("Choose a future review request time.");
-        return;
-      }
-      if (!etWallClockExists(reviewCustomAt, targetISO)) {
-        alert(ET_GAP_TIME_MESSAGE);
-        return;
-      }
-      // The server clamps to 30 days; a later time would silently move (codex #4140 r10 P2).
-      if (target.getTime() > Date.now() + MAX_REVIEW_DELAY_MS) {
-        alert("The review request time can be at most 30 days after completion.");
+      const reviewTimeProblem = customReviewTimeProblem(reviewCustomAt);
+      if (reviewTimeProblem) {
+        alert(reviewTimeProblem);
         return;
       }
     }
-      const missingRequiredAreaProduct = selectedProducts.find((p) => {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
-        );
-      if (!areaRequirement) return false;
-      const value = Number(p.areaValue);
-      return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
-    });
-    if (!isIncompleteVisit && missingRequiredAreaProduct) {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(missingRequiredAreaProduct, serviceTypeForArea),
-          serviceTypeForArea,
-        );
-      alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
+    // An incomplete visit skips the ordinary row checks, but a submitted add-on row still needs its actuals (the server refuses it).
+    // The feed could not say whether this visit carries add-on treatments: a completed visit is not submitted blind.
+    if (service?.areaAddOnsLookupFailed === true && !isIncompleteVisit) {
+      alert(AREA_ADDONS_LOOKUP_FAILED_MESSAGE);
+      return;
+    }
+    const productRowProblem = isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) : completionProductRowProblem(service, selectedProducts, typeFor);
+    if (productRowProblem) {
+      alert(productRowProblem);
       return;
     }
     setSubmitting(true);
@@ -18666,7 +18245,7 @@ export function CompletionPanel({
       // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
       // server's unlisted-skip audit (Codex #4113 P2).
       const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
-        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => !row.areaAddOnKey && String(row.productId) === String(id))).flatMap((id) => {
             const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
             const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
@@ -18728,12 +18307,14 @@ export function CompletionPanel({
             ...(p.amountUnit === "tsp"
               ? submittedAmount(p.totalAmount, p.amountUnit)
               : { totalAmount: p.totalAmount, amountUnit: p.amountUnit }),
-            applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+            applicationMethod: productApplicationMethod(p, typeFor(p)),
           applicationArea:
             p.applicationArea ||
-            (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+            (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
+          // The area add-on this row records (the server keeps it only for an add-on the visit carries).
+          areaAddOnKey: p.areaAddOnKey,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
         // The existing completion field carries the visit area into the server
@@ -18864,7 +18445,11 @@ export function CompletionPanel({
             return entries.length ? { termiteStations: entries } : {};
           })()
           : {}),
-        customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
+        // Quick complete hides the question, so its untouched default is not
+        // an answer the tech gave: it goes as before, empty.
+        customerInteraction: quickComplete && customerInteraction === DEFAULT_CUSTOMER_INTERACTION
+          ? ""
+          : normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
         observations: reportObservations,
@@ -18998,12 +18583,12 @@ export function CompletionPanel({
           };
         });
       }
-      if (nextVisitNote) {
-        body.nextVisitAdjustmentNote = nextVisitNote;
-      }
-      if (service?.completionInvoiceAlreadySent) {
-        body.invoiceAlreadySent = true;
-      }
+      // The note is stored on the NEXT visit's staff note by the server; the
+      // card's visit id rides with it so the note lands on the visit shown.
+      Object.assign(body, nextVisitNoteFields({ nextVisitNote, nextVisit }));
+      // The invoice fields of the body: the Fast Complete sheets build theirs
+      // with the same helper (lib/completion-invoice-fields.js).
+      Object.assign(body, completionInvoiceFields(service));
       // Once the completion is KNOWN COMMITTED, every submit — automatic
       // retry or the manual one after give-up — replays the committed body
       // byte-for-byte through replayCommittedCompletion above; a fresh build
@@ -19186,7 +18771,7 @@ export function CompletionPanel({
     return (
       (!!noteText && inSelection) ||
       (action?.product?.id &&
-        selectedProducts.some((p) => p.productId === action.product.id))
+        selectedProducts.some((p) => !p.areaAddOnKey && p.productId === action.product.id))
     );
   }
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
@@ -19204,17 +18789,33 @@ export function CompletionPanel({
       ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
       : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
+  // A regular pest visit has no Protocol actions field (owner 2026-10-04):
+  // the product rows say what was done. An action a restored draft already
+  // carries stays selected (its marker line shows in the notes) and submits.
   const hideProtocolActionsField =
-    isLawn &&
-    !protocolActionsLoading &&
-    !protocolActionError &&
-    effectiveProtocolActions.length === 0;
+    isRegularPestVisit ||
+    (isLawn &&
+      !protocolActionsLoading &&
+      !protocolActionError &&
+      effectiveProtocolActions.length === 0);
   const protocolActionSelectOptions = effectiveProtocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
     selected: isProtocolActionSelected(action),
     action,
   }));
+  // The bermuda removal mix carries the server's spray conditions (active growth, the June
+  // morning limit, rain and irrigation, mowing, and the test patch on a CitraBlue or
+  // unconfirmed cultivar): one short line each beside the selector, the same line shown
+  // once however many of the three products carry it.
+  const bermudaConditionLines = [...new Set(effectiveProtocolActions
+    .filter((action) => action.group)
+    .flatMap((action) => action.gateNotes || [])
+    .filter((note) => BERMUDA_CONDITION_KEYS.includes(note.key))
+    .map((note) => (note.key === "testPatchFirst" ? BERMUDA_TEST_PATCH_LINE : note.text)))];
+  // The actions list's own warnings (/completion-actions): why the bermuda removal mix is not
+  // offered (an excluded cultivar, a blocked or capped product), one short line each.
+  const protocolActionWarningLines = [...new Set((protocolActionMeta?.warnings || []).map((warning) => warning?.message).filter(Boolean))];
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
@@ -19299,7 +18900,34 @@ export function CompletionPanel({
         }
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
+      // Options that share a group (the bermuda removal mix) go on together.
+      if (option.action.group) {
+        for (const mate of effectiveProtocolActions) {
+          if (mate !== option.action && mate.group === option.action.group) applyProtocolAction(mate);
+        }
+        normalizeGroupRows(option.action.group);
+      }
     }
+  }
+  // A product of the group that was added or restored BEFORE the group was applied has its own row
+  // (a catalog method, a catalog rate and area): it takes the group's spot shape, no catalog area
+  // or rate, and no derived total (a total the tech typed stays). Rows the group adds already have it.
+  function normalizeGroupRows(group) {
+    const members = new Map(effectiveProtocolActions.filter((a) => a.group === group && a.product?.id).map((a) => [String(a.product.id), a]));
+    setSelectedProducts((prev) => prev.map((row) => {
+      const member = members.get(String(row.productId));
+      if (!member || (member.prefillAmount !== false && member.applicationMode !== "spot")) return row;
+      const method = member.product.applicationMethod || "spot_treatment";
+      const unit = requiredApplicationArea(method, serviceTypeForArea, true)?.unit || "sqft";
+      // A typed total is the tech's actual and stays (with its manual flag); the catalog rate, the area
+      // and the area default flags are cleared either way.
+      const kept = row.totalAmountManual === true;
+      return {
+        ...row, applicationMethod: method, group, areaUnit: unit,
+        rate: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false,
+        ...(kept ? {} : { totalAmount: "", lawnAmountReason: "Spot work: enter the area treated and the amount used." }),
+      };
+    }));
   }
   function handleLawnFindingAdd(text) {
     if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
@@ -19388,7 +19016,7 @@ export function CompletionPanel({
       // cannot survive beside a newer application measurement.
       selectedProducts.map((p) => [
         p.productId, p.name, p.rate || null, p.rateUnit || null,
-        productApplicationMethod(p, serviceTypeForArea),
+        productApplicationMethod(p, typeFor(p)),
         p.applicationArea || null, p.areaValue ?? null, p.areaUnit || null,
         Array.isArray(p.targets) ? p.targets : [],
       ]),
@@ -19670,20 +19298,37 @@ export function CompletionPanel({
     </div>
   );
   const photoReconcileOwed = completionResult?.completionPhotoUpload?.reconcileOwed === true;
+  const photoReconcileHandedOff = completionResult?.completionPhotoUpload?.handedOff === true;
   const photoRecoveryNotice = (completionResult?.completionPhotoUpload?.failed > 0 || photoReconcileOwed) && (
     <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
       color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
       <p style={{ margin: "0 0 12px" }}>
-        {photoReconcileOwed
+        {photoReconcileHandedOff
+          ? "The visit is saved. Report repair was handed to the office because your access changed."
+          : photoReconcileOwed
           ? "The visit is saved and the photos are uploaded. The report still needs updating with them."
           : `The visit is saved. ${completionResult.completionPhotoUpload.failed} ${completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.`}
       </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
-      <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
-        style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
-        {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
-      </button>
+      {!photoRetryConflict && !photoReconcileHandedOff && (
+        <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
+        </button>
+      )}
+      {!photoReconcileOwed && (
+        <button type="button" onClick={discardRetainedCompletionPhotos} disabled={photoRetrying}
+          style={{ marginLeft: photoRetryConflict ? 0 : 8, padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Discard retained photos
+        </button>
+      )}
+      {photoReconcileHandedOff && (
+        <button type="button" onClick={discardRetainedCompletionPhotos}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Dismiss local recovery
+        </button>
+      )}
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
         Later
       </button>
@@ -20324,6 +19969,7 @@ export function CompletionPanel({
             {isLawn && !quickComplete && (
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
+                  request={adminFetch}
                   service={service}
                   disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
@@ -20432,7 +20078,7 @@ export function CompletionPanel({
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
+                  onChange={handleNotesInput}
                   rows={quickComplete ? 3 : 5}
                   // Lock edits while the AI draft is in flight so typing or a
                   // dictated chunk landing mid-call isn't clobbered when the
@@ -20561,7 +20207,7 @@ export function CompletionPanel({
                     <button
                       type="button"
                       aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                      onClick={() => removeSelectedLabel(kind, label)}
+                      onClick={() => removeSelectionPill(kind, label)}
                       style={{
                         border: "none",
                         background: "transparent",
@@ -20646,6 +20292,16 @@ export function CompletionPanel({
                             </option>
                           ))}
                     </select>
+                    {bermudaConditionLines.map((line) => (
+                      <div key={line} style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
+                    {protocolActionWarningLines.map((line) => (
+                      <div key={line} role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
                     {selectedProtocolActionCount > 0 && (
                       <div
                         style={{
@@ -20703,6 +20359,7 @@ export function CompletionPanel({
               <Field label="Blog post for the customer">
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
@@ -21120,6 +20777,7 @@ export function CompletionPanel({
             {/* Service findings — typed specialty completion */}
             {isTypedFindings && (
               <TypedFindingsSection
+                dictationContext={findingsDictationContext}
                 variant="mobile"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
@@ -21146,6 +20804,7 @@ export function CompletionPanel({
               const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
               return (
                 <TypedFindingsSection
+                  dictationContext={findingsDictationContext}
                   key={schema.type}
                   variant="mobile"
                   frozen={generating}
@@ -21165,6 +20824,16 @@ export function CompletionPanel({
                 />
               );
             })}
+            <AreaAddOnFields
+              service={service}
+              selectedProducts={selectedProducts}
+              products={products}
+              onAddProduct={addAreaAddOnProduct}
+              disabled={generating}
+              colors={{ text: M.ink, muted: M.ink3, border: M.hairline }}
+              selectStyle={mSelect}
+              labelStyle={eyebrowStyle}
+            />
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -21172,7 +20841,7 @@ export function CompletionPanel({
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
                     const selected = !!selectedProducts.find(
-                      (sp) => sp.productId === p.id,
+                      (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                     );
                     return (
                       <Chip
@@ -21243,7 +20912,7 @@ export function CompletionPanel({
                 >
                   {selectedProducts.map((sp) => (
                     <div
-                      key={sp.productId}
+                      key={productRowId(sp)}
                       style={{
                         background: M.card,
                         border: `0.5px solid ${M.hairline}`,
@@ -21276,7 +20945,7 @@ export function CompletionPanel({
                         placeholder="Rate"
                         value={sp.rate}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "rate", e.target.value)
+                          updateProduct(productRowId(sp), "rate", e.target.value)
                         }
                         style={{
                           ...mInput,
@@ -21289,7 +20958,7 @@ export function CompletionPanel({
                         value={sp.rateUnit}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "rateUnit",
                             e.target.value,
                           )
@@ -21326,7 +20995,7 @@ export function CompletionPanel({
                             placeholder="Gal"
                             value={sp.carrierGallons ?? ""}
                             onChange={(e) =>
-                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                              updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                             }
                             style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
                           />{" "}
@@ -21341,7 +21010,7 @@ export function CompletionPanel({
                         value={sp.totalAmount || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "totalAmount",
                             e.target.value,
                           )
@@ -21357,7 +21026,7 @@ export function CompletionPanel({
                         value={sp.amountUnit ?? sp.rateUnit ?? ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "amountUnit",
                             e.target.value,
                           )
@@ -21382,12 +21051,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
-                      {completionAreasServiced.length > 0 && (() => {
+                      {productAreaPickerChoices.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
                           sp.applicationArea,
                         );
                         const areaChoices = productAreaChoices(
-                          completionAreasServiced,
+                          productAreaPickerChoices,
                           sp.applicationArea,
                         );
                         return (
@@ -21415,7 +21084,7 @@ export function CompletionPanel({
                                 selected={selectedAreas.includes(area)}
                                 onClick={() =>
                                   updateProduct(
-                                    sp.productId,
+                                    productRowId(sp),
                                     "applicationArea",
                                     toggleProductAreaValue(
                                       sp.applicationArea,
@@ -21432,10 +21101,10 @@ export function CompletionPanel({
                         );
                       })()}
                       <select
-                        value={productApplicationMethod(sp, serviceTypeForArea)}
+                        value={productApplicationMethod(sp, typeFor(sp))}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "applicationMethod",
                             e.target.value,
                           )
@@ -21463,9 +21132,9 @@ export function CompletionPanel({
                       </select>
                       {(() => {
                         const areaRequirement = requiredApplicationArea(
-                          productApplicationMethod(sp, serviceTypeForArea),
-                          serviceTypeForArea,
-                          lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                          productApplicationMethod(sp, typeFor(sp)),
+                          typeFor(sp),
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -21476,7 +21145,7 @@ export function CompletionPanel({
                             value={sp.areaValue || ""}
                             onChange={(e) =>
                               updateProduct(
-                                sp.productId,
+                                productRowId(sp),
                                 "areaValue",
                                 e.target.value,
                               )
@@ -21492,7 +21161,7 @@ export function CompletionPanel({
                       })()}
                       <button
                         type="button"
-                        onClick={() => removeProduct(sp.productId)}
+                        onClick={() => removeProduct(productRowId(sp))}
                         aria-label="Remove product"
                         style={{
                           width: 36,
@@ -21526,12 +21195,12 @@ export function CompletionPanel({
                         });
                         return (
                         <ProductTargetsPicker
-                          idSuffix={sp.productId}
+                          idSuffix={productRowId(sp)}
                           targets={sp.targets}
                           suggestions={picker.suggestions}
                           noun={picker.noun}
                           onChange={(next) =>
-                            updateProduct(sp.productId, "targets", next)
+                            updateProduct(productRowId(sp), "targets", next)
                           }
                           theme={{
                             labelColor: M.ink3,
@@ -21558,7 +21227,7 @@ export function CompletionPanel({
                 (owner 2026-07-23): the chips are structural-pest rooms/zones;
                 those visits carry their own location semantics (zone trace,
                 trap locations, entry points, station map). */}
-            {!quickComplete && !areasTreatedHidden && (
+            {!quickComplete && !areasTreatedFieldHidden && (
               <Field label="Areas treated">
                 {" "}
                 {/* Owner directive 2026-08-27: every multi-choice control is
@@ -22246,6 +21915,7 @@ export function CompletionPanel({
                     type="text"
                     value={nextVisitNote}
                     onChange={(e) => setNextVisitNote(e.target.value)}
+                    maxLength={NEXT_VISIT_NOTE_MAX}
                     placeholder="Note about next visit adjustment…"
                     style={{ ...mInput, marginTop: 10 }}
                   />
@@ -22706,6 +22376,7 @@ export function CompletionPanel({
               {" "}
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
+                  request={adminFetch}
                 service={service}
                 disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
@@ -22916,7 +22587,7 @@ export function CompletionPanel({
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={handleNotesInput}
               rows={quickComplete ? 3 : 5}
               // Lock edits while the AI draft is in flight so typing or a
               // dictated chunk landing mid-call isn't clobbered when the
@@ -23049,7 +22720,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                    onClick={() => removeSelectedLabel(kind, label)}
+                    onClick={() => removeSelectionPill(kind, label)}
                     style={{
                       border: "none",
                       background: "transparent",
@@ -23145,6 +22816,12 @@ export function CompletionPanel({
                           </option>
                         ))}
                   </select>
+                  {bermudaConditionLines.map((line) => (
+                    <div key={line} style={{ fontSize: 14, color: D.muted }}>{line}</div>
+                  ))}
+                  {protocolActionWarningLines.map((line) => (
+                    <div key={line} role="note" style={{ fontSize: 14, color: D.muted }}>{line}</div>
+                  ))}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>
                       {selectedProtocolActionCount} protocol action
@@ -23191,6 +22868,7 @@ export function CompletionPanel({
                 <label style={labelStyle}>Blog post for the customer</label>{" "}
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
@@ -23580,6 +23258,7 @@ export function CompletionPanel({
           {/* Service findings — typed specialty completion */}
           {isTypedFindings && (
             <TypedFindingsSection
+              dictationContext={findingsDictationContext}
               variant="desktop"
               frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
@@ -23606,6 +23285,7 @@ export function CompletionPanel({
             const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
             return (
               <TypedFindingsSection
+                dictationContext={findingsDictationContext}
                 key={schema.type}
                 variant="desktop"
                 frozen={generating}
@@ -23623,6 +23303,16 @@ export function CompletionPanel({
               />
             );
           })}
+          <AreaAddOnFields
+            service={service}
+            selectedProducts={selectedProducts}
+            products={products}
+            onAddProduct={addAreaAddOnProduct}
+            disabled={generating}
+            colors={{ text: D.text, muted: D.muted, border: D.border }}
+            selectStyle={inputStyle}
+            labelStyle={labelStyle}
+          />
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -23637,7 +23327,7 @@ export function CompletionPanel({
             >
               {(products || []).slice(0, 5).map((p) => {
                 const isSelected = selectedProducts.find(
-                  (sp) => sp.productId === p.id,
+                  (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                 );
                 return (
                   <button
@@ -23715,7 +23405,7 @@ export function CompletionPanel({
             >
               {selectedProducts.map((sp) => (
                 <div
-                  key={sp.productId}
+                  key={productRowId(sp)}
                   style={{
                     background: D.card,
                     border: `1px solid ${D.border}`,
@@ -23747,14 +23437,14 @@ export function CompletionPanel({
                     placeholder="Rate"
                     value={sp.rate}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rate", e.target.value)
+                      updateProduct(productRowId(sp), "rate", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.rateUnit}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rateUnit", e.target.value)
+                      updateProduct(productRowId(sp), "rateUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23783,7 +23473,7 @@ export function CompletionPanel({
                         placeholder="Gal"
                         value={sp.carrierGallons ?? ""}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                          updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                         }
                         style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                       />{" "}
@@ -23797,14 +23487,14 @@ export function CompletionPanel({
                     placeholder="Total"
                     value={sp.totalAmount || ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "totalAmount", e.target.value)
+                      updateProduct(productRowId(sp), "totalAmount", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.amountUnit ?? sp.rateUnit ?? ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "amountUnit", e.target.value)
+                      updateProduct(productRowId(sp), "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23821,12 +23511,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
-                  {completionAreasServiced.length > 0 && (() => {
+                  {productAreaPickerChoices.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(
                       sp.applicationArea,
                     );
                     const areaChoices = productAreaChoices(
-                      completionAreasServiced,
+                      productAreaPickerChoices,
                       sp.applicationArea,
                     );
                     return (
@@ -23856,7 +23546,7 @@ export function CompletionPanel({
                               type="button"
                               onClick={() =>
                                 updateProduct(
-                                  sp.productId,
+                                  productRowId(sp),
                                   "applicationArea",
                                   toggleProductAreaValue(
                                     sp.applicationArea,
@@ -23886,10 +23576,10 @@ export function CompletionPanel({
                     );
                   })()}
                   <select
-                    value={productApplicationMethod(sp, serviceTypeForArea)}
+                    value={productApplicationMethod(sp, typeFor(sp))}
                     onChange={(e) =>
                       updateProduct(
-                        sp.productId,
+                        productRowId(sp),
                         "applicationMethod",
                         e.target.value,
                       )
@@ -23916,9 +23606,9 @@ export function CompletionPanel({
                   </select>
                   {(() => {
                     const areaRequirement = requiredApplicationArea(
-                      productApplicationMethod(sp, serviceTypeForArea),
-                      serviceTypeForArea,
-                      lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                      productApplicationMethod(sp, typeFor(sp)),
+                      typeFor(sp),
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -23929,7 +23619,7 @@ export function CompletionPanel({
                         value={sp.areaValue || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "areaValue",
                             e.target.value,
                           )
@@ -23941,7 +23631,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label="Remove product"
-                    onClick={() => removeProduct(sp.productId)}
+                    onClick={() => removeProduct(productRowId(sp))}
                     style={{
                       background: "none",
                       border: "none",
@@ -23969,12 +23659,12 @@ export function CompletionPanel({
                     });
                     return (
                     <ProductTargetsPicker
-                      idSuffix={sp.productId}
+                      idSuffix={productRowId(sp)}
                       targets={sp.targets}
                       suggestions={picker.suggestions}
                       noun={picker.noun}
                       onChange={(next) =>
-                        updateProduct(sp.productId, "targets", next)
+                        updateProduct(productRowId(sp), "targets", next)
                       }
                       theme={{
                         labelColor: D.muted,
@@ -23997,7 +23687,7 @@ export function CompletionPanel({
           {/* Areas Serviced — hidden for Tree & Shrub and rodent lines (owner
               2026-07-23): the chips are structural-pest rooms/zones; those
               visits carry their own location semantics. */}
-          {!quickComplete && !areasTreatedHidden && (
+          {!quickComplete && !areasTreatedFieldHidden && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}
@@ -24508,6 +24198,7 @@ export function CompletionPanel({
                   type="text"
                   value={nextVisitNote}
                   onChange={(e) => setNextVisitNote(e.target.value)}
+                  maxLength={NEXT_VISIT_NOTE_MAX}
                   placeholder="Note about next visit adjustment..."
                   style={{ ...inputStyle, marginTop: 8, marginBottom: 0 }}
                 />
@@ -25197,12 +24888,15 @@ function TechTipPicker({
     if (String(customTip || "").trim()) setShowCustom(true);
   }, [customTip]);
   const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
-  const groups = library?.groups || [];
+  const groups = useMemo(() => rotatedTipGroups(library), [library]);
   const allTips = useMemo(
     () => groups.flatMap((g) => (g.tips || []).map((t) => ({ ...t, groupLabel: g.label }))),
     [groups],
   );
-  const tipById = useMemo(() => new Map(allTips.map((t) => [t.id, t])), [allTips]);
+  // A search reads the whole library (`more`: the tips this visit's list
+  // leaves out, owner 2026-10-09); the open list stays the visit's own.
+  const searchTips = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const tipById = useMemo(() => new Map(searchTips.map((t) => [t.id, t])), [searchTips]);
   // The custom line takes a slot like a library pick (the server caps the
   // frozen set the same way), so the count and the cap include it.
   const customCount = String(customTip || "").trim() ? 1 : 0;
@@ -25213,7 +24907,7 @@ function TechTipPicker({
   // would drop over cap.
   const customLocked = !customCount && selectedIds.length >= TECH_TIP_MAX;
   const q = query.trim().toLowerCase();
-  const ranked = q ? rankTechTips(allTips, q) : null;
+  const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
   const inactive = disabled || loading || !!error;
@@ -25488,6 +25182,8 @@ const MONTH_NAMES = [
 
 /* Product descriptions — plain-language for techs and Virginia */
 const PRODUCT_DESCRIPTIONS = {
+  // Before the generic key: the plain product is the caterpillar product on lawn and tree & shrub lines.
+  "acelepryn insecticide": "chlorantraniliprole for leaf-feeding caterpillars (IRAC 28)",
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
@@ -25564,12 +25260,13 @@ const PRODUCT_DESCRIPTIONS = {
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",
-  mainspring: "non-neonic option for whiteflies, caterpillars, leafminers, and resistance management (IRAC 28)",
-  "distance igr": "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
-  distance: "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
+  mainspring: "non-neonic option for whiteflies, leafminers, and resistance management (IRAC 28)",
+  "distance igr": "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
+  distance: "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
   talus: "insect growth regulator for immature whitefly and scale stages (IRAC 16)",
   "kphite 7lp": "phosphite support for root/oomycete pressure; FRAC P07",
   kphite: "phosphite support for root/oomycete pressure; FRAC P07",
+  reliant: "phosphite support for root/oomycete pressure; FRAC P07",
   conserve: "spinosyn option for caterpillar/thrips-type work where labeled",
   floramite: "miticide for confirmed mite pressure only",
   "liquid copper": "contact protectant for labeled leaf or bacterial disease; keep separate from oil",
@@ -25616,10 +25313,21 @@ const TRACK_SAFETY_RULES = {
   ],
 };
 
+/* Overrides for a lawn payload that carries its own safety_rules (the v13 program,
+   GATE_LAWN_V13): Celsius is limited to 2 applications a year there. The base list above keeps the
+   legacy wording (3) for the gate-off protocol. */
+const PRODUCT_DESCRIPTIONS_V13 = {
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
+  "lesco 10-0-22":
+    "slow-release fertilizer with extra potassium for winter hardiness",
+};
+
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */
 export {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 };

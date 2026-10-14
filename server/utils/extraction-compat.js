@@ -66,6 +66,12 @@ function flatView(extraction) {
     // Watched by replay variance (FIELD_GROUPS medium).
     caller_id_disclaimed: typeof caller.caller_id_disclaimed === 'boolean' ? caller.caller_id_disclaimed : null,
     phone_note: caller.phone_note || null,
+    // ani_cannot_text / text_phone (schema 1.25.0, owner ruling 2026-10-07) —
+    // the line the caller called from cannot take texts and they gave another
+    // number for texts. NOT caller_id_disclaimed (that means the number is not
+    // theirs). Tri-state like caller_id_disclaimed. Watched by replay variance.
+    ani_cannot_text: typeof caller.ani_cannot_text === 'boolean' ? caller.ani_cannot_text : null,
+    text_phone: caller.text_phone_e164 || null,
     // sms_declined (schema 1.19.0, codex P1 on #5292) — the dedicated
     // explicit-SMS-refusal field, distinct from sms_consent_given=false
     // ("never asked"). Tri-state like caller_id_disclaimed: null (never
@@ -122,6 +128,19 @@ function flatView(extraction) {
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'
       ? property.service_address_is_primary_residence
       : null,
+    // Whole-building occupancy (schema 1.23.0): the extraction's judgement that
+    // the caller owns/leases/occupies the ENTIRE building at the service
+    // address. null when absent (every older row). It decides one thing: a
+    // business address with no unit is not held for a unit ask
+    // (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT), so replay variance watches it.
+    whole_building_occupancy: typeof property.whole_building_occupancy === 'boolean'
+      ? property.whole_building_occupancy
+      : null,
+    // The extraction's final judgement of the above over the whole call (schema
+    // 1.23.0): unhedged, uncorrected, unshared, not a question or a condition.
+    whole_building_occupancy_final: typeof property.whole_building_occupancy_final === 'boolean'
+      ? property.whole_building_occupancy_final
+      : null,
     // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
@@ -169,6 +188,10 @@ function flatView(extraction) {
     price_offered_by_staff: typeof svc.price_offered_by_staff === 'boolean' ? svc.price_offered_by_staff : null,
     price_accepted_by_caller: typeof svc.price_accepted_by_caller === 'boolean' ? svc.price_accepted_by_caller : null,
     price_is_final: typeof svc.price_is_final === 'boolean' ? svc.price_is_final : null,
+    // Whole-call judgement that ANY price came up (schema 1.24.0): null when absent (every older
+    // row). The no-price assessment booking (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING) needs exactly
+    // false, so replay variance watches it.
+    price_discussed: typeof svc.price_discussed === 'boolean' ? svc.price_discussed : null,
     staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
     selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,

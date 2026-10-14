@@ -50,6 +50,8 @@ describe('StripeService.savePaymentMethod', () => {
       if (table === 'payment_methods') return paymentMethodQuery;
       throw new Error(`Unexpected trx table: ${table}`);
     });
+    // The per-customer payment-method advisory lock (utils/payment-method-lock.js).
+    trxMock.raw = jest.fn(async () => ({ rows: [] }));
 
     dbMock = jest.fn((table) => {
       if (table === 'customers') return customerQuery;
@@ -146,6 +148,7 @@ describe('savePaymentMethod — duplicate-key race + requireAttached (portal ACH
       first: jest.fn(async () => existingRow),
     };
     const trxMock = jest.fn(() => pmWriteQuery);
+    trxMock.raw = jest.fn(async () => ({ rows: [] }));
     dbMock = jest.fn((table) => (table === 'customers' ? customerQuery : pmReadQuery));
     dbMock.transaction = jest.fn(async (cb) => cb(trxMock));
 

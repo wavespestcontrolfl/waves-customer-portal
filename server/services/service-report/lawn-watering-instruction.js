@@ -19,11 +19,28 @@
 //      force a direction over it.
 //   B. until-dry + timed hold -> ONE hold keeping both conditions (the clock
 //      time, and not before the treatment has dried).
-//   C. hold + water-in -> the water-in deadline is always completion + the
-//      rule's window (never re-anchored to the hold end). A hold that reaches
-//      it cannot be satisfied together with the water-in -> no claim, for
-//      review; otherwise hold then water in. Hold end = completion + longest
-//      timed hold rounded UP to the clock hour in ET.
+//   C. hold + water-in -> hold, then water in. The water-in deadline is
+//      completion + the rule's window while the hold ends before it. When a
+//      TIMED hold reaches that deadline (owner 2026-10-09: every post-emergent
+//      herbicide holds 24 hours, and the pre-emergents it rides with water in
+//      within 24), the water-in follows the hold: the deadline is re-anchored
+//      to the printed hold end + the window ("Skip ... until Sat 10 AM. After
+//      that, water in ... by Sun 10 AM"). An until-dry hold with no recorded
+//      hours has no printed end, so its synthetic floor never anchors a
+//      deadline: a window it reaches is still no claim, for review. Hold end
+//      = completion + longest timed hold rounded UP to the clock hour in ET.
+//
+//   D. a water-in whose window is longer than LONG_WINDOW_HOURS (a
+//      pre-emergent: the label allows 14 days to get its ½ inch, owner
+//      2026-10-09 "follow the labels") is never a special run: it is one
+//      "needs about ½ inch of water by <date>. Rain and your regular watering
+//      both count." line with no minutes. It never merges with a short
+//      water-in (Arena, Dylox, a fertilizer): the short one keeps its own amount
+//      and deadline, and the long line follows it ("In all, ..."). A long-only
+//      visit records instruction.longWindow = true. A visit with both records
+//      instruction.later = { at, state, lines }: from the short water-in's own
+//      deadline (`at`) the live banner prints only the long line, so a
+//      deadline that has passed is never shown as current.
 //
 // Minutes ladder for a water-in (NEVER assumes there is no sprinkler system):
 //   1. customer's measured rate (typed inches per week + run minutes + days
@@ -38,6 +55,13 @@
 // true) are ignored here.
 // Generic copy prints minutes only, never "about a quarter inch": at the UF
 // rates the runtime uses those minutes are really 0.33-0.38 inch.
+// For the "generic" basis only (step 3, no head type on file): the rule-of-thumb
+// figures are not the customer's system, so a completion built with
+// `plainWhenNoSetup` states the AMOUNT and no minutes ("with about ½ inch by
+// ..."), and records instruction.amountOnly (owner 2026-10-08, permanent and
+// ungated since 2026-10-09: minutes only when the customer's portal setup gives
+// them). The caller passes it at completion (the instruction is then FROZEN);
+// an unfrozen re-render passes nothing. This module reads no gate.
 //
 // Mowing is a SEPARATE result (instruction.mowHold, never part of `lines`: the
 // watering text sends `lines` verbatim). It exists only when an applied product
@@ -51,21 +75,32 @@
 // hours or minutes figure (the banned re-entry pattern). Water-in copy is
 // allowed on a non-permitted county day and says so.
 
-const { resolveApplicationRate, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
+const { resolveApplicationRate, normalizeRuntimeInputs, OWNER_MINUTES_PER_QUARTER_INCH } = require('@waves/irrigation-runtime');
 // ET wall-clock extraction lives in the one shared module; only the deadline
 // rounding below is specific to this writer.
-const { etParts, etDateString } = require('../../utils/datetime-et');
+const { etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const HOUR_MS = 3600000;
+// Latest ET wall time a same-day water-in deadline may print ("11 PM tonight"),
+// and the least time it must leave after completion: a full cycle of several
+// rotor zones at about 40 minutes each.
+const SAME_DAY_CUTOFF = '23:00';
+const SAME_DAY_MIN_LEAD_MS = 3 * HOUR_MS;
+// A water-in window longer than LONG_WINDOW_HOURS is met by rain and the
+// customer's regular schedule (rule D), never by a one-off run. One constant:
+// the rule validator refuses a same-day rule on such a window.
+const { LONG_WINDOW_HOURS } = require('./lawn-watering-rule');
 
 // Owner table: minutes per zone for a quarter inch. Scaled linearly (rounded
 // to 5) for any other rule depth.
-const GENERIC_MINUTES_PER_QUARTER_INCH = Object.freeze({ spray: 15, rotor: 40 });
+// One table, in the irrigation package: the lawn report's card derives weekly inches from the same constant.
+const GENERIC_MINUTES_PER_QUARTER_INCH = OWNER_MINUTES_PER_QUARTER_INCH;
 const BASE_INCHES = 0.25;
 
 const HOLD_SECOND_LINE = 'That gives today’s treatment time to work.';
 const PLAN_LINE = 'Then follow this week’s plan below.';
 const ANY_DAY_LINE = 'Run it even if it is not your usual day.';
+const LONG_COUNTS_LINE = 'Rain and your regular watering both count.';
 // A water-in shallower than the plan's per-run depth is partial credit only.
 const PARTIAL_CREDIT_LINE = `${ANY_DAY_LINE} That counts toward this week’s watering.`;
 // Plan-dependent sentences are NEVER part of the instruction (which is frozen
@@ -80,6 +115,9 @@ const DRY_HOLD_FLOOR_HOURS = 6; // used only when no dry-hold rule carries hold_
 const DRY_LABEL = 'today’s treatment has dried';
 const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
+// The live banner's invitation under an amount-only water-in (banner.setupLine).
+// Never part of `lines`: the PDF, the watering text and Ask Waves do not carry it.
+const SETUP_INVITE_LINE = 'Add your sprinkler setup and we’ll give you minutes for each zone.';
 
 // ── Time helpers ─────────────────────────────────────────────────────────
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -128,6 +166,16 @@ function formatWhen(date, anchor) {
   const days = Math.round((Date.parse(`${atDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000);
   if (days >= 6) return `${WEEKDAYS[at.dayOfWeek]}, ${MONTHS[at.month - 1]} ${at.day} at ${clock}`;
   return `${WEEKDAYS[at.dayOfWeek]} ${clock}`;
+}
+
+// "¼ inch", "½ inch", "0.27 inch", "1 inch", "1.5 inches": exact quarter
+// fractions in words, otherwise up to two decimals. Singular up to one inch.
+function formatInches(value) {
+  const n = Math.round(Number(value) * 100) / 100;
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const quarters = { 0.25: '¼', 0.5: '½', 0.75: '¾' };
+  const text = quarters[n] || String(n);
+  return `${text} ${n <= 1 ? 'inch' : 'inches'}`;
 }
 
 // ── Mow hold ─────────────────────────────────────────────────────────────
@@ -210,7 +258,7 @@ function scaledMinutes(perQuarterInch, inches) {
   return Math.max(5, Math.round((perQuarterInch * (inches / BASE_INCHES)) / 5) * 5);
 }
 
-function minutesFor(runtime, inches) {
+function minutesFor(runtime, inches, plainWhenNoSetup = false) {
   const empty = { spray: null, rotor: null, unknown: false, measured: null };
   const rt = runtime && typeof runtime === 'object' && runtime.unconfirmed !== true ? runtime : null;
 
@@ -250,7 +298,12 @@ function minutesFor(runtime, inches) {
   if (onFile) {
     return { minutes: { ...empty, unknown: true }, basis: 'unknown_heads', clause: FULL_CYCLE };
   }
-  // No head type on file: never assume no sprinklers. Both generic figures.
+  // No head type on file: never assume no sprinklers. The amount alone when the
+  // caller is a completion build (plainWhenNoSetup); both generic figures on an
+  // unfrozen re-render.
+  if (plainWhenNoSetup) {
+    return { minutes: { ...empty }, basis: 'generic', clause: null, amountOnly: true, amount: formatInches(inches) };
+  }
   return { minutes: { ...empty, spray, rotor }, basis: 'generic', clause: `spray heads about ${spray} minutes a zone and rotors about ${rotor} minutes` };
 }
 
@@ -284,7 +337,206 @@ function emptyInstruction() {
  *                                    explicitInchesPerWeek, unconfirmed }
  * @returns {object}
  */
-function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
+// The water-in deadline, or null when no honest one exists.
+// C. Completion + the rule's window while the hold ends before it. A hold that
+// reaches it: when the effective hold end is a TIMED end (a printed clock
+// time), the water-in follows the hold and the deadline becomes that hold end
+// + the window (owner 2026-10-09). When the effective end is the until-dry
+// floor (synthetic, never printed) the pair cannot be honoured together: no
+// claim, for review, never a deadline anchored to an invented figure. A
+// same-day rule (label: water in "the same day") also caps it at
+// SAME_DAY_CUTOFF on the completion's ET day, and when the later of completion
+// and the hold's end leaves less than SAME_DAY_MIN_LEAD before the cutoff, the
+// watering run cannot fit: no claim, never a next-day or impossible deadline
+// (so a 24-hour hold beside Dylox stays no claim).
+function waterInDeadline(at, waterIns, byHours, holdEnd, timedEnd = null) {
+  let by = deadlineAfter(at, byHours);
+  if (holdEnd && holdEnd.getTime() >= by.getTime()) {
+    if (!timedEnd || timedEnd.getTime() < holdEnd.getTime()) return null;
+    by = deadlineAfter(timedEnd, byHours);
+  }
+  if (!waterIns.some((r) => r.water_in_same_day === true)) return by;
+  // The run can start only once completion AND any hold are behind it.
+  const start = Math.max(at.getTime(), holdEnd ? holdEnd.getTime() : 0);
+  const cutoff = parseETDateTime(`${etDateString(at)}T${SAME_DAY_CUTOFF}`);
+  if (cutoff.getTime() - start < SAME_DAY_MIN_LEAD_MS) return null;
+  if (cutoff.getTime() < by.getTime()) by = cutoff;
+  return by;
+}
+
+// The water-in half of the instruction: amount, deadline and minutes. Fills the
+// water-in fields of `out` and returns the detail the lines are written from,
+// or null when no honest deadline exists (C. see waterInDeadline).
+function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd }) {
+  const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
+  const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
+  const detail = { inches, byHours, ...minutesFor(runtime, inches, plainWhenNoSetup) };
+  const by = waterInDeadline(at, waterIns, byHours, holdEnd, timedEnd);
+  if (!by) return null;
+  out.minutes = detail.minutes;
+  out.waterInInches = inches;
+  out.waterInBy = by.toISOString();
+  out.waterInByLabel = formatWhen(by, at);
+  if (detail.amountOnly) out.amountOnly = true;
+  return detail;
+}
+
+// The water-in sentences. Minutes: "by <when>" then "Run <clause>" (one line after
+// a hold). Amount only (no sprinkler setup on file): "with about ½ inch by <when>".
+function waterInLines(detail, whenLabel, afterHold) {
+  const lead = afterHold ? 'After that, water in' : 'Water in';
+  if (detail.amountOnly) return [`${lead} today’s treatment with about ${detail.amount} by ${whenLabel}.`];
+  return afterHold
+    ? [`${lead} today’s treatment by ${whenLabel}: run ${detail.clause}.`]
+    : [`${lead} today’s treatment by ${whenLabel}.`, `Run ${detail.clause}.`];
+}
+
+// D. The long-window water-in: the largest amount, by the shortest of the long
+// windows from completion (a hold inside it changes nothing: the regular
+// schedule resumes after the hold).
+function longWaterIn(longs, at) {
+  const inches = Math.max(...longs.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
+  const byHours = Math.min(...longs.map((r) => finitePositive(r.water_in_by_hours, 24)));
+  const by = deadlineAfter(at, byHours);
+  return { inches, by, label: formatWhen(by, at) };
+}
+
+// Two lines when the long water-in is the instruction's own water-in; one
+// combined line when it follows a short water-in, so the visit stays short.
+function longWaterInLines(long, lead, combined) {
+  const needs = `${lead} needs about ${formatInches(long.inches)} of water by ${long.label}.`;
+  return combined ? [`${needs} ${LONG_COUNTS_LINE}`] : [needs, LONG_COUNTS_LINE];
+}
+
+// Each resolved rule by what it asks of the customer. A water-in is short (a
+// one-off run) or long (rule D) by its own window.
+const isLongWaterIn = (r) => finitePositive(r.water_in_by_hours, 24) > LONG_WINDOW_HOURS;
+const RULE_GROUP = {
+  hold: () => 'holds',
+  water_in: (r) => (isLongWaterIn(r) ? 'longs' : 'waterIns'),
+  none: () => 'nones',
+};
+function groupRules(resolved) {
+  const groups = { holds: [], waterIns: [], longs: [], nones: [] };
+  resolved.forEach((r) => {
+    const groupOf = RULE_GROUP[r.mode];
+    if (groupOf) groups[groupOf(r)].push(r);
+  });
+  return groups;
+}
+
+// "None" is a positive claim: every product resolved and at least one of them
+// is label or owner sourced.
+function noneInstruction(out, nones) {
+  if (!nones.some((r) => r.source === 'label' || r.source === 'owner')) return out;
+  out.state = 'none';
+  out.ruleSource = ruleSourceOf(nones);
+  out.lines = [NONE_LINE_1];
+  return out;
+}
+
+// When the visit's holds end. Each hold is timed or until-dry. An until-dry
+// rule's EXPLICIT hold_hours is a recorded minimum, so it counts as a timed
+// hold too (printed as a clock time beside the drying condition). The
+// synthetic six-hour floor is for the conflict check only and is never printed.
+function holdWindow(holds, at) {
+  const dryHolds = holds.filter((r) => r.hold_until === 'dry');
+  const dryHours = dryHolds.map((r) => Number(r.hold_hours)).filter((h) => Number.isFinite(h) && h > 0);
+  const timedHours = [
+    ...holds.filter((r) => r.hold_until !== 'dry').map((r) => finitePositive(r.hold_hours, 24)),
+    ...dryHours,
+  ];
+  const timedEnd = timedHours.length
+    ? ceilToHour(new Date(at.getTime() + Math.max(...timedHours) * HOUR_MS))
+    : null;
+  const dryEnd = dryHolds.length && !dryHours.length
+    ? new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS)
+    : null;
+  const effectiveEnd = [timedEnd, dryEnd].filter(Boolean).sort((x, y) => y - x)[0] || null;
+  return { timedEnd, effectiveEnd, waitsForDry: dryHolds.length > 0 };
+}
+
+// B. Until-dry + timed hold is ONE hold that keeps both conditions: the clock
+// time, and not before the treatment has dried (never a number beside
+// dry/dried). Fills the hold fields of `out` and returns the label the hold
+// line prints.
+function applyHold(out, hold, at) {
+  if (!hold.timedEnd) {
+    out.holdUntilLabel = DRY_LABEL;
+    out.holdUntilPlanLabel = DRY_PLAN_LABEL;
+    return DRY_LABEL;
+  }
+  out.holdUntil = hold.timedEnd.toISOString();
+  out.holdUntilLabel = formatWhen(hold.timedEnd, at);
+  // The plan overlay ("Not before …:") keeps the drying condition too, or
+  // the plan card would release a run at the clock time on a wet treatment.
+  out.holdUntilPlanLabel = hold.waitsForDry ? `${out.holdUntilLabel} and ${DRY_PLAN_LABEL}` : out.holdUntilLabel;
+  return hold.waitsForDry ? `${out.holdUntilLabel}, and not before ${DRY_LABEL}` : out.holdUntilLabel;
+}
+
+// A long-only visit: the long line is the instruction's own water-in.
+function applyLongOnly(out, long) {
+  out.longWindow = true;
+  out.minutes = { spray: null, rotor: null, unknown: false, measured: null };
+  out.waterInInches = long.inches;
+  out.waterInBy = long.by.toISOString();
+  out.waterInByLabel = long.label;
+}
+
+// A short water-in beside a long one (Arena beside a pre-emergent): the short
+// step is over at ITS OWN deadline while the long line has days to run. `later`
+// is what the live banner says from that moment: the long line worded as on a
+// long-only visit, and nothing about the short run. It is frozen with the
+// instruction; nothing is recomputed at read time. A timed hold has ended by
+// then (waterInDeadline never puts the short deadline before the printed hold
+// end); a hold that waits for drying has no clock end, so its line stays,
+// without its clock time. waterInInches / waterInBy are the long water-in's
+// own amount and deadline: the read-time rain check (lawn-water-in-rain.js)
+// measures rain through that deadline against that amount.
+function laterPhase(out, hold, long) {
+  const dry = !!hold && hold.waitsForDry;
+  return {
+    at: out.waterInBy,
+    state: dry ? 'hold_then_water_in' : 'water_in',
+    waterInInches: long.inches,
+    waterInBy: long.by.toISOString(),
+    lines: [
+      ...(dry ? [`Skip your turf watering until ${DRY_LABEL}.`] : []),
+      ...longWaterInLines(long, dry ? 'Today’s treatment then' : 'Today’s treatment', false),
+    ],
+  };
+}
+
+const LONG_LEAD = { short: 'In all, it', hold: 'Today’s treatment then', alone: 'Today’s treatment' };
+
+// State, expiry and lines from the parts the visit has: a hold, a short
+// water-in, a long water-in (any of them null).
+function finishInstruction(out, { hold, holdLabel, short, long }) {
+  const holdLines = hold ? [`Skip your turf watering until ${holdLabel}.`] : [];
+  if (!short && !long) {
+    out.state = 'hold';
+    // A hold that waits for the treatment to dry has no clock end: dryness is
+    // a condition, so it never expires on a synthetic clock (the plan-week
+    // scope bounds it). A purely timed hold ends at its clock time.
+    out.expiresAt = hold.timedEnd && !hold.waitsForDry ? hold.timedEnd.toISOString() : null;
+    out.lines = [...holdLines, HOLD_SECOND_LINE];
+    return out;
+  }
+  const shortLines = short ? [...waterInLines(short, out.waterInByLabel, !!hold), ANY_DAY_LINE] : [];
+  // The long line closes the instruction: alone it is the water-in, after a
+  // short water-in it is the total ("In all").
+  const longLines = long ? longWaterInLines(long, LONG_LEAD[(short && 'short') || (hold && 'hold') || 'alone'], !!short) : [];
+  out.state = hold ? 'hold_then_water_in' : 'water_in';
+  // The live banner lasts until the LAST deadline it names. A hold that waits
+  // for drying keeps the whole note live past it: the drying condition never
+  // ends by the clock.
+  out.expiresAt = hold && hold.waitsForDry ? null : (long ? long.by.toISOString() : out.waterInBy);
+  out.lines = [...holdLines, ...shortLines, ...longLines];
+  if (short && long) out.later = laterPhase(out, hold, long);
+  return out;
+}
+
+function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhenNoSetup } = {}) {
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
   const resolved = list.map(ruleOf);
@@ -306,103 +558,21 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   // No other product may force a direction over a product we know nothing about.
   if (resolved.some((r) => !r)) return out;
 
-  const holds = resolved.filter((r) => r.mode === 'hold');
-  const waterIns = resolved.filter((r) => r.mode === 'water_in');
-  const nones = resolved.filter((r) => r.mode === 'none');
+  const { holds, waterIns, longs, nones } = groupRules(resolved);
+  if (!holds.length && !waterIns.length && !longs.length) return noneInstruction(out, nones);
 
-  if (!holds.length && !waterIns.length) {
-    // "None" is a positive claim: every product resolved (above) and at least
-    // one of them is label or owner sourced.
-    if (nones.some((r) => r.source === 'label' || r.source === 'owner')) {
-      out.state = 'none';
-      out.ruleSource = ruleSourceOf(nones);
-      out.lines = [NONE_LINE_1];
-    }
-    return out;
-  }
-
-  // Each hold is timed or until-dry. An until-dry rule's EXPLICIT hold_hours
-  // is a recorded minimum, so it counts as a timed hold too (printed as a
-  // clock time beside the drying condition). The synthetic six-hour floor is
-  // for the conflict check only and is never printed.
-  const dryHolds = holds.filter((r) => r.hold_until === 'dry');
-  const dryHours = dryHolds.map((r) => Number(r.hold_hours)).filter((h) => Number.isFinite(h) && h > 0);
-  const timedHours = [
-    ...holds.filter((r) => r.hold_until !== 'dry').map((r) => finitePositive(r.hold_hours, 24)),
-    ...dryHours,
-  ];
-  const timedEnd = timedHours.length
-    ? ceilToHour(new Date(at.getTime() + Math.max(...timedHours) * HOUR_MS))
+  const hold = holds.length ? holdWindow(holds, at) : null;
+  const short = waterIns.length
+    ? applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: hold && hold.effectiveEnd, timedEnd: hold && hold.timedEnd })
     : null;
-  const dryEnd = dryHolds.length && !dryHours.length
-    ? new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS)
-    : null;
-  const effectiveHoldEnd = [timedEnd, dryEnd].filter(Boolean).sort((x, y) => y - x)[0] || null;
+  // C. A short water-in with no honest deadline: no claim (see waterInDeadline).
+  if (waterIns.length && !short) return out;
 
-  let waterInDetail = null;
-  let by = null;
-  if (waterIns.length) {
-    const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
-    const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
-    waterInDetail = { inches, byHours, ...minutesFor(runtime, inches) };
-    // C. The deadline is ALWAYS completion + the rule's window. A hold that
-    // reaches it cannot be honoured together with the water-in: no claim, for
-    // review, never a manufactured later deadline.
-    by = deadlineAfter(at, byHours);
-    if (effectiveHoldEnd && effectiveHoldEnd.getTime() >= by.getTime()) return out;
-    out.minutes = waterInDetail.minutes;
-    out.waterInInches = inches;
-    out.waterInBy = by.toISOString();
-    out.waterInByLabel = formatWhen(by, at);
-  }
-  out.ruleSource = ruleSourceOf([...holds, ...waterIns]);
-
-  if (!holds.length) {
-    out.state = 'water_in';
-    out.expiresAt = out.waterInBy;
-    out.lines = [
-      `Water in today’s treatment by ${out.waterInByLabel}.`,
-      `Run ${waterInDetail.clause}.`,
-      ANY_DAY_LINE,
-    ];
-    return out;
-  }
-
-  // B. Until-dry + timed hold is ONE hold that keeps both conditions: the
-  // clock time, and not before the treatment has dried (never a number beside
-  // dry/dried).
-  let holdLabel;
-  if (timedEnd) {
-    out.holdUntil = timedEnd.toISOString();
-    out.holdUntilLabel = formatWhen(timedEnd, at);
-    // The plan overlay ("Not before …:") keeps the drying condition too, or
-    // the plan card would release a run at the clock time on a wet treatment.
-    out.holdUntilPlanLabel = dryHolds.length ? `${out.holdUntilLabel} and ${DRY_PLAN_LABEL}` : out.holdUntilLabel;
-    holdLabel = dryHolds.length ? `${out.holdUntilLabel}, and not before ${DRY_LABEL}` : out.holdUntilLabel;
-  } else {
-    out.holdUntilLabel = DRY_LABEL;
-    out.holdUntilPlanLabel = DRY_PLAN_LABEL;
-    holdLabel = DRY_LABEL;
-  }
-  if (waterInDetail) {
-    out.state = 'hold_then_water_in';
-    // A hold that waits for drying keeps the whole note live past the water-in
-    // deadline: the drying condition never ends by the clock.
-    out.expiresAt = dryHolds.length ? null : out.waterInBy;
-    out.lines = [
-      `Skip your turf watering until ${holdLabel}.`,
-      `After that, water in today’s treatment by ${out.waterInByLabel}: run ${waterInDetail.clause}.`,
-      ANY_DAY_LINE,
-    ];
-  } else {
-    out.state = 'hold';
-    // A hold that waits for the treatment to dry has no clock end: dryness is
-    // a condition, so it never expires on a synthetic clock (the plan-week
-    // scope bounds it). A purely timed hold ends at its clock time.
-    out.expiresAt = timedEnd && !dryHolds.length ? timedEnd.toISOString() : null;
-    out.lines = [`Skip your turf watering until ${holdLabel}.`, HOLD_SECOND_LINE];
-  }
-  return out;
+  out.ruleSource = ruleSourceOf([...holds, ...waterIns, ...longs]);
+  const long = longs.length ? longWaterIn(longs, at) : null;
+  if (long && !short) applyLongOnly(out, long);
+  const holdLabel = hold ? applyHold(out, hold, at) : null;
+  return finishInstruction(out, { hold, holdLabel, short, long });
 }
 
 /**
@@ -426,11 +596,48 @@ function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = 
   return lines;
 }
 
+/**
+ * GATE_LAWN_WATER_IN_RAIN, read time only: a water-in frozen with BOTH generic figures ("spray heads about 30 minutes a zone
+ * and rotors about 80 minutes": no head type was on file) says the amount first, then the same two figures:
+ * "...by Sat 9 AM: about ½ inch — around 30 minutes on spray heads or 80 on rotors." The minutes are the ones the
+ * instruction was frozen with (one rate table, minutesFor); nothing is recomputed. Anything else comes back as the very same
+ * object: a head type or a measured rate on file (one figure), mixed heads on file, an amount-only instruction (owner
+ * 2026-10-08: minutes only when the customer's setup gives them), a hold-only or none instruction, or lines that are not
+ * the generic ones (an older record).
+ */
+function withAmountLine(instruction) {
+  if (!instruction || typeof instruction !== 'object' || !Array.isArray(instruction.lines)) return instruction;
+  if (!['water_in', 'hold_then_water_in'].includes(instruction.state) || instruction.amountOnly === true) return instruction;
+  const m = instruction.minutes;
+  const spray = m && Number(m.spray);
+  const rotor = m && Number(m.rotor);
+  if (!m || m.measured != null || m.unknown === true || !Number.isFinite(spray) || !Number.isFinite(rotor) || spray <= 0 || rotor <= 0) return instruction;
+  const amount = formatInches(instruction.waterInInches);
+  if (!amount) return instruction;
+  const clause = `spray heads about ${spray} minutes a zone and rotors about ${rotor} minutes`;
+  const tail = `about ${amount} — around ${spray} minutes on spray heads or ${rotor} on rotors.`;
+  const lines = instruction.lines.slice();
+  const afterHold = lines.findIndex((line) => typeof line === 'string' && line.startsWith('After that, water in today’s treatment by ') && line.endsWith(`: run ${clause}.`));
+  if (afterHold >= 0) {
+    lines[afterHold] = `${lines[afterHold].slice(0, -`run ${clause}.`.length)}${tail}`;
+    return { ...instruction, lines };
+  }
+  const runAt = lines.findIndex((line) => line === `Run ${clause}.`);
+  if (runAt < 1 || !(typeof lines[runAt - 1] === 'string' && lines[runAt - 1].startsWith('Water in today’s treatment by ') && lines[runAt - 1].endsWith('.'))) return instruction;
+  lines[runAt - 1] = `${lines[runAt - 1].slice(0, -1)}: ${tail}`;
+  lines.splice(runAt, 1);
+  return { ...instruction, lines };
+}
+
 module.exports = {
   buildWateringInstruction,
   composeBannerLines,
+  withAmountLine,
+  formatInches,
+  SETUP_INVITE_LINE,
   normalizeMowHoldDays,
   isValidMowHold,
   GENERIC_MINUTES_PER_QUARTER_INCH,
+  LONG_WINDOW_HOURS,
   _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter, buildMowHold },
 };

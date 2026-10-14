@@ -4,7 +4,8 @@
   "webDir": "dist",
   "ios": {
     "contentInset": "never",
-    "backgroundColor": "#E5EFF7"
+    "backgroundColor": "#E5EFF7",
+    "limitsNavigationsToAppBoundDomains": true
   },
   "server": {
     "url": "https://portal.wavespestcontrol.com",

@@ -141,7 +141,7 @@ describe('llm call-ledger coverage', () => {
 // { laneId: '<lane>' })`, then set the lane's policy to ledger: 'call').
 const KNOWN_UNWRAPPED = {
   'services/llm/call.js': [2, 'the adapter itself — records each leg through recordCall'],
-  'services/voice-agent/relay-conversation.js': [1, 'voice_relay streams; ledgerCall takes a resolved Message'],
+  'services/voice-agent/relay-conversation.js': [1, 'voice_relay streams; each finished round is recorded through recordStreamedMessage'],
   'services/collections/outbound-voice/collections-conversation.js': [1, 'voice_relay_collections streams'],
   'services/lawn-assessment.js': [1, 'lawn_assess: its Gemini primary is a raw fetch, unrecorded'],
   'services/tree-shrub-assessment.js': [1, 'tree_shrub: Gemini primary is a raw fetch'],

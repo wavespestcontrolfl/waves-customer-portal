@@ -7,7 +7,7 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
-import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, SectionOneTimeBlock, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
 const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
@@ -918,6 +918,23 @@ describe('mixed-estimate approval microcopy', () => {
   });
 });
 
+describe('an area add-on price reads "per application" (AGENTS.md price copy)', () => {
+  const addOn = { service: 'area_addon', addOnKey: 'web_sweep', addOnCategory: 'pest_control', priceUnit: 'application', label: 'Web Sweep', amount: 99, kind: 'charge' };
+  const plain = { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 150, kind: 'charge' };
+
+  it('the one-time breakdown row says "$99.00 per application"; a plain row keeps its bare amount', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 249, items: [addOn, plain] }} />);
+    expect(screen.getByText('$99.00 per application')).toBeInTheDocument();
+    expect(screen.getByText('$150.00')).toBeInTheDocument();
+    expect(screen.queryByText(/per visit/i)).toBeNull();
+  });
+
+  it('the row embedded in a service section says it too', () => {
+    render(<SectionOneTimeBlock contribution={{ items: [addOn], subtotal: 99 }} />);
+    expect(screen.getByText('$99.00 per application')).toBeInTheDocument();
+  });
+});
+
 describe('OneTimeBreakdownCard lawn guide row (one-time lawn lines)', () => {
   const request = { token: 'tok-otl', customerEmail: 'a@b.com', customerPhone: '+19415551234', disabled: false, preview: false };
   const lawnBreakdown = (service) => ({ total: 450, items: [{ service, label: 'Lawn work', amount: 450, kind: 'charge' }] });
@@ -1246,6 +1263,15 @@ describe('oneTimePriceCopy', () => {
     const noGuarantee = oneTimePriceCopy(breakdown, { noGuarantee: true });
     expect(noGuarantee).not.toMatch(/guarantee/i);
     expect(noGuarantee).toMatch(/break the breeding cycle/);
+  });
+
+  it('classifies an area add-on row by its catalog family, not its name (no pest callback on a lawn add-on)', () => {
+    const lawnAddOn = { total: 129, items: [{ service: 'area_addon', addOnKey: 'fire_ant_yard', addOnCategory: 'lawn_care', label: 'Fire Ant Yard Treatment', amount: 129 }] };
+    expect(oneTimePriceCopy(lawnAddOn)).toMatch(/One lawn treatment/);
+    expect(oneTimePriceCopy(lawnAddOn)).not.toMatch(/30-day callback period/);
+    // The web sweep is pest control: it keeps the default one-time terms.
+    const webSweep = { total: 99, items: [{ service: 'area_addon', addOnKey: 'web_sweep', addOnCategory: 'pest_control', label: 'Web Sweep', amount: 99 }] };
+    expect(oneTimePriceCopy(webSweep)).toMatch(/30-day callback period/);
   });
 
   it('returns Bora-Care wood-treatment copy without the pest callback line', () => {
@@ -2153,6 +2179,25 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
 });
 
 describe('ContactGapFields — missing-contact capture on accept', () => {
+  it('asks for a mobile number only when the estimate has none, and saves it on request', () => {
+    const onPhoneSave = vi.fn();
+    const { rerender } = render(<ContactGapFields gaps={{ lastName: false, email: false, phone: false }} />);
+    expect(screen.queryByLabelText('Mobile number')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: false, phone: true }} phone="941555" onPhoneSave={onPhoneSave} />);
+    expect(screen.getByLabelText('Mobile number')).toHaveValue('941555');
+    // Not a full number yet: the save stays off.
+    expect(screen.getByRole('button', { name: 'Save number' })).toBeDisabled();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: false, phone: true }} phone="(941) 555-0142" onPhoneSave={onPhoneSave} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save number' }));
+    expect(onPhoneSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the server refusal under the mobile number field', () => {
+    render(<ContactGapFields gaps={{ phone: true }} phone="(941) 555-0142" phoneError="We could not complete this booking online — please call the Waves office." />);
+    expect(screen.getByRole('alert')).toHaveTextContent('please call the Waves office');
+    expect(screen.getByLabelText('Mobile number')).toHaveAttribute('aria-invalid', 'true');
+  });
+
   const noop = () => {};
 
   it('renders nothing when there are no gaps', () => {

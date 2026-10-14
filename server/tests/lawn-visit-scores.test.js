@@ -78,35 +78,32 @@ test('independentStressFloor reads only insect/drought/mechanical severities, ne
   expect(visit.independentStressFloor({ status: 'complete', severities: JSON.stringify({ fungal_activity: sig('minor') }) })).toBeNull();
 });
 
-// Owner ruling 2026-09-24: lawn health scores are READ-ONLY from photos. A
-// technician's adjustedScores override is honored ONLY for a key the AI left
-// unknown (null) — a blank AI read is the one thing they may fill in. A key
-// the AI DID determine is authoritative no matter what the client posts.
-describe('confirm scores are read-only from the AI; a blank AI read is the one fillable exception', () => {
+// Owner ruling 2026-10-04 (replaces the 2026-09-24 read-only ruling): the
+// technician may change any score until the assessment is confirmed. A posted
+// number wins, then the value saved on the row, then the AI's read.
+describe('confirm scores: a technician entry wins over the AI read', () => {
   const scoreValue = (value) => Math.max(0, Math.min(100, Math.round(Number(value))));
 
   describe('resolveConfirmScores — legacy / no-run path (the assessment row IS the AI read)', () => {
-    test('an AI-known score ignores any override; a NULL column stays NULL unless the technician fills it', () => {
+    test('a posted number replaces a stored score; a NULL column stays NULL unless the technician fills it', () => {
       const assessment = { turf_density: 72, weed_suppression: null, color_health: null, fungus_control: 75, thatch_level: null, stress_damage: null };
       expect(visit.resolveConfirmScores(assessment, undefined, scoreValue)).toEqual({
         turf_density: 72, weed_suppression: null, color_health: null, fungus_control: 75, thatch_level: null, stress_damage: 75,
       });
-      // turf_density/fungus_control are AI-known (72/75) — the override is ignored.
       expect(visit.resolveConfirmScores(assessment, { turf_density: 10, fungus_control: 5, color_health: '81', stress_damage: 40 }, scoreValue))
-        .toMatchObject({ turf_density: 72, fungus_control: 75, color_health: 81, stress_damage: 40, weed_suppression: null });
-      // A blank or malformed override never becomes a 0 — it falls back to the stored value, as before this ruling.
+        .toMatchObject({ turf_density: 10, fungus_control: 5, color_health: 81, stress_damage: 40, weed_suppression: null });
+      // A blank or malformed override never becomes a 0 — it falls back to the stored value.
       expect(visit.resolveConfirmScores(assessment, { turf_density: ' ', fungus_control: 'abc', stress_damage: 'x' }, scoreValue)).toMatchObject({ turf_density: 72, fungus_control: 75, stress_damage: 75 });
       const nothing = visit.resolveConfirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, {}, scoreValue);
       expect(nothing).toEqual({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null });
       expect(visit.scoresComplete(nothing)).toBe(false);
     });
 
-    test('stress_damage can\'t be moved once the AI produced it, even via a fungus/thatch edit', () => {
+    test('a stored stress_damage moves only by a direct entry, never by a fungus/thatch edit', () => {
       const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
       expect(visit.resolveConfirmScores(assessment, {}, scoreValue).stress_damage).toBe(20);
-      // fungus_control is AI-known (20) so its override is ignored too, giving
-      // the tech no back door into re-deriving a fixed stress_damage.
-      expect(visit.resolveConfirmScores(assessment, { fungus_control: 90, stress_damage: 5 }, scoreValue)).toMatchObject({ fungus_control: 20, stress_damage: 20 });
+      expect(visit.resolveConfirmScores(assessment, { fungus_control: 90 }, scoreValue)).toMatchObject({ fungus_control: 90, stress_damage: 20 });
+      expect(visit.resolveConfirmScores(assessment, { stress_damage: 5 }, scoreValue)).toMatchObject({ fungus_control: 20, stress_damage: 5 });
     });
 
     test('a genuinely AI-blank stress_damage derives from the picked (possibly tech-filled) components, and a direct fill sticks', () => {
@@ -122,23 +119,111 @@ describe('confirm scores are read-only from the AI; a blank AI read is the one f
   });
 
   describe('confirmScores — run-backed path (the immutable scores_adjusted snapshot is the AI read)', () => {
-    test('an override on an AI-known key is ignored; the one blank AI key accepts the fill', () => {
-      const assessment = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
-      const run = { status: 'complete', severities: { drought_stress: sig('moderate') }, scores_adjusted: { ...assessment } };
+    test('a posted number replaces the AI read, sticks across a later save that omits it, and posting null restores the AI read', () => {
+      const ai = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
+      const run = { status: 'complete', severities: { drought_stress: sig('moderate') }, scores_adjusted: { ...ai } };
       const options = { scoreValue, calculateOverallScore: () => 77 };
-      const filled = visit.confirmScores(assessment, run, { color_health: 70, turf_density: 999, fungus_control: 1 }, options);
-      expect(filled).toMatchObject({
-        confirmed: true, missing: [],
-        finalScores: { turf_density: 72, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 60, stress_damage: 50 },
+      const persist = (row, decision) => ({
+        ...row, ...decision.finalScores,
+        adjusted_scores: JSON.stringify({ ...decision.finalScores, stress_damage_explicit: decision.stressExplicit }),
       });
+      // Color stays blank, so this first save is a pending one.
+      const first = visit.confirmScores({ ...ai }, run, { turf_density: 90, stress_damage: 65 }, options);
+      expect(first).toMatchObject({ confirmed: false, missing: ['color_health'], finalScores: { turf_density: 90, weed_suppression: 80, stress_damage: 65 } });
+      const saved = persist(ai, first);
+      // The client posts only the keys typed in this session.
+      const second = visit.confirmScores(saved, run, { color_health: 70 }, options);
+      expect(second).toMatchObject({
+        confirmed: true, missing: [], calibrationEligible: true,
+        // Thatch read 60, below the technician's Condition 65: raised to it on
+        // the completing save, so no report reads it as a worse finding.
+        finalScores: { turf_density: 90, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 65, stress_damage: 65 },
+        syntheticSubScores: ['thatch_level'],
+      });
+      // While the row was pending, the sub-score kept its own reading.
+      expect(first.finalScores.thatch_level).toBe(60);
+      // Calibration still compares against what the AI read.
+      expect(second.aiScores).toMatchObject({ turf_density: 72, stress_damage: 50 });
+      const restored = visit.confirmScores(saved, run, { color_health: 70, turf_density: null, stress_damage: null }, options);
+      expect(restored.finalScores).toMatchObject({ turf_density: 72, stress_damage: 50 });
+      expect(restored.stressExplicit).toBeNull();
     });
 
-    test('stress_damage can\'t be moved when the AI produced it, even via a fungus/thatch edit', () => {
+    test('an AI-read stress_damage moves only by a direct entry, never by a fungus/thatch edit', () => {
       const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
       const run = { status: 'complete', severities: JSON.stringify({ insect_damage: sig('moderate') }), scores_adjusted: { ...assessment } };
       const options = { scoreValue, calculateOverallScore: () => 77 };
-      expect(visit.confirmScores(assessment, run, { fungus_control: 90, stress_damage: 5 }, options).finalScores)
-        .toMatchObject({ fungus_control: 20, stress_damage: 20 });
+      expect(visit.confirmScores(assessment, run, { fungus_control: 90 }, options).finalScores)
+        .toMatchObject({ fungus_control: 90, stress_damage: 20 });
+      expect(visit.confirmScores(assessment, run, { stress_damage: 5 }, options))
+        .toMatchObject({ stressExplicit: 5, finalScores: { fungus_control: 20, stress_damage: 5 } });
+    });
+
+    test('a blank Fungus or Thatch takes its no-finding score (never a low Condition), but only when that completes the row', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null, stress_damage: 95 };
+      const run = { status: 'complete', severities: JSON.stringify({ insect_damage: sig('none') }), scores_adjusted: JSON.stringify(ai) };
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      expect(visit.confirmScores({ ...ai }, run, {}, options)).toMatchObject({
+        confirmed: true, missing: [], syntheticSubScores: ['fungus_control', 'thatch_level'],
+        // Thatch's own no-finding score is 85; Condition 95 is higher, and a
+        // sub-score never sits below Condition.
+        finalScores: { fungus_control: 95, thatch_level: 95, stress_damage: 95 },
+      });
+      // A low Condition (drought, insects) is never written into a sub-score
+      // nobody read: the report would cite it as fungus or thatch evidence.
+      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 40 }, options).finalScores)
+        .toMatchObject({ fungus_control: 95, thatch_level: 85, stress_damage: 40 });
+      // A reading is never replaced.
+      const fungusRead = { ...ai, fungus_control: 75, stress_damage: 75 };
+      expect(visit.confirmScores(fungusRead, { ...run, scores_adjusted: JSON.stringify(fungusRead) }, {}, options))
+        .toMatchObject({ syntheticSubScores: ['thatch_level'], finalScores: { fungus_control: 75, thatch_level: 85 } });
+      // Still pending (Color blank): the blanks stay blank, so a later
+      // Condition change is not left beside a stale value.
+      const colorBlank = { ...ai, color_health: null };
+      expect(visit.confirmScores(colorBlank, { ...run, scores_adjusted: JSON.stringify(colorBlank) }, {}, options)).toMatchObject({
+        confirmed: false, syntheticSubScores: [], missing: ['color_health', 'fungus_control', 'thatch_level'],
+        finalScores: { fungus_control: null, thatch_level: null },
+      });
+    });
+
+    test('a blank sub-score the client posted stays blank: that client shows the field (standalone Lawn assessment page)', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null, stress_damage: 95 };
+      const run = { status: 'complete', severities: JSON.stringify({ insect_damage: sig('none') }), scores_adjusted: JSON.stringify(ai) };
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      const posted = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null };
+      expect(visit.confirmScores({ ...ai }, run, posted, options)).toMatchObject({
+        confirmed: false, missing: ['fungus_control', 'thatch_level'], syntheticSubScores: [],
+        finalScores: { fungus_control: null, thatch_level: null },
+      });
+      expect(visit.confirmScores({ ...ai }, run, { ...posted, fungus_control: 40, thatch_level: 80 }, options))
+        .toMatchObject({ confirmed: true, syntheticSubScores: [], finalScores: { fungus_control: 40, thatch_level: 80, stress_damage: 95 } });
+    });
+
+    test('a Condition the technician entered lifts a lower Fungus/Thatch read; the AI\'s own Condition never does', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
+      const run = { status: 'complete', severities: JSON.stringify({ fungal_activity: sig('severe') }), scores_adjusted: JSON.stringify(ai) };
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      expect(visit.confirmScores({ ...ai }, run, {}, options)).toMatchObject({ syntheticSubScores: [], finalScores: { fungus_control: 20, stress_damage: 20 } });
+      // Corrected up to 80: the low fungus read no longer stands as evidence;
+      // thatch (85) was already above it and keeps its reading.
+      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 80 }, options)).toMatchObject({
+        confirmed: true, syntheticSubScores: ['fungus_control'],
+        finalScores: { fungus_control: 80, thatch_level: 85, stress_damage: 80 },
+      });
+      // A sub-score the technician posted in the same request is theirs and stays.
+      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 80, fungus_control: 30 }, options).finalScores)
+        .toMatchObject({ fungus_control: 30, stress_damage: 80 });
+    });
+
+    test('calibration leaves out a sub-score that holds no reading, so one Condition entry counts once', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
+      const run = { status: 'complete', severities: JSON.stringify({ fungal_activity: sig('severe') }), scores_adjusted: JSON.stringify(ai) };
+      const decision = visit.confirmScores({ ...ai }, run, { stress_damage: 80 }, { scoreValue, calculateOverallScore: () => 77 });
+      expect(visit.calibrationScores(decision.finalScores, decision.syntheticSubScores))
+        .toEqual({ turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: 85, stress_damage: 80 });
+      // The saved row keeps the raised value; only the comparison drops it.
+      expect(decision.finalScores.fungus_control).toBe(80);
+      expect(visit.calibrationScores(decision.finalScores, undefined)).toEqual(decision.finalScores);
     });
 
     test('a fully AI-blank run derives stress_damage from the technician-filled components and the run\'s independent stressors', () => {
@@ -259,10 +344,6 @@ describe('confirm scores are read-only from the AI; a blank AI read is the one f
       expect(visit.confirmScores(assessment, snapshot, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 }).aiScores).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
       expect(visit.runAiScores({ ...run, scores_adjusted: null })).toEqual({});
       expect(visit.confirmScores(assessment, { ...run, scores_adjusted: null }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 })).toMatchObject({ confirmed: true, calibrationEligible: false });
-      // the overall inputs can all be known while a sub-score the AI also left unknown is not — still pending
-      const thatchStillUnknown = { ...run, scores_adjusted: JSON.stringify({ turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: null, stress_damage: 60 }) };
-      const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, thatchStillUnknown, {}, { scoreValue, calculateOverallScore: () => 77 });
-      expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], calibrationEligible: false });
       const unavailable = visit.confirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, { status: 'unavailable', scores_raw: null, severities: null }, {}, { scoreValue, calculateOverallScore: () => 77 });
       expect(unavailable).toMatchObject({ overallScore: null, confirmed: false, calibrationEligible: false, aiScores: {} });
       expect(unavailable.missing).toEqual(visit.SCORE_KEYS);

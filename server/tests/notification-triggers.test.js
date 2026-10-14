@@ -256,6 +256,18 @@ describe('notification trigger push tags', () => {
     expect(safe.message).toBe('twilio:1234567890abcdef retry ***1234 later');
   });
 
+  test('id lists pass verbatim: a UUID with a phone-like digit tail is never masked', () => {
+    const tailUuid = '14f3d827-0191-4701-8123-295768912345';
+    const safe = __private.sanitizeNotificationPayload('payment_failed', {
+      allocationInvoiceIds: [tailUuid, '22222222-2222-4222-8222-222222222222'],
+      event_ids: [tailUuid],
+      message: 'retry +19415551234 later',
+    });
+    expect(safe.allocationInvoiceIds).toEqual([tailUuid, '22222222-2222-4222-8222-222222222222']);
+    expect(safe.event_ids).toEqual([tailUuid]);
+    expect(safe.message).toBe('retry ***1234 later');
+  });
+
   test('phone redaction masks extension-suffixed numbers by the PHONE last four', () => {
     const safe = __private.sanitizeNotificationPayload('payment_failed', {
       message: 'call +19415551234x123 or 19415552222 ext 99 today',

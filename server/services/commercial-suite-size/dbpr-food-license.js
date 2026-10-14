@@ -400,6 +400,10 @@ async function resolveViaDbprLicense({ address = {}, phone = null, businessNameH
       }
     }
     rows = rows.filter(isEligibleDineInLicense);
+    // A caller that must tell "no license here" from "the extract did not
+    // load" (an outage, a timeout, a cold cache) passes opts.diag: the match
+    // ran against real rows only when extractLoaded is true.
+    if (opts.diag && typeof opts.diag === 'object') opts.diag.extractLoaded = rows.length > 0;
     if (!rows.length) return null;
     const row = matchDbprRow(rows, {
       street: address.street,

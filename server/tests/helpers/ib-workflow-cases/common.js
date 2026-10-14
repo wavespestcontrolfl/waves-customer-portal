@@ -37,7 +37,7 @@ const ymdAdd = (ymd, days) => new Date(Date.parse(`${ymd}T12:00:00Z`) + days * 8
 /** The tool refused for the actor's role (the registry's own wording): evidence of a refusal, not merely the absence of a card. */
 const roleRefusal = (result) => !!result && typeof result === 'object' && /not available to your role/i.test(String(result.error || ''));
 /** The send tool answered that the number is opted out / blocked, in its own words or a code. */
-const OPT_OUT_PATTERN = /opt.?out|\bstop\b|consent|unsubscrib|do.not.(text|contact)|blocked/i;
+const OPT_OUT_PATTERN = /opt(?:ed)?.?out|\bstop\b|consent|unsubscrib|do.not.(text|contact)|blocked/i;
 
 const errorCode = (result) => (result && typeof result === 'object' ? result.code || null : null);
 const has = (haystack, needle) => JSON.stringify(haystack || '').includes(needle);

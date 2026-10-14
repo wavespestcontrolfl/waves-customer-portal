@@ -37,8 +37,8 @@ describe('askPackage images', () => {
     if (saved.clef === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = saved.clef;
   });
 
-  test('no shipped package declares imageSlots, so each refuses images before any provider call', async () => {
-    for (const pkg of Object.values(PACKAGES)) expect(pkg.imageSlots).toBeUndefined();
+  test('only photo_privacy.v1 declares imageSlots; every other package refuses images before any provider call', async () => {
+    expect(Object.values(PACKAGES).filter((pkg) => pkg.imageSlots !== undefined).map((pkg) => pkg.id)).toEqual(['photo_privacy.v1']);
     const result = await askPackage('sms_courtesy.v1', STATE, { provider: 'cloudflare', images: [IMG] });
     expect(result).toMatchObject({ ok: false, reason: 'images_not_allowed', packageId: 'sms_courtesy.v1' });
     expect(mockDispatch).not.toHaveBeenCalled();

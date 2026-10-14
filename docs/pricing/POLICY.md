@@ -75,8 +75,9 @@ $/sqft rate.
 **Meaning.** The 6-visit Standard program is the mandated default and the only
 auto-recommended tier — it matches the `six_x` cadence in the "10/10 SWFL Tree
 & Shrub Protocol" (`server/config/protocols.json`). Enhanced (9x, every 6
-weeks) is a customer-selectable upsell. Light (4x, protocol `four_x`) was
-retired for new sales by owner directive 2026-09-24:
+weeks) is a customer-selectable upsell. Light (4x) was
+retired for new sales by owner directive 2026-09-24 (the protocol's `four_x` text was
+removed 2026-10-09; the protocol now lists `six_x` and `nine_x`):
 `TREE_SHRUB.tiers.light.hidden` drops it from every offering surface and
 `RETIRED_SALE_SERVICE_KEYS` (`retired-sale-catalog.js`) keeps the
 `tree_shrub_quarterly` catalog row out of sales and agent catalogs. The engine

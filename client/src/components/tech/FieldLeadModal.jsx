@@ -51,47 +51,47 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
 
   return createPortal(
     <div ref={dialogRef} className={fieldPortalClass || undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Flag Opportunity" style={{
-      position: 'fixed', inset: 0, zIndex: 9999, fontFamily: '"DM Sans", Inter, system-ui, sans-serif',
+      position: 'fixed', inset: 0, zIndex: 9999, fontFamily: '"Roboto", system-ui, sans-serif',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: 'rgba(0,0,0,0.5)',
+      background: 'rgba(28,25,23,0.45)',
     }} onClick={onClose}>
       <div
         onClick={e => e.stopPropagation()}
         style={{
-          background: '#fff', borderRadius: isMobile ? 0 : 16, width: isMobile ? '100%' : '90%', maxWidth: isMobile ? 'none' : 420,
+          background: '#fff', borderRadius: isMobile ? 0 : 6, width: isMobile ? '100%' : '90%', maxWidth: isMobile ? 'none' : 420,
           height: isMobile ? '100%' : undefined, maxHeight: '100%', boxSizing: 'border-box',
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
           paddingTop: 'env(safe-area-inset-top, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)',
           paddingLeft: 'env(safe-area-inset-left, 0px)', paddingRight: 'env(safe-area-inset-right, 0px)',
-          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          boxShadow: '0 20px 60px rgba(28,25,23,0.18)',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0, padding: '16px 24px' }}>
-          <h3 style={{ margin: 0, fontSize: 18, color: '#1e293b' }}>Flag Opportunity</h3>
-          <button aria-label="Close" onClick={onClose} style={{ minWidth: 44, minHeight: 44, background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: '#94a3b8' }}>&times;</button>
+          <h3 style={{ margin: 0, fontSize: 18, color: '#1c1917' }}>Flag Opportunity</h3>
+          <button aria-label="Close" onClick={onClose} style={{ minWidth: 44, minHeight: 44, background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: '#78716c' }}>&times;</button>
         </div>
 
         {success ? (
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
             <div style={{ fontSize: 40, marginBottom: 8 }}>&#10003;</div>
-            <div style={{ fontSize: 16, color: '#10b981', fontWeight: 600 }}>Lead submitted!</div>
+            <div style={{ fontSize: 16, color: '#1c1917', fontWeight: 500 }}>Lead submitted!</div>
           </div>
         ) : (
           <>
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 24px' }}>
             {/* Customer info */}
-            <div style={{ background: '#f1f5f9', borderRadius: 10, padding: 14, marginBottom: 16 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b' }}>{customerName}</div>
-              {address && <div style={{ fontSize: 13, color: '#64748b', marginTop: 2 }}>{address}</div>}
+            <div style={{ background: '#fafaf9', border: '0.5px solid #e7e5e4', borderRadius: 6, padding: 14, marginBottom: 16 }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: '#1c1917' }}>{customerName}</div>
+              {address && <div style={{ fontSize: 13, color: '#57534e', marginTop: 2 }}>{address}</div>}
             </div>
 
             {/* Service type */}
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#475569', marginBottom: 6 }}>Service Type</label>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 500, color: '#57534e', marginBottom: 6 }}>Service Type</label>
             <select
               value={serviceType} onChange={e => setServiceType(e.target.value)}
               style={{
-                width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1',
-                fontSize: 14, color: '#1e293b', marginBottom: 14, background: '#fff',
+                width: '100%', padding: '10px 12px', borderRadius: 4, border: '1px solid #d6d3d1',
+                fontSize: 14, color: '#1c1917', marginBottom: 14, background: '#fff',
               }}
             >
               <option value="">Select service...</option>
@@ -99,14 +99,14 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
             </select>
 
             {/* Notes */}
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#475569', marginBottom: 6 }}>Notes</label>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 500, color: '#57534e', marginBottom: 6 }}>Notes</label>
             <textarea
               value={notes} onChange={e => setNotes(e.target.value)}
               placeholder="What did you observe?"
               rows={3}
               style={{
-                width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1',
-                fontSize: 14, color: '#1e293b', marginBottom: 14, resize: 'vertical', fontFamily: 'inherit',
+                width: '100%', padding: '10px 12px', borderRadius: 4, border: '1px solid #d6d3d1',
+                fontSize: 14, color: '#1c1917', marginBottom: 14, resize: 'vertical', fontFamily: 'inherit',
               }}
             />
 
@@ -114,10 +114,10 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
             <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
               {['normal', 'high'].map(u => (
                 <button key={u} onClick={() => setUrgency(u)} style={{
-                  flex: 1, padding: '8px 0', borderRadius: 8, fontSize: 13, fontWeight: 600,
-                  border: urgency === u ? 'none' : '1px solid #cbd5e1', cursor: 'pointer',
-                  background: urgency === u ? (u === 'high' ? '#ef4444' : '#0ea5e9') : '#fff',
-                  color: urgency === u ? '#fff' : '#64748b',
+                  flex: 1, padding: '8px 0', borderRadius: 4, fontSize: 13, fontWeight: 500,
+                  border: urgency === u ? 'none' : '1px solid #d6d3d1', cursor: 'pointer',
+                  background: urgency === u ? '#1c1917' : '#fff',
+                  color: urgency === u ? '#fff' : '#57534e',
                 }}>
                   {u === 'high' ? 'Urgent' : 'Normal'}
                 </button>
@@ -127,12 +127,12 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
 
             </div>
             <div style={{ flexShrink: 0, padding: '14px 24px 24px' }}>
-            {error && <div role="alert" style={{ color: '#ef4444', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+            {error && <div role="alert" style={{ color: '#a32d2d', fontSize: 13, marginBottom: 12 }}>{error}</div>}
             <button
               onClick={handleSubmit} disabled={submitting}
               style={{
-                width: '100%', padding: 14, borderRadius: 10, border: 'none',
-                background: '#0ea5e9', color: '#fff', fontSize: 15, fontWeight: 700,
+                width: '100%', padding: 14, borderRadius: 4, border: 'none',
+                background: '#1c1917', color: '#fff', fontSize: 15, fontWeight: 500,
                 cursor: submitting ? 'wait' : 'pointer', opacity: submitting ? 0.6 : 1,
               }}
             >

@@ -119,6 +119,14 @@
     "approval": null,
     "scope": "none"
   },
+  "check_address": {
+    "module": "address-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "check_customer_status": {
     "module": "tech-tools.js",
     "domain": "tech",
@@ -434,6 +442,78 @@
   "repair_closeout": {
     "module": "closeout-repair-tools.js",
     "domain": "closeout",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "reprice_future_visits": {
+    "module": "reprice-visits-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "resend_receipt": {
+    "module": "receipt-resend-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "create_customer_link": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_autopay_setup_link": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "remove_customer_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_invoice": {
+    "module": "invoice-action-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "remove_saved_payment_method": {
+    "module": "billing-write-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "correct_invoice_address": {
+    "module": "billing-write-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "accept_estimate": {
+    "module": "estimate-accept-tools.js",
+    "domain": "estimate",
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",
@@ -1407,6 +1487,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "offer_choices": {
+    "module": "choice-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "needs_me": {
     "module": "needs-me-tools.js",
     "domain": "ops",
@@ -1472,6 +1560,14 @@
     "scope": "scoped"
   },
   "merge_customers": {
+    "module": "customer-lifecycle-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "delete_duplicate_customer": {
     "module": "customer-lifecycle-tools.js",
     "domain": "customers",
     "kind": "internal_write",
@@ -1910,5 +2006,21 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "find_admin_reads": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "read_admin_data": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
   }
 }

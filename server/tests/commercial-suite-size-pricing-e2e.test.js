@@ -277,8 +277,13 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     });
 
     test('the admin lookup route skips suite sizing when the operator asks for the whole property', () => {
+      // The route takes its scope decision from lookup-callers.js (PR 7) and
+      // turns the leg off for a whole-property (association) job.
       const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/property-lookup-v2.js'), 'utf8');
-      expect(src).toMatch(/commercialSuiteSizing: wholeProperty !== true/);
+      expect(src).toMatch(/lookupOptionsFor\('admin_estimate_tool'/);
+      expect(src).toMatch(/if \(wholeProperty === true\) callerOptions\.commercialSuiteSizing = false;/);
+      const { lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
+      expect(lookupOptionsFor('admin_estimate_tool').commercialSuiteSizing).toBe(true);
     });
 
     test('a verified story count divides the recomputed default like a confirmed one (Codex #4840 r14 P1)', async () => {

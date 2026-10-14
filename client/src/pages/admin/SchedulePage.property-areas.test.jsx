@@ -349,7 +349,11 @@ it.each([['property-1|old-address', 2000], ['property-1|new-address', 4200]])('a
   }));
   mount('Lawn Care');
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(shownBefore));
+  // A bound override keeps the card (and its box) so the tech sees it; an
+  // override for another address is withheld and the recorded lawn applies
+  // with no card at all.
+  if (shownBefore === 2000) await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(shownBefore));
+  else await waitFor(() => expect(screen.queryByLabelText('Area treated today (sq ft)')).not.toBeInTheDocument());
 });
 
 it('a restored lawn override with no recorded property is withheld once shared areas load', async () => {
@@ -359,7 +363,7 @@ it('a restored lawn override with no recorded property is withheld once shared a
   }));
   mount('Lawn Care');
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(4200));
+  await waitFor(() => expect(screen.queryByLabelText('Area treated today (sq ft)')).not.toBeInTheDocument());
 });
 
 it('on a pure lawn visit a bed soil drench never takes the shared lawn area', async () => {
@@ -367,8 +371,12 @@ it('on a pure lawn visit a bed soil drench never takes the shared lawn area', as
   render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Lawn Care', scheduledDate: '2026-09-27',
     completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: [], nextStepChips: [] } }}
     products={[...products, sequestar]} onClose={() => {}} onSubmit={vi.fn()} />);
-  await screen.findByRole('button', { name: 'Review areas' });
+  // The reviewed lawn is the whole-lawn default: no card renders, so wait for
+  // the areas read to settle before adding the product.
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('property-areas'))).toBe(true));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+  expect(screen.queryByRole('button', { name: 'Review areas' })).not.toBeInTheDocument();
   fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Sequestar' } });
   fireEvent.click(screen.getByText('Sequestar'));
-  expect(screen.queryByDisplayValue('4200')).toBe(screen.getByLabelText('Area treated today (sq ft)'));
+  expect(screen.queryByDisplayValue('4200')).not.toBeInTheDocument();
 });

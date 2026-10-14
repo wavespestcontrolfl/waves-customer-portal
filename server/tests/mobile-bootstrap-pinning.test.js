@@ -17,6 +17,96 @@ describe('native customer-app bootstrap reproducibility', () => {
     });
   }
 
+  test('the iOS app lists the portal as its app-bound domain so the offline copy installs', () => {
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'client/capacitor.config.json'), 'utf8'));
+    expect(config.ios.limitsNavigationsToAppBoundDomains).toBe(true);
+    expect(new URL(config.server.url).hostname).toBe('portal.wavespestcontrol.com');
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // The plist domain is derived from server.url, not typed a second time.
+    expect(source).toContain('Add :WKAppBoundDomains array');
+    expect(source).toContain('new URL(c.server.url).hostname');
+    expect(source).not.toMatch(/WKAppBoundDomains:0 string portal\./);
+  });
+
+  test('bootstrap-ios raises the iOS floor to 15.0 and attaches the privacy manifest to the App target', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    expect(source).toContain('IOS_MIN="15.0"');
+    expect(source).toMatch(/platform :ios, '\$\{IOS_MIN\}'/);
+    expect(source).toContain('IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};');
+    expect(source).toContain('phase.add_file_reference(ref, true) unless phase.files_references.include?(ref)');
+    // Pods targets take their floor from podspecs: post_install raises them too.
+    expect(source).toContain('waves: iOS floor');
+    expect(source).toContain('installer.pods_project.targets.each');
+    // A Podfile floor above 15 is kept, and a Podfile with no post_install gets one.
+    expect(source).toContain("s/^platform :ios, '([0-9]|1[0-4])");
+    expect(source).toContain('post_install do |installer|\\n" + hook + "end');
+    // A missing Homebrew wrapper must not end the script under pipefail.
+    expect(source).toMatch(/POD_GEM_HOME="\$\(.*\|\| true\)"/);
+    // No GNU-only readlink -f as the first choice; CocoaPods' own Ruby runs the steps.
+    expect(source).toContain('realpath "$POD_BIN"');
+    expect(source).toContain('GEM_HOME="$POD_GEM_HOME" "$POD_RUBY" "$@"');
+    // A gem-installed CocoaPods (no Homebrew GEM_HOME) still runs the xcodeproj steps.
+    expect(source).not.toContain('if [ -n "$POD_GEM_HOME" ] && (cd ios/App');
+    // The manual add step prints only when the automatic attach failed.
+    expect(source).toContain('if [ "${PRIVACY_ATTACHED:-0}" != "1" ]; then');
+    // The floor is raised before `npx cap sync ios`, which runs pod install.
+    expect(source.indexOf('IOS_MIN="15.0"')).toBeLessThan(source.indexOf('\nnpx cap sync ios'));
+  });
+
+  test('bootstrap-ios adopts the UIScene life cycle that iOS 27 SDK builds require', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    expect(source).toContain('class SceneDelegate: UIResponder, UIWindowSceneDelegate');
+    expect(source).toContain('ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url');
+    expect(source).toContain('$(PRODUCT_MODULE_NAME).SceneDelegate');
+    expect(source).toContain('UISceneStoryboardFile string Main');
+    // A push tapped while the app was closed reaches Capacitor's push handler.
+    expect(source).toContain('connectionOptions.notificationResponse');
+    expect(source).toContain('router.userNotificationCenter(center, didReceive: response');
+    // The tap is kept until the handler exists: no attempt limit.
+    expect(source).toContain('private var pendingNotificationResponse: UNNotificationResponse?');
+    expect(source).not.toContain('attemptsLeft');
+    // CocoaPods' embed-frameworks script cannot run inside Xcode's user-script sandbox.
+    expect(source).toContain('s/ENABLE_USER_SCRIPT_SANDBOXING = YES;/ENABLE_USER_SCRIPT_SANDBOXING = NO;/g');
+    // The manifest is written only after the delegate is in the target.
+    expect(source.indexOf('target.source_build_phase')).toBeLessThan(source.indexOf('Add $SCENE_KEY dict'));
+  });
+
+  test('bootstrap-ios answers the export compliance question in Info.plist', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // A boolean, not a string: App Store Connect ignores a string value and holds the build.
+    expect(source).toContain('Add :ITSAppUsesNonExemptEncryption bool false');
+    expect(source).not.toMatch(/set_plist ITSAppUsesNonExemptEncryption/);
+  });
+
+  test('Xcode Cloud can generate the ignored iOS project from a clean clone', () => {
+    const postClone = path.join(root, 'client/ios/App/ci_scripts/ci_post_clone.sh');
+    // Xcode Cloud runs ci_scripts/ci_post_clone.sh from beside the workspace, and only if it is executable.
+    expect(fs.statSync(postClone).mode & 0o111).not.toBe(0);
+    const ci = fs.readFileSync(postClone, 'utf8');
+    expect(ci).toContain('bash scripts/mobile/bootstrap-ios.sh');
+    expect(ci).toMatch(/^export CI=true$/m);
+    // Node follows .nvmrc and is checked against the published checksums.
+    expect(ci).toContain('< .nvmrc');
+    expect(ci).toContain('shasum -a 256 -c -');
+    // That folder is the only tracked path inside the generated project.
+    const tracked = spawnSync('git', ['ls-files', 'client/ios'], { cwd: root, encoding: 'utf8' });
+    expect(tracked.stdout.trim().split('\n')).toEqual(['client/ios/App/ci_scripts/ci_post_clone.sh']);
+    const ignored = spawnSync('git', ['check-ignore', '-q', 'client/ios/App/App.xcodeproj/project.pbxproj'], { cwd: root });
+    expect(ignored.status).toBe(0);
+
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // A clean clone has client/ios/App (the tracked folder) but no project: the add still runs.
+    expect(source).toContain('if [ ! -d "ios/App/App.xcodeproj" ]; then');
+    expect(source).not.toContain('if [ ! -d "ios/App" ]; then');
+    // The tracked folder is moved aside for `cap add` and put back on every exit.
+    expect(source).toContain('trap restore_ci_scripts EXIT');
+    expect(source.indexOf('hold_ci_scripts\n  # Only empty folders')).toBeLessThan(source.indexOf('npx cap add ios'));
+    // Xcode Cloud builds only a shared scheme; version and team are written only when named.
+    expect(source).toContain('scheme.save_as(project.path, "App", true)');
+    expect(source).toContain('c.build_settings["MARKETING_VERSION"] = version unless version.empty?');
+    expect(source).toContain('c.build_settings["DEVELOPMENT_TEAM"] = team unless team.empty?');
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');

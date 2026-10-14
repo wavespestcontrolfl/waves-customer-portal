@@ -28,7 +28,7 @@ const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
-const { redactRequestUrl } = require('./utils/redact-request-url');
+const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('./utils/request-log-format');
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -278,6 +278,12 @@ app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'
 // other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
 app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
 
+// Staff two-step code step (GATE_ADMIN_MFA, dark): no-store/noindex headers
+// and the generic unknown-route 404 while the gate is off, mounted in the same
+// position — above cors(), the global `/api/` limiter, the login limiter and
+// the body parsers. The route re-runs it.
+app.use('/api/admin/auth/login/mfa', ...require('./middleware/staff-mfa-guard').loginMfaPreParserGuard);
+
 // Signed satellite image proxy (lead-form lookup, service report, portal
 // station map): serves Google imagery WITHOUT the server Maps key ever
 // reaching a customer. Mounted ABOVE the global cors() (which would otherwise
@@ -287,6 +293,14 @@ app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredT
 // the mount and ends in a terminal generic 404, so nothing falls through.
 // <img> loads need no CORS headers, so this route sets none.
 app.use('/api/public/map-image', require('./routes/public-map-image'));
+
+// Typed-decision labeler token (X-Labeler-Token): its own router, mounted ABOVE
+// the global cors() (an allowed-origin OPTIONS would answer 204), the global
+// `/api/` limiter and the body parsers (Codex #5677 r1–r2). A request without
+// the header falls straight through to the admin router below; one with it is
+// answered here (generic 404, or the label write behind its own limiter and
+// parser). See docs/public-route-contracts.md "Typed-decision labeler token".
+app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'));
 
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
@@ -486,6 +500,8 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // BEFORE the global limiter, or an over-budget IP gets a 429 (and no
 // no-store/CORP) from a route that is supposed to be dark / generic.
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
+// Accept-card phone capture: the same reason. Its privacy headers and its gate-off 404 land before the global limiter.
+app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 
 app.use('/api/', limiter);
 
@@ -670,14 +686,7 @@ app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
 }));
 
 // Request logging
-morgan.token('redacted-url', (req) => redactRequestUrl(req.originalUrl || req.url || ''));
-morgan.token('redacted-referrer', (req) => {
-  const referrer = req.headers?.referer || req.headers?.referrer;
-  return referrer ? redactRequestUrl(referrer) : '-';
-});
-const REDACTED_COMBINED_LOG = ':remote-addr - :remote-user [:date[clf]] '
-  + '":method :redacted-url HTTP/:http-version" :status :res[content-length] '
-  + '":redacted-referrer" ":user-agent"';
+registerRedactedTokens(morgan);
 app.use(morgan(REDACTED_COMBINED_LOG, {
   stream: { write: (message) => logger.info(message.trim()) },
 }));
@@ -745,6 +754,7 @@ app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'))
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
+app.use('/api/admin/access-codes', require('./routes/admin-access-codes'));
 app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
@@ -1003,6 +1013,7 @@ app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/line', require('./routes/tech-line'));
 app.use('/api/tech/services', require('./routes/tech-track'));
+app.use('/api/tech/dictation', require('./routes/tech-dictation'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
@@ -1589,11 +1600,19 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
     {
       const { runExclusive } = require('./utils/cron-lock');
       if (config.nodeEnv !== 'test') {
-        require('./utils/scheduled-cron').schedule('*/15 * * * *', async () => {
+        // Every minute, so GATE_SERIES_MOVE_TEXT_COALESCE can release a held
+        // staff series-move text when its 3-minute hold ends. Gate off: the
+        // job returns before its lock except on the quarter hour, so it runs
+        // exactly as the old */15 schedule did. Gate on: the quarter-hour tick
+        // also releases held texts; the ticks between release only those.
+        require('./utils/scheduled-cron').schedule('* * * * *', async () => {
           try {
+            const quarterHour = new Date().getMinutes() % 15 === 0;
+            const coalesce = require('./services/series-move-text-coalesce').enabled();
+            if (!quarterHour && !coalesce) return;
             await runExclusive('series-move-effects-reconcile', async () => {
               const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
-              const out = await reconcileSeriesMoveEffects();
+              const out = await reconcileSeriesMoveEffects(coalesce ? { heldTexts: quarterHour ? 'with' : 'only' } : {});
               if (out.candidates) logger.info(`[cron] series move effects reconcile: ${out.finished}/${out.candidates} finished`);
             });
           } catch (err) {
@@ -1630,8 +1649,11 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
         cron.schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('recipient-optin-sweep', async () => {
-              const { sweepUndispatchedOptins } = require('./services/recipient-optin');
+              const { sweepUndispatchedOptins, sweepOnSiteFollowUps } = require('./services/recipient-optin');
               await sweepUndispatchedOptins();
+              // Caller demotion + booking-confirmation replays to on-site
+              // recipients that were held or failed after their YES.
+              await sweepOnSiteFollowUps();
             });
           } catch (err) {
             logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);
@@ -1740,12 +1762,27 @@ function shutdown(signal) {
     .then((count) => { if (count) logger.info(`[shutdown] sent ${count} pending lead fallback reply(ies)`); })
     .catch(err => logger.warn(`[shutdown] lead fallback flush failed: ${err.message}`));
   const leadFallbacksFlushed = flushLeadFallbacks();
+  // A call-processing pass in flight (transcription + extraction run for
+  // minutes) dies with this process. Stamp its row so the next pod reclaims
+  // it after 2 quiet minutes instead of 10; the pass keeps its claim until the
+  // kill, so nothing overlaps it. Gated (GATE_CALL_PROC_SHUTDOWN_RELEASE);
+  // fail-soft; one bounded UPDATE per pass; done before the pool closes.
+  const callPassesMarked = (async () => {
+    try {
+      const processor = require('./services/call-recording-processor');
+      const r = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
+      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.stamped} stamped, ${r.failed} not stamped, gate ${r.enabled ? 'on' : 'off'}`);
+    } catch (err) {
+      logger.warn(`[shutdown] call pass stamp failed: ${err.message}`);
+    }
+  })();
   io.close(() => {
     logger.info('[shutdown] Socket.io closed');
     httpServer.close(async () => {
       logger.info('[shutdown] HTTP server closed, exiting');
       await leadFallbacksFlushed;
       await flushLeadFallbacks();
+      await callPassesMarked;
       try {
         const db = require('./models/db');
         await Promise.race([

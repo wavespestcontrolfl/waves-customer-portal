@@ -46,6 +46,8 @@ function pickerLists(products, commonProducts, groupOf) {
   const rest = listed.filter((product) => !commonById.has(String(product.id))).sort(byName);
   return {
     listed,
+    // Every listed product of the primary group, "Used most" ones included.
+    primary: listed.filter((product) => groupOf(product) === 'pest'),
     commonById,
     mostUsed: [...commonById.keys()].map((id) => byId.get(id)),
     pest: rest.filter((product) => groupOf(product) === 'pest'),
@@ -119,7 +121,63 @@ function BrowseLists({ lists, showOther, groupProps, titles }) {
   );
 }
 
-export default function FastCompleteProductPicker({ variant, line = 'pest', products, commonProducts, onSheetIds, anchorRef, onPick, onClose }) {
+// The lawn sheet's own search (variant "inline"): a box in the Products section.
+// Typing lists the matching catalog products right under it; one tap adds the
+// product and clears the box. No dialog, so nothing to open and nothing to close.
+// On the lawn line it searches the lawn products only (lawnProductGroup): a
+// lawn visit never lists a termiticide or a roach bait (owner 2026-10-05).
+// When matches first show for a typed query the list is scrolled into view
+// (nearest edge), so it is not left under the sheet's bottom bar.
+function InlineProductSearch({ line, products, commonProducts, onSheetIds, locked, onPick }) {
+  const searchId = useId();
+  const [query, setQuery] = useState('');
+  const lawn = line === 'lawn';
+  const lists = useMemo(() => pickerLists(products, commonProducts, lawn ? lawnProductGroup : productGroup), [products, commonProducts, lawn]);
+  const q = query.trim().toLowerCase();
+  const results = q ? rankProducts(lawn ? lists.primary : lists.listed, q) : null;
+  const resultsRef = useRef(null);
+  const hasResults = !!results && results.length > 0;
+  useEffect(() => {
+    if (hasResults) resultsRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [q, hasResults]);
+  return (
+    <div className="tech-product-search tech-product-search--inline">
+      <label htmlFor={searchId} className="sr-only">Search products</label>
+      <SearchIcon />
+      <Input
+        id={searchId}
+        type="text"
+        enterKeyHint="search"
+        autoComplete="off"
+        className="tech-visit-control tech-product-search-input"
+        placeholder="Search products"
+        disabled={locked}
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+      />
+      {results && results.length > 0 && (
+        <div ref={resultsRef} role="group" aria-label="Matching products" className="tech-product-list tech-product-inline-results">
+          {results.map((product) => (
+            <ProductOption
+              key={product.id}
+              product={product}
+              common={lists.commonById.get(String(product.id))}
+              onSheet={onSheetIds.has(String(product.id))}
+              onPick={(picked) => { setQuery(''); onPick(picked); }}
+            />
+          ))}
+        </div>
+      )}
+      {results && !results.length && <p className="tech-visit-muted">No products match.</p>}
+    </div>
+  );
+}
+
+export default function FastCompleteProductPicker({ variant, ...props }) {
+  return variant === 'inline' ? <InlineProductSearch {...props} /> : <ProductPickerDialog variant={variant} {...props} />;
+}
+
+function ProductPickerDialog({ variant, line = 'pest', products, commonProducts, onSheetIds, anchorRef, onPick, onClose }) {
   const titleId = useId();
   const searchId = useId();
   // Escape and Tab stay in the picker; the sheet's own Escape waits under it,

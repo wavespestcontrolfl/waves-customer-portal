@@ -1,16 +1,19 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
+const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
+const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const areaAddOnRows = require('../services/area-addon-visit-rows');
+const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -30,8 +33,61 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { seriesCustomerSkipReason } = require('../services/series-customer-eligibility');
+const { seriesCustomerSkipReason, SERIES_CUSTOMER_COLUMNS } = require('../services/series-customer-eligibility');
 const MODELS = require('../config/models');
+const { isAreaAddOnCatalogKey } = require('../services/pricing-engine/constants');
+
+// An area add-on (GATE_AREA_ADDONS) is generic one-time work: its completion
+// profile is lawn care or pest control by family, but it is never the lawn
+// Fast Complete sheet or the pest report flow.
+function lawnFastCompleteOffered(completionProfile) {
+  return lawnFastCompleteLive() && !isAreaAddOnCatalogKey(completionProfile?.serviceKey);
+}
+// A visit that carries an attached area add-on row (a same-trip add-on rides a normal
+// pest or lawn visit as a scheduled_service_addons row) has work the lightweight flows
+// cannot record: its product and treated area. Every lightweight flow is off for it and
+// the visit's own full completion form is the way in (a host keeps its lawn or pest lane
+// and gains the add-on's product fields; only an add-on that IS the visit is generic). One batched read per feed
+// (areaAddOnSoldByVisit). The flags are a hint: each sheet's context route re-reads
+// the rows (resolveEligibility fails closed) and is the authority, so a failed read
+// here is logged and leaves the flags as they were.
+const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
+  ...Object.fromEntries([
+    'reserviceFastCompleteEnabled', 'treeShrubFastCompleteEnabled', 'lawnReserviceFastCompleteEnabled', 'lawnFastCompleteEnabled',
+    'fastCompleteRecapEnabled', 'fastCompleteReportEnabled', 'typedReportFlowEnabled', 'assessmentFastCompleteEnabled',
+  ].map((flag) => [flag, false])),
+  areaAddOnRowsAttached: true,
+});
+// Each attached add-on carries its governed rate (area-addon-governed-rate.js), and a visit whose OWN service is
+// a chemical add-on carries its own (`own`): the completion form prefills the governed rate, never the
+// product's catalog default.
+async function areaAddOnVisitIdsForFeed(serviceRows) {
+  try {
+    const byVisit = await areaAddOnRows.areaAddOnSoldByVisit(db, serviceRows.map((s) => s.id));
+    const own = await areaAddOnGovernedRate.areaAddOnFeed(db, byVisit, serviceRows);
+    return { byVisit, own };
+  } catch (e) {
+    logger.warn(`[schedule] area add-on row lookup failed: ${e.message}`);
+    // `failed`: "no add-on" is not known. Every visit of the batch says so (areaAddOnsLookupFailed), the lightweight
+    // flows stay off, and the completion form refuses to submit a completed visit until the feed reloads.
+    return { byVisit: new Map(), own: new Map(), failed: true };
+  }
+}
+// What a visit of a batch whose add-on lookup failed carries: every lightweight flow off (as for a visit with an add-on),
+// and the marker the completion form reads. It does NOT claim an add-on row is attached.
+const AREA_ADDON_LOOKUP_FAILED = Object.freeze({
+  ...LIGHT_COMPLETION_FLOWS_OFF,
+  // The two routing shortcuts Tech Home reads directly (the bait-station sheet and the grouped-stop sheet): off as well.
+  stationFastCompleteEnabled: false, comboFastCompleteEnabled: false,
+  areaAddOnRowsAttached: false, areaAddOnsLookupFailed: true,
+});
+// The report flow needs a plain untyped, uncombined profile (the typed forms and
+// companion sections are required at completion and the flow has none).
+function fastCompleteReportOffered(completionProfile) {
+  return require('../config/feature-gates').fastCompleteReportLive()
+    && require('../services/combo-fast-complete').reportFlowShape(completionProfile)
+    && !isAreaAddOnCatalogKey(completionProfile?.serviceKey);
+}
 const trackTransitions = require('../services/track-transitions');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
@@ -45,7 +101,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
+const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -79,6 +135,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
   activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
@@ -130,6 +187,7 @@ const {
   uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
+const { fetchPropertyForecast, SERVICE_AREA_DEFAULT_LOCATION } = require('../services/service-report/application-conditions');
 
 // Office coordinates for office-level rain outlooks (matches the NWS point
 // used by feed.js / forecast-analyzer.js — Lakewood Ranch HQ area).
@@ -403,6 +461,9 @@ const DISCOUNT_PROVENANCE_COLUMNS = [
   // month feed selects these two beside the guarded columns above — same
   // guard, so a mid-migration database never 500s that feed either.
   'estimated_price', 'primary_line_price',
+  // The sold area add-on scope (migration 20261008230000): the week feed's explicit select reads it
+  // through the same guard, so a database without the column never 500s the feed.
+  'area_addon_scope',
 ];
 // Pre-push fallback audit P1 on #4657 (d17e523d73): the read-only discount
 // + provenance projection the four schedule feeds (GET /, /week, /month,
@@ -435,6 +496,31 @@ function discountProvenanceProjection(req, s) {
     lineDiscountId: s.line_discount_id || null,
     lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
     pricingProvenance: s.pricing_provenance ?? null,
+  };
+}
+
+// The visit's premise and contact fields, serialized ONE way for the day feed
+// and the week feed. The admin Dispatch Fast Complete rules
+// (client/src/lib/dispatchCompletionRouting.js) open a one-screen sheet only
+// for a row that carries `propertyId`, and the sheets check the routed premise
+// against the live visit, so the mobile week list needs the same fields the day
+// list has or its visits fall back to the long form. Needs the row to select
+// property_id, address_line1/2, city, state, zip, visit_lat/visit_lng,
+// customer_phone and check_in_time (the day feed's `scheduled_services.*` and
+// the week feed's explicit select both do).
+function visitPremiseFields(s) {
+  return {
+    customerPhone: s.customer_phone,
+    // The visit's premise (null = never stamped with a property). The tech
+    // Fast Complete sheet checks it against the live visit, so a stale row
+    // can't complete a visit since moved to another unit or property.
+    propertyId: s.property_id ?? null,
+    address: [[s.address_line1, s.address_line2].filter(Boolean).join(' '), s.city, [s.state, s.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+    city: s.city,
+    state: s.state,
+    lat: s.visit_lat != null ? Number(s.visit_lat) : null,
+    lng: s.visit_lng != null ? Number(s.visit_lng) : null,
+    checkInTime: s.check_in_time,
   };
 }
 
@@ -1935,6 +2021,73 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, r
   }
 }
 
+// The columns of the estimate a staff booking links: read once before the booking transaction (the preflight) and again
+// FOR SHARE inside it. The locked read is the row every add-on decision of the transaction uses.
+const LINKED_ESTIMATE_COLUMNS = Object.freeze([
+  'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
+  'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id', 'address', 'pricing_authority',
+]);
+
+// The add-on decisions of a staff booking made inside its transaction, on the linked estimate row that transaction holds locked:
+// a gated add-on whose gate is off, a recurring accept that would drop a sold add-on, and the add-ons' yearly limits under the
+// customer lock (the preflight read ran before it, so two bookings of one customer could each pass it). Nothing is left out of
+// the count: an accepted estimate booked a second time counts its first booking. Thrown as the same 409 the preflight returns.
+async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customerId, property, appliedOn, postedServiceKeys = null }) {
+  const refusal = require('../services/estimate-manual-acceptance').persistedAddOnRefusal(estimate, {
+    action: 'booking from it', billingTerm, checkRecurring: estimate.status !== 'accepted',
+  });
+  if (refusal) throw Object.assign(httpError(409, refusal.message), { code: refusal.code });
+  // The yearly limits of the add-ons this booking POSTS (Codex round 24): an add-on the office left off is not written to the
+  // visit, so its limit does not stop the booking. No list given = every sold add-on.
+  await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
+    estimate, customerId, property, appliedOn, staff: true, onlyServiceKeys: postedServiceKeys,
+  });
+}
+
+// The catalog keys a booking REQUEST names before it is priced: its own service and its add-on lines. A line is posted by
+// catalog id (and sometimes by key): the ids are resolved in one read. A failed read returns null = judge every sold add-on.
+async function requestedAreaAddOnServiceKeys(database, serviceId, serviceAddons) {
+  const lines = Array.isArray(serviceAddons) ? serviceAddons.filter(Boolean) : [];
+  const posted = lines.map((line) => line.serviceKey).filter(Boolean).map((key) => String(key).trim().toLowerCase());
+  const ids = [...new Set([serviceId, ...lines.map((line) => line.serviceId)].filter((id) => /^[0-9a-f-]{36}$/i.test(String(id || ''))).map(String))];
+  if (!ids.length) return posted;
+  try {
+    const rows = await database('services').whereIn('id', ids).select('service_key');
+    return [...new Set([...posted, ...rows.map((row) => row.service_key).filter(Boolean)])];
+  } catch (err) {
+    logger.warn(`[admin-schedule] posted service keys unreadable for the add-on limit preflight: ${err.message}`);
+    return null;
+  }
+}
+
+// The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the gross
+// price of the line, the visit's own included: a primary add-on booked at a stale price is refused too): area-addon-visit-rows assertPostedAreaAddOnsSold.
+const postedAreaAddOnLines = (pricing) => [
+  { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null, discount: pricing.primaryDiscount || undefined, credit: pricing.primaryAppointmentCreditDollars },
+  // `credit`: the share of an APPOINTMENT discount the stack put on this line (an add-on takes none).
+  ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base, discount: line.discount || undefined, credit: line.appointmentCreditDollars })),
+];
+// What the guard needs to judge an appointment-wide discount: the visit's final total and that discount's dollars.
+const postedAreaAddOnTotals = (pricing) => ({
+  finalPrice: pricing.finalPrice,
+  appointmentDiscountDollars: pricing.appointmentDiscount ? pricing.appointmentDiscount.discountDollars : 0,
+});
+
+// The Update Details save and the area add-ons (Codex round 18 P1): what the edit ADDS must be sold by the visit's source estimate
+// and never joins a repeating series (area-addon-visit-rows assertEditedAreaAddOns), and a visit that carries a limited add-on is
+// rechecked for the new day, the new property, or a newly added add-on (area-addon-limits assertMovedVisitLimitsOpen), inside the
+// save's transaction before the visit is written. A visit with no area add-on after the edit costs the visit read and one row read.
+async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addressPlan }) {
+  const { keys, added } = await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
+    // Each posted row with its gross price: an added add-on must carry the estimate's price, a kept one its stored price.
+    updates, rowLines: Array.isArray(replaceAddons) ? replaceAddons.map((line) => ({ key: line && line.serviceKey, price: line ? line.base : undefined, discount: line ? line.discount : undefined, credit: line ? line.appointmentCreditDollars : undefined })) : null,
+  });
+  if (!keys.length) return;
+  await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, {
+    visitId, scheduledDate: updates.scheduled_date, propertyId: addressPlan ? addressPlan.propertyId : null, serviceKeys: keys, force: Boolean(addressPlan) || added.length > 0, staff: true,
+  });
+}
+
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
@@ -2345,7 +2498,7 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
     // baseAmount * (amount / 100) — plain IEEE754 float division, which
     // rounds 5% of $20.70 down to $1.03 (20.70 * 0.05 ===
     // 1.0349999999999999). The mobile checkout preview (and every other
-    // discount surface, per CLAUDE.md's "regardless of the gate" rounding
+    // discount surface, per docs/gates-and-env.md's "regardless of the gate" rounding
     // rule) now shows the cent-exact $1.04 through
     // lib/discountStack.percentageDiscountDollars — sharing that same
     // integer-cents helper here keeps this cap-check from clamping the
@@ -2753,6 +2906,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   let finalAddonLines = addonLines;
   let appointmentDiscount = null;
   let finalAppointmentDollars = 0;
+  // The share of the appointment discount the stack puts on the PRIMARY line (0 with no stack): the area add-on guard reads it.
+  let finalPrimaryAppointmentCredit = 0;
   let resolvedAppointmentDiscount = null;
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
@@ -2875,6 +3030,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
           : { ...line, price: restated.net, appointmentCreditDollars: restated.appointmentDiscountDollars };
       });
       finalAppointmentDollars = stacked.appointmentDiscountDollars;
+      finalPrimaryAppointmentCredit = stacked.lines[0].appointmentDiscountDollars || 0;
       finalPrice = stacked.total;
     }
   }
@@ -2889,6 +3045,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     primaryServiceKey: serviceRecord?.service_key || null,
     primaryServiceCategory: serviceRecord?.category || null,
     primaryDiscount: finalPrimaryDiscount,
+    primaryAppointmentCreditDollars: finalPrimaryAppointmentCredit,
     addonLines: finalAddonLines,
     appointmentDiscount: appointmentDiscount ? {
       discountId: appointmentDiscount.id,
@@ -2961,6 +3118,9 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
 // a restore — must stay safe, so the check lives here rather than at each
 // of the many call sites below.
 const ONE_TIME_ADDON_SERVICE_KEYS = new Set(['waveguard_membership']);
+// An area add-on treatment (area_addon_<key>) is one application, sold and limited from one estimate: it is due only on the visit it
+// was sold on, whatever its stored `recurring_pattern` holds (a staff-built line leaves it NULL, which would ride the parent cadence).
+const isOneTimeOnlyAddonKey = (serviceKey) => ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey) || isAreaAddOnCatalogKey(serviceKey);
 
 // `blackoutDates` must be the same layers the visit-date generator used:
 // a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
@@ -2971,7 +3131,7 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   // later occurrence. Returning true on the anchor date keeps the fee in the
   // booking's own price-floor gate, which also filters the parent's date.
   const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
-  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) {
+  if (serviceKey && isOneTimeOnlyAddonKey(serviceKey)) {
     const anchor = normalizeDateOnly(baseDateStr);
     return !!anchor && anchor === normalizeDateOnly(targetDateStr);
   }
@@ -3008,7 +3168,7 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
 // 'one_time' pattern is due on the anchor only; every other line recurs.
 function addonRecursAfterAnchor(line) {
   const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
-  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  if (serviceKey && isOneTimeOnlyAddonKey(serviceKey)) return false;
   return (line?.recurringPattern || line?.recurring_pattern || null) !== 'one_time';
 }
 
@@ -4360,6 +4520,39 @@ function storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discount
   return Number(price) > 0 ? Number(price) : 0;
 }
 
+// The same price plus the LINE price behind it: what the visit's lines come to before any
+// discount (the parent line's gross AND each due add-on's gross, the add-on set the price itself
+// reads), from the same calculation with every discount cleared. Tells a root that is unpriced
+// (no line price anywhere) from one whose known line price, on the parent or on an add-on, is
+// discounted to $0. An add-on's gross is scheduled_service_addons.base_price, else its net plus
+// its frozen discount dollars (the relation restackStoredVisitFinancials reads it by).
+// Read-only companion for the Intelligence Bar billing type card; storedOccurrenceFloorPrice,
+// and so what the top-up stamps, is unchanged.
+function storedOccurrenceFloorVerdict(parent, dueAddons, allParentAddons, discountScope, discountCaps) {
+  const price = storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discountScope, discountCaps);
+  const undiscounted = {
+    ...parent, discount_type: null, discount_amount: null, discount_max_dollars: null, line_discount_dollars: null,
+  };
+  const grossAddons = (Array.isArray(dueAddons) ? dueAddons : []).map((addon) => {
+    const storedGross = Number(addon?.base_price);
+    const gross = Number.isFinite(storedGross) && storedGross > 0
+      ? storedGross : (Number(addon?.estimated_price) || 0) + (Number(addon?.discount_dollars) || 0);
+    return { ...addon, estimated_price: gross };
+  });
+  // allParentAddons stays as stored: the legacy reconstruction subtracts the add-ons' NET total
+  // from the parent's stored total.
+  const positive = (n) => (Number(n) > 0 ? Number(n) : 0);
+  const line = calculateStoredVisitFinancials(undiscounted, grossAddons, allParentAddons, discountScope).price;
+  const parentLine = calculateStoredVisitFinancials(undiscounted, [], allParentAddons, discountScope).price;
+  return {
+    price,
+    linePrice: positive(line),
+    parentLinePrice: positive(parentLine),
+    addonLines: grossAddons.filter((a) => positive(a.estimated_price) > 0)
+      .map((a) => ({ name: a.service_name || 'add-on', gross: positive(a.estimated_price) })),
+  };
+}
+
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
   const serviceKeyFilter = parent?.discount_service_key_filter || null;
   const serviceCategoryFilter = parent?.discount_service_category_filter || null;
@@ -5117,6 +5310,7 @@ async function loadProjectCompletionContextByServiceId(services) {
   const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
+  const addOnVisits = await areaAddOnVisitIdsForFeed(rows);
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5125,7 +5319,7 @@ async function loadProjectCompletionContextByServiceId(services) {
         completionProfileLookupFailed = true;
         return null;
       });
-    return [service.id, {
+    const entry = {
       completionProfile,
       // Whether the inspection-credit lane is live — Dispatch V2 completes
       // from THIS endpoint's payload, and the closeout panel renders its
@@ -5169,14 +5363,35 @@ async function loadProjectCompletionContextByServiceId(services) {
         && require('../config/feature-gates').typedVoiceFillLive()
         && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
         && !(completionProfile?.companions || []).length,
+      // GATE_STATION_FAST_COMPLETE (with the two gates above): a termite or
+      // rodent bait station visit may open the Fast Complete sheet even while
+      // the station map is on, the sheet carrying the station checks. Only the
+      // two bait station forms (a trap check keeps the full form) and never a
+      // combined visit. The client also needs the map known on
+      // (pest-fast-complete.js isTypedReportEligible).
+      stationFastCompleteEnabled: require('../services/visit-station-facts').stationFastCompleteEnabled(completionProfile),
+      // GATE_COMBO_FAST_COMPLETE: the pest and lawn Fast Complete sheets may be parts of one grouped stop.
+      // True only for a member of a grouped stop; the container (PR 2) and the server decide the rest.
+      comboFastCompleteEnabled: require('../services/combo-fast-complete').comboRowFlag(service),
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_ASSESSMENT_FAST_COMPLETE: Dispatch opens the Waves Assessment's one-screen sheet; only an assessment profile.
+      assessmentFastCompleteEnabled: require('../config/feature-gates').assessmentFastCompleteLive()
+        && completionProfile?.serviceKey === require('../services/assessment-booking').ASSESSMENT_SERVICE_KEY,
+      // GATE_LAWN_FAST_COMPLETE: the admin Dispatch/Schedule surfaces open the
+      // regular lawn Fast Complete sheet for an eligible lawn visit when on.
+      // Read at call time; the context route is the eligibility authority.
+      lawnFastCompleteEnabled: lawnFastCompleteOffered(completionProfile),
       // GATE_FAST_COMPLETE_VOICE_FILL: the pest re-service sheet shows its
       // "Tell me what you did" mic, Check chips and office note when on. Read
       // at call time; no per-tech flag.
       fastCompleteVoiceFillEnabled: fastCompleteVoiceFillLive(),
+      // GATE_FAST_COMPLETE_INVOICED_VISITS: admin Dispatch opens an already
+      // invoiced visit (or one returning from payment) in its Fast Complete
+      // sheet, which sends the full form's invoiceAlreadySent. Read at call time.
+      invoicedVisitFastCompleteEnabled: require('../config/feature-gates').fastCompleteInvoicedVisitsLive(),
       // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
@@ -5189,9 +5404,7 @@ async function loadProjectCompletionContextByServiceId(services) {
       // flow has none, so it keeps the full form (Codex #5538). Nor a
       // service with its own typed findings (cockroach, German roach
       // knockdowns): /complete requires them and the report flow has none.
-      fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()
-        && !(completionProfile?.companions || []).length
-        && !completionProfile?.findingsType,
+      fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -5232,7 +5445,12 @@ async function loadProjectCompletionContextByServiceId(services) {
       // An OUTAGE is not "no linked project": a visit with a project must not
       // look project-free and complete on its own record.
       linkedProjectLookupFailed,
-    }];
+    };
+    const addOns = addOnVisits.byVisit.get(String(service.id));
+    // areaAddOnRowsAttached keeps the lightweight flows off; the list (key, name, sold area, governed rate) labels
+    // each add-on's product row on the visit's own completion form. areaAddOnOwn is the same for the add-on that IS the visit.
+    const own = addOnVisits.own.get(String(service.id));
+    return [service.id, { ...entry, ...(addOnVisits.failed ? AREA_ADDON_LOOKUP_FAILED : {}), ...(own ? { areaAddOnOwn: own } : {}), ...(addOns ? { ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOns: addOns } : {}) }];
   }));
   return new Map(entries);
 }
@@ -5768,6 +5986,38 @@ function recurringWithoutBillableAmount({
   };
 }
 
+// The price each date's extension row would carry, one entry per date: the series
+// price template (resolveSeriesExtensionPriceTemplate) plus the add-on lines due on
+// that date, through storedOccurrenceFloorPrice. The one read seriesExtensionUnbillable
+// takes its minimum from and the Intelligence Bar billing type card takes its maximum
+// from (seriesNextOccurrencesPrice): the price the top-up copies onto the visits it mints.
+async function seriesExtensionDatePrices(conn, args) {
+  return (await seriesExtensionDateVerdicts(conn, args)).map((v) => v.price);
+}
+
+async function seriesExtensionDateVerdicts(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate = null }) {
+  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+  // Codex pre-push audit P1 (deferred fast-follow): routed through
+  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
+  // pricing + real catalog caps every extension write site's own
+  // applyDiscountStackRestack already stamps rows with — see that
+  // function's own comment for the concrete under-count this fixes.
+  // discountCaps is gated so the gate-off path makes no extra query, and
+  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
+  // once per date: gatePriceParent's line_discount_id is fixed and
+  // parentAddons is a superset of every date's own dueAddons, so the whole
+  // cap set is knowable up front — a validation guard that can be asked
+  // about many dates has no reason to repeat the same catalog read.
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+    : null;
+  return dates.map((d) => storedOccurrenceFloorVerdict(
+    gatePriceParent,
+    filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent),
+    parentAddons, storedDiscountScope, discountCaps,
+  ));
+}
+
 // The SAME billable-amount verdict for every OFFICE writer that grows an
 // existing series — the Edit Appointment count raise and fixed→ongoing flip
 // (reconcileRecurringSeriesVisitCount) and the recurring-plan alert actions
@@ -5796,31 +6046,15 @@ async function seriesExtensionUnbillable(conn, {
   // The cancel-reseed's in-term placement selects add-ons by the replaced
   // occurrence, not the visit's own day — the check reads the same set.
   addonDate = null,
+  // The billing fields the customer WOULD have (a pending lane edit asking
+  // whether the series stays billable under it); merged over the live row.
+  customerOverride = null,
 }) {
   if (!dates.length) return null;
-  const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
-  if (!gateCustomer) return null;
-  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
-  // Codex pre-push audit P1 (deferred fast-follow): routed through
-  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
-  // pricing + real catalog caps every extension write site's own
-  // applyDiscountStackRestack already stamps rows with — see that
-  // function's own comment for the concrete under-count this fixes.
-  // discountCaps is gated so the gate-off path makes no extra query, and
-  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
-  // once per date: gatePriceParent's line_discount_id is fixed and
-  // parentAddons is a superset of every date's own dueAddons, so the whole
-  // cap set is knowable up front — a validation guard that can be asked
-  // about many dates has no reason to repeat the same catalog read.
-  const discountCaps = discountStackingLive()
-    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
-    : null;
-  let floor = Infinity;
-  for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
-    const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
-    floor = Math.min(floor, price);
-  }
+  const liveCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
+  if (!liveCustomer) return null;
+  const gateCustomer = customerOverride ? { ...liveCustomer, ...customerOverride } : liveCustomer;
+  const floor = Math.min(...await seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate }));
   const extendProfile = await resolveCompletionProfileForScheduledService(parent, conn).catch(() => null);
   // The PARENT's own label — asks whether the series' service is always-free;
   // children still resolve the live catalog identity at insert (same
@@ -5841,6 +6075,171 @@ async function seriesExtensionUnbillable(conn, {
     serviceType: extendSeriesServiceType,
   });
 }
+
+// Bound on the verdict's cadence walk: cadence steps tried (steps skipped as
+// past or too close count too). The walk covers the whole top-up horizon (up to
+// 730 days), so a daily cadence needs about 730 steps; there is no cap on the
+// dates validated. A walk that hits this bound without finishing is refused as
+// unverified, never passed.
+const SERIES_VERDICT_MAX_ATTEMPTS = 3000;
+const SERIES_VERDICT_UNVERIFIED = {
+  error: 'Could not verify whether this recurring plan will bill — its schedule is too long to check. Change the billing type on the customer page.',
+  code: 'RECURRING_BILLING_UNVERIFIED',
+  fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+};
+
+// The billable-amount verdict (seriesExtensionUnbillable, the one the nightly
+// top-up asks per candidate date) for every visit the top-up would mint
+// within its horizon on series `parentId`, optionally under billing fields the customer
+// does not have yet (`customerOverride`: a pending lane edit). Inputs are
+// gathered exactly as extendSeriesOnceLocked gathers them: the root with its
+// series template overlaid, the latest live visit's anchor, the cadence walk
+// (nextRecurringDate / seasonalSafeShift / too-close / not-past), the add-ons
+// due on each date, the stored discount scope and the sibling-resolved
+// create-invoice stamp. Dates are the cadence dates only: occupancy clashes
+// move a visit, not its price.
+//
+// The walk covers the COMPLETE horizon, and always at least the next cadence
+// occurrence even when it falls beyond the horizon (a yearly plan whose next
+// visit is past the top-up's reach is still the visit that would be minted).
+// A date's price depends only on the add-ons due on it (and the series' stored
+// discount scope, which is the same for every date), so dates are grouped by
+// that set and one representative per distinct set is priced: a daily series
+// costs a handful of verdicts, not one per day. seriesExtensionUnbillable
+// takes the minimum over the dates it is given, so the verdict is the same one
+// the per-date walk would give. Read-only (the legacy cap freeze the extension
+// writes is skipped). Null when the series has nothing to extend or bills.
+// A rider series (rides_parent_id, GATE_PEST_RIDES_LAWN_AT_ACCEPT + visit groups) seeds
+// its next visit on a lawn host date before it walks its own cadence
+// (walkExtensionCandidates -> rideLawnExtension), and an add-on can price one date and
+// not the other. So the host date the top-up would ride, from the top-up's own candidate
+// function (rideLawnCandidate, read-only), is validated too; when that answer is
+// unknown the verdict is unverified.
+async function seriesWalkWithRide(conn, walk, latest, horizonEnd) {
+  const { parent, cols } = walk;
+  if (!(cols.rides_parent_id && parent.rides_parent_id)) return walk;
+  // Every host date the top-up would ride in one run, not only the first: it re-selects a host
+  // after each insert (up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN), and each insert becomes the
+  // latest visit and an occupied date for the next pick. The same read-only selector is asked
+  // for each, with the inserts it would have made so far.
+  const existingDates = new Set(await loadActiveSeriesDates(conn, parent.id));
+  let anchor = latest;
+  const rideDates = [];
+  for (;;) {
+    const ride = await rideLawnCandidate({
+      conn, parent, parentId: parent.id, cols, latest: anchor, opts: { maxDate: horizonEnd }, existingDates,
+    });
+    if (!ride) break;
+    if (ride.unanswered || rideDates.length >= TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN) return SERIES_VERDICT_UNVERIFIED;
+    rideDates.push(ride.date);
+    existingDates.add(ride.date);
+    anchor = { ...anchor, scheduled_date: ride.date };
+  }
+  return rideDates.length ? { ...walk, dates: [...new Set([...walk.dates, ...rideDates])], rideDates } : walk;
+}
+
+async function seriesVerdictWalk(conn, parentId) {
+  const cols = await conn('scheduled_services').columnInfo();
+  let parent = await conn('scheduled_services').where({ id: parentId }).first();
+  if (!parent?.is_recurring || !parent.recurring_pattern) return null;
+  parent = overlayRecurringTemplateOverrides(parent, cols);
+  const latest = await latestLiveSeriesVisit(conn, parentId);
+  if (!latest) return null;
+  const pattern = parent.recurring_pattern;
+  const rOpts = {
+    ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  const latestStr = seriesExtendAnchor(latest, pattern, rOpts);
+  const skipParent = (cols.skip_weekends && !!parent.skip_weekends) || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const dirParent = cols.weekend_shift && parent.weekend_shift === 'back' ? 'back' : 'forward';
+  const blackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+  const { horizonDaysFromEnv } = require('../services/recurring-series-topup');
+  const today = etDateString();
+  const horizonEnd = etDateString(addETDays(parseETDateTime(`${today}T12:00`), horizonDaysFromEnv()));
+  // One representative date per distinct set of due add-ons. A date past the horizon is
+  // priced only while nothing inside it was (the next occurrence is always validated), and
+  // the first date past the horizon ends the walk with the verdict.
+  const byPricing = new Map();
+  for (let attempt = 1; attempt <= SERIES_VERDICT_MAX_ATTEMPTS; attempt += 1) {
+    const candidate = seasonalSafeShift(nextRecurringDate(latestStr, pattern, attempt, rOpts), pattern, skipParent, dirParent, blackoutDates);
+    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, pattern, candidate) || candidate <= today) continue;
+    const past = candidate > horizonEnd;
+    const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
+      .map((addon) => parentAddons.indexOf(addon)).join(',');
+    if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
+    if (past) return seriesWalkWithRide(conn, { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent }, latest, horizonEnd);
+  }
+  // The attempt cap ended the walk before the horizon: unverified, never passed.
+  return SERIES_VERDICT_UNVERIFIED;
+}
+
+async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk || walk === SERIES_VERDICT_UNVERIFIED) return walk;
+  const { parent, cols, parentAddons } = walk;
+  return seriesExtensionUnbillable(conn, {
+    ...walk, customerOverride,
+    storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+    seriesCioc: cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined,
+  });
+}
+
+// The highest price the top-up would copy onto a visit it mints on series `parentId`
+// within the same walk (seriesVerdictWalk, the verdict's own): the extension price
+// template + the add-on lines due on each date (seriesExtensionDatePrices, the read
+// seriesExtensionUnbillable takes its minimum from). `{ unverified: true }` when the walk
+// could not finish; null when the series has nothing to extend.
+async function seriesNextOccurrencesPrice(conn, parentId) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk) return null;
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, hosts: [], parentLinePrice: 0, addonLines: [] };
+  const { parent, parentAddons } = walk;
+  const verdicts = await seriesExtensionDateVerdicts(conn, {
+    ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+  });
+  const price = Math.max(0, ...verdicts.map((v) => v.price));
+  const linePrice = Math.max(0, ...verdicts.map((v) => v.linePrice));
+  const parentLinePrice = Math.max(0, ...verdicts.map((v) => v.parentLinePrice));
+  // The add-on lines (name, gross) due on any walked date, once each.
+  const addonLines = [...new Map(verdicts.flatMap((v) => v.addonLines).map((a) => [`${a.name}=${a.gross}`, a])).values()];
+  // The lawn host dates a rider series would ride (seriesWalkWithRide), each with its own price
+  // and zero kind, so the caller can name the date and pin the list.
+  const hosts = (walk.rideDates || []).map((date) => {
+    const v = verdicts[walk.dates.indexOf(date)];
+    return { date, price: v.price, linePrice: v.linePrice };
+  });
+  // An explicit $0 template override (written only by the price/service scope lane) stays an
+  // authoritative $0 on every visit the top-up mints (applyStoredVisitFinancials, same gate and
+  // same condition: the lines price to nothing and the override is exactly 0), so those visits
+  // bill nothing; kept apart from a root that is merely unpriced.
+  const explicitZero = price === 0 && isEnabled('editApptPriceServiceScope')
+    && parseTemplateOverrides(parent.recurring_template_overrides)?.estimated_price === 0;
+  // Which kind of zero: the override above, a known line price discounted away, or no price at all.
+  let zero = null;
+  if (price === 0) zero = explicitZero ? 'override' : (linePrice > 0 ? 'discounted' : 'unpriced');
+  return { unverified: false, price, linePrice, parentLinePrice, addonLines, zero, explicitZero, hosts };
+}
+
+
+// GET /api/admin/schedule/held-visits?date=YYYY-MM-DD — visits promised to a
+// caller on a recorded call with nothing booked (GATE_CALL_HELD_VISIT). Display
+// only. This strip must never break the Dispatch page: a failed load is an
+// empty list.
+router.get('/held-visits', requireAdmin, async (req, res) => {
+  const date = String(req.query.date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T12:00:00Z`))) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  try {
+    const heldVisits = await require('../services/call-held-visits').listHeldVisits(date);
+    return res.json({ heldVisits });
+  } catch (err) {
+    logger.warn(`[held-visits] load failed for ${date}: ${err.message}`);
+    return res.json({ heldVisits: [] });
+  }
+});
 
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
@@ -5926,9 +6325,16 @@ router.get('/', async (req, res, next) => {
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
+    // Visits whose stop is in an active neighborhood, when a visit's assigned
+    // technician may add a gate code or mark one wrong
+    // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
+    let gateActionVisits = new Set();
+    const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
     try {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        neighborhoodGateByVisit = await require('../services/neighborhood-access').neighborhoodGateEntriesForVisits(db, services);
+        const neighborhoodAccess = require('../services/neighborhood-access');
+        neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+        if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {
       logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
@@ -6116,6 +6522,7 @@ router.get('/', async (req, res, next) => {
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
         neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
+        neighborhoodActions: gateActionVisits.has(s.id),
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -6160,10 +6567,10 @@ router.get('/', async (req, res, next) => {
       // predict as not-collected (never widen coverage).
       let visitMonthDuesCollected = false;
       if (lane.mode === 'monthly_membership') {
-        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
         if (!autopayActive) {
           try {
-            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`));
+            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`), { excludeScheduledServiceId: s.id });
           } catch { visitMonthDuesCollected = false; }
         }
       }
@@ -6334,7 +6741,16 @@ router.get('/', async (req, res, next) => {
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
+        areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
+        // The add-on lookup failed for this batch: the completion form refuses a completed visit until the schedule reloads.
+        areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,
+        areaAddOns: projectCompletionContext.areaAddOns,
+        areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
+        assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
+        // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
+        invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -6343,6 +6759,9 @@ router.get('/', async (req, res, next) => {
         laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
         typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
         typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
+        // GATE_STATION_FAST_COMPLETE — see loadProjectCompletionContextByServiceId.
+        stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
+        comboFastCompleteEnabled: projectCompletionContext.comboFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6355,14 +6774,10 @@ router.get('/', async (req, res, next) => {
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
-        customerId: s.customer_id, customerPhone: s.customer_phone,
-        // The visit's premise (null = never stamped with a property). The tech
-        // Fast Complete sheet checks it against the live visit, so a stale row
-        // can't complete a visit since moved to another unit or property.
-        propertyId: s.property_id ?? null,
-        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
-        city: s.city,
-        state: s.state,
+        customerId: s.customer_id,
+        // propertyId, address, city, state, lat, lng, customerPhone and
+        // checkInTime: shared with the week feed (visitPremiseFields).
+        ...visitPremiseFields(s),
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
         serviceAddons,
@@ -6375,8 +6790,6 @@ router.get('/', async (req, res, next) => {
         windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
         has_service_record: s.has_service_record === true,
-        lat: s.visit_lat != null ? Number(s.visit_lat) : null,
-        lng: s.visit_lng != null ? Number(s.visit_lng) : null,
         customerConfirmed: s.customer_confirmed,
         // Lets the sidebar hide actions that the review gate would 409
         // (unreviewed outbound-callback bookings).
@@ -6387,9 +6800,16 @@ router.get('/', async (req, res, next) => {
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
         estimatedDuration: s.estimated_duration_minutes || 60,
+        // The stored estimate before the 60 fill: the drive-line late check
+        // sums real estimates only (stop-drive-legs.js).
+        rawEstimateMinutes: s.estimated_duration_minutes ?? null,
+        // The effective service premise, for the late check's co-visit
+        // rule (premiseStampConflicts reads these canonically).
+        premise: { line1: s.address_line1 || null, line2: s.address_line2 || null, city: s.city || null, zip: s.zip || null },
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
+        ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
@@ -6403,11 +6823,12 @@ router.get('/', async (req, res, next) => {
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
         lastLineServiceNotes: previewText(lastLineService?.technician_notes),
-        checkInTime: s.check_in_time, checkOutTime: s.check_out_time,
+        checkOutTime: s.check_out_time,
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
+        autoDispatchLocked: s.auto_dispatch_locked === true,
         recurringPattern: s.recurring_pattern || null,
         recurringOngoing: s.recurring_ongoing ?? null,
         recurringNth: s.recurring_nth ?? null,
@@ -6468,6 +6889,10 @@ router.get('/', async (req, res, next) => {
       Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
     }
 
+    // Drive legs, the stop each leg comes from, and late risk against the
+    // 2-hour arrival window, for the day list (display only).
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
+
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
       tech.totalServices = tech.services.length;
@@ -6485,19 +6910,26 @@ router.get('/', async (req, res, next) => {
     });
 
     // Assignment picker roster: assignable staff only (technician-eligibility.js).
-    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    const roster = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    // Marked out for this date (GATE_TECH_OUT_REDISTRIBUTE): the day list
+    // shows no open hours for them, since assertAssignableTechnician would
+    // refuse the booking. An unreadable absence table hides nothing.
+    const absent = await absentTechDays(db, { dateFrom: date, dateTo: date }).catch(() => new Set());
+    const technicians = roster.map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
     try {
-      const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,precipitation_probability&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York`);
-      if (weatherRes.ok) {
-        const wd = await weatherRes.json();
-        const current = wd.current || {};
+      const forecast = await fetchPropertyForecast({
+        latitude: SERVICE_AREA_DEFAULT_LOCATION.latitude,
+        longitude: SERVICE_AREA_DEFAULT_LOCATION.longitude,
+      });
+      if (forecast.status === 'ok' && forecast.current) {
+        const current = forecast.current;
         weather = {
-          temp: Math.round(current.temperature_2m || 0),
-          windSpeed: Math.round(current.wind_speed_10m || 0),
-          rainProbability: current.precipitation_probability || 0,
+          temp: Math.round(current.temperature_f || 0),
+          windSpeed: Math.round(current.wind_mph || 0),
+          rainProbability: current.precipitation_probability_pct || 0,
         };
       }
     } catch { /* weather is optional */ }
@@ -6535,6 +6967,10 @@ router.get('/', async (req, res, next) => {
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
+      // The booking hours the office's create check enforces (capacity mode:
+      // the shift), so the day list's Open blocks never offer a refused hour.
+      // null = no shift bound.
+      bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay(),
       weather,
       rainChance,
       ...(zoneRain ? { zoneRain } : {}),
@@ -6619,9 +7055,23 @@ router.get('/week', async (req, res, next) => {
           ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
           ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
           ...(discountProvenanceCols.line_discount_dollars ? ['scheduled_services.line_discount_dollars'] : []),
+          // areaAddOnFeed reads the own add-on's sold scope (its grass) from this column, as the day feed's
+          // scheduled_services.* gives it: without it the Week view withholds the governed rate.
+          ...['area_addon_scope'].filter((col) => discountProvenanceCols[col]).map((col) => `scheduled_services.${col}`),
           'scheduled_services.technician_id',
+          // The premise and contact fields the Dispatch Fast Complete sheets
+          // read (visitPremiseFields): the same columns the day feed gets
+          // from scheduled_services.*, in the same stamped-address-wins form.
+          'scheduled_services.property_id', 'scheduled_services.check_in_time',
+          db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+          db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+          db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+          db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+          db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+          'customers.phone as customer_phone',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
+          'scheduled_services.auto_dispatch_locked',
           'scheduled_services.recurring_parent_id',
           'scheduled_services.recurring_pattern',
           'scheduled_services.recurring_ongoing',
@@ -6762,10 +7212,10 @@ router.get('/week', async (req, res, next) => {
         // Visit-month dues for the prediction (see day view).
         let visitMonthDuesCollected = false;
         if (lane.mode === 'monthly_membership') {
-          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
           if (!autopayActive) {
             try {
-              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`));
+              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`), { excludeScheduledServiceId: s.id });
             } catch { visitMonthDuesCollected = false; }
           }
         }
@@ -6845,6 +7295,9 @@ router.get('/week', async (req, res, next) => {
           id: s.id,
           customerId: s.customer_id,
           customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+          // propertyId and the rest of the premise the day feed carries: the
+          // Fast Complete rules and sheets read them off this row too.
+          ...visitPremiseFields(s),
           serviceType: svcType,
           serviceTypeDisplay,
           serviceAddons,
@@ -6940,13 +7393,22 @@ router.get('/week', async (req, res, next) => {
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
+          areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
+          areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,
+          areaAddOns: projectCompletionContext.areaAddOns,
+          areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
+          assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
+          invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
           laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
           typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
           typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
+          stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
+          comboFastCompleteEnabled: projectCompletionContext.comboFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -6957,6 +7419,7 @@ router.get('/week', async (req, res, next) => {
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
           recurringParentId: s.recurring_parent_id || null,
+          autoDispatchLocked: s.auto_dispatch_locked === true,
           recurringPattern: s.recurring_pattern || null,
           recurringOngoing: s.recurring_ongoing ?? null,
           recurringNth: s.recurring_nth ?? null,
@@ -7005,7 +7468,17 @@ router.get('/week', async (req, res, next) => {
       for (const day of days) day.rainChance = null;
     }
 
-    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
+    // Techs marked out per day, so the mobile week list offers no open hour
+    // the booking check would refuse. Unreadable = nothing hidden.
+    try {
+      const absent = await absentTechDays(db, { dateFrom: days[0].date, dateTo: days[days.length - 1].date });
+      for (const day of days) {
+        const suffix = `:${day.date}`;
+        day.outTechIds = [...absent].filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));
+      }
+    } catch { /* absences are optional here */ }
+
+    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled, bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay() });
   } catch (err) { next(err); }
 });
 
@@ -7051,6 +7524,7 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
         'scheduled_services.is_recurring',
+        'scheduled_services.auto_dispatch_locked',
         'scheduled_services.recurring_parent_id',
         'scheduled_services.recurring_pattern',
         'scheduled_services.recurring_ongoing',
@@ -7134,6 +7608,7 @@ router.get('/month', async (req, res, next) => {
         duration: s.estimated_duration_minutes || 30,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
+        autoDispatchLocked: s.auto_dispatch_locked === true,
         recurringPattern: s.recurring_pattern || null,
         recurringOngoing: s.recurring_ongoing ?? null,
         recurringNth: s.recurring_nth ?? null,
@@ -7669,7 +8144,8 @@ async function assertNoCallBookingConflict(guard) {
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
 
-router.post('/', requireAdmin, async (req, res, next) => {
+router.post('/', requireAdmin, scheduleCreateHandler);
+async function scheduleCreateHandler(req, res, next) {
   try {
     const {
       customerId, technicianId, scheduledDate, windowStart: windowStartRaw, windowEnd: windowEndRaw,
@@ -7835,11 +8311,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
-        .first(
-          'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
-          'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option',
-          'property_id',
-        );
+        .first(...LINKED_ESTIMATE_COLUMNS);
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
       // A quote priced for one property must not book at another: the
       // estimate's own linkage would otherwise re-stamp the visit to the
@@ -7877,23 +8349,32 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (linkedEstimate.status !== 'accepted' && linkedEstimate.expires_at && new Date(linkedEstimate.expires_at) < new Date()) {
         return res.status(400).json({ error: 'This estimate has expired. Revive it on the Estimates page before booking from it.' });
       }
-      // A suppression-carrying estimate cannot be BOOKED while
-      // GATE_BERMUDA_SUPPRESSION is off. This must run in the preflight,
-      // BEFORE the appointment transaction: the accept-on-book failure
-      // handler below deliberately KEEPS the booking when acceptance fails,
-      // so the manual-acceptance gate alone would still schedule (and
-      // possibly prepay-stamp) the disabled add-on (codex #3272 r6).
-      // Applies to the already-accepted link path too — scheduling the
-      // program is exactly what the kill switch must stop.
+      // A suppression-carrying or area add-on estimate cannot be BOOKED while its gate is off,
+      // and a not-yet-accepted recurring estimate that carries an area add-on cannot be booked
+      // at all (its best-effort acceptance would drop the add-on). This must run in the
+      // preflight, BEFORE the appointment transaction: the accept-on-book failure handler
+      // below deliberately KEEPS the booking when acceptance fails, so the manual-acceptance
+      // gate alone would still schedule (and possibly prepay-stamp) the disabled add-on (codex
+      // #3272 r6). Applies to the already-accepted link path too (the gates), because
+      // scheduling the program is exactly what the kill switch must stop.
       {
-        const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-        if (estimateDataCarriesBermudaSuppression(linkedEstimate.estimate_data)
-          && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-          return res.status(409).json({
-            error: 'This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before booking from it.',
-            code: 'BERMUDA_SUPPRESSION_GATED',
-          });
-        }
+        const addOnRefusal = require('../services/estimate-manual-acceptance').persistedAddOnRefusal(linkedEstimate, {
+          action: 'booking from it',
+          billingTerm: bookingBillingTerm,
+          checkRecurring: linkedEstimate.status !== 'accepted',
+        });
+        if (addOnRefusal) return res.status(409).json({ error: addOnRefusal.message, code: addOnRefusal.code });
+        // The add-ons' yearly limits on the day being booked (the same recheck the customer's accept runs), read for
+        // the booking's customer and property: an unowned estimate (a lead or standalone quote) is attached to this
+        // customer on book, so its own customer_id is empty here.
+        // Only the add-ons this request posts (the office may book fewer than were sold): the request's own service and its
+        // add-on lines, by catalog key (one small catalog read for the posted ids). The locked recheck inside the transaction
+        // judges the priced lines again.
+        const limitRefusal = await require('../services/area-addon-limits').areaAddOnLimitRefusal(db, {
+          estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,
+          onlyServiceKeys: await requestedAreaAddOnServiceKeys(db, serviceId, serviceAddons),
+        });
+        if (limitRefusal) return res.status(409).json(limitRefusal.body);
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
       // (retired 2026-09-24) must not be booked-and-accepted here: the
@@ -8559,6 +9040,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // the estimate's frozen disclosure), a failed attach/accept leaves it so
     // the first completion still collects (codex #3591 r62 P1).
     let directRodentSetupStamp = 0;
+    // The linked estimate as the booking transaction read it under its lock (see assertLockedEstimateAddOns); the preflight copy
+    // until that read.
+    let lockedLinkedEstimate = linkedEstimate;
     await db.transaction(async (trx) => {
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
       // occupancy lock, FIRST statement of the trx, before the comms lock
@@ -8634,7 +9118,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // restored loser's source_estimate_id onto a kept-customer visit.
         if (linkedEstimateId) {
           const freshLinkedEstimate = await trx('estimates')
-            .where({ id: linkedEstimateId }).forShare().first('id', 'customer_id', 'property_id');
+            .where({ id: linkedEstimateId }).forShare().first(...LINKED_ESTIMATE_COLUMNS);
           if (!freshLinkedEstimate
             || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
             const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
@@ -8651,8 +9135,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
             && String(freshLinkedEstimate.property_id) !== String(bookingProperty.property_id)) {
             throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
           }
+          // Every add-on decision again, on the row this transaction now holds FOR SHARE (an estimator save waits behind it),
+          // never on the preflight copy: the gated and recurring-plan refusals and the yearly limits under the customer lock.
+          // The scope writer below reads the same row.
+          lockedLinkedEstimate = freshLinkedEstimate;
+          // Lock order: the estimate's add-on lock first, then the place locks the limit recheck takes (the order
+          // Update Details takes them in), so the two paths never wait on each other in a cycle.
+          await require('../services/area-addon-visit-rows').lockEstimateAddOns(trx, freshLinkedEstimate.id);
+          await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {
+            billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,
+            postedServiceKeys: postedAreaAddOnLines(pricing).map((line) => line.key).filter(Boolean),
+          });
         }
       }
+      // The area add-ons the posted lines carry, against the estimate row this transaction holds locked (an estimate revised after
+      // the modal built its request is refused here, with nothing inserted): a posted add-on the estimate does not sell, or sells at
+      // another price, never books; fewer than sold is the office's choice. None posted: no query. A repeating series never carries one.
+      require('../services/area-addon-visit-rows').assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });
+      // ... and an add-on this estimate already has on an appointment is not booked from it a second time (one estimate sells
+      // one application). Read inside this transaction, after the booking's customer lock.
+      await require('../services/area-addon-visit-rows').assertAreaAddOnsNotYetBooked(trx, lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it
       // updates the customer, then waits on the advisory lock). Taking the
@@ -8847,9 +9349,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
         });
       }
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
+      // The sold area (scope) of the linked estimate's area add-ons, rebuilt from the estimate on the server (never from the
+      // posted lines) and written by the same writer the customer's accept uses: without it the job card withholds the rate.
+      await require('../services/area-addon-visit-rows').writeStaffBookedAreaAddOnScopes(trx, {
+        scheduledServiceId: svc.id, estimate: lockedLinkedEstimate, ownServiceKey: svc.service_key_snapshot,
+      });
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
       await require('../services/visit-groups').maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' });
+      // Two-treatment package (cockroach / flea): visit 2 books with visit 1
+      // — gate-dark, savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: svc, cols });
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
       // Inspection credit: durable in-transaction marker on the series
       // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
@@ -9802,7 +10313,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
+
+// The Schedule-screen create without an HTTP request — the Intelligence Bar's
+// start-a-recurring-program tool (owner 2026-10-06) runs this so the bar and
+// this screen book through the SAME handler. It runs the router-level catalog
+// prime (as router.use above does, failures ignored), then the handler with
+// the only request fields it reads, and resolves the reply it would send:
+// { status, json }. An error the handler passes to next() rejects.
+async function createScheduleBooking({ body, actor }) {
+  await primePercentDiscountExclusions().catch(() => {});
+  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName } };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    scheduleCreateHandler(req, res, reject).catch(reject);
+  });
+}
 
 // GET /api/admin/schedule/list — paginated list view with filters
 router.get('/list', async (req, res, next) => {
@@ -10400,6 +10930,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              // A visit carrying a limited area add-on is judged for the NEW day (this row is locked by the CAS above); a limit reached
+              // fails this id with the staff detail and the batch goes on (the loop's catch reports it).
+              await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: id, visit: svc, scheduledDate: bulkTargetDate, staff: true });
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
@@ -10893,6 +11426,299 @@ async function refuseCarriedStopInEditMove(ackedIds) {
         { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
       );
     }
+  }
+}
+
+// ---- update-details: a stop shared by two or more services (a combo) -----
+//
+// update-details writes ONE row, so a date, time or technician change on a
+// shared stop would leave the other services behind. The request says how to
+// handle it (owner rulings 2026-10-03: Edit appointment can move a combo, and
+// a technician-only change asks too):
+//   comboMove 'together' — the whole stop moves or is reassigned. Everything
+//     is checked BEFORE any write (planVisitMoveForStaff: the same staff move
+//     the schedule runs, against the stop's live membership read here); the
+//     date, window and technician keys are then taken off the body, so the
+//     per-row edit below saves the other fields on the current slot; the
+//     move itself runs after that edit commits (commit()).
+//   comboMove 'separate' — the service is split off its stop here, and the
+//     rest is the ordinary single-row edit.
+// No comboMove (every other caller), a row that is not on a shared stop, or
+// a request that changes nothing about the slot: null, the handler is
+// unchanged.
+// `comboVisit` is the stop the operator was shown ({ id, memberIds,
+// liveCount, liveMemberIds }); a stop whose live services differ from it is
+// refused before anything is saved.
+function comboEditChanges(body, row) {
+  const b = body || {};
+  let intake;
+  try {
+    intake = windowIntakeFromBody(b);
+  } catch {
+    return null; // a half-cleared window is the handler's own 422
+  }
+  const dateTarget = b.scheduledDate !== undefined && b.scheduledDate !== '' ? dateOnly(b.scheduledDate) : null;
+  const start = intake.clearBoth ? null : (intake.windowStart !== undefined ? normalizeHHMM(intake.windowStart) : undefined);
+  return {
+    intake,
+    length: comboLengthChange(b, row, intake),
+    date: !!dateTarget && dateTarget !== dateOnly(row.scheduled_date),
+    start: intake.clearBoth
+      ? !!row.window_start
+      : (start !== undefined && start !== (normalizeHHMM(row.window_start) || null)),
+    technician: b.technicianId !== undefined && (b.technicianId || null) !== (row.technician_id || null),
+  };
+}
+
+// The whole-stop move keeps every service's own length.
+function comboLengthChange(body, row, intake) {
+  const posted = parseInt(body.estimatedDuration, 10);
+  if (Number.isInteger(posted) && posted > 0 && row.estimated_duration_minutes != null
+    && posted !== Number(row.estimated_duration_minutes)) return true;
+  const span = (a, z) => {
+    const [h1, m1] = String(normalizeHHMM(a) || '').split(':').map(Number);
+    const [h2, m2] = String(normalizeHHMM(z) || '').split(':').map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? (h2 * 60 + m2) - (h1 * 60 + m1) : null;
+  };
+  const stored = span(row.window_start, row.window_end);
+  return stored != null && !!intake.windowStart && !!intake.windowEnd && span(intake.windowStart, intake.windowEnd) !== stored;
+}
+
+// A stop with no stored span takes the start only: each service's end is
+// derived from its own length. No time change = a date-only (or
+// technician-only) move, which keeps the stored window.
+function comboMoveWindow(row, changes) {
+  if (!changes.start) return undefined;
+  const keepsSpan = !!(row.window_start && row.window_end);
+  const end = keepsSpan && changes.intake.windowEnd ? normalizeHHMM(changes.intake.windowEnd) : null;
+  return { start: normalizeHHMM(changes.intake.windowStart), ...(end ? { end } : {}) };
+}
+
+// The stop the operator was shown against the stop as it is now. Null = the
+// same live services (or nothing was shown: an older client).
+function comboShownStopChanged(shown, live) {
+  if (shown == null) return false;
+  const ids = (v) => (Array.isArray(v) ? v.map(String).sort().join(',') : null);
+  return typeof shown !== 'object' || String(shown.id) !== String(live.id)
+    || ids(shown.liveMemberIds) !== ids(live.liveMemberIds);
+}
+
+// The split is its own committed action. Every refusal the request answers
+// after it — thrown, sent directly by the handler, or sent by the error
+// middleware — goes out through res.json, so that is where it is disclosed:
+// nobody closes on an unnoticed separation.
+function discloseComboSeparation(res) {
+  const send = res.json.bind(res);
+  res.json = (payload) => send(res.statusCode >= 400 && payload && typeof payload.error === 'string'
+    ? { ...payload, error: `This service was separated from the stop, but the other changes were not saved. ${payload.error}`, comboSeparated: true }
+    : payload);
+}
+
+// 'separate': the service leaves its stop here; the handler then runs the
+// ordinary single-row edit.
+async function separateComboService(req, row) {
+  const vg = require('../services/visit-groups');
+  try {
+    await vg.splitChild({
+      visitId: row.visit_id,
+      scheduledServiceId: row.id,
+      createdBy: `admin:${req.technicianId || 'unknown'}`,
+    });
+  } catch (err) {
+    // The split's own refusals (a frozen visit, a row that just left the
+    // stop) are the operator's to read, not a 500. Nothing was changed.
+    const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
+    if (known) throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+    // Any other failure can come after the split committed (a connection
+    // lost on the commit's acknowledgement). Read the row: off the stop =
+    // it did commit, so carry on as separated and let that be disclosed.
+    const now = await db('scheduled_services').where({ id: row.id }).first('visit_id').catch(() => undefined);
+    if (!now || String(now.visit_id || '') === String(row.visit_id)) throw err;
+  }
+  return { separated: true };
+}
+
+const comboStopChangedError = () => Object.assign(
+  httpError(409, 'This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was changed.'),
+  { code: 'VISIT_MEMBERSHIP_CHANGED' },
+);
+
+// No choice in the request, and it changes the technician: on a shared stop
+// that would reassign this one row and split the stop without anyone having
+// chosen that (the caller did not know the stop is shared, or cannot ask).
+// Refused like a date or time change; the form then shows the choice.
+async function refuseUnchosenComboReassign(req) {
+  if (req.body.technicianId === undefined) return;
+  const row = await db('scheduled_services').where({ id: req.params.id }).first('visit_id', 'technician_id');
+  if (!row || !row.visit_id || (req.body.technicianId || null) === (row.technician_id || null)) return;
+  if ((await require('../services/visit-groups').openMembers(db, row.visit_id)).length < 2) return;
+  throw Object.assign(
+    httpError(409, 'This service is grouped with another at the same stop. Choose whether the technician changes for the whole stop or this service is separated, then save again. Nothing was changed.'),
+    { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+  );
+}
+
+// The same question inside the save's transaction, under the row's lock: a
+// row that joined a shared stop (or whose stop gained a live service) after
+// the unlocked check above must not be reassigned alone. `seenVisitId` is
+// the membership the unlocked check allowed.
+async function assertStillUnsharedForReassign(trx, serviceId, seenVisitId) {
+  const row = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first('visit_id');
+  const nowVisitId = row ? (row.visit_id || null) : null;
+  const shared = !!nowVisitId && (await require('../services/visit-groups').openMembers(trx, nowVisitId)).length >= 2;
+  if (shared || String(nowVisitId || '') !== String(seenVisitId || '')) {
+    throw Object.assign(
+      httpError(409, 'This appointment was grouped with another service while saving — reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
+async function planComboEditMove(req) {
+  const body = req.body || {};
+  const choice = body.comboMove;
+  if (choice === undefined) {
+    await refuseUnchosenComboReassign(req);
+    return null;
+  }
+  if (choice !== 'together' && choice !== 'separate') {
+    throw httpError(400, "comboMove must be 'together' or 'separate'");
+  }
+  const row = await db('scheduled_services').where({ id: req.params.id })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id');
+  if (!row) return null;
+  const vg = require('../services/visit-groups');
+  const shared = !!row.visit_id && (await vg.openMembers(db, row.visit_id)).length >= 2;
+  if (!shared) {
+    // The operator was shown a shared stop and chose to keep it together,
+    // but it is not shared any more (separated or closed since): refuse,
+    // never move the one service as if that were the choice. 'separate' on
+    // a row already off its stop is the ordinary edit it asked for.
+    if (choice === 'together' && body.comboVisit != null) throw comboStopChangedError();
+    return null;
+  }
+  const changes = comboEditChanges(body, row);
+  if (!changes) return null;
+  if (!(changes.date || changes.start || changes.technician || changes.length)) return null;
+  const live = await vg.visitSummaryForService(db, row.id);
+  if (comboShownStopChanged(body.comboVisit, live)) throw comboStopChangedError();
+
+  if (choice === 'separate') return separateComboService(req, row);
+  return planComboTogetherMove(req, row, changes, live);
+}
+
+// The mover refuses a same-day window that has already passed, for every
+// service it touches (rebooker: sameDayWindowElapsed). Asked here first, so
+// that refusal comes before the edit is saved, not after. A technician-only
+// change keeps each service's own window, so each one is asked; a date or
+// time change is asked about the new window.
+async function comboTargetElapsed(row, changes, newDate, newWindow) {
+  const { sameDayWindowElapsed } = require('../utils/datetime-et');
+  const vg = require('../services/visit-groups');
+  const members = await vg.openMembers(db, row.visit_id);
+  if (!(changes.date || changes.start)) {
+    // A technician-only change never rewinds a visit that is under way.
+    if (members.some((m) => ['en_route', 'on_site'].includes(String(m.status)))) {
+      return 'A service on this stop is already under way, so the stop cannot be reassigned as a whole. Choose Separate to reassign only this service.';
+    }
+    return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
+      ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
+      : null;
+  }
+  // Every service's own target window, as the unit mover derives it (the
+  // tapped one takes the new slot, the others shift with it): one of them
+  // can have passed when the tapped one has not.
+  const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+  let targets;
+  try {
+    targets = vg.planMemberTargets({
+      members,
+      primary: members.find((m) => String(m.id) === String(row.id)) || row,
+      visitWindowStart: visit?.window_start || null,
+      win: { start: newWindow?.start || null, end: newWindow?.end || null },
+      newDateStr: newDate,
+    });
+  } catch (err) {
+    if (err?.statusCode) return err.message; // the mover would refuse the same way
+    throw err;
+  }
+  return targets.some((t) => sameDayWindowElapsed(newDate, t.end || t.start))
+    ? 'That time has already passed today for a service on this stop. Pick a later time.'
+    : null;
+}
+
+// 'together': every refusal comes before any write.
+async function planComboTogetherMove(req, row, changes, shown) {
+  const body = req.body;
+  const refuse = (status, message, code) => {
+    throw Object.assign(httpError(status, `${message} Nothing was changed.`), code ? { code } : {});
+  };
+  // Only a real clear: a stop with no time posts empty bounds as an echo.
+  if (changes.intake.clearBoth && row.window_start) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
+  if (changes.length) {
+    refuse(422, "Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.", 'COMBO_LENGTH_CHANGE');
+  }
+  if (body.propertyId !== undefined) {
+    refuse(422, 'A different address takes this service off the shared stop. Save that change on its own, or choose Separate.', 'COMBO_ADDRESS_CHANGE');
+  }
+  // Two mixes the whole-stop move cannot honor (owner ruling 2026-10-03:
+  // refuse them before anything is saved). The move reassigns THIS stop
+  // only, so a staff change for following visits would be dropped silently;
+  // and a visit made recurring in the same save would build its plan from
+  // the date the stop is leaving.
+  if (changes.technician && normalizeAssignmentScope(body.assignmentScope) !== 'this_only') {
+    refuse(422, 'Moving the whole stop changes the technician for this visit only. Set "Apply staff change to" to this appointment only, or change later visits in their own save.', 'COMBO_ASSIGNMENT_SCOPE');
+  }
+  if (changes.date && body.isRecurring === true && body.spawnRecurringChildren === true) {
+    refuse(422, 'Make this visit recurring in its own save, then move the stop: the plan is built from the visit\'s date.', 'COMBO_MAKE_RECURRING');
+  }
+  // The stored date is a Date from Postgres: normalized before validation.
+  const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
+  if (!newDate) refuse(400, 'That date is not a current or future date.');
+  const newWindow = comboMoveWindow(row, changes);
+  const elapsed = await comboTargetElapsed(row, changes, newDate, newWindow);
+  if (elapsed) refuse(409, elapsed, 'SLOT_TAKEN');
+  // A text is about a new date or time, never a technician change alone.
+  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
+  const actor = { techRole: req.techRole, technicianId: req.technicianId };
+  const { planVisitMoveForStaff, runPlannedVisitMove } = require('./admin-dispatch');
+  const planned = await planVisitMoveForStaff({
+    serviceId: row.id,
+    newDate,
+    newWindow,
+    notifyCustomer,
+    body: {
+      ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
+    },
+    actor,
+    sourceSurface: 'edit_modal',
+    // A technician-only change keeps the stop's date and window.
+    keepSlot: !(changes.date || changes.start),
+  });
+  if (!planned.plan) {
+    throw Object.assign(httpError(planned.status, `${planned.body.error} Nothing was changed.`), planned.body.code ? { code: planned.body.code } : {});
+  }
+  // The per-row edit below must not move, reassign or text: the move does.
+  for (const key of ['scheduledDate', 'windowStart', 'windowEnd', 'technicianId', 'assignmentScope', 'notifyCustomer']) delete req.body[key];
+  return {
+    commit: () => runPlannedVisitMove({ plan: planned.plan, serviceId: row.id, newDate, reasonCode: 'admin', notifyCustomer, actor }),
+  };
+}
+
+// The details are saved by the time the move runs, so its outcome is part of
+// the 200 answer, never an error status: `moved` (true / false / null when it
+// is not known whether the move went through) plus whatever the move
+// answered (warnings, needsAttention, notificationSent...).
+async function commitComboEditMove(plan, serviceId) {
+  try {
+    const out = await plan.commit();
+    const moved = out.status < 300 && !out.body?.needsAttention;
+    return { ...out.body, moved, ...(out.status >= 300 ? { error: out.body?.error || 'The stop was not moved.' } : {}) };
+  } catch (err) {
+    const refused = err?.statusCode >= 400 && err.statusCode < 500;
+    logger.error(`[schedule/update-details] whole-stop move after the edit ${refused ? 'was refused' : 'failed'} for ${serviceId}: ${err.message}`);
+    return { moved: refused ? false : null, error: err.message, ...(err.code ? { code: err.code } : {}) };
   }
 }
 
@@ -12744,7 +13570,8 @@ function retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate) {
   return vouched;
 }
 
-router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
+router.put('/:id/update-details', requireAdmin, scheduleUpdateDetailsHandler);
+async function scheduleUpdateDetailsHandler(req, res, next) {
   try {
     // First statement, before any read: see negativePricePosted.
     if (negativePricePosted(req.body || {})) {
@@ -12761,6 +13588,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         throw httpError(422, 'Choose a saved customer address.');
       }
     }
+    // Before the series planner: a shared stop moved 'together' leaves no
+    // date on the body for it to plan.
+    const comboMovePlan = await planComboEditMove(req);
+    if (comboMovePlan?.separated) discloseComboSeparation(res);
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan && propertyId !== undefined) {
       // An address change regroups relocated occurrences on their OLD dates
@@ -12783,6 +13614,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       assignmentScope,
+      // The edit form's "Keep auto-dispatch off this visit" box and the value it
+      // opened with (auto-dispatch/staff-edit-lock.js).
+      autoDispatchLocked, autoDispatchLockedWas,
       // Apply this save's PRICE / primary-SERVICE change to the rest of the
       // series ('following') or keep it per-visit ('this_only', the default).
       // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
@@ -12859,7 +13693,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       }
     }
-    const updates = {};
+    // A flipped "Keep auto-dispatch off this visit" box is a change in itself.
+    const updates = { ...autoDispatchBoxPatch({ now: autoDispatchLocked, was: autoDispatchLockedWas }) };
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
     // filters, and the catalog's own type/amount as the authority. Without
@@ -13108,15 +13943,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     const normalizedAssignmentScope = normalizeAssignmentScope(assignmentScope);
     let assignmentNeedsChange = false;
     let assignmentShouldRun = false;
+    let reassignSeenVisitId;
     if (hasTechnicianIdUpdate) {
       if (technicianId !== null && typeof technicianId !== 'string') {
         return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
       }
       const existingAssignment = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('id', 'technician_id');
+        .first('id', 'technician_id', 'visit_id');
       if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
       assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
+      // The membership this reassignment was allowed on (planComboEditMove
+      // refused a shared stop with no choice); re-read under the row lock
+      // before the assignment writes.
+      if (assignmentNeedsChange) reassignSeenVisitId = existingAssignment.visit_id || null;
       assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
       if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
@@ -13247,6 +14087,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       clearAddonDiscountsOnPriceEdit = financialPlan.clearAddonDiscountsOnPriceEdit;
       expectedAddonRowIds = financialPlan.expectedAddonRowIds;
       financialCasSnapshot = financialPlan.financialCasSnapshot;
+      // updateVisitDetails only (never an HTTP field): the visit version the
+      // caller approved replaces the planner's own read as the row-version CAS
+      // baseline, so a write after that approval is drift under the lock too.
+      if (req.approvedVisitVersion) {
+        if (!financialCasSnapshot?.versions) {
+          throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
+          });
+        }
+        financialCasSnapshot.versions.parent = String(req.approvedVisitVersion);
+      }
       // Codex pre-push audit P1 (round 4 on #4657, :13181): the re-service/
       // is_callback classification AND its reServiceConversionZeroPrice
       // decision (zeroing the visit + every add-on for an eligible free
@@ -13357,6 +14208,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             code: 'RETIRED_SERVICE_NOT_SELLABLE',
           });
         }
+      }
+    }
+    // A package visit 1 with a live visit 2: changing its service would
+    // leave visit 2 as a $0 treatment of the wrong service. Change visit 2
+    // (or cancel it) first.
+    if (serviceEditPosted && await require('../services/package-followup-booking').hasLivePackageChild(db, [req.params.id])) {
+      const cur = await db('scheduled_services').where({ id: req.params.id }).first('service_id', 'service_type');
+      if ((updates.service_id !== undefined && String(updates.service_id || '') !== String(cur?.service_id || ''))
+        || (updates.service_type !== undefined && String(updates.service_type || '') !== String(cur?.service_type || ''))) {
+        return res.status(409).json({
+          error: 'This visit has a linked second treatment (package visit 2). Cancel or change that visit before changing this service.',
+          code: 'PACKAGE_CHILD_PRESENT',
+        });
       }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
@@ -13782,6 +14646,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // combined lock and customer row first now runs to completion before
       // the other can proceed.
       if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');
+      // Lock order: the estimate's add-on lock BEFORE the stop locks and the place locks an address change takes (the
+      // booking takes the estimate lock first and reaches the stop lock later, through maybeGroupRow).
+      if (addressPlan) {
+        const linked = await trx('scheduled_services').where({ id: req.params.id }).first('source_estimate_id');
+        await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);
+      }
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
       if (addressPartnersQuery) {
         const lockedPartners = await addressPartnersQuery.clone();
@@ -13789,7 +14659,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw httpError(409, 'Appointments changed while saving. Reload and choose the address again.');
         }
       }
-      if (preReadVisitId) {
+      // Also for a technician change on a row alone on its visit: joining
+      // that visit serializes on this lock, so the membership re-check
+      // before the assignment write below cannot be raced.
+      if (preReadVisitId || reassignSeenVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {
@@ -13890,6 +14763,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           });
         }
       }
+      // updateVisitDetails only (never an HTTP field): the related state the
+      // caller approved, rechecked under the customer and visit locks above.
+      if (req.approvedRepriceState) await assertApprovedRepriceState(trx, req.params.id, req.approvedRepriceState);
 
       // The repricing refusal (owner ruling 2026-09-28): decided HERE, under
       // this visit's row lock — taken now if nothing above took it
@@ -14088,8 +14964,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       }
 
+      // The edited visit's add-ons are judged at the destination as the save will leave them (its rows are replaced below).
+      // (It rides the plan: `editedVisit`, read by appointment-address assertAreaAddOnLimitsAtDestination.)
+      if (addressPlan) addressPlan.editedVisit = { id: req.params.id, ownKey: updates.service_key_snapshot, scheduledDate: updates.scheduled_date, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : undefined };
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
+      if (reassignSeenVisitId !== undefined) await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);
       if (assignmentShouldRun) {
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
@@ -14122,6 +15002,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
+        // A staff date/window choice locks the occurrence from auto-dispatch
+        // (this path writes no reschedule_log row the person-placed guard reads).
+        Object.assign(updates, staffEditLockPatch(occRow, updates));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)
@@ -14635,7 +15518,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // commit and then sees the invoice in 'sending'. A payer can never
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
+        // A package visit 2 whose date staff set by hand stops following
+        // visit 1's moves: the reschedule_log row is the marker the parent
+        // shift hook reads (call-booking-catalog).
+        const pkgDateBefore = updates.scheduled_date
+          ? await trx('scheduled_services').where({ id: req.params.id, source_action: 'package_followup_auto' })
+            .first('customer_id', 'scheduled_date')
+          : null;
+        await assertAreaAddOnEdit(trx, req.params.id, { updates, replaceAddons, addressPlan });
+        await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
+          await trx('reschedule_log').insert({
+            scheduled_service_id: req.params.id, customer_id: pkgDateBefore.customer_id,
+            original_date: dateOnly(pkgDateBefore.scheduled_date), new_date: dateOnly(updates.scheduled_date),
+            reason_code: 'admin_edit', initiated_by: 'admin',
+          });
+        }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
         if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
@@ -14776,8 +15675,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // set (add / edit / remove handled uniformly by delete + re-insert).
       if (addonsReplaced) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
+        // What an area add-on row was sold for lives only on the stored row: read it before the
+        // delete and put it back on the row of the same service (area-addon-visit-rows.js).
+        const carriedAreaScopes = await areaAddOnRows.readAreaAddOnScopesToCarry(trx, req.params.id);
         await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).del();
         await insertScheduledServiceAddons(trx, req.params.id, replaceAddons, addonCols, canonicalRestackedAddonDollars);
+        await areaAddOnRows.restoreCarriedAreaAddOnScopes(trx, req.params.id, carriedAreaScopes);
+      }
+      // An area add-on the edit ADDED (a row, or the visit's own service moved to one; the guard above proved the source
+      // estimate sells it) has no carried scope: stamp what the estimate sold. Only a scope still missing is written, and a
+      // posted line can never set one.
+      if (addonsReplaced || updates.service_key_snapshot !== undefined || updates.service_id !== undefined) {
+        await areaAddOnRows.stampAddedAreaAddOnScopes(trx, req.params.id);
       }
       if (clearAddonDiscountsOnPriceEdit) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
@@ -16260,6 +17169,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // A shared stop moved 'together': the edit above saved the other fields
+    // on the stop's current slot; the whole-stop move runs now and sends the
+    // one customer text itself.
+    const comboMove = comboMovePlan?.commit ? await commitComboEditMove(comboMovePlan, req.params.id) : null;
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -16373,6 +17287,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Advisory occupancy-overlap notes — present only when this save
       // stacked over an existing visit.
       ...(editWarnings.length ? { warnings: editWarnings } : {}),
+      ...(comboMove ? { comboMove } : {}),
+      ...(comboMovePlan?.separated ? { comboSeparated: true } : {}),
     });
   } catch (err) {
     // The in-transaction duplicate-series backstop rolled the spawn back —
@@ -16390,7 +17306,58 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
+
+// The Schedule-screen visit edit without an HTTP request — the Intelligence
+// Bar's reprice_future_visits tool (owner ruling 2026-10-07) saves each
+// visit's new price through this so the bar and the Edit appointment screen
+// share one writer (validation, the re-price block, CAS, post-commit
+// effects). It runs the router-level catalog prime (as router.use above
+// does, failures ignored), then the handler with the only request fields it
+// reads (params.id, body, technicianId, techRole), and resolves the reply it
+// would send: { status, json }. An error the handler passes to next() rejects.
+// approvedVisitVersion (the visit's xmin:ctid the caller checked) becomes the
+// handler's row-version CAS baseline: any write since then refuses 409
+// VISIT_CHANGED_RETRY under the visit's row lock. approvedRepriceState
+// ({ addonCount, billingLane, refreshablePrepayTerm }) covers the related records
+// that version does not: see assertApprovedRepriceState.
+async function updateVisitDetails({ id, body, actor, approvedVisitVersion = null, approvedRepriceState = null }) {
+  await primePercentDiscountExclusions().catch(() => {});
+  const req = { params: { id }, body, technicianId: actor.technicianId, techRole: 'admin', approvedVisitVersion, approvedRepriceState };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    scheduleUpdateDetailsHandler(req, res, reject).catch(reject);
+  });
+}
+
+// The related state an updateVisitDetails caller approved — the visit's add-on
+// line count, the customer's resolved billing lane, and whether the customer
+// has an annual prepay term this save's refresh would process
+// (refreshableTermsForCustomer) — read inside the save's
+// transaction after its customer, visit and add-on row locks. Any difference
+// refuses 409 VISIT_CHANGED_RETRY (REPRICE_APPROVAL_DRIFT) before any write.
+async function assertApprovedRepriceState(trx, id, approved) {
+  const visit = await trx('scheduled_services').where({ id }).first('customer_id');
+  const customer = visit?.customer_id
+    ? await trx('customers').where({ id: visit.customer_id }).first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate')
+    : null;
+  const [addons] = await trx('scheduled_service_addons').where({ scheduled_service_id: id }).count('* as count');
+  const { refreshableTermsForCustomer } = require('../services/annual-prepay-renewals');
+  const terms = customer ? await refreshableTermsForCustomer(customer.id, trx) : [];
+  const drifted = !customer
+    || Number(addons?.count || 0) !== Number(approved.addonCount)
+    || resolveBillingLane(customer).mode !== approved.billingLane
+    || terms.length > 0 !== (approved.refreshablePrepayTerm === true);
+  if (drifted) {
+    throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+      statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'REPRICE_APPROVAL_DRIFT',
+    });
+  }
+}
 
 // POST /api/admin/schedule/:id/update-details/preview — structural round on
 // #4657 (replaces the recurring "mirror the server" P1s :3526/:2394):
@@ -16440,6 +17407,10 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // without running its ack/grouped/frozen guards: those exist for the
     // actual commit (and can throw/require a disclosure round-trip),
     // never for a read-only dry run.
+    // The same mirror for a shared stop moved 'together': the save takes the
+    // date off the body before the financial planner runs (planComboEditMove;
+    // the whole-stop move commits the date afterwards, on its own).
+    if (req.body.comboMove === 'together') scheduledDate = undefined;
     if (scheduledDate !== undefined && scheduledDate !== '' && collectiveMoveGateOn()) {
       const collectiveMoveTarget = validScheduleDate(scheduledDate);
       if (collectiveMoveTarget) {
@@ -17062,6 +18033,121 @@ const { loadActiveConfig: loadPestPressureActiveConfig } = require('../services/
 // generatePrepaidReceiptForService already reports through `receipt.reason`
 // for every other refusal here, so the Mark-prepaid modal explains it the
 // same way instead of the caller crashing on an unexpected object.
+// A Charge-now / prepaid-receipt pre-mint whose amount IS a member's monthly dues
+// for an unpriced plan visit asks the mint for the dues stamp + coverage check
+// (the completion mint's own), so that invoice is visible to the month's dedupe.
+function membershipDuesMintRequest(svc, amount) {
+  if (!isMembershipDuesShapedVisit({
+    estimatedPrice: svc.estimated_price,
+    primaryLinePrice: svc.primary_line_price ?? null,
+    isCallback: svc.is_callback,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+    waveguardTier: svc.cust_waveguard_tier,
+    amount,
+  })) return null;
+  return { month: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 7), amount };
+}
+
+// The (customer, month) a prepayment on this visit would interact with, from an
+// UNLOCKED read of the visit and customer, or null when the month's dues would
+// not cover this visit. "Covered" is decided by THE coverage predicate
+// completion itself uses (billing-lane membershipDuesCoverVisit, with the dues
+// as the cover), not a hand-rolled price test: an unpriced plan visit AND a
+// priced RECURRING plan visit are both covered (both complete without an invoice
+// once a dues invoice bills the month), while a callback, a non-recurring priced
+// visit and a payer-billed visit are not. The caller re-verifies customer and
+// month after it holds the visit row.
+const visitMonthOf = (d) => String(d instanceof Date ? d.toISOString() : d).slice(0, 7);
+async function planVisitDuesScope(serviceId) {
+  const svc = await db('scheduled_services')
+    .where('scheduled_services.id', serviceId)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(
+      'scheduled_services.*',
+      'customers.monthly_rate as cust_monthly_rate',
+      'customers.waveguard_tier as cust_waveguard_tier',
+      'customers.billing_mode as cust_billing_mode',
+    )
+    .first();
+  if (!svc || svc.is_callback) return null;
+  let payerBilled = false;
+  try {
+    const resolved = await require('../services/payer').resolveForInvoice({ customerId: svc.customer_id, scheduledServiceId: svc.id });
+    payerBilled = !!resolved?.payerId;
+  } catch (e) {
+    logger.warn(`[schedule] prepaid dues-scope payer resolve failed for service ${svc.id}: ${e.message}`);
+  }
+  if (!membershipDuesCoverVisit({
+    visitIsPayerBilled: payerBilled,
+    perApplicationBilling: svc.cust_billing_mode === 'per_application',
+    annualPrepayBilling: svc.cust_billing_mode === 'annual_prepay',
+    customerAutopayActive: false,
+    duesCollectedThisMonth: true,
+    hasVisitPrice: Number(svc.estimated_price) >= 0.01,
+    isRecurring: svc.is_recurring,
+    waveguardTier: svc.cust_waveguard_tier,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+  })) return null;
+  return { serviceId: svc.id, customerId: String(svc.customer_id), month: visitMonthOf(svc.scheduled_date) };
+}
+
+// The live stamped dues invoice that already bills this plan visit's month, or
+// null. A prepayment marked on such a visit has nowhere to land: the visit mints
+// no invoice of its own (the month's dues are the covering invoice), so cash or
+// Zelle recorded on the visit would sit off the payment ledger while that
+// invoice keeps dunning. Read-only (the prepaid POST itself decides under the
+// month lock, recordPrepaidUnderDuesLock).
+async function duesInvoiceCoveringPlanVisit(serviceId, conn = db) {
+  const scope = await planVisitDuesScope(serviceId);
+  if (!scope) return null;
+  const { findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return findLiveStampedDuesInvoice(conn, scope.customerId, scope.month, { excludeScheduledServiceId: scope.serviceId });
+}
+
+// Records the prepaid marker ATOMICALLY with the dues-coverage decision. For a
+// dues-shaped plan visit the whole thing is one transaction whose FIRST lock is
+// the dues-month lock (THE LOCK RULE, billing-lane.js: it holds nothing yet, so
+// it may wait): coverage is re-read under it, and only an uncovered month takes
+// the marker (the visit-row UPDATE comes after the lock, so a completion holding
+// the visit row only TRIES the month lock and a mint holding it only polls the
+// month lock: neither can wait on this transaction in a cycle). A sibling dues
+// invoice that commits first is seen by the re-read (refused); one that mints
+// after this commits is the reverse order described at the POST route. The
+// scope came from an unlocked read of the visit, so after the UPDATE the visit's
+// month and customer are re-verified (rescheduled / merged since: retryable).
+// `writeStamp(conn)` is the caller's marker UPDATE (all its row predicates).
+async function recordPrepaidUnderDuesLock(serviceId, { amount, writeStamp }) {
+  const scope = amount > 0 ? await planVisitDuesScope(serviceId) : null;
+  if (!scope) return { updated: await writeStamp(db) };
+  const { acquireMembershipDuesMonthLock, findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return db.transaction(async (trx) => {
+    await acquireMembershipDuesMonthLock(trx, scope.customerId, scope.month);
+    const covering = await findLiveStampedDuesInvoice(trx, scope.customerId, scope.month, { excludeScheduledServiceId: serviceId });
+    if (covering) return { covering };
+    const updated = await writeStamp(trx);
+    if (updated.length) {
+      const now = await trx('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+      if (!now || String(now.customer_id) !== scope.customerId || visitMonthOf(now.scheduled_date) !== scope.month) {
+        const err = new Error('This visit moved to another month or customer while its prepayment was being recorded — nothing was saved; retry.');
+        err.status = 409;
+        throw err;
+      }
+    }
+    return { updated };
+  });
+}
+function duesCoversPrepaidRefusal(duesInvoice) {
+  const label = duesInvoice.invoice_number || duesInvoice.id;
+  return {
+    error: `This month's membership dues are already billed on invoice ${label}, so this visit has no invoice of its own to take the payment. Record the payment on invoice ${label} instead of marking this visit prepaid.`,
+    code: 'membership_dues_invoice_covers',
+    invoice_id: duesInvoice.id,
+    invoice_number: duesInvoice.invoice_number || null,
+  };
+}
+
 async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   // ONE canonical per-visit collection verdict, resolved BEFORE this visit's
@@ -17099,9 +18185,12 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return mintScheduledServiceInvoiceWithDeposit({
+  const duesRequest = membershipDuesMintRequest(svc, amount);
+  try {
+  return await mintScheduledServiceInvoiceWithDeposit({
     svc,
     recheckInTrx: siblingCoverageRecheckInTrx(svc),
+    ...(duesRequest ? { membershipDues: duesRequest } : {}),
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
@@ -17118,6 +18207,15 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       dueDate: etDateString(),
     }),
   });
+  } catch (err) {
+    // The dues stamp's own refusals read as the receipt flow's usual {reason}
+    // shape instead of an exception the Mark-prepaid modal never expects.
+    if (err?.code === 'MEMBERSHIP_DUES_COVERED') return { invoice: null, reason: 'membership_dues_covered' };
+    if (err?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' || err?.code === 'SCHEDULED_BILLING_SOURCE_MOVED') {
+      return { invoice: null, reason: 'membership_dues_unverified' };
+    }
+    throw err;
+  }
 }
 
 // Send the branded paid receipt (email + SMS) for a fully-paid invoice, exactly
@@ -17411,6 +18509,13 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // A plan visit whose month a stamped dues invoice already bills takes no
+    // prepaid marker (the covered visit mints no invoice to apply the payment
+    // to): the coverage check and the marker write are ONE transaction under the
+    // dues-month lock (recordPrepaidUnderDuesLock), so a sibling dues invoice can
+    // neither slip in between them nor be missed when no receipt is requested.
+    // A refusal names the invoice the payment belongs on. A zero amount records
+    // no money and is never refused.
     // Terminal rows never take a stamp (same set the series fan-out
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
@@ -17419,18 +18524,22 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // manual writer next to the series fan-out and the bulk action, and a
     // manual method replacing the annual one would hide paid coverage from
     // the completion billing gate (Codex #4030 r7 P1).
-    const updated = await db('scheduled_services')
-      .where({ id: req.params.id })
-      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
-      .modify(withoutAnnualCoverage)
-      .modify((q) => technicianLiveVisitFilter(req, q))
-      .update({
-        prepaid_amount: amt,
-        prepaid_method: method || null,
-        prepaid_note: note || null,
-        prepaid_at: db.fn.now(),
-      })
-      .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
+    const { updated, covering: coveringDues } = await recordPrepaidUnderDuesLock(req.params.id, {
+      amount: amt,
+      writeStamp: (conn) => conn('scheduled_services')
+        .where({ id: req.params.id })
+        .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+        .modify(withoutAnnualCoverage)
+        .modify((q) => technicianLiveVisitFilter(req, q))
+        .update({
+          prepaid_amount: amt,
+          prepaid_method: method || null,
+          prepaid_note: note || null,
+          prepaid_at: db.fn.now(),
+        })
+        .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']),
+    });
+    if (coveringDues) return res.status(409).json(duesCoversPrepaidRefusal(coveringDues));
     if (!updated.length) {
       const current = await db('scheduled_services').where({ id: req.params.id })
         .first('status', 'annual_prepay_term_id', 'prepaid_method');
@@ -17461,6 +18570,37 @@ router.post('/:id/prepaid', async (req, res, next) => {
     } else if (emailReceipt === true) {
       // Operator asked for a receipt but we won't send one — surface why.
       receipt = { sent: false, reason: decision.reason };
+    }
+    // REVERSE ORDER, receipt requested: the marker was written under the month
+    // lock while the month was uncovered, and a sibling visit's dues invoice
+    // then committed before THIS request's receipt mint (which the dues stamp
+    // refuses as already covered). The marker has nowhere to land, so it is
+    // undone here (only if it is still the one we wrote) and refused with the
+    // same message. Not dead code: the lock cannot hold across the receipt mint
+    // (it takes its own locks and may call out), and a sibling mint never looks
+    // at the marker.
+    // MARKER FIRST, a sibling's dues mint after (no receipt request): nothing
+    // re-checks here, and billing is deliberately left as it is. The prepaid plan
+    // visit mints no invoice of its own at completion (its prepaid amount covers
+    // the dues amount) and the sibling's completion mints the month's stamped dues
+    // invoice, so the month is billed ONCE but the cash on the visit is not
+    // applied to it. The MINT raises one office alert per (dues invoice, visit)
+    // asking a person to apply that cash (alertPrepaidVisitsToApplyToDuesInvoice
+    // in invoice.js, after the mint commits); no payment row or invoice change is
+    // made automatically.
+    if (receipt && receipt.reason === 'membership_dues_covered') {
+      // prepaid_at is written by now() (microseconds) but comes back as a JS
+      // Date (milliseconds): compare at millisecond precision, or the guard
+      // matches no row and the refused marker stays.
+      const undone = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .whereRaw("date_trunc('milliseconds', prepaid_at) = date_trunc('milliseconds', ?::timestamptz)", [updated[0].prepaid_at])
+        .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+      if (!undone) logger.warn(`[schedule] prepaid marker on ${req.params.id} was not undone after a covered receipt mint (the marker changed since it was written)`);
+      const covering = await duesInvoiceCoveringPlanVisit(req.params.id);
+      return res.status(409).json(covering
+        ? duesCoversPrepaidRefusal(covering)
+        : { error: 'This month\'s membership dues are already billed on another invoice — record the payment there instead of marking this visit prepaid.', code: 'membership_dues_invoice_covers' });
     }
     res.json({ success: true, ...updated[0], receipt });
   } catch (err) {
@@ -17945,9 +19085,11 @@ router.post('/:id/invoice', async (req, res, next) => {
     // roll-forward — completion reuses this pre-minted invoice, so skipping the
     // credit here would strand the customer's paid deposit and collect full
     // price on top of it.
+    const duesRequest = membershipDuesMintRequest(svc, amount);
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
       recheckInTrx: siblingCoverageRecheckInTrx(svc),
+      ...(duesRequest ? { membershipDues: duesRequest } : {}),
       // In-lock ownership recheck: substantial async work happens between
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
@@ -18420,8 +19562,9 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
   return termsByCustomer;
 }
 
-// True when this save puts an UNSTAMPED visit back at the price the /secure
-// plan was sold at (its per_visit_amount baseline). Such an edit can never
+// True when this save puts an UNSTAMPED visit back at the price the term was
+// sold at for it (the /secure per_visit_amount baseline, or the visit's own
+// mint price under GATE_PREPAY_MINT_PRICE_HOLD). Such an edit can never
 // leave the old-price invoice covering a different price, so the rail lets
 // it through — it is exactly the repair the stamp-time hold's office alert
 // asks for. A visit the term already stamped (prepaid money on it) is never
@@ -18429,8 +19572,8 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
 async function editRestoresSoldPrice(conn, term, row, proposedPrice) {
   if (proposedPrice === undefined || proposedPrice === null || proposedPrice === '') return false;
   if (row?.prepaid_amount != null && Number(row.prepaid_amount) > 0) return false;
-  const { securePlanSoldPerVisitCents } = require('../services/annual-prepay-renewals');
-  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  const { soldPriceCentsForVisit } = require('../services/annual-prepay-renewals');
+  const soldCents = await soldPriceCentsForVisit(term, row, conn);
   return soldCents != null && Math.round(Number(proposedPrice) * 100) === soldCents;
 }
 
@@ -19326,7 +20469,14 @@ async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
 // scope, lawn-service identity of the host and of each occurrence, blackouts and
 // weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
 // that rule a ride out). null = no ride: the caller walks its normal cadence.
-async function rideLawnExtension(ctx) {
+// The read-only half of the ride: the lawn occurrence the rider's next visit would
+// join, with no write. null = no ride (gate off, not a rider, a blocking reason, or no
+// date the plan still wants); { unanswered: true } = the pair preview failed, so the
+// answer is not known (rideLawnExtension then walks the cadence, as the top-up does;
+// the Intelligence Bar's verdict refuses as unverified instead). Also the one function
+// the billing-type verdict (seriesVerdictWalk) asks which date a rider series seeds on.
+const RIDE_PREVIEW_ERROR_REASONS = new Set(['blackout_check_error', 'series_check_error', 'error']);
+async function rideLawnCandidate(ctx) {
   const {
     conn, parent, parentId, cols, opts, latest, existingDates,
   } = ctx;
@@ -19340,19 +20490,30 @@ async function rideLawnExtension(ctx) {
     plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
   } catch (err) {
     logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
-    return null;
+    return { unanswered: true };
   }
+  // A read failure the preview swallowed into a reason is not a rule ruling the ride out: the
+  // answer is unknown (the top-up walks its cadence either way; the billing verdict refuses).
+  if (plan.reasons.some((r) => RIDE_PREVIEW_ERROR_REASONS.has(r))) return { unanswered: true };
   if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
   // The preview's insert list assumes its proposed MOVES happen too; this
   // extension only appends. So spacing is enforced against the latest rider
   // visit that is actually still booked: at least the rule's minimum gap after
   // it (never, say, D168 next to a kept off-cadence D160).
   const after = dateOnly(latest.scheduled_date);
-  const gapFloor = Preview._internals.addDaysStr(after, Preview.MIN_GAP_DAYS);
+  const gapFloor = Preview._internals.addDaysStr(after, Preview.riderGapsFor(parent.recurring_pattern).min);
   const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
   // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
   const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
-  const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
+  return host ? { date, host } : null;
+}
+
+async function rideLawnExtension(ctx) {
+  const { parent } = ctx;
+  const ride = await rideLawnCandidate(ctx);
+  if (!ride || ride.unanswered) return null;
+  const { date, host } = ride;
+  const window = normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
   if (!window || window.unplaceable) return null;
   return placeGroupedExtension(ctx, date, [host.id], {
     technicianId: host.technician_id || null,
@@ -20116,6 +21277,33 @@ async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
     if (await test(conn, parent, parentId, cols)) hits.push(reason);
   }
   return hits;
+}
+
+// Which of a customer's ongoing roots (eligibleSeriesParentIds, the coarse recurring_ongoing
+// selector) would the nightly top-up extend NOW? Runs the top-up's own two skip rules: the
+// customer rules (topupCustomerSkipReason: deleted, held, inactive, churned) and each root's
+// series rules (topupSeriesSkipReason: annual prepay, plan hold, duplicate series), the same
+// calls topUpRecurringSeriesLocked makes. Read-only. A skip is a state of the moment, not a
+// verdict on the root: any of them can clear later (a hold lifts, a customer reactivates, a
+// duplicate closes, a term ends), so callers keep checking a skipped root's real terms and
+// only report and pin the skip. There is deliberately no list of "permanent" reasons.
+// Returns { extend: [id], skipped: [{ id, reason }] }.
+async function splitRootsByTopupSkip(conn, customerId, ids) {
+  const out = { extend: [], skipped: [] };
+  if (!ids.length) return out;
+  const place = (id, reason) => (reason ? out.skipped.push({ id, reason }) : out.extend.push(id));
+  const customer = await conn('customers').where({ id: customerId }).first(...SERIES_CUSTOMER_COLUMNS);
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) {
+    ids.forEach((id) => place(id, customerSkip));
+    return out;
+  }
+  const cols = await conn('scheduled_services').columnInfo();
+  for (const id of ids) {
+    const parent = await conn('scheduled_services').where({ id }).first();
+    place(id, parent ? await topupSeriesSkipReason(conn, parent, id, cols) : 'series_not_found');
+  }
+  return out;
 }
 
 // Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
@@ -21210,6 +22398,8 @@ router.put('/:id/status', async (req, res, next) => {
         // recovery vehicle: re-attempt it directly (dedup-guarded,
         // fire-and-forget; Codex r4). Mirrors admin-dispatch.
         {
+          // The package visit 2 retire (job-status no-show cascade) re-runs too.
+          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id, packageOnly: true }).catch(() => {});
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }
@@ -22379,6 +23569,18 @@ router.get('/:id/series-summary', async (req, res, next) => {
       // Same dark-ship contract for the price/service "Apply to" selector.
       canScopePriceService: isEnabled('editApptPriceServiceScope'),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/:id/visit-summary
+// The stop this service shares with others, read live: { visit: null } for
+// an ungrouped row, else the same summary the day feed attaches. Edit
+// appointment asks on open, so every screen that opens it (Day, 5-Day, Week,
+// List, the dispatch board) sees a combo the same way and with its full
+// membership, whatever its own feed carries.
+router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
+  try {
+    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
   } catch (err) { next(err); }
 });
 
@@ -24389,6 +25591,10 @@ async function generateReportCopyWithFallback({
   // Under the writer rules only the four-section report is accepted; the
   // deterministic fallback keeps the two-section shape.
   requireSections = false,
+  // (draft, rejection, { sameProvider }) => text added to the user message of
+  // the next attempt, so a rejected draft is repaired and not written blind
+  // again. Absent: the next attempt gets the same message (lawn, tree and shrub).
+  repairNote,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -24404,6 +25610,8 @@ async function generateReportCopyWithFallback({
 } = {}) {
   const failures = [];
   let lastRejection = null;
+  // The last rejected draft and who wrote it, for `repairNote`.
+  let rejected = null;
   // Shared wall-clock budget for the whole chain (2 providers × ≤2 attempts).
   // These direct adapter calls previously carried NO timeout, so a stalled
   // primary sat on callOpenAI's 10-minute default and the admin request died
@@ -24430,7 +25638,7 @@ async function generateReportCopyWithFallback({
           laneId: 'report_copy',
           model: provider.model,
           system: systemPrompt,
-          text: userMessage,
+          text: userMessage + repairNoteFor(repairNote, rejected, provider.name),
           jsonMode: false,
           maxTokens,
           timeoutMs: Math.min(remainingMs, REPORT_CALL_TIMEOUT_MS),
@@ -24459,12 +25667,15 @@ async function generateReportCopyWithFallback({
       const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
         || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
-        || (typeof extraRejection === 'function' ? extraRejection(report) : null);
+        // May be async: the lawn draft's result-timing check asks a model, and
+        // is told what is left of this chain's budget so it never outlives it.
+        || (typeof extraRejection === 'function' ? await extraRejection(report, { remainingMs: deadline - Date.now() }) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
       }
 
       lastRejection = rejection;
+      rejected = { draft: report, rejection: repairReasonFor(rejection, parsed), provider: provider.name };
       logger.warn(
         `[generate-report] ${provider.name} attempt ${attempt} rejected (${rejection})${attempt < 2 ? '; retrying' : '; trying backup'}`,
       );
@@ -24479,6 +25690,26 @@ async function generateReportCopyWithFallback({
     rejection: lastRejection,
     failures,
   };
+}
+
+// The repair note for the writer rules' drafts: what the draft broke, and the
+// draft itself only for the provider that wrote it.
+const writerRepairNote = (screenInputs) => (draft, rejection, { sameProvider }) => rejectedDraftRepairNote({
+  draft, rejection, detail: writerRulesRejectionDetail(draft, screenInputs), includeDraft: sameProvider,
+});
+
+// A draft in the right shape that trips the parser's own word screen comes
+// back with no body, so it reads as 'malformed_shape' (kept for the log and
+// the response). The repair note names the words instead: telling the writer
+// its titles were wrong would leave the real fault in the next draft.
+function repairReasonFor(rejection, parsed) {
+  const words = rejection === 'malformed_shape' && Array.isArray(parsed?.violations) ? parsed.violations.map(String).filter(Boolean) : [];
+  return words.length ? `banned:${words.join(',')}` : rejection;
+}
+
+function repairNoteFor(repairNote, rejected, providerName) {
+  if (typeof repairNote !== 'function' || !rejected) return '';
+  return repairNote(rejected.draft, rejected.rejection, { sameProvider: rejected.provider === providerName }) || '';
 }
 
 // Last-resort copy when both AI providers miss. Only structured, technician-
@@ -24877,6 +26108,36 @@ function buildTypedFindingsPromptBlock({
 }
 
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
+// The sweep chip's correction for the report writer (owner 2026-10-08): the
+// technician's tap stands over the note, so a note that says "swept the eaves"
+// is not completed-work evidence for the sweep. Added only when the sheet says
+// so; every other request's prompt is as it was.
+const SWEEP_NOT_DONE_LINE = 'Technician correction: the eaves and webs were NOT swept on this visit. Do not say that eaves, webs or cobwebs were swept, brushed, knocked down or removed, whatever the note says.';
+// A draft that still claims the sweep after that correction is refused like any
+// other wording the report may not carry (Codex P2 on #6147), judged one
+// sentence at a time (linear).
+// A web takes any removal word, the particle next to its verb or after the
+// web ("knocked the cobwebs down"). An eave alone is a claim only with a
+// sweeping word and no nest or wasp in the sentence: other work at the eaves
+// ("removed a wasp nest from the eaves") stays on the report.
+const SWEEP_CLAIM_BRUSH = String.raw`swe(?:ep|pt|eping)|brush(?:ed|ing)?|knock(?:ed|ing)?\s+(?:\S+\s+){0,4}?(?:down|off|out)|de-?webb?(?:ed|ing)?`;
+const SWEEP_CLAIM_BRUSH_RE = new RegExp(String.raw`\b(?:${SWEEP_CLAIM_BRUSH})\b`, 'i');
+const SWEEP_CLAIM_REMOVAL_RE = new RegExp(String.raw`\b(?:${SWEEP_CLAIM_BRUSH}|remov(?:ed|ing|al)|clear(?:ed|ing)|clean(?:ed|ing)|wip(?:ed|ing)|took\s+(?:\S+\s+){0,4}?down)\b`, 'i');
+const SWEEP_CLAIM_WEB_RE = /\b(?:spider\s?webs?|cobwebs?|webs?|webbing)\b/i;
+const SWEEP_CLAIM_EAVE_RE = /\b(?:eaves?|soffits?)\b/i;
+const SWEEP_CLAIM_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\b/i;
+function sentenceClaimsSweep(sentence) {
+  if (SWEEP_CLAIM_WEB_RE.test(sentence)) return SWEEP_CLAIM_REMOVAL_RE.test(sentence) || /\bde-?webb?(?:ed|ing)?\b/i.test(sentence);
+  if (/\bde-?webb?(?:ed|ing)?\b/i.test(sentence)) return true;
+  // The nest exception is each action's own: "removed a wasp nest and swept
+  // the eaves" still claims the sweep (Codex round 8 on #6147).
+  return sentence.split(/[,;]|\b(?:and|then|but)\b/i)
+    .some((part) => SWEEP_CLAIM_EAVE_RE.test(part) && SWEEP_CLAIM_BRUSH_RE.test(part) && !SWEEP_CLAIM_NEST_RE.test(part));
+}
+function reportClaimsSweep(text) {
+  return String(text || '').split(/[.!?\n]+/).some(sentenceClaimsSweep);
+}
+
 router.post('/generate-report', async (req, res) => {
   try {
     const crypto = require('crypto');
@@ -24895,6 +26156,13 @@ router.post('/generate-report', async (req, res) => {
       // "Write again" (Fast Complete): a fresh draft for the same inputs, so
       // the cached one is not read back. The new draft still replaces it.
       fresh,
+      // The Fast Complete sweep chip (owner 2026-10-08): an exact true means
+      // the technician tapped the sweep OFF, over whatever the note says.
+      sweepNotDone,
+      // GATE_STATION_FAST_COMPLETE: the technician's per-station statuses from
+      // the Fast Complete sheet, [{ number, status }]; they stand over the note
+      // (visit-station-facts.js stationChecksWriterLine).
+      stationChecks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -24915,6 +26183,10 @@ router.post('/generate-report', async (req, res) => {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
 
+    // The technician's station statuses (gate on, a bait station form): a serviced
+    // station under the completed work, the rest under what the technician
+    // observed (visit-station-facts.js stationChecksWriterLines).
+    const stationLines = await require('../services/visit-station-facts').stationChecksWriterLinesForVisit(db, { scheduledServiceId, structuredFindings, stationChecks });
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
     const areas = asArray(areasServiced);
     const actions = asArray(actionsCompleted);
@@ -25830,16 +27102,16 @@ Service Date: ${serviceDate || 'Not specified'}
 Arrival Time: ${arrivalTime || 'Not specified'}
 
 ${writerRulesOn
-    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
+    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}${noteAbsenceHint(promptNotes)}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}${stationLines.completed}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 ${writerRulesOn
     ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
     : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
 
 [OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}${stationLines.observed}
 Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
 
 [REPORTED BY CUSTOMER]
@@ -25868,8 +27140,21 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.
+    // Lawn with the v6 copy live (P15): the prompt carried the
+    // RESULT TIMING rule, so the copy is screened for it too; any forward
+    // result timing is rejected (the report's "What to expect" owns timing).
+    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
+    const { lawnDraftTimingRejection, lawnDraftTimingCheckLive } = require('../services/service-report/lawn-draft-timing-check');
+    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
+    // The meaning check for this request (lawn-draft-timing-check.js). Its
+    // state joins the cache identity, and a draft it could not judge is never
+    // cached: a draft accepted while the check was off or down must not be
+    // served again once it is back.
+    const lawnTimingCheckOn = lawnTimingOn && lawnDraftTimingCheckLive();
+    let lawnTimingUnchecked = false;
     const cacheKey = crypto.createHash('sha256')
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
+      .update(lawnTimingCheckOn ? '|lawn-timing-check:1' : '')
       // Under the writer rules product names never reach the prompt, so what
       // the output screens check joins the key instead: a draft screened for
       // one product set is never served for another.
@@ -25882,7 +27167,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         : '')
       .digest('hex');
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // Under the writer rules a cached draft is screened again below before it
+    // is served.
+    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -25896,23 +27183,23 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
     // visit's: a catalog product the prompt itself mentions (a note saying
-    // "the customer asked about <product>") joins the trade-name screen.
+    // "the customer asked about <product>") joins the trade-name screen in
+    // full, and every other catalog product is screened by its brand word
+    // or its name as a phrase (wholeCatalog, in the shared builder), so a
+    // name the model brings from its own knowledge is caught without an
+    // ordinary word inside an unmentioned catalog name ("snap", "trap")
+    // rejecting plain copy.
+    let catalogRows = null;
     const mentionedCatalogNames = [];
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
-        for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
-          const named = Boolean(row?.name)
-            && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
-          if (named) mentionedCatalogNames.push(row.name);
-          // Its actives too: a draft must not swap the named product for
-          // its active ingredient; and an active the prompt names on its own
-          // ("azoxystrobin" in a note) is screened even with no product name.
-          if (row?.active_ingredient && (named || activeIngredientsMentioned(fullUserMessage, row.active_ingredient))) {
-            mentionedCatalogActives.push(row.active_ingredient);
-          }
-        }
+        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
+        const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
+        catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
+        const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
+        mentionedCatalogNames.push(...mentioned.names);
+        mentionedCatalogActives.push(...mentioned.actives);
       } catch (err) {
         logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);
         return res.status(503).json({
@@ -25927,6 +27214,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
+        wholeCatalog: writerRulesOn,
+        catalogRows,
+        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
@@ -25968,21 +27258,41 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
-    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
-    // RESULT TIMING rule, so the copy is screened for it too; any forward
-    // result timing is rejected (the report's "What to expect" owns timing).
-    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
-    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
+    const writerScreenInputs = {
+      activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
+    };
     const writerRulesScreen = (text) => (writerRulesOn
-      ? writerRulesRejection(text, {
-        activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
-      })
+      ? writerRulesRejection(text, writerScreenInputs)
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // Under the writer rules a rejected draft goes back with what it broke.
+    const repairNote = writerRepairNote(writerScreenInputs);
+    // A cached draft is served only if it still passes both screens as they
+    // read now: a product, alias or active ingredient added since it was
+    // cached must not ride out on the cache.
+    // The chip tapped off: a draft that still claims the sweep is never served.
+    const sweepClaimRefused = (text) => sweepNotDone === true && reportClaimsSweep(text);
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached) && !sweepClaimRefused(cached)) {
+      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    }
+    // The same wall-clock ceiling the provider chain keeps: the last-resort
+    // copy's meaning check below is charged against it too.
+    const reportChainDeadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
-      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
+      // Lawn drafts that pass the pattern screen get one meaning check (owner
+      // 2026-10-03): the pattern screen exempts watering / mowing clauses, so
+      // a result promise phrased around watering needs a reader. Fails open.
+      extraRejection: async (text, { remainingMs } = {}) => {
+        const cheap = (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text)
+          || (sweepClaimRefused(text) ? 'sweep_not_done' : null);
+        if (cheap || !lawnTimingCheckOn) return cheap;
+        // The flag describes the draft this call judges: the accepted draft
+        // is always the last one checked.
+        lawnTimingUnchecked = false;
+        return lawnDraftTimingRejection(text, { remainingMs, onUnchecked: () => { lawnTimingUnchecked = true; } });
+      },
+      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true, repairNote } : {}),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -26008,13 +27318,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       const report = buildDeterministicReportCopy({
         serviceType: fallbackServiceType,
         areas: rulesItems(promptAreas),
-        actions: rulesItems([...promptActions, ...typedFallbackActions]),
+        // The technician's station checks lead (visit-station-facts.js; empty with
+        // the gate off or on any other visit): the fallback keeps the first items.
+        actions: rulesItems([...stationLines.fallbackActions, ...promptActions, ...typedFallbackActions]),
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
-        observations: rulesItems([...promptObs, ...typedFallbackObservations]),
+        observations: rulesItems([...stationLines.fallbackObservations, ...promptObs, ...typedFallbackObservations]),
         recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
         // A zero rating ("Recorded pest activity was none.") names no place
         // checked, a property-wide absence the writer rules refuse (rule 4):
@@ -26031,13 +27343,30 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
+      // The lawn meaning check reads the last-resort copy too: it echoes the
+      // technician's own structured observations, which can carry a result
+      // promise the pattern screen exempts (codex #5734 r1). Fails open.
+      // The cheap screens first: a copy they already refuse costs no model call.
+      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report));
+      const fallbackTiming = report && !fallbackScreened && lawnTimingCheckOn
+        ? await lawnDraftTimingRejection(report, { remainingMs: reportChainDeadline - Date.now() })
+        : null;
+      // The sweep chip's correction screens the last-resort copy too (its own
+      // term: the line above is read as written by lawn-draft-timing-check.test.js).
+      const fallbackReport = report && (fallbackScreened || fallbackTiming || sweepClaimRefused(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
         });
+        // Every draft came back and the report's wording checks refused it:
+        // say so, not "unavailable", so the next step is clear (prod
+        // 2026-10-02: a refused-wording failure read as an outage).
+        const everyDraftRefused = Array.isArray(generated.failures) && generated.failures.length > 0
+          && generated.failures.every((failure) => failure?.reason === 'copy_rejected');
         return res.status(503).json({
-          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          error: everyDraftRefused
+            ? 'The AI drafts did not pass the report’s wording checks, so none was used. Try again, or write the report yourself. Your existing service notes were not changed.'
+            : 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
           retryable: true,
         });
       }
@@ -26055,7 +27384,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     }
 
     const { report } = generated;
-    reportCopyCacheSet(cacheKey, report);
+    // An unjudged lawn draft (the check was unavailable) is served, not cached.
+    if (!lawnTimingUnchecked) reportCopyCacheSet(cacheKey, report);
     logger.info('[generate-report] generated', {
       provider: generated.provider,
       model: generated.model,
@@ -27324,7 +28654,46 @@ function blackoutDateString(value) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// The catalog products, and their actives, a report prompt names: under the
+// writer rules each joins the trade-name and active screens, so a draft never
+// names a product a note mentioned. Supplies (yard signs, stakes, stickers)
+// are no products a report could name: their ordinary words ("yard sign",
+// "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
+// visit whose notes said "yard" (prod 2026-10-02).
+const MENTION_GENERIC_TOKENS = new Set([...CompletionRecap.REPORT_GENERIC_PRODUCT_TOKENS, ...CompletionRecap.REPORT_VOCABULARY_NAME_WORDS]);
+function catalogScreensForPrompt(catalogRows, promptText) {
+  const names = [];
+  const actives = [];
+  const promptWritesAlias = CompletionRecap.promptAliasTest(promptText);
+  for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
+    // By its name or its short display name. A registered alias the prompt
+    // writes out is screened in the shared builder (mentionedText): aliases
+    // are staff shorthand, matched whole.
+    // Neither the report screen's own generic words (the pests, "station",
+    // "trap", "yard", "care") nor the plain report words inside catalog names
+    // ("high", "contact", "monitoring") mark a product named: a note that says
+    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
+    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
+    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
+      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
+    // Its alias written out counts as naming it for its actives.
+    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
+    names.push(...mentioned);
+    // Its actives too: a draft must not swap the named product for its
+    // active ingredient; and an active the prompt names on its own
+    // ("azoxystrobin" in a note) is screened even with no product name.
+    if (row?.active_ingredient && (named || activeIngredientsMentioned(promptText, row.active_ingredient))) {
+      actives.push(row.active_ingredient);
+    }
+  }
+  return { names, actives };
+}
+
 router._test = {
+  assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
+  areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
+  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
+  catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
@@ -27455,6 +28824,9 @@ router._test = {
   planSeriesExtendDates,
   seriesExtendAnchor,
   mintOrReuseScheduledServiceInvoice,
+  duesInvoiceCoveringPlanVisit,
+  recordPrepaidUnderDuesLock,
+  duesCoversPrepaidRefusal,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
@@ -27582,6 +28954,15 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // address resolver, so "same property" can never mean something different
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
+module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
+module.exports.seriesNextOccurrencesPrice = seriesNextOccurrencesPrice;
+module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
+
+// Same handler as POST / — see createScheduleBooking above.
+module.exports.createScheduleBooking = createScheduleBooking;
+// Same handler as PUT /:id/update-details — see updateVisitDetails above.
+module.exports.updateVisitDetails = updateVisitDetails;
+module.exports.assertApprovedRepriceState = assertApprovedRepriceState;

@@ -14,11 +14,12 @@ const dispatchAlerts = require('../services/dispatch-alerts');
 function mockTransactionReturning(rows) {
   const returning = jest.fn().mockResolvedValue(rows);
   const update = jest.fn().mockReturnValue({ returning });
-  const whereNull = jest.fn().mockReturnValue({ update });
+  const whereNotIn = jest.fn().mockReturnValue({ update });
+  const whereNull = jest.fn().mockReturnValue({ whereNotIn });
   const table = jest.fn().mockReturnValue({ whereNull });
   table.fn = { now: jest.fn(() => 'NOW()') };
   db.transaction = jest.fn(async (cb) => cb(table));
-  return { table, whereNull, update, returning };
+  return { table, whereNull, whereNotIn, update, returning };
 }
 
 describe('dispatch alerts bulk resolve', () => {
@@ -41,6 +42,8 @@ describe('dispatch alerts bulk resolve', () => {
 
     expect(chain.table).toHaveBeenCalledWith('dispatch_alerts');
     expect(chain.whereNull).toHaveBeenCalledWith('resolved_at');
+    // a "Visit not closed out" card needs a recorded decision: Clear leaves it open
+    expect(chain.whereNotIn).toHaveBeenCalledWith('type', ['visit_not_closed_out']);
     expect(chain.update).toHaveBeenCalledWith({
       resolved_at: 'NOW()',
       resolved_by: 'tech-1',
@@ -83,5 +86,17 @@ describe('dispatch alerts bulk resolve', () => {
     expect(result).toEqual({ resolved: 0, counts: [], alerts: [] });
     expect(to).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  test('the single-card Resolve route refuses a decision-only card before resolving it', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const start = source.indexOf("router.patch('/alerts/:id/resolve'");
+    const route = source.slice(start, source.indexOf('router.', start + 10));
+    const refusal = route.indexOf("code: 'DECISION_REQUIRED'");
+    expect(route).toContain('DECISION_ONLY_ALERT_TYPES.includes(target.type)');
+    expect(route).toContain('res.status(409)');
+    expect(refusal).toBeGreaterThan(-1);
+    expect(refusal).toBeLessThan(route.indexOf('await resolveAlert('));
+    expect(dispatchAlerts.DECISION_ONLY_ALERT_TYPES).toEqual(['visit_not_closed_out']);
   });
 });

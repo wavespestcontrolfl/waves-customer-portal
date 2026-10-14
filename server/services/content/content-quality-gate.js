@@ -441,7 +441,19 @@ function isPageOnlyOpportunity(brief) {
 // round-trip and cannot be spoofed by a draft.
 function isOperatorAuthoredBrief(brief) {
   const s = brief?.gsc_signal;
-  return !!s && s.bucket === 'operator_intercept';
+  return !!s && s.bucket === 'operator_intercept' && s.suggested !== true;
+}
+
+// "Suggest a post" briefs (report-blog-suggestion.js) share the
+// operator_intercept bucket, but nobody authored them: they keep the SERP
+// evidence check (the topic's intent is profiled like any mined topic's), and
+// only GSC evidence is waived, since a new topic has no search traffic by
+// construction (GitHub Codex P1 on ba9bed50fc). Same anti-spoofing key and
+// presence rule as isCompetitorGapBrief: the persisted provenance must be
+// there, or the brief hard-fails no_gsc_signal.
+function isSuggestionBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'operator_intercept' && s.suggested === true && !!s.suggested_at;
 }
 
 function checkSerpBriefAttached(_draft, brief) {
@@ -501,6 +513,9 @@ function isCitabilityBackfillBrief(brief) {
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
+  }
+  if (isSuggestionBrief(brief)) {
+    return { ok: true, reason: 'office_suggestion' };
   }
   if (isCompetitorGapBrief(brief)) {
     return { ok: true, reason: 'competitor_gap_evidence' };

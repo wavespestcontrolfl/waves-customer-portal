@@ -237,6 +237,7 @@ function status() {
 }
 
 module.exports = {
+  FCM_REQUEST_TIMEOUT_MS,
   send,
   status,
   // exported for unit tests

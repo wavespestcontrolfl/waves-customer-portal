@@ -332,6 +332,108 @@ describe('resolveCallBookingCatalogService', () => {
   });
 });
 
+describe('Waves Assessment pick is the offered visit, not a placeholder (2026-10-05 call a12fd5ef)', () => {
+  const ASSESSMENT_ROW = { id: 'svc-assessment', service_key: 'lawn_inspection', name: 'Waves Assessment', short_name: 'Assessment', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 };
+  const RE_SERVICES = [
+    { id: 'svc-pest-re', service_key: 'pest_re_service', name: 'Pest Control Re-Service', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  ];
+  const CATALOG_WITH_ASSESSMENT = [...CATALOG, ASSESSMENT_ROW];
+
+  test('a pest + rodent + termite plan quote with an assessment pick stays an assessment', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'Pest control, rodent, and termite maintenance plan' },
+      transcription: "I'm looking for rodent, pest control, ants, and termite. Do you mind if I come out and take a look?",
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('a termite assessment is never turned into a roach or rodent job by a stray keyword', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'Termite assessment' },
+      transcription: 'we saw swarmers, and we had a roach last week too, can you inspect the house',
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('a specific model pick still outranks the assessment', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Rodent Trapping Service', matched_service: 'Waves Assessment' },
+      transcription: 'rats in the attic, please set traps',
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('rodent_trapping');
+  });
+
+  test('with no model pick, keyword rules still book the rodent job', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'rats in the attic' },
+      transcription: 'I have rats in my attic',
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('rodent_general_one_time');
+  });
+
+  test('revisit intent from a plan customer still replaces an assessment pick', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'pest control revisit' },
+      services: CATALOG_WITH_ASSESSMENT,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_re_service');
+  });
+
+  test('the assessment is known by its stable key even if its label changes', () => {
+    const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Free Home Assessment', requested_service: 'rodent and termite plan' },
+      transcription: 'we have rodent boxes outside, can you come take a look',
+      services: [...CATALOG, renamed],
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('a stored extraction still saying Waves Assessment finds the renamed row by its key', () => {
+    const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'rodent and termite plan' },
+      transcription: 'we have rodent boxes outside, can you come take a look',
+      services: [...CATALOG, renamed],
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('a renamed assessment (same key) is still replaceable by the re-service override', () => {
+    const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Free Home Assessment', requested_service: 'pest control revisit' },
+      services: [...CATALOG, renamed],
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_re_service');
+  });
+
+  test('an assessment never takes a quoted treatment price, so it is never invoiced', () => {
+    const priced = resolveCallBookingPrice({ quotedPrice: '$350', catalogRow: ASSESSMENT_ROW });
+    expect(priced).toEqual({ price: null, source: null });
+    expect(callBookingInvoiceOnComplete({ price: priced.price, catalogRow: ASSESSMENT_ROW })).toBe(false);
+  });
+
+  test('an assessment never books a follow-up treatment visit', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2040-05-20T10:00' },
+      catalogRow: ASSESSMENT_ROW,
+      parentDate: '2040-05-01',
+      parentWindowStart: '09:00',
+    })).toBeNull();
+  });
+});
+
 describe('existing-customer revisit → covered re-service row (owner catalog rule)', () => {
   const GENERIC_ROW = {
     id: 'svc-generic-appt',
@@ -861,6 +963,43 @@ describe('callBookingInvoiceOnComplete', () => {
 
 describe('resolveCallFollowUpPlan', () => {
   const roach = CATALOG[0];
+
+  describe('two-treatment package rows (GATE_PACKAGE_FOLLOWUP_AUTOBOOK)', () => {
+    const prior = process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+    afterEach(() => {
+      if (prior === undefined) delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+      else process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = prior;
+    });
+
+    test('gate on: a cockroach_control booking plans visit 2 with no transcript mention', () => {
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'true';
+      const plan = resolveCallFollowUpPlan({
+        extracted: {},
+        catalogRow: roach,
+        parentDate: '2026-07-02',
+        parentWindowStart: '08:00',
+      });
+      // packageOnly: nobody discussed it — the writer skips it while the
+      // primary is still a pending office-review request.
+      expect(plan).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00', packageOnly: true });
+      // A discussed follow-up on the same row is an ordinary plan.
+      expect(resolveCallFollowUpPlan({
+        extracted: { follow_up_visit_mentioned: true }, catalogRow: roach, parentDate: '2026-07-02', parentWindowStart: '08:00',
+      })).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00' });
+    });
+
+    test('gate on: a non-package row still needs the mention', () => {
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'true';
+      expect(resolveCallFollowUpPlan({ extracted: {}, catalogRow: CATALOG[2], parentDate: '2026-07-02' })).toBeNull();
+    });
+
+    test('gate off (unset / not exactly true): byte-identical — no mention, no plan', () => {
+      delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+      expect(resolveCallFollowUpPlan({ extracted: {}, catalogRow: roach, parentDate: '2026-07-02' })).toBeNull();
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'TRUE';
+      expect(resolveCallFollowUpPlan({ extracted: {}, catalogRow: roach, parentDate: '2026-07-02' })).toBeNull();
+    });
+  });
 
   test('mention with no date -> parent date + catalog interval, parent window', () => {
     const plan = resolveCallFollowUpPlan({
@@ -1437,6 +1576,19 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     return { conn, log };
   }
 
+  test('a package visit 2 follows a parent move only until it is rescheduled on its own', async () => {
+    const { conn, log } = fakeConn({ updatedCount: 1 });
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    // The plan read excludes a package child with a reschedule_log row of
+    // its own (a customer's same-day time change included). Booking-time
+    // evidence, never the editable catalog interval (codex #5896 r2 P2).
+    const marker = log.wheres.find((w) => w && w.sql && /reschedule_log/.test(w.sql));
+    expect(marker).toEqual({
+      sql: '(source_action <> ? OR NOT EXISTS (SELECT 1 FROM reschedule_log rl WHERE rl.scheduled_service_id = scheduled_services.id))',
+      bindings: ['package_followup_auto'],
+    });
+  });
+
   test('shifts the still-pending, never-confirmed child by the parent delta', async () => {
     const { conn, log } = fakeConn({ updatedCount: 1 });
     const shifted = await shiftCallFollowUpsForParentMove({
@@ -1447,12 +1599,13 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     });
     expect(shifted).toBe(1);
     expect(log.table).toBe('scheduled_services');
-    // Narrow filter: only the AI-call child, still pending, never confirmed.
-    expect(log.where).toEqual({
-      parent_service_id: 'svc-parent',
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
+    // Narrow filter: the parent's never-customer-confirmed linked children —
+    // the AI-call child while still pending, the package auto-book child
+    // (booked confirmed) while pending or confirmed. Nothing else.
+    expect(log.where).toEqual({ parent_service_id: 'svc-parent', customer_confirmed: false });
+    expect(log.wheres).toContainEqual({
+      sql: "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))",
+      bindings: ['ai_call_pipeline_followup', 'package_followup_auto'],
     });
     // Delta applied in SQL: scheduled_date + (to - from).
     expect(log.raws.some((r) => Array.isArray(r.bindings) && r.bindings[0] === '2026-07-05' && r.bindings[1] === '2026-07-02')).toBe(true);
@@ -1473,6 +1626,19 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     occupancy.acquireOccupancyLocks.mockClear();
     await shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19' }] });
     expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
+  });
+
+  test('the destination probe carries the child\'s own technician (null when unassigned) — the write CASes on that same value', async () => {
+    const kids = [
+      { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 60 },
+      { id: 'kid-2', technician_id: null, day: '2026-07-16', new_day: '2026-07-19', window_start: '11:00:00', window_end: null, estimated_duration_minutes: 60 },
+    ];
+    const { conn, log } = fakeConn({ kids, updatedCount: 1 });
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(occupancy.findConflictingVisits.mock.calls.map(([a]) => [a.excludeServiceIds[0], a.technicianId]))
+      .toEqual([['kid-1', 't1'], ['kid-2', null]]);
+    expect(log.wheres).toContainEqual(expect.objectContaining({ technician_id: 't1' }));
+    expect(log.wheres).toContainEqual(expect.objectContaining({ technician_id: null }));
   });
 
   test('a child whose destination block is already booked is NOT written onto it — it keeps its date and is reported; a windowless child is not probed', async () => {
@@ -1627,6 +1793,7 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
       log.table = table;
       const chain = {
         where: (arg) => { log.selectWhere = arg; return chain; },
+        whereRaw: (sql, bindings) => { log.selectWhereRaw = { sql, bindings }; return chain; },
         select: () => Promise.resolve(children),
       };
       return chain;
@@ -1652,17 +1819,21 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
   });
 
   test('cancels each pending, never-confirmed child through transitionJobStatus + tracking columns', async () => {
-    const { conn, log } = fakeConn({ children: [{ id: 'child-1' }, { id: 'child-2' }] });
+    const { conn, log } = fakeConn({ children: [{ id: 'child-1', status: 'pending' }, { id: 'child-2', status: 'confirmed' }] });
     const cancelled = await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
     expect(cancelled).toBe(2);
-    // Narrow filter: only the AI-call child, still pending, never confirmed.
-    expect(log.selectWhere).toEqual({
-      parent_service_id: 'svc-parent',
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
+    // Cancel filter: the AI-call child while pending and never customer-
+    // confirmed; the package child pending or confirmed EVEN after the
+    // customer confirmed it — a $0 included visit 2 must not outlive its
+    // cancelled package (codex #5896 r1 P1).
+    expect(log.selectWhere).toEqual({ parent_service_id: 'svc-parent' });
+    expect(log.selectWhereRaw).toEqual({
+      sql: "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed', 'rescheduled')))",
+      bindings: ['ai_call_pipeline_followup', 'package_followup_auto'],
     });
     expect(transitionJobStatus).toHaveBeenCalledTimes(2);
+    // Each flip starts from the child's OWN status (a confirmed package child is not 'pending').
+    expect(transitionJobStatus.mock.calls[1][0]).toMatchObject({ jobId: 'child-2', fromStatus: 'confirmed', toStatus: 'cancelled' });
     expect(transitionJobStatus.mock.calls[0][0]).toMatchObject({
       jobId: 'child-1',
       fromStatus: 'pending',
@@ -1702,6 +1873,12 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
     const untouched = fakeConn();
     expect(await cancelCallFollowUpsForParentCancel({ conn: untouched.conn, parentServiceId: null })).toBe(0);
     expect(untouched.log.table).toBeNull();
+  });
+
+  test('packageOnly (skipped / no-show parent) narrows the cascade to package children', async () => {
+    const { conn, log } = fakeConn({ children: [{ id: 'child-pkg', status: 'confirmed' }] });
+    expect(await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent', packageOnly: true })).toBe(1);
+    expect(log.selectWhere).toEqual({ source_action: 'package_followup_auto' });
   });
 });
 

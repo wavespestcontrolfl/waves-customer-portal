@@ -47,3 +47,30 @@ test('suggested granular identities cannot inherit an unrelated catalog dose or 
   const rows = protocolCompletionDefaultSelections(response, [{ id: 'palm' }], () => ({ rate: 10, rateUnit: 'lb', totalAmount: 90, carrierGallons: 110 }));
   expect(rows[0]).toMatchObject({ rate: '', rateUnit: 'lb/palm', totalAmount: '', carrierGallons: '', amountUnit: 'lb' });
 });
+
+test('a September guide offers Snapshot, the summer palm feed and TriStar; Talus and Headway are gone', () => {
+  const sep = protocols.tree_shrub.visits.find(v => v.month === 'Sep');
+  const products = Object.fromEntries([...sep.fieldGuide.routine, ...sep.fieldGuide.conditional].map(r => [r.key, reference.products[r.key]]));
+  render(<TreeShrubFieldGuide guide={{ ...sep.fieldGuide, month: 'Sep', ...reference, products }} />);
+  expect(screen.getByRole('button', { name: /Snapshot 2.5TG/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /TriStar 8.5 SL/ })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /Talus|Headway/ })).toBeNull();
+});
+
+test('the palm chart keeps the 105 divisor and says why (owner 2026-10-09)', () => {
+  render(<TreeShrubFieldGuide guide={guide} />);
+  expect(screen.getByText(/Canopy width² ÷ 105, rounded down\./)).toBeTruthy();
+  expect(screen.getByText(/limit in the Sarasota County fertilizer codes\. Do not raise the rate\./)).toBeTruthy();
+});
+
+test('the Zylam tank amount is named foliar-only, so it is never read as the drench dose (Codex r5 #6200)', () => {
+  const december = protocols.tree_shrub.visits.find(v => v.month === 'Dec');
+  render(<TreeShrubFieldGuide guide={{ ...december.fieldGuide, month: 'Dec', ...reference }} mode="tech" />);
+  const row = screen.getByRole('button', { name: /Zylam/ });
+  expect(within(row).getByText(/^Foliar spray only: /)).toBeTruthy();
+  // A held mix shows the hold, not a labelled amount.
+  cleanup();
+  const held = { ...reference.products, zylam: { ...reference.products.zylam, mix: null, summary: 'Mix withheld · see product checks' } };
+  render(<TreeShrubFieldGuide guide={{ ...december.fieldGuide, month: 'Dec', ...reference, products: held }} mode="tech" />);
+  expect(within(screen.getByRole('button', { name: /Zylam/ })).getByText('Mix withheld · see product checks')).toBeTruthy();
+});

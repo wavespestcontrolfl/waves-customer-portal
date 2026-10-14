@@ -6,22 +6,21 @@ GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
 names the failure it prevents and the file it protects. Codex invocations
 return JSON matching `.github/codex-review-schema.json`; every reviewer
 cites `file:line` for every finding.
-Other tasks use the user's requested response format. Coding agents follow
-the applicable invariants and Implementation defaults below.
+Other tasks use the user's requested format; coding agents follow the
+invariants and Implementation defaults below.
 The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
 `npm prepare`) blocks a push on any P0 and warns on P1.
 
 **Budget: this file stays under 30 KB** — `npm run check:domain-rules`
-fails when it grows past that. Codex limits automatically loaded project
-instructions to the configured project-document budget; the default is
-32 KiB across the loaded project instruction chain. Repo orientation lives
-in `CLAUDE.md`, procedures live in `.claude/skills/*`, and the per-route
-security contracts live in `docs/public-route-contracts.md`. Do not
-duplicate them here; point at them.
+fails when it grows past that; Codex truncates the loaded instruction
+chain at 32 KiB. Repo orientation lives in `CLAUDE.md`, procedures live
+in `.claude/skills/*`, and the per-route security contracts live in
+`docs/public-route-contracts.md`. Do not duplicate them here; point at
+them.
 
-For coding work, read `CLAUDE.md` before editing and load only the relevant
-skills and reference sections. For an audit or explanation, read applicable
-rules as evidence; do not execute the workflows they describe.
+For coding work read `CLAUDE.md` first and load only the relevant skills
+and reference sections. For an audit, read rules as evidence; do not
+execute the workflows they describe.
 
 ## Codex local database policy
 
@@ -118,21 +117,24 @@ rules as evidence; do not execute the workflows they describe.
   ineligible rows indistinguishable), a rate limit, and privacy headers;
   a dark `GATE_*` route skips its limiter so a probe never sees a
   revealing 429. That baseline applies where a route's entry says nothing
-  else; where the entry records a different or narrower guard set (the
-  bond switcher's uniform 403 while dark, the automation-preview page's
-  token-plus-noindex-only contract), the entry is authoritative — flag
-  drift from the entry, never the entry itself, and flag a NEW route or a
-  widened payload that adopts less than the baseline without its entry
-  saying why. Writes on the `/api/reports/:token/*` family gate on
+  else; where the entry records a different or narrower guard set, the
+  entry is authoritative — flag drift from the entry, never the entry
+  itself, and flag a NEW route or a widened payload that adopts less than
+  the baseline without its entry saying why. Writes on the
+  `/api/reports/:token/*` family gate on
   `service_report_v1` + the token format check, use atomic conditional
   updates for one-shot guards (409 on 0 rows), mirror the read-side
   eligibility check, validate bodies before `Number()` coercion, and ride
   `reportEventLimiter`. Contract e-signature tokens burn when signed. The
   estimate `ask` and `find-slots` routes keep the estimate token gate, the
   short-lived signed `askToken`, terminal/expired rejection, their rate
-  limits, no raw question/query logging, and never book. Any change to a
-  listed route's auth, gate, payload, or headers that the document does
-  not describe is P0.
+  limits, no raw question/query logging, and never book. The commit path
+  re-checks the preflight read: a live gate re-read there (no row lock
+  stabilizes an env flip — `validateBookingSlotGeometry` vs
+  `customerWindowAdmits`), row-derived eligibility on the locked row
+  (`reserveSlot`). Skipping either is P0 unless the entry records the
+  exception. Any change to a listed route's auth, gate, payload, or
+  headers that the document does not describe is P0.
 - **`/receipt/:token` permanence.** The receipt token is `invoices.token`
   and is intentionally permanent — customers re-share receipt links with
   bookkeepers months later. A `used` / `viewed_count` / `expires_at` gate
@@ -189,9 +191,9 @@ rules as evidence; do not execute the workflows they describe.
   `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`,
   `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock
   fields, and `node-cron` schedules without `timezone: 'America/New_York'`.
-- **Near-today date literals in tests.** A literal that passes through a
-  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red the night
-  the ET calendar passes it (`schedule-confirm-race.test.js`, 2026-07-23).
+- **Near-today date literals in tests.** A literal that passes a
+  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red when the
+  ET calendar passes it (`schedule-confirm-race.test.js`).
   Compute relative dates for anything a freshness check validates.
 - **PII in logs (non-card).** Phone, email, street address, full inbound
   SMS bodies, or customer names interpolated into log lines. Log ids.
@@ -211,20 +213,14 @@ rules as evidence; do not execute the workflows they describe.
   render instead of once at the page boundary is also P1.
 - **Retained V1 shared-export modules.** `client/src/pages/admin/`
   `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`, and
-  `CommunicationsPage.jsx` survive the V1→V2 migration as utility modules;
-  their named exports (`CompletionPanel`, `RescheduleModal`,
-  `EditServiceModal`, `ProtocolPanel`, `MONTH_NAMES`, `PRODUCT_DESCRIPTIONS`,
-  `TRACK_SAFETY_RULES`, `stripLegacyBoilerplate`, `STAGES`, `STAGE_MAP`,
-  `KANBAN_STAGES`, `LEAD_SOURCES`, `CustomerMap`, `CustomerIntelligenceTab`,
-  `STATUS_CONFIG`, `PIPELINE_FILTERS`, `DECLINE_REASONS`, `classifyEstimate`,
-  `getUrgencyIndicator`, `detectCompetitor`, `ALL_NUMBERS`,
-  `NUMBER_LABEL_MAP`) are imported by V2 pages. Touching them is a
-  coordinated change; deleting or resurrecting the files is not allowed.
+  `CommunicationsPage.jsx` survive the V1→V2 migration as utility modules
+  whose named exports V2 pages import (list: `waves-design` skill).
+  Touching them is a coordinated change; deleting or resurrecting the
+  files is not allowed.
 - **Style-system mixing.** Tier-2 pages use inline styles + the `D`
   palette; Tier-1 V2 pages use Tailwind + `components/ui`. A file that
   imports `components/ui/*` and defines a `D = { … }` palette is mixing.
-  `KnowledgePage.jsx`'s six-slice promotion to Tier-1 (spec §5.7) is
-  finished. Flag any *new* `D` usage inside a migrated panel.
+  Flag any *new* `D` usage inside a migrated panel.
   Visual-refresh PRs on V2 pages are strict 1:1 on data, endpoints, and
   metrics — content or endpoint changes never share a PR with them.
   `alert-fg` red is for genuine alerts only; the one sanctioned exception
@@ -301,9 +297,16 @@ rules as evidence; do not execute the workflows they describe.
   "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-exempt",
   never "EPA-approved"; never a fixed re-entry/drying minute figure — the
   idiom is "safe once dry" + technician confirms timing. SMS agent: rainfast/
-  re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep
-  the tree for the class. Untouched-code violations are backlog; flag diffs
-  that ADD/EXTEND such copy.
+  re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep the
+  tree; flag diffs that ADD/EXTEND such copy. Every new path admitting
+  free text into REPORT/treatment copy runs the COMPLETE screen
+  `customerCopyViolations` (`service-report/technician-report-copy.js`)
+  before it stores AND renders — never the `findBannedCustomerCopy`
+  subset, which alone misses bare "safe"/"toxic"/"poison", bare
+  "infestation" and access-code shapes. Voice-fill prefills, technician
+  edits and owner-direct/LLM commits have each shipped past it. Report-copy
+  guard only: it bans efficacy words billing/support copy may use, and
+  a field whose wording a state form sets is exempt.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/

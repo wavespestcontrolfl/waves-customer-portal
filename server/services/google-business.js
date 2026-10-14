@@ -2418,6 +2418,12 @@ class GoogleBusinessService {
             },
           );
           if (!notif) throw new Error('removal-alert notification insert failed');
+          // A flap (removed, reinstated, removed again) or a repeat alert for
+          // the same reviews must not leave two open removal rows: close older
+          // open ones this alert covers, in the same transaction as the insert.
+          if (notif.id) {
+            await this._closeRemovalAlerts(trx, loc.id, { coveredBy: gone.map(r => r.id), resolution: 'Replaced by a newer removal alert for the same reviews', exceptId: notif.id });
+          }
         });
       } catch (err) {
         logger.warn(`[gbp] Removal alert for ${loc.name} rolled back (${err.message}) — claim released, retrying next sync`);
@@ -2450,6 +2456,43 @@ class GoogleBusinessService {
   }
 
   /**
+   * Close OPEN removal alerts (reason 'reviews_missing') at a location, by one
+   * of two selections over metadata.reviewIds (google_reviews.id, the id space
+   * both the removal and the restored alerts store):
+   *   - `coveredBy`: every reviewId sits inside this set (a newer removal
+   *     alert for the same reviews or a superset);
+   *   - `restored`: the row names at least one of these just-restored ids AND
+   *     no review it names is still missing. A restore of [A, B] split over two
+   *     sync cycles never has both ids in one cycle's set, so containment
+   *     cannot close it; "nothing left missing" can. A reviewId whose
+   *     google_reviews row no longer exists is not missing (nothing to wait for).
+   * openToCloser: a row a person already marked done is taken over too, so
+   * their Reopen cannot bring an obsolete alert back; a row a system component
+   * closed is left alone.
+   */
+  async _closeRemovalAlerts(conn, locationId, { coveredBy = null, restored = null, resolution, exceptId = null }) {
+    const ids = coveredBy || restored || [];
+    if (!ids.length) return 0;
+    const { doneColumns, openToCloser } = NotificationService._private;
+    let query = conn('notifications')
+      .where({ recipient_type: 'admin', category: 'review' })
+      .whereRaw("metadata->>'reason' = 'reviews_missing'")
+      .whereRaw("metadata->>'locationId' = ?", [locationId]);
+    if (coveredBy) {
+      query = query.whereRaw("jsonb_typeof(metadata->'reviewIds') = 'array' AND ?::jsonb @> (metadata->'reviewIds')", [JSON.stringify(coveredBy)]);
+    } else {
+      // jsonb_exists_any, not the ?| operator: knex reads every ? as a binding.
+      query = query
+        .whereRaw("jsonb_typeof(metadata->'reviewIds') = 'array' AND jsonb_exists_any(metadata->'reviewIds', ?::text[])", [ids.map(String)])
+        .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(metadata->'reviewIds') AS rid(id)
+          JOIN google_reviews g ON g.id::text = rid.id WHERE g.missing_since IS NOT NULL)`);
+    }
+    if (exceptId) query = query.whereNot({ id: exceptId });
+    return openToCloser(query, 'supersede')
+      .update(doneColumns({ by: 'supersede', resolution, keepExisting: true, conn }));
+  }
+
+  /**
    * Correction bell for the removal alert: reviews whose missing_since stamp
    * cleared this run are back on Google, and the admin who saw "removed"
    * needs to hear it (2026-08-13: a transient false removal alert sent the
@@ -2476,16 +2519,30 @@ class GoogleBusinessService {
           .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
           .join(', ');
         const suffix = rows.length > 15 ? ` and ${rows.length - 15} more` : '';
-        await NotificationService.notifyAdmin(
-          'review',
-          `${rows.length} Google review${rows.length === 1 ? '' : 's'} restored at ${locName}`,
-          `Back on Google for ${locName}: ${names}${suffix}. These were previously reported removed — no missing-reviews case is needed for them.`,
-          {
-            bell: true,
-            link: '/admin/reviews',
-            metadata: { locationId, reason: 'reviews_restored', count: rows.length, reviewIds: rows.map(r => r.review_id) },
-          },
-        );
+        // The restored bell and the close of the removal alerts it answers commit
+        // together: the stamp is already cleared, so no later sync retries
+        // either half, and a half-done pair would leave the office both "removed"
+        // and "restored" for the same reviews. notifyAdmin returns null on an
+        // insert failure instead of throwing, so null throws to roll back; on any
+        // failure the removal alert stays as the only record the office has.
+        await db.transaction(async (trx) => {
+          const restoredBell = await NotificationService.notifyAdmin(
+            'review',
+            `${rows.length} Google review${rows.length === 1 ? '' : 's'} restored at ${locName}`,
+            `Back on Google for ${locName}: ${names}${suffix}. These were previously reported removed — no missing-reviews case is needed for them.`,
+            {
+              bell: true,
+              link: '/admin/reviews',
+              metadata: { locationId, reason: 'reviews_restored', count: rows.length, reviewIds: rows.map(r => r.review_id) },
+              connection: trx,
+            },
+          );
+          if (!restoredBell) throw new Error('restored-review notification insert failed');
+          // The removal alerts naming these reviews are obsolete once none of the
+          // reviews they name is still missing (a row still naming a missing one
+          // stays open; the last review back closes it, even from a later cycle).
+          await this._closeRemovalAlerts(trx, locationId, { restored: rows.map(r => r.review_id), resolution: 'The reviews are back on Google' });
+        });
         logger.info(`[gbp] ${rows.length} previously-missing review(s) at ${locName} reappeared — stamp cleared, admin notified`);
       } catch (err) {
         logger.warn(`[gbp] Restored-review notification failed for ${locationId}: ${err.message}`);

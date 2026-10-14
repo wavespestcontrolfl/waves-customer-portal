@@ -67,6 +67,7 @@ const {
   isStaffMaintenanceEnabled,
 } = require('../middleware/staff-maintenance');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
+const { sessionMfaBlock } = require('../services/staff-mfa');
 
 // Track tokens are 64-char lowercase hex — generated as
 // encode(gen_random_bytes(32), 'hex') in
@@ -182,7 +183,7 @@ async function socketAuth(socket, next) {
     try {
       tech = await db('technicians')
         .where({ id: decoded.technicianId })
-        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password', 'mfa_enabled_at');
     } catch (err) {
       logger.error(`[socket-auth] technicians lookup failed: ${err.message}`);
       // Closed-fail: a DB blip shouldn't grant a stale token access.
@@ -194,7 +195,9 @@ async function socketAuth(socket, next) {
       return next(rejectionError('Identity revoked', 'IDENTITY_REVOKED'));
     }
 
-    if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
+    // Same two-step rule as adminAuthenticate (GATE_ADMIN_MFA): a session
+    // without the code, or an admin still owed enrollment, gets no socket.
+    if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password || sessionMfaBlock(decoded, tech)) {
       return next(rejectionError('Identity revoked', 'IDENTITY_REVOKED'));
     }
 
@@ -217,6 +220,7 @@ async function socketAuth(socket, next) {
     socket.userType = tech.role;       // 'admin' | 'technician', sourced from DB
     socket.userId = decoded.technicianId;
     socket.staffTokenVersion = decoded.tokenVersion;
+    socket.staffTokenMfa = decoded.mfa === true;
     socket.staffTokenExpiresAt = Number.isInteger(decoded.exp) ? decoded.exp * 1000 : null;
     return next();
   }

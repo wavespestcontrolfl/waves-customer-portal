@@ -530,6 +530,31 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
   }
 }
 
+// Keep an operator claim alive (Codex #5880 r3 P1): recoverStaleLocks settles a
+// running operator claim whose locked_at is older than STALE_LOCK_MINUTES, which can happen while its
+// provider request is still in flight (rendering used most of the window). The send refreshes locked_at
+// at the provider handoff, so stale recovery cannot take the claim for the length of that request.
+// Keyed by the claim's token (locked_by) and still `running`: false when the row is no longer this
+// claim's (settled, re-owned), and the caller must not hand the request to the provider.
+// `query` (optional, async (sql, params) => pg result): run the one UPDATE on a caller-supplied session
+// instead of the pool. The handoff guard runs while the App path holds a pooled transaction, and with
+// DB_POOL_MAX=2 another pooled statement there could wait on a slot the caller itself holds.
+// A claim that holds no job (id null: the job was already finished) has nothing to keep alive: true.
+async function heartbeatOperatorReceiptClaim(claim, query = null) {
+  if (!claim?.id) return true;
+  if (typeof query === 'function') {
+    const res = await query(
+      "UPDATE receipt_delivery_jobs SET locked_at = now(), updated_at = now() WHERE id = $1 AND locked_by = $2 AND status = 'running'",
+      [claim.id, claim.token],
+    );
+    return res.rowCount > 0;
+  }
+  const touched = await db('receipt_delivery_jobs')
+    .where({ id: claim.id, locked_by: claim.token, status: 'running' })
+    .update({ locked_at: db.fn.now(), updated_at: db.fn.now() });
+  return touched > 0;
+}
+
 // Right after an operator leg delivers ('email' | 'sms'): claim-specific
 // evidence on the row, so a claim that is never released (a failed release,
 // or a process that dies before it) is settled by recoverStaleLocks without
@@ -547,51 +572,91 @@ async function recordOperatorReceiptDelivered(claim, leg) {
     .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt ${leg} evidence failed for job ${claim.id}: ${err.message}`));
 }
 
-// After the operator send: a delivered receipt EMAIL completes the job (the
-// queued job would only repeat it; its text leg already skips once
-// receipt_sent_at is stamped). Otherwise the queued job goes back exactly as
-// it was — it still owes the email — and a row the claim itself created is
-// removed, or queued if an enqueue took it over. Scoped to this claim's
-// token; a failure logs and leaves the row to recoverStaleLocks.
-async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null } = {}) {
-  if (!claim?.id) return;
-  const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
+// After the operator send, the claim is released. ONE ordered decision for every
+// claimed job. A "takeover" is an enqueue that changed a claim-created row's source
+// meanwhile (enqueueReceiptDelivery merges into a running operator_send row):
+// someone wants that receipt delivered.
+//
+//   1. email delivered by this send        -> completed        (nothing more is owed; no duplicate)
+//   2. holdForReconciliation (outcome of a leg unknown; the IB tool sets it)
+//                                          -> failed ("held")  for EVERY row, including the one the claim
+//                                             created: never queued (a leg may have gone out), and kept as the
+//                                             invoice's one job row so a later or concurrent enqueue (a delayed
+//                                             Stripe webhook, a closeout repair) stays deduped instead of
+//                                             inserting a fresh job that re-sends a receipt the provider
+//                                             may already have accepted (enqueueReceiptDelivery only merges
+//                                             into a RUNNING operator_send row, so it never revives a failed one)
+//   3. otherwise (definite failure, or only a text delivered)
+//        taken over by an enqueue          -> queued           (that job is due)
+//        a row the claim created           -> removed
+//        prior queued / retry_scheduled    -> back as it was   (it still owes the email)
+//
+// (A prior queued job cannot be taken over: an enqueue only merges into a running
+// operator_send row. A completed or failed job is not claimed at all — see the claim.)
+// The decision and its writes run in one transaction under the row lock, so an
+// enqueue cannot land between reading the row and settling it.
+// A delivered email completes a queued job (it would only repeat the email; its text leg
+// already skips once receipt_sent_at is stamped). Scoped to this claim's token; a failure
+// logs and leaves the row to recoverStaleLocks.
+// holdForReconciliation parks the job as 'failed' (the status the drain and the claim never
+// pick up; closeout status reads it as a failed delivery) for a person to reconcile.
+// Default off: the Invoices route hands the job back as it always did.
+// `report` (optional): an object this fills with `stamped` (see above) beside the returned disposition.
+// Returns what became of the automatic receipt job, for callers that report it
+// (the IB tool states what the queue will actually do from this, never a guess):
+//   'none'                    no job to settle (it was already finished, or never claimed)
+//   'completed'               a delivered email closed the job — nothing more is queued
+//   'removed'                 the claim created the row itself: no automatic receipt exists
+//   'returned_to_queue'       the job is queued again and WILL be delivered automatically
+//   'held_for_reconciliation' parked as failed; the queue will not send it again
+//   'release_failed'          the release could not be written; stale-claim recovery settles it
+//                             later and may re-queue it
+async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false, report = null } = {}) {
+  if (!claim?.id) return 'none';
   try {
     // Anything delivered stamps the invoice first (the caller's own stamp may
     // have failed) — before a job is handed back, so its text leg skips. If
     // this write fails too, the claim stays running for recoverStaleLocks.
     if (emailDelivered || smsDelivered) {
-      await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
+      const stamped = await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
+      // `report` (optional, filled in place): whether THIS write stamped receipt_sent_at (it only writes an
+      // unstamped invoice), for a caller that must say honestly whether the stamp was recorded.
+      if (report) report.stamped = stamped > 0;
     }
-    if (emailDelivered) {
-      await mine().update({
-        status: 'completed',
-        sms_result: smsResult,
-        email_result: emailResult,
-        completed_at: db.fn.now(),
-        locked_at: null,
-        locked_by: null,
-        last_error: null,
-        updated_at: db.fn.now(),
-      });
-    } else if (!claim.prior) {
-      // A row the claim created goes away — unless an enqueue took it over
-      // meanwhile (source no longer 'operator_send'): that job is now due.
-      const removed = await mine().where({ source: 'operator_send' }).del();
-      if (!removed) {
-        await mine().update({ status: 'queued', locked_at: null, locked_by: null, updated_at: db.fn.now() });
+    return await db.transaction(async (trx) => {
+      const mine = () => trx('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
+      const unlock = { locked_at: null, locked_by: null, updated_at: trx.fn.now() };
+      // A write that touched no row means the row was re-owned since: not settled here.
+      const settled = (rows, outcome) => (rows ? outcome : 'release_failed');
+      const row = await mine().forUpdate().first('source');
+      if (!row) return 'release_failed';
+      const prior = claim.prior; // null = the claim created the row
+      const takenOver = !prior && row.source !== 'operator_send';
+
+      // 1. This send delivered the email.
+      if (emailDelivered) {
+        return settled(await mine().update({
+          status: 'completed', sms_result: smsResult, email_result: emailResult, completed_at: trx.fn.now(), last_error: null, ...unlock,
+        }), 'completed');
       }
-    } else {
-      await mine().update({
-        status: claim.prior.status,
-        next_attempt_at: claim.prior.next_attempt_at,
-        locked_at: null,
-        locked_by: null,
-        updated_at: db.fn.now(),
-      });
-    }
+      // 2. The outcome of a leg is unknown: never queued.
+      if (holdForReconciliation) {
+        return settled(await mine().update({
+          status: 'failed',
+          sms_result: smsResult,
+          email_result: emailResult,
+          last_error: 'operator receipt send outcome unknown — held for reconciliation, not retried automatically',
+          ...unlock,
+        }), 'held_for_reconciliation');
+      }
+      // 3. Everything else.
+      if (takenOver) return settled(await mine().update({ status: 'queued', ...unlock }), 'returned_to_queue');
+      if (!prior) return (await mine().where({ source: 'operator_send' }).del()) ? 'removed' : 'release_failed';
+      return settled(await mine().update({ status: prior.status, next_attempt_at: prior.next_attempt_at, ...unlock }), 'returned_to_queue');
+    });
   } catch (err) {
     logger.warn(`[receipt-delivery-queue] operator receipt claim release failed for job ${claim.id}: ${err.message}`);
+    return 'release_failed';
   }
 }
 
@@ -642,6 +707,7 @@ module.exports = {
   scheduleReceiptDeliveryDrain,
   claimReceiptJobForOperatorSend,
   recordOperatorReceiptDelivered,
+  heartbeatOperatorReceiptClaim,
   releaseOperatorReceiptClaim,
   markTextCarriedBySummary,
   resumeDeferredReceiptDelivery,

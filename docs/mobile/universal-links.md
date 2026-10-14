@@ -76,6 +76,11 @@ links in the browser. No client update needed.
 - The client handler also refuses /admin, /tech, /api and any URL whose
   pathname starts with `//` (protocol-relative smuggling) — keep that guard;
   it backstops the association files.
+- Plain `http://portal.wavespestcontrol.com/...` is accepted and upgraded to
+  https before the origin check. Texted links carry no scheme (the SMS link
+  policy strips `https://`), Messages opens them as http, and iOS routes http
+  universal links into the app too. Before 2026-10 the handler refused them,
+  so every texted link opened the app on Home (Sentry `Native link: rejected`).
 
 ## Diagnosing an app that opens on home
 

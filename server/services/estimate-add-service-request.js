@@ -239,6 +239,9 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
     updatedInputs.priorQualifyingServices = estData.priorQualifyingServices;
   }
 
+  // The lawn list mode the saved estimate priced with (no pin when it priced no lawn).
+  Object.assign(updatedInputs, require('./estimate-floor-signal-replay').savedLawnCostPlusSignal(estData));
+
   try {
     const v1Result = generateEstimate(updatedInputs);
     const legacyResult = mapV1ToLegacyShape(v1Result);

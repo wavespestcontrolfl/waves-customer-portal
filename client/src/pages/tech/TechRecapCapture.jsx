@@ -5,10 +5,11 @@ import { deleteRecapClipDraft, getRecapClipDraft, putRecapClipDraft } from '../.
 // Native camera -> tag the action -> presigned PUT to S3 -> lands in the customer's
 // recap. All optional; rendered only on the active (on_site) PEST job behind the
 // pest-recap-v1 flag. Mirrors the admin closeout RecapCapture but uses the tech
-// bearer-token `request` helper + the tech dark palette.
+// bearer-token `request` helper + the Waves Admin look (DECISIONS 2026-10-03):
+// ink and stone surfaces; `teal` and `green` are the ink accent, red an error.
 const C = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9',
-  text: '#e2e8f0', muted: '#94a3b8', red: '#ef4444', green: '#22c55e',
+  bg: '#fafaf9', card: '#ffffff', border: '#d6d3d1', teal: '#1c1917',
+  text: '#1c1917', muted: '#57534e', red: '#a32d2d', green: '#1c1917',
 };
 
 // role keys must match server ROLE_MAP (recap-media.js).
@@ -441,12 +442,12 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
   const items = itemState.serviceId === serviceId ? itemState.items : [];
   const visiblePendingFile = pendingFile?.serviceId === serviceId ? pendingFile.file : null;
   const captureDisabled = Boolean(uploading) + Boolean(failedUpload) + Boolean(restoringFor === serviceId) > 0;
-  const chip = { display: 'flex', alignItems: 'center', gap: 7, padding: '12px 10px', borderRadius: 11, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', textAlign: 'left' };
+  const chip = { display: 'flex', alignItems: 'center', gap: 7, padding: '12px 10px', borderRadius: 4, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12.5, fontWeight: 500, cursor: 'pointer', textAlign: 'left' };
 
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginTop: 10 }}>
+    <div style={{ background: C.card, border: `0.5px solid ${C.border}`, borderRadius: 6, padding: 14, marginTop: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: 14, color: C.text }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 500, fontSize: 14, color: C.text }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: C.teal }} /> Recap clips
         </span>
         <span style={{ fontSize: 12, color: C.muted }}>{items.length ? `${items.length} captured` : 'optional'}</span>
@@ -460,13 +461,13 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
       {items.length > 0 && (
         <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
           {items.map((m) => (
-            <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
-              <div style={{ width: 38, height: 38, borderRadius: 7, background: 'linear-gradient(135deg,#0ea5e9,#0b1220)', flexShrink: 0 }} />
+            <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, padding: 8 }}>
+              <div style={{ width: 38, height: 38, borderRadius: 4, background: C.bg, border: `1px solid ${C.border}`, flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: C.text, textTransform: 'capitalize' }}>{m.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: C.text, textTransform: 'capitalize' }}>{m.role}</div>
                 <div style={{ fontSize: 11.5, color: C.teal }}>“{m.caption}”</div>
               </div>
-              <span style={{ fontSize: 10.5, color: m.status === 'ready' ? C.green : C.muted, fontWeight: 700 }}>{m.status === 'ready' ? 'Uploaded' : m.status}</span>
+              <span style={{ fontSize: 10.5, color: m.status === 'ready' ? C.green : C.muted, fontWeight: 500 }}>{m.status === 'ready' ? 'Uploaded' : m.status}</span>
               <button onClick={() => remove(m.id)} style={{ background: 'none', border: 'none', color: C.muted, fontSize: 18, cursor: 'pointer' }}>×</button>
             </div>
           ))}
@@ -482,30 +483,30 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
                 {failedUpload.file.name} · {ROLE_LABELS.get(failedUpload.role)}
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
-                {failedUpload.retryable && <button type="button" onClick={() => upload(failedUpload)} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>Retry upload</button>}
-                <button type="button" disabled={failedUpload.discardPending} onClick={discardFailedUpload} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: `1px solid ${C.border}`, background: 'none', color: C.text, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>{discardButtonLabel(failedUpload)}</button>
+                {failedUpload.retryable && <button type="button" onClick={() => upload(failedUpload)} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 4, border: 'none', background: C.teal, color: '#fff', fontWeight: 500, fontSize: 14, cursor: 'pointer' }}>Retry upload</button>}
+                <button type="button" disabled={failedUpload.discardPending} onClick={discardFailedUpload} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 4, border: `1px solid ${C.border}`, background: 'none', color: C.text, fontWeight: 500, fontSize: 14, cursor: 'pointer' }}>{discardButtonLabel(failedUpload)}</button>
               </div>
             </>
           )}
         </div>
       )}
-      <button type="button" disabled={captureDisabled} onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 10, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: captureDisabled ? 'default' : 'pointer', opacity: captureDisabled ? 0.65 : 1 }}>
+      <button type="button" disabled={captureDisabled} onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 4, border: 'none', background: C.teal, color: '#fff', fontWeight: 500, fontSize: 14, cursor: captureDisabled ? 'default' : 'pointer', opacity: captureDisabled ? 0.65 : 1 }}>
         {captureButtonLabel(uploading, failedUpload)}
       </button>
 
       {/* zIndex 1000 like the other tech sheets: the bottom nav is fixed at 50 and later in the DOM, so at 50 it painted over the sheet's last rows. */}
       {visiblePendingFile && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(5,8,13,.7)', zIndex: 1000, display: 'flex', alignItems: 'flex-end' }} onClick={() => setPendingFile(null)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', background: C.card, borderRadius: '18px 18px 0 0', border: `1px solid ${C.border}`, boxSizing: 'border-box', padding: '16px 14px calc(22px + env(safe-area-inset-bottom, 0px))', maxHeight: '82%', overflowY: 'auto' }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(28,25,23,.45)', zIndex: 1000, display: 'flex', alignItems: 'flex-end' }} onClick={() => setPendingFile(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', background: C.card, borderRadius: '6px 6px 0 0', border: `1px solid ${C.border}`, boxSizing: 'border-box', padding: '16px 14px calc(22px + env(safe-area-inset-bottom, 0px))', maxHeight: '82%', overflowY: 'auto' }}>
             <div style={{ width: 40, height: 4, background: C.border, borderRadius: 3, margin: '0 auto 12px' }} />
-            <div style={{ fontWeight: 800, fontSize: 16, color: C.text, textAlign: 'center' }}>What were you doing?</div>
+            <div style={{ fontWeight: 500, fontSize: 16, color: C.text, textAlign: 'center' }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: C.muted, textAlign: 'center', margin: '4px 0 12px' }}>One tap. We caption it for the customer.</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {(showMore ? [...CHIPS_TOP, ...CHIPS_MORE] : CHIPS_TOP).map((c) => (
                 <button type="button" key={c.role} onClick={() => tag(c.role)} style={chip}><span style={{ width: 9, height: 9, borderRadius: '50%', background: C.teal, flexShrink: 0 }} />{c.label}</button>
               ))}
             </div>
-            {!showMore && <button type="button" onClick={() => setShowMore(true)} style={{ marginTop: 9, width: '100%', padding: 10, borderRadius: 9, background: 'none', border: `1px solid ${C.border}`, color: C.muted, fontSize: 12.5, cursor: 'pointer' }}>More actions…</button>}
+            {!showMore && <button type="button" onClick={() => setShowMore(true)} style={{ marginTop: 9, width: '100%', padding: 10, borderRadius: 4, background: 'none', border: `1px solid ${C.border}`, color: C.muted, fontSize: 12.5, cursor: 'pointer' }}>More actions…</button>}
           </div>
         </div>
       )}

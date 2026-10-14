@@ -63,10 +63,9 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     if (owned) await owned.dispose();
   });
 
-  // The run's immutable scores_adjusted snapshot IS the AI's read (owner
-  // ruling 2026-09-24: lawn scores are read-only from photos) — it mirrors
-  // `scores` by default, exactly like the real /assess writer. A test that
-  // wants an AI-blank (fillable) key passes it as `null` in `scores`.
+  // The run's immutable scores_adjusted snapshot IS the AI's read — it
+  // mirrors `scores` by default, exactly like the real /assess writer. A test
+  // that wants an AI-blank key passes it as `null` in `scores`.
   async function seed(scores = {}, { run = true, service = false } = {}) {
     const f = await fixture(mockKnex);
     const visit = service ? await f.visit() : null;
@@ -340,21 +339,33 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   });
 
   test('two concurrent legacy fills of different blanks both survive', async () => {
-    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: null }, { run: false });
+    // Two of the four on-screen scores are blank, so neither save alone
+    // completes the row (a blank Fungus/Thatch would take its no-finding score and
+    // confirm on the first save).
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, turf_density: null }, { run: false });
     await Promise.all([
       request(assessment.id, { adjustedScores: { color_health: 70 } }),
-      request(assessment.id, { adjustedScores: { fungus_control: 60 } }),
+      request(assessment.id, { adjustedScores: { turf_density: 60 } }),
     ]);
     const row = await read(assessment.id);
-    expect(row).toMatchObject({ color_health: 70, fungus_control: 60 });
+    expect(row).toMatchObject({ color_health: 70, turf_density: 60, confirmed_by_tech: true });
   });
 
   test('clearing an earlier legacy fill (posted as null) removes it', async () => {
     const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
     await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
-    const cleared = await request(assessment.id, { adjustedScores: { fungus_control: null, color_health: 70 } });
-    expect(cleared.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
+    const cleared = await request(assessment.id, { adjustedScores: { fungus_control: null } });
+    expect(cleared.body).toMatchObject({ confirmed: false, missingScores: ['color_health', 'fungus_control'] });
     expect(cleared.body.assessment.fungus_control).toBeNull();
+  });
+
+  // Owner ruling 2026-10-04: the screen has no Fungus or Thatch field, so a
+  // blank one takes its no-finding score (never a low Condition) once the
+  // rest of the row is complete.
+  test('a legacy blank Fungus takes its no-finding score on the completing save', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
+    const done = await request(assessment.id, { adjustedScores: { color_health: 70, stress_damage: 64 } });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, fungus_control: 95, thatch_level: 90, stress_damage: 64 });
   });
 
   test('legacy reload sends the server AI read, so a partial fill stays editable', async () => {
@@ -376,14 +387,58 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, stress_damage: 40 });
   });
 
+  test('a legacy row with no stressor signal stays pending until Condition is entered: the 95 fallback confirms nothing', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: null, thatch_level: null, stress_damage: null }, { run: false });
+    const empty = await request(assessment.id, { adjustedScores: {} });
+    expect(empty.body).toMatchObject({ confirmed: false, missingScores: ['stress_damage', 'fungus_control', 'thatch_level'] });
+    expect(empty.body.assessment).toMatchObject({ confirmed_by_tech: false, stress_damage: null, fungus_control: null, thatch_level: null });
+    const entered = await request(assessment.id, { adjustedScores: { stress_damage: 70 } });
+    expect(entered.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 70, fungus_control: 95, thatch_level: 85 });
+  });
+
+  test('a legacy Condition corrected upward lifts the lower Fungus read with it; a posted blank stays blank', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: 20, stress_damage: 20 }, { run: false });
+    const done = await request(assessment.id, { adjustedScores: { stress_damage: 80 } });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 80, fungus_control: 80, thatch_level: 90 });
+    // Calibration compares the Condition entry once: the raised Fungus is left out.
+    await drain();
+    const [, , techScores] = intel.recordTechCalibration.mock.calls.at(-1);
+    expect(techScores).toMatchObject({ stress_damage: 80, fungus_control: null, thatch_level: 90 });
+    const { assessment: panel } = await seed({ ...COMPLETE, fungus_control: null }, { run: false });
+    const blank = await request(panel.id, { adjustedScores: { ...COMPLETE, fungus_control: null } });
+    expect(blank.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
+  });
+
+  test('a confirmed legacy assessment is final: a retry or a stale second session cannot rewrite its scores', async () => {
+    const { assessment } = await seed(COMPLETE, { run: false });
+    const first = await request(assessment.id, { adjustedScores: { turf_density: 72 } });
+    expect(first.body.assessment).toMatchObject({ confirmed_by_tech: true, turf_density: 72 });
+    await drain();
+    const committed = await read(assessment.id);
+    const stale = await request(assessment.id, { adjustedScores: { turf_density: 5, stress_damage: 1 }, stress_flags: { drought_stress: true } });
+    expect(stale.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, stress_damage: 85 } });
+    expect(await read(assessment.id)).toEqual(committed);
+    // The first confirmation recorded the calibration comparison; the stale one adds none.
+    await drain();
+    expect(intel.recordTechCalibration.mock.calls.filter(([id]) => id === assessment.id)).toHaveLength(1);
+    // Two sessions confirming at once: one wins, and the row holds only its scores.
+    const { assessment: raced } = await seed(COMPLETE, { run: false });
+    await Promise.all([
+      request(raced.id, { adjustedScores: { turf_density: 40 } }),
+      request(raced.id, { adjustedScores: { color_health: 30 } }),
+    ]);
+    const row = await read(raced.id);
+    expect([[40, 76], [80, 30]]).toContainEqual([row.turf_density, row.color_health]);
+  });
+
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');
     try {
-      // turf_density is AI-known here (80, from COMPLETE) — the override is
-      // ignored; the free-text observations edit is unaffected.
+      // turf_density was read by the AI (80, from COMPLETE); the technician's
+      // 72 replaces it (owner ruling 2026-10-04).
       const result = await request(assessment.id, { adjustedScores: { turf_density: 72, observations: 'Technician legacy text' } });
-      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 80, observations: 'Technician legacy text' } });
+      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, observations: 'Technician legacy text' } });
       expect(result.body).not.toHaveProperty('confirmed');
       await drain();
       expect(delivery).not.toHaveBeenCalled();

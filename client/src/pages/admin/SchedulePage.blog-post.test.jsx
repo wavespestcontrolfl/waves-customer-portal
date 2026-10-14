@@ -2,7 +2,8 @@
 // The Waves blog post on the completion form (GATE_REPORT_BLOG_POST, owner
 // "ok go" 2026-10-01): the picker shows only while the server answers
 // available, a pick is draft content that a reopened form restores, and the
-// completion sends it as blogPostId.
+// completion sends it as blogPostId. A search no post covers can be suggested
+// as a new post (GATE_BLOG_SEARCH_SUGGEST; owner mockup approval 2026-10-03).
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompletionPanel } from './SchedulePage';
@@ -33,6 +34,7 @@ function stubFetch() {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     let data = { customer: {}, actions: [], available: false };
     if (String(url).includes('/blog-posts')) data = blogResponse(String(url));
+    if (String(url).includes('/blog-suggestions')) data = { status: 'queued' };
     return { ok: true, json: async () => data };
   }));
 }
@@ -158,5 +160,18 @@ describe('the blog post on the completion form', () => {
     await act(async () => fireEvent.click(submit));
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit.mock.calls[0][1]).not.toHaveProperty('blogPostId');
+  });
+
+  it('a search no post covers is suggested from the form: POST blog-suggestions with the phrase', async () => {
+    blogResponse = (url) => ({ available: true, posts: url.includes('?q=') ? [{ ...POST, exact: false }] : [], suggest: true });
+    await renderPanel();
+    fireEvent.change(await screen.findByLabelText('Search the Waves blog'), { target: { value: 'standing water' } });
+    expect(await screen.findByText('No post covers “standing water” yet.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest a post about “standing water”' }));
+    expect(await screen.findByRole('button', { name: 'Suggested: “standing water”' })).toBeTruthy();
+    const [url, options] = fetch.mock.calls.find(([called]) => String(called).includes('/blog-suggestions'));
+    expect(String(url)).toContain(`/admin/dispatch/${service.id}/blog-suggestions`);
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ phrase: 'standing water' });
   });
 });

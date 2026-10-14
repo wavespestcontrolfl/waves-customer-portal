@@ -464,6 +464,16 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         renewal_charge_consent_at: contract.signed_at || new Date(),
       });
 
+      // An agreement that charges after installation records its wait HERE,
+      // in the activation transaction: the term never becomes visible to a
+      // closeout without it (an installation closing at the same moment
+      // would otherwise find no wait, go unstamped and strand the plan's
+      // invoice — GitHub Codex #5816 r2). A failure rolls the activation
+      // back; the daily sweep retries it.
+      await require('./termite-annual-signature-charge').recordInstallationWait({
+        conn: trx, estimateId, contract, invoiceId: conversion.draftInvoiceId, trigger,
+      });
+
       return {
         activated: true,
         termId: conversion.annualPrepayTermId,
@@ -586,6 +596,8 @@ async function collectOrDeliverAnnualInvoice({
 //      that never went out
 //   3. anchorInstalledTerms — re-anchors coverage to the completed
 //      installation (codex round 4)
+//      then chargeInstalledTerms — charges an agreement that bills after
+//      installation, once that installation is completed
 //   4. retryInstallHandoffs — re-rings a scheduling handoff that never
 //      durably landed (codex round 4)
 //   5. remindExpiredSignatureLinks — slice 3b: nudges staff once per
@@ -597,6 +609,7 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     scanned: 0, activated: 0, skipped: 0, failed: 0,
     deliveryScanned: 0, delivered: 0, deliveryFailed: 0, charged: 0, collectionHeld: 0,
     anchorScanned: 0, anchored: 0, anchorFailed: 0,
+    installChargeScanned: 0, installCharged: 0, installPayLinked: 0, installChargeHeld: 0, neverInstalledAlerted: 0,
     handoffScanned: 0, handedOff: 0, handoffFailed: 0,
     countersignScanned: 0, countersignReminded: 0,
     signatureNudgeScanned: 0, signatureNudged: 0,
@@ -608,6 +621,9 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
   // Anchor BEFORE the handoff retry: a term whose installation already
   // happened needs no "schedule the installation" bell.
   await anchorInstalledTerms({ conn, limit, counts });
+  // Agreements that charge after installation: collect the ones whose
+  // installation is completed; alert once on the ones never installed.
+  await chargeInstalledTerms({ conn, limit, counts });
   // After anchoring: portal-declined terms whose station retrieval is due.
   await retryDeclineRetrievalTasks({ counts });
   await retryInstallHandoffs({ conn, limit, counts });
@@ -1210,6 +1226,290 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
   }
 }
 
+// ---- charge after installation (owner ruling 2026-09-30) ----------------
+// An agreement signed on the charge-after-installation wording records
+// 'awaiting_installation' at signing (termite-annual-signature-charge.js):
+// no charge, no pay link. This pass collects it once the plan's
+// installation visit is PERFORMED — the visit the closeout stamped as this
+// plan's installation (paf_held_term_id, see deferredInstallHoldingTerm) with
+// a performed, non-backfill closeout (wherePerformedCloseout), read by the
+// same daily sweep for the
+// same reason (every completion writer is covered by one reader). The charge
+// is at most a day behind the installation.
+//
+// Only an unpaid ORIGINAL term with a still-collectable invoice (a declined
+// future renewal does not release the first year):
+// a plan cancelled before installation (term cancelled / invoice void) is
+// never a candidate, so it is never charged.
+//
+// Second half (owner ruling R8): a plan still waiting NEVER_INSTALLED_ALERT_DAYS
+// after signing, with no completed installation, raises ONE office alert.
+function awaitingInstallationRows(conn) {
+  const { AWAITING_INSTALLATION } = require('./termite-annual-signature-charge');
+  return conn('estimates as e')
+    .join('annual_prepay_terms as apt', conn.raw('apt.source_estimate_id = e.id'))
+    .join('invoices as inv', conn.raw('inv.id = apt.prepay_invoice_id'))
+    .where('e.annual_plan_activation_status', 'activated')
+    .whereRaw("e.annual_plan_signature_charge ->> 'status' = ?", [AWAITING_INSTALLATION])
+    .whereNull('apt.renewed_from_term_id')
+    // payment_pending whatever the renewal decision: a customer who declined
+    // the NEXT year online still owes this installed first year.
+    .where('apt.status', 'payment_pending')
+    .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES);
+}
+
+// "Stamp the visit" (owner ruling 2026-10-03 on #5816, the same call as the
+// prepay lane's "stamp + narrow"): is this visit the installation of a plan
+// whose first-year charge waits for (or was released by) that installation?
+// Returns the plan's term, or null. Completion asks this at closeout through
+// annual-prepay-renewals.js pafDeferredHoldingTerm and stamps the answer on
+// the visit (scheduled_services.paf_held_term_id). From then on the stamp IS
+// the installation's identity: the plan covers that visit (no second bill),
+// the charge release reads it (chargeInstalledTerms), and so does the
+// first-visit text. `terms` are the customer's candidate terms the caller
+// already loaded (payment_pending, or paid coverage when it re-decides after
+// activation).
+//
+// Held only when ALL of these stand:
+//   - a termite installation service type, matching the plan by the anchor's
+//     plan-scoped rule (whereInstallationVisitForPlan);
+//   - the plan was deferred to installation (deferred_at on its charge
+//     record) and its invoice is still live;
+//   - the visit's own newest closeout does not say the work was not performed
+//     (inspection only / customer declined / incomplete / backfill): that
+//     visit is not the installation;
+//   - no OTHER completed visit already carries this plan's stamp: one
+//     installation per plan, so a later installation-named job bills
+//     normally;
+//   - the visit has no live invoice of its own (Charge Now, Terminal, a
+//     pre-minted invoice);
+//   - the visit is not billed to a third-party payer.
+// A visit paid another way (prepaid_method) never reaches here, and the
+// closeout clears a stamp from a payer-billed or separately paid visit. So an
+// installation collected outside the plan is never stamped, never releases
+// the automatic charge, and reaches the office through the never-released
+// alert.
+const DEAD_PLAN_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
+// Statuses of a visit invoice that no longer bills anything.
+const DEAD_VISIT_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled'];
+
+// Does the visit have a live invoice of its own, other than the plan's?
+// Linked directly (invoices.scheduled_service_id) or through one of its
+// service records (invoices.service_record_id).
+async function visitHasOwnInvoice(conn, visitId, planInvoiceId) {
+  const own = await conn('invoices')
+    .where(function linkedToVisit() {
+      this.where('scheduled_service_id', visitId)
+        .orWhereIn('service_record_id', conn('service_records').where({ scheduled_service_id: visitId }).select('id'));
+    })
+    .whereNot({ id: planInvoiceId })
+    .whereNotIn('status', DEAD_VISIT_INVOICE_STATUSES)
+    .first('id');
+  return !!own;
+}
+// `claim` (the closeout passes it): the one-installation decision and the
+// stamp write are ONE step under the term's row lock, so two installation
+// visits of a plan closing at once cannot both be held (GitHub Codex #5816
+// r2). Without it (a billing preview) this only reads.
+async function deferredInstallHoldingTerm(visit, terms, conn, { claim = false } = {}) {
+  if (!claim) return findDeferredInstallHoldingTerm(visit, terms, conn);
+  return conn.transaction(async (trx) => {
+    const ids = terms.map((t) => t.id);
+    if (ids.length) await trx('annual_prepay_terms').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+    const term = await findDeferredInstallHoldingTerm(visit, terms, trx);
+    if (term) {
+      // The plan has ONE stamp: a reopened visit's stale one goes as this
+      // visit takes it.
+      await trx('scheduled_services').where({ paf_held_term_id: term.id }).whereNot({ id: visit.id })
+        .whereNot({ status: 'completed' }).update({ paf_held_term_id: null });
+      await trx('scheduled_services').where({ id: visit.id }).update({ paf_held_term_id: term.id });
+    }
+    return term;
+  });
+}
+
+async function findDeferredInstallHoldingTerm(visit, terms, conn) {
+  if (!visit?.id || !visit.customer_id) return null;
+  let serviceType = visit.service_type;
+  if (serviceType === undefined) {
+    serviceType = (await conn('scheduled_services').where({ id: visit.id }).first('service_type'))?.service_type;
+  }
+  if (!isTermiteInstallationServiceType(serviceType)) return null;
+  for (const term of terms) {
+    if (term.renewed_from_term_id || !term.source_estimate_id || !term.prepay_invoice_id) continue;
+    const estimate = await conn('estimates').where({ id: term.source_estimate_id })
+      .first('annual_plan_activation_status', 'annual_plan_signature_charge', 'property_id');
+    if (estimate?.annual_plan_activation_status !== 'activated') continue;
+    if (!parseJsonish(estimate.annual_plan_signature_charge)?.deferred_at) continue;
+    const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
+    if (!invoice || DEAD_PLAN_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) continue;
+    const matches = await whereInstallationVisitForPlan(
+      conn('scheduled_services as ss').where('ss.id', visit.id).whereNotIn('ss.status', DEAD_VISIT_STATUSES),
+      installationPlanFor(term, estimate),
+    ).first('ss.id');
+    if (!matches) continue;
+    const closeout = await conn('service_records')
+      .where({ scheduled_service_id: visit.id })
+      .orderBy('created_at', 'desc').orderBy('id', 'desc')
+      .first('status', 'structured_notes');
+    const notes = parseJsonish(closeout?.structured_notes) || {};
+    if (closeout && (NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) || String(notes.backfill || '') === 'true')) continue;
+    // A visit that carries a bill of its own (Charge Now, a Terminal payment,
+    // a pre-minted invoice — linked by the visit or by its service record) is
+    // collected through that bill, with or without a prepaid stamp. The plan
+    // does not hold it, so it never releases the plan's charge beside that
+    // payment (pre-push audit P0 on #5816). The charge transaction repeats
+    // this under the visit lock (requireNoOtherVisitInvoice).
+    if (await visitHasOwnInvoice(conn, visit.id, term.prepay_invoice_id)) continue;
+    // Only a COMPLETED visit holds the plan's one stamp. A stamped visit
+    // that was reopened (confirmed / en route / cancelled ...) is no longer
+    // the installation: it must not block the real one, and the charge guard
+    // refuses it anyway (GitHub Codex #5816 r4). The closeout marks a visit
+    // completed before it asks, so two visits closing at once are both
+    // 'completed' here and the term lock picks one.
+    const other = await conn('scheduled_services')
+      .where({ paf_held_term_id: term.id, status: 'completed' })
+      .whereNot({ id: visit.id })
+      .first('id');
+    if (other) continue;
+    // Same resolver, same strictness, as the prepay hold: a payer-billed
+    // visit is billed to that payer and never held.
+    const visitPayer = await require('./payer').resolveForInvoice({
+      database: conn, customerId: visit.customer_id, scheduledServiceId: visit.id, throwOnError: true,
+    });
+    if (visitPayer?.payerId) return null;
+    return term;
+  }
+  return null;
+}
+
+// The STAMP's service identity is narrower than the anchor's
+// (whereTermiteInstallationServiceType also takes any bait/station job): only
+// a service named as a termite INSTALLATION may release the plan's charge —
+// "Termite Installation Setup" (admin-schedule.js termite_installation_setup),
+// "Termite Bait Station Installation". A maintenance job ("Termite Bait
+// Station Cartridge Replacement", "Annual Termite Active Bait Station
+// Service") and the liquid "Termite Bora-Care Install" are not it (GitHub
+// Codex #5816 r2).
+function isTermiteInstallationServiceType(serviceType) {
+  const type = String(serviceType || '').toLowerCase();
+  return type.includes('termite') && type.includes('installation');
+}
+
+// A 'completed' visit is not always performed work: a closeout recorded as
+// inspection only, customer declined or incomplete, and a quiet backfill
+// (which must move no money), all leave scheduled_services.status
+// 'completed'. Same rule as the deferred prepay release
+// (paf-prepay-release.js): the visit's CURRENT closeout record decides.
+const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
+function wherePerformedCloseout(builder) {
+  return builder.whereRaw(`EXISTS (
+    SELECT 1 FROM service_records r
+    WHERE r.id = (
+      SELECT r2.id FROM service_records r2
+      WHERE r2.scheduled_service_id = ss.id
+      ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1
+    )
+      AND r.status = 'completed'
+      AND COALESCE(r.structured_notes ->> 'visitOutcome', '') <> ALL(?::text[])
+      AND COALESCE(r.structured_notes ->> 'backfill', '') <> 'true'
+  )`, [NOT_PERFORMED_OUTCOMES]);
+}
+
+// THE installation that releases a plan's charge: the visit the closeout
+// STAMPED as held by this plan's term (deferredInstallHoldingTerm), completed,
+// with a performed closeout. Nothing is re-derived from service types or
+// properties here — the stamp is the identity.
+async function earliestPerformedInstallation(term, conn) {
+  return wherePerformedCloseout(
+    conn('scheduled_services as ss').where('ss.paf_held_term_id', term.id).where('ss.status', 'completed'),
+  ).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
+}
+
+// Correlated form for the sweep's scans over annual_prepay_terms `apt`.
+function completedInstallationForRow(conn) {
+  return function completedInstallation() {
+    wherePerformedCloseout(
+      this.select(conn.raw('1')).from('scheduled_services as ss')
+        .whereRaw('ss.paf_held_term_id = apt.id').where('ss.status', 'completed'),
+    );
+  };
+}
+
+async function chargeInstalledTerms({ conn, limit, counts }) {
+  const SignatureCharge = require('./termite-annual-signature-charge');
+  try {
+    const installed = await awaitingInstallationRows(conn)
+      .whereExists(completedInstallationForRow(conn))
+      // Same rotation as the delivery pass: least-recently-attempted first.
+      .orderBy('inv.annual_delivery_attempted_at', 'asc', 'first')
+      .orderBy('inv.created_at', 'asc')
+      .select('e.id as estimate_id', 'apt.id as term_id', 'inv.id as invoice_id')
+      .limit(limit);
+    counts.installChargeScanned = installed.length;
+    for (const row of installed) {
+      try {
+        try {
+          await conn('invoices').where({ id: row.invoice_id }).update({ annual_delivery_attempted_at: new Date() });
+        } catch (stampErr) {
+          logger.warn(`[termite-annual-activation] attempt stamp failed for invoice ${row.invoice_id}: ${stampErr.message}`);
+        }
+        const charge = await SignatureCharge.chargeAnnualInvoiceAfterInstallation({
+          estimateId: row.estimate_id, invoiceId: row.invoice_id, conn,
+        });
+        if (charge.status === 'paid' || charge.status === 'processing') counts.installCharged += 1;
+        else if (charge.deliverPayLink) {
+          const delivery = await deliverAnnualInvoiceOrBell({
+            estimateId: row.estimate_id, invoiceId: row.invoice_id, termId: row.term_id, conn,
+          });
+          if (delivery.ok) counts.installPayLinked += 1;
+          else counts.installChargeHeld += 1;
+        } else counts.installChargeHeld += 1;
+      } catch (err) {
+        counts.installChargeHeld += 1;
+        logger.error(`[termite-annual-activation] after-installation charge errored for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] after-installation charge scan failed: ${err.message}`);
+    counts.installChargeScanError = err.message;
+  }
+
+  try {
+    const stale = await awaitingInstallationRows(conn)
+      .whereNotExists(completedInstallationForRow(conn))
+      .whereRaw("e.annual_plan_signature_charge ->> 'never_installed_alerted_at' IS NULL")
+      // CASE, not two ANDed predicates: the cast must never run on a value
+      // the shape check has not passed.
+      // The clock starts at the signature (signed_at); a record without one
+      // falls back to when the wait was recorded.
+      // Each timestamp is shape-checked on its own, so one the check does
+      // not accept (it caps February at 28: a leap-day signature) falls back
+      // to the other instead of dropping the plan from the alert.
+      .whereRaw(`COALESCE(
+          CASE WHEN (e.annual_plan_signature_charge ->> 'signed_at') ~ '${CASTABLE_ISO_INSTANT}'
+            THEN (e.annual_plan_signature_charge ->> 'signed_at')::timestamptz END,
+          CASE WHEN (e.annual_plan_signature_charge ->> 'deferred_at') ~ '${CASTABLE_ISO_INSTANT}'
+            THEN (e.annual_plan_signature_charge ->> 'deferred_at')::timestamptz END
+        ) < now() - interval '${SignatureCharge.NEVER_INSTALLED_ALERT_DAYS} days'`)
+      .orderBy('inv.created_at', 'asc')
+      .select('e.id as estimate_id', 'inv.id as invoice_id')
+      .limit(limit);
+    for (const row of stale) {
+      try {
+        if (await SignatureCharge.alertNeverInstalled({ estimateId: row.estimate_id, invoiceId: row.invoice_id, conn })) {
+          counts.neverInstalledAlerted += 1;
+        }
+      } catch (err) {
+        logger.error(`[termite-annual-activation] never-installed alert failed for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] never-installed scan failed: ${err.message}`);
+    counts.neverInstalledScanError = err.message;
+  }
+}
+
 // Codex #4940 r9: the station retrieval of a term the customer declined
 // online is evaluated HERE, once it is due (its paid-through term_end has
 // passed, or its prepay was refunded) — see annual-prepay-renewals.js
@@ -1605,6 +1905,10 @@ module.exports = {
   anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
   whereTermHasCompletedInstallation,
+  earliestPerformedInstallation,
+  deferredInstallHoldingTerm,
+  visitHasOwnInvoice,
+  isTermiteInstallationServiceType,
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,

@@ -1119,7 +1119,10 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       // The primary HOME changed: the customer's sprinkler settings described
       // the demoted property — same move guard as an address edit, same
       // transaction (codex #3565 gh-r26).
-      await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx);
+      // The new-sod record is a fact about the home: a same-address flip (the mirror already
+      // described the promoted property) keeps it, like the lawn measurement above.
+      const sameHomeFlip = !!formerHomeKey && formerHomeKey === addressKey(newPrimary);
+      await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx, { clearNewSod: !sameHomeFlip });
       applied += 1;
       continue;
     }

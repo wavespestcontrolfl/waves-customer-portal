@@ -44,6 +44,8 @@ async function createSchema(trx) {
   await trx.schema.createTable('scheduled_services', table => {
     table.uuid('id').primary(); table.uuid('customer_id'); table.uuid('property_id');
     table.uuid('technician_id'); table.uuid('visit_id');
+    // Package visit 2 link (appointment-address carries visit 1's address to it).
+    table.uuid('parent_service_id'); table.string('source_action', 30);
     table.string('status'); table.date('scheduled_date');
     table.string('service_address_line1'); table.string('service_address_line2');
     table.string('service_address_city'); table.string('service_address_state'); table.string('service_address_zip');

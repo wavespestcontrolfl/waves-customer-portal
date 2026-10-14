@@ -267,6 +267,80 @@ describe('DELETE /admin/communications/scheduled/:id', () => {
     expect(db.__store.sms_log['sms-2']).toBeUndefined();
   });
 
+  // keepRow (the Intelligence Bar's cancel_queued_message, W7-dev-04): the
+  // writer cancels IN PLACE instead of deleting. The inbox route above never
+  // sets it, so its delete-on-cancel behavior is unchanged.
+  describe('cancelScheduledSmsRow with keepRow', () => {
+    const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
+
+    test('an ordinary scheduled row is kept with status canceled, body and recipient intact', async () => {
+      seedScheduledRow('sms-k1', { message_body: 'Staff-scheduled text for later.' });
+
+      const result = await cancelScheduledSmsRow({ id: 'sms-k1', techRole: 'admin', keepRow: true });
+
+      expect(result).toMatchObject({ outcome: 'ok', cancelled: true });
+      const row = db.__store.sms_log['sms-k1'];
+      expect(row).toBeDefined();
+      expect(row.status).toBe('canceled');
+      expect(row.message_body).toBe('Staff-scheduled text for later.');
+      expect(row.to_phone).toBe('+19415551234');
+    });
+
+    test('a second cancel of the same row is idempotent: nothing to do, row still canceled', async () => {
+      seedScheduledRow('sms-k2');
+      await cancelScheduledSmsRow({ id: 'sms-k2', techRole: 'admin', keepRow: true });
+
+      const again = await cancelScheduledSmsRow({ id: 'sms-k2', techRole: 'admin', keepRow: true });
+
+      expect(again).toEqual({ outcome: 'not_found', cancelled: false, row: null });
+      expect(db.__store.sms_log['sms-k2'].status).toBe('canceled');
+    });
+
+    test('a row already claimed by the send cron (status sending) is left untouched', async () => {
+      seedScheduledRow('sms-k3', { status: 'sending' });
+
+      const result = await cancelScheduledSmsRow({ id: 'sms-k3', techRole: 'admin', keepRow: true });
+
+      expect(result).toMatchObject({ outcome: 'not_found', cancelled: false });
+      expect(db.__store.sms_log['sms-k3'].status).toBe('sending');
+    });
+
+    test('a review-ask reservation row is still canceled in place with its marker intact', async () => {
+      seedScheduledRow('sms-k4', { metadata: { review_ask_reservation: true, scheduled_sms_attempts: 3 } });
+
+      const result = await cancelScheduledSmsRow({ id: 'sms-k4', techRole: 'admin', keepRow: true });
+
+      expect(result).toMatchObject({ outcome: 'ok', cancelled: true });
+      const row = db.__store.sms_log['sms-k4'];
+      expect(row.status).toBe('canceled');
+      expect(row.metadata).toMatchObject({ review_ask_reservation: true, scheduled_sms_attempts: 3 });
+    });
+
+    test('a recruiting_comms_deferred row still settles its comms_history entry and is kept canceled', async () => {
+      seedScheduledRow('sms-k5', {
+        message_type: 'job_application_received',
+        metadata: { entry_point: 'recruiting_comms_deferred', job_application_id: 'app-k5', ledger_entry_id: 'entry-k5' },
+      });
+      mockReconcileLedger.mockClear();
+
+      const result = await cancelScheduledSmsRow({ id: 'sms-k5', techRole: 'admin', keepRow: true });
+
+      expect(result).toMatchObject({ outcome: 'ok', cancelled: true });
+      expect(db.__store.sms_log['sms-k5'].status).toBe('canceled');
+      expect(mockReconcileLedger).toHaveBeenCalledTimes(1);
+      expect(mockReconcileLedger.mock.calls[0][2]).toEqual({ deferred: expect.objectContaining({ outcome: 'blocked', code: 'cancelled_by_admin' }) });
+    });
+
+    test('refuseWorkflowOwned is still enforced with keepRow: a workflow-owned row is untouched', async () => {
+      seedScheduledRow('sms-k6', { metadata: { entry_point: 'invoice_send_deferred' } });
+
+      const result = await cancelScheduledSmsRow({ id: 'sms-k6', techRole: 'admin', keepRow: true, refuseWorkflowOwned: true });
+
+      expect(result).toMatchObject({ outcome: 'workflow_owned', cancelled: false });
+      expect(db.__store.sms_log['sms-k6'].status).toBe('scheduled');
+    });
+  });
+
   test('a row the dispatch cron already claimed before the request arrived (status already sending) is left untouched', async () => {
     seedScheduledRow('sms-3', {
       status: 'sending',

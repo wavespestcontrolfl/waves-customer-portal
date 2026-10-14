@@ -106,7 +106,7 @@ const SERVICE = {
 async function openSheet(request, service = SERVICE) {
   render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
   // The first render pays the sheet's cold import; a slow machine gets time.
-  await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 5000 });
+  await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 10000 });
 }
 
 function addProduct(name, amount) {
@@ -118,8 +118,13 @@ function addProduct(name, amount) {
 
 async function generate(note = NOTE) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
+  // Generate holds (disabled, its reason in the footer) while the visit's
+  // photos and promises load, and a click before then does nothing: wait for
+  // it to be live (the CI flake of 2026-10-03, reproduced with a slow photos
+  // read).
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
-  await screen.findByText('Report the customer will see', {}, { timeout: 5000 });
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
 
 const recordCard = (label = 'Cockroach Treatment') => screen.getByRole('region', { name: `${label} record heard from you` });
@@ -130,6 +135,16 @@ const pick = (field, option, card = recordCard()) => {
   fireEvent.click(within(within(card).getByRole('group', { name: field })).getByRole('button', { name: option }));
 };
 const sendButton = () => screen.getByRole('button', { name: 'Complete & send' });
+
+// Owner 2026-10-08: no short sheet has a "Swept eaves and webs" box; a plain pest
+// visit's sweep is read from its note, and a typed visit records none.
+describe('the swept eaves and webs box on a typed visit', () => {
+  test('is not on the visit step', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    expect(screen.queryByRole('checkbox', { name: 'Swept eaves and webs' })).toBeNull();
+  });
+});
 
 describe('the typed record on the sheet', () => {
   test('reads the visit\'s own form from the note with the record\'s present values, shows each field with its words, and writes the report and the completion from it', async () => {
@@ -176,7 +191,10 @@ describe('the typed record on the sheet', () => {
     expect(body).not.toHaveProperty('clientPestRating');
     expect(body).not.toHaveProperty('structuredObservations');
     expect(body.products).toEqual([expect.objectContaining({ productId: 'gel' })]);
-  });
+    // The file's first full flow pays the sheet's cold start: under CI load it
+    // ran past the defaults (PR #5690's and later client jobs), as the sibling
+    // FastCompleteSheet.test.jsx's first full flow does.
+  }, 20000);
 
   test('a typed visit needs no product: its work is in its own form', async () => {
     const request = makeRequest({ typedFacts: { ...READ, values: { species: 'German', activity_level: 'Low' } } });
@@ -680,4 +698,45 @@ describe('counts and the technician\'s rating (step 4)', () => {
       expect(sendButton().disabled).toBe(true);
     });
   });
+});
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): a typed visit already
+// invoiced from the payment flow completes here with the full form's invoice
+// field.
+describe('a typed visit already invoiced from the payment flow', () => {
+  async function send(service) {
+    const request = makeRequest({ typedFacts: { ...READ, values: { species: 'German', activity_level: 'Low' } } });
+    await openSheet(request, service);
+    await generate('German roaches, low. Inspected and talked with the customer about sanitation.');
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+    return request.bodies('/complete')[0];
+  }
+
+  test('posts invoiceAlreadySent: true', async () => {
+    const body = await send({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    expect(body).toMatchObject({ includePayLink: true, products: [], areasServiced: [] });
+  }, 20000);
+
+  test('a visit with only a door-charge marker, or none, posts no invoice field', async () => {
+    expect(await send({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' })).not.toHaveProperty('invoiceAlreadySent');
+    cleanup();
+    expect(await send(SERVICE)).not.toHaveProperty('invoiceAlreadySent');
+  }, 30000);
+
+  test('Next stop hands the completion response to the page, so admin Dispatch can stage the payment prompt', async () => {
+    const response = { success: true, invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoicePaymentActionRequired: true };
+    const onCompleted = vi.fn();
+    const request = makeRequest({ complete: response, typedFacts: { ...READ, values: { species: 'German', activity_level: 'Low' } } });
+    render(<FastCompleteSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+    await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 10000 });
+    await generate('German roaches, low. Inspected and talked with the customer about sanitation.');
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalledWith(response);
+  }, 20000);
 });

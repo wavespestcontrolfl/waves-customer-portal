@@ -470,7 +470,15 @@ router.post('/autonomous/run-now', aiContentLimiter, async (req, res, next) => {
     // run-now publishes when SHADOW_MODE_* is live, so serialize it behind the
     // same engine lock the daily cron + CLI live run use — an admin triggering
     // this while a batch is in flight must not race the per-day/week caps.
-    const run = await runner._withEngineLock('admin-run-now', () => runner.runNext({ minScore }));
+    // Terminal writer: the run ends with the same after-run step the daily
+    // batch takes (clean up a draft this run took, bring the waiting-drafts
+    // item up to date), inside the lock: a click that finds the lock held
+    // settles nothing, and the item is never rebuilt beside a running batch.
+    const run = await runner._withEngineLock('admin-run-now', async () => {
+      const finished = await runner.runNext({ minScore });
+      await runner.settleTerminalWork([finished]);
+      return finished;
+    });
     logger.info(`[content] manual run-now by ${req.technicianId || 'admin'}: outcome=${run.outcome} action=${run.action_type || '-'} opp=${run.opportunity_id || '-'} pr=${run.astro_pr_url || '-'}`);
     res.json({ success: true, mined, run });
   } catch (err) { next(err); }

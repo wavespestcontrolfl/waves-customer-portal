@@ -22,6 +22,14 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
       if (parentId) q.orWhere('id', parentId).orWhere((children) => children
         .where('recurring_parent_id', parentId).whereNotIn('status', JOIN_INELIGIBLE_STATUSES));
     }).orderBy('id');
+  // A package visit 2 is the same treatment at the same property: an address
+  // correction on visit 1 carries to it in every scope (it is neither
+  // recurring nor grouped), including one parked 'rescheduled' by a customer
+  // request, which is rebooked later from this row.
+  const kids = await conn('scheduled_services').where({ customer_id: anchor.customer_id, parent_service_id: anchor.id,
+    source_action: 'package_followup_auto' }).whereIn('status', ['pending', 'confirmed', 'rescheduled']);
+  const packageChildIds = kids.filter((row) => row.source_action === 'package_followup_auto').map((row) => row.id);
+  if (packageChildIds.length) rows = [...new Map([...rows, ...kids.filter((row) => packageChildIds.includes(row.id))].map((row) => [row.id, row])).values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status))
     .map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {
@@ -34,7 +42,7 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
   const stopKeys = [...new Set(rows.flatMap((row) => [row.property_id, propertyId].map((id) => stopBaseKey({
     propertyId: id, customerId: row.customer_id, scheduledDate: row.scheduled_date,
   }))).concat(visits.map((visit) => visit.stop_base_key)))].sort();
-  return { anchor, parentId, propertyId, scope, rows, visits, stopKeys };
+  return { anchor, parentId, propertyId, scope, rows, visits, stopKeys, packageChildIds };
 }
 
 // Called after occupancy, tech-day, maintenance and comms locks, before stop/appointment rows.
@@ -52,6 +60,33 @@ async function lockAppointmentAddress(trx, plan, updates = {}, { noWait = false 
   for (const key of [...keys].sort()) await lockStop(trx, key, { noWait });
 }
 
+// Every visit the plan moves to another property and that carries a limited area add-on (its own service or an add-on row) is
+// judged at the DESTINATION property (area-addon-limits assertMovedVisitLimitsOpen), inside the caller's transaction on the
+// locked rows: the anchor, grouped siblings and series rows alike, for every caller (Update Details, the Intelligence Bar, the
+// geocode review). One batched row read; a plan with no area add-on reads nothing more.
+// `edited` ({ id, ownKey, rowKeys }): the visit the SAME save edits. Its add-on rows are replaced later in that save, so what it
+// will carry (the posted own service and rows, where the save posts them) is judged, never the rows it is about to drop.
+async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId, edited = null) {
+  const moving = lockedRows.filter((row) => String(row.property_id || '') !== String(propertyId || ''));
+  if (!moving.length) return;
+  const { areaAddOnKeysByVisit } = require('./area-addon-visit-rows');
+  const rowKeys = await areaAddOnKeysByVisit(trx, moving.map((row) => row.id));
+  // The rows are judged as ONE batch: each row that passes counts, on its day, for the rows judged after it (in the tables it
+  // is still at its old property), so two visits moved together cannot each take the destination's last allowed application.
+  const alsoMoving = {};
+  for (const row of moving) {
+    const isEdited = edited && String(edited.id) === String(row.id);
+    const ownKey = isEdited && edited.ownKey !== undefined ? edited.ownKey : row.service_key_snapshot;
+    const carried = isEdited && Array.isArray(edited.rowKeys) ? edited.rowKeys : (rowKeys.get(String(row.id)) || []);
+    const serviceKeys = [ownKey, ...carried].filter((key) => String(key || '').startsWith('area_addon_'));
+    if (!serviceKeys.length) continue;
+    // The edited visit lands on the day the same save sets (a combined address and date edit is judged on its final day).
+    const scheduledDate = isEdited && edited.scheduledDate ? edited.scheduledDate : undefined;
+    const judged = await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: row.id, visit: row, propertyId, scheduledDate, serviceKeys, staff: true, alsoMoving });
+    for (const key of (judged && judged.keys) || []) alsoMoving[key] = [...(alsoMoving[key] || []), judged.day];
+  }
+}
+
 async function applyAppointmentAddress(trx, plan, actorId) {
   const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId, plan.scope);
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
@@ -66,7 +101,9 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
-  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
+  await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, plan.editedVisit || null);
+  const addressRows = locked.filter((row) => row.id === plan.anchor.id || (fresh.packageChildIds || []).includes(row.id)
+    || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property
@@ -144,3 +181,4 @@ async function refreshAppointmentAddressBriefs(conn, ids) {
 }
 
 module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs };
+module.exports._test = { assertAreaAddOnLimitsAtDestination };

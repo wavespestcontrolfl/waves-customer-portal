@@ -894,6 +894,14 @@ const FLAG_PAYLOAD_STAMPS = [
     stamp: ({ extraction }) => ({ heard_name: { first_name: extraction?.caller?.first_name ?? null, last_name: extraction?.caller?.last_name ?? null } }) },
   { flags: ADDRESS_SNAPSHOT_FLAGS, stamp: ({ extraction }) => ({ heard_address: heardAddressSnapshot(extraction) }) },
   { flags: new Set(['missing_unit_number']), stamp: ({ extraction, addressValidation }) => ({ unit_ask_building: unitAskBuilding(extraction, addressValidation) }) },
+  // A hold armed because the VALID extraction said the line cannot get texts (ani_cannot_text) is marked on
+  // both of its cards, so closing callback_number_needed can tell it must not release that hold.
+  // A caller who ALSO disclaimed the number keeps that meaning on the callback card
+  // (ownership_disclaimed): "Line can get texts" never clears it; its own Resolve does.
+  { flags: new Set(['callback_number_needed', 'text_number_differs']),
+    stamp: ({ extraction }) => (extraction?.caller?.ani_cannot_text === true
+      ? { no_text_hold: true, ...(extraction?.caller?.caller_id_disclaimed === true ? { ownership_disclaimed: true } : {}) }
+      : {}) },
 ];
 
 function buildTriageItem({
@@ -1005,6 +1013,10 @@ function buildTriageItem({
     // spoken callback — same review lane as the other phone/consent asks;
     // the appointment already booked, this only gets a real number.
     callback_number_needed: 'customer_field_conflict',
+    // The caller's line cannot take texts and they gave another number for texts, but
+    // the call linked to an existing customer whose account phone differs — the office
+    // swaps the account phone (owner ruling 2026-10-07). Advisory; filed by the processor.
+    text_number_differs: 'customer_field_conflict',
     do_not_contact_requested: 'customer_field_conflict',
     lead_creation_failed: 'customer_field_conflict',
     name_email_mismatch: 'name_review',
@@ -1025,6 +1037,9 @@ function buildTriageItem({
     // Booked on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) — the office
     // collects the first name; never holds the booking.
     missing_first_name: 'name_review',
+    // The caller spelled their own name and the spelling differs from the name saved for
+    // them (contact-dictation names section) — advisory, card-only, never an auto-write.
+    name_spelling_differs: 'name_review',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     // Call-classified property roles (occupancy contradiction / primary-
@@ -1035,6 +1050,9 @@ function buildTriageItem({
     address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
+    // A family caller named an account holder: live accounts with that exact name, for the office
+    // to confirm and link the call to (call-family-name-link.js). Suggest-only.
+    family_account_candidates: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
     // The call linked to an existing customer via something WEAKER than the
     // phone (pre-set call.customer_id, name/context) and the caller's number

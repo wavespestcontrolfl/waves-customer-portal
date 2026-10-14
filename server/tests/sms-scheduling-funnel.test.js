@@ -57,7 +57,7 @@ test('offers are counted by kind and state, and an unresolved slot is called out
     ],
   });
   expect(summary.offers).toEqual({
-    sent: 3, by_kind: { move_visit: 2, book_new: 1 }, open: 1, expired: 1, superseded: 1, other: 0,
+    sent: 3, by_kind: { move_visit: 2, book_new: 1 }, open: 1, expired: 1, superseded: 1, accepted: 0, other: 0,
     with_unresolved_slot: 1, matured: 3, followed_by_change_48h: 1,
   });
 });
@@ -91,6 +91,10 @@ test('a supersede after the report end does not rewrite the past report', () => 
   expect(asOf('2026-09-30T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 1, open: 0 });
   expect(asOf('2026-10-05T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 0, open: 1 });
   expect(asOf('2026-10-05T10:00:00Z', '2026-10-02T12:00:00Z')).toMatchObject({ superseded: 0, expired: 1 });
+  // An offer the move executor accepted is counted the same way: as of the report's end.
+  const acceptedAsOf = (closedAt, now) => summarizeFunnel({ offers: [{ ...offer(closedAt), status: 'accepted' }], now: new Date(now) }).offers;
+  expect(acceptedAsOf('2026-09-30T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ accepted: 1, open: 0, other: 0 });
+  expect(acceptedAsOf('2026-10-05T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ accepted: 0, open: 1, other: 0 });
 });
 
 test('a text whose 48h window has not closed is left out of the change rate', () => {
@@ -115,4 +119,123 @@ test('an impossible bare date is refused, not rolled over', () => {
 test('report dates print as the Eastern day, also after 8 PM Eastern', () => {
   const { formatReportDate } = require('../services/sms-scheduling-funnel');
   expect(formatReportDate(new Date('2026-10-02T01:30:00Z'))).toBe('2026-10-01');
+});
+
+test('a would-move is scored only after its 48h, and only against a logged move into that time inside it', () => {
+  const { summarizeDecisions } = require('../services/sms-scheduling-funnel');
+  const would = (id) => JSON.stringify({ kind: 'move_visit', scheduled_service_id: id, date: '2026-10-06', start: '10:00', arrival_end: '12:00' });
+  const decided = '2026-10-01T15:00:00Z';
+  const decisions = [
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v1'), created_at: decided },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v2'), created_at: decided },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v3'), created_at: decided },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v4'), created_at: '2026-10-04T15:00:00Z' },
+    { action: 'accept_slot', outcome: 'staff', refusals: '["quote_not_in_text"]', would_have: null, created_at: decided },
+    { action: 'decline', outcome: 'no_action', refusals: [], would_have: null, created_at: decided },
+  ];
+  const moves = new Map([
+    ['v1', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]],
+    // moved, but to another time
+    ['v2', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-07', new_window: '10:00-11:00' }]],
+    // moved there, but days later: outside the window
+    ['v3', [{ created_at: '2026-10-05T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]],
+  ]);
+  const out = summarizeDecisions(decisions, moves, new Date('2026-10-05T00:00:00Z'));
+  expect(out).toEqual({
+    total: 6,
+    move_offers_decided: 0,
+    by_outcome: { would_move: 4, staff: 1, no_action: 1 },
+    by_action: { accept_slot: 5, decline: 1 },
+    refusals: { quote_not_in_text: 1 },
+    // v4 was decided 9h before the report end: not scored yet
+    would_move_matured: 3,
+    would_move_matched: 1,
+    would_move_unmatched: 2,
+    executed: {},
+  });
+});
+
+test('a would-move the executor carried out is counted as executed and left out of the staff comparison; a refused one is still scored', () => {
+  const { summarizeDecisions, AUTOMATIC_MOVE_INITIATORS } = require('../services/sms-scheduling-funnel');
+  const would = (id) => JSON.stringify({ kind: 'move_visit', scheduled_service_id: id, date: '2026-10-06', start: '10:00', arrival_end: '12:00' });
+  const row = (id, execution_status) => ({ action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would(id), created_at: '2026-10-01T15:00:00Z', execution_status });
+  const out = summarizeDecisions([row('v1', 'moved'), row('v2', 'refused'), row('v3', null)], new Map(), new Date('2026-10-05T00:00:00Z'));
+  expect(out.executed).toEqual({ moved: 1, refused: 1 });
+  expect(out).toMatchObject({ would_move_matured: 2, would_move_matched: 0, would_move_unmatched: 2 });
+  // The executor's move is the customer's own request: it stays a real accept for recall.
+  expect(AUTOMATIC_MOVE_INITIATORS).not.toContain(require('../services/sms-scheduling-act').INITIATED_BY);
+});
+
+test("recall counts an accept the executor carried out: its own logged move is a real accept, caught by its would-move", () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const offer = { id: 'o1', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T13:00:00Z', slots: [{ date: '2026-10-06', start: '10:00' }] };
+  const decision = { sms_offer_id: 'o1', outcome: 'would_move', execution_status: 'moved', replied_at: '2026-10-01T14:00:00Z', created_at: '2026-10-01T14:00:05Z',
+    would_have: JSON.stringify({ scheduled_service_id: 'v1', date: '2026-10-06', start: '10:00' }) };
+  // The executor's reschedule_log row, seconds after the reply.
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T14:00:08Z', new_date: '2026-10-06', new_window: '10:00-12:00' }]]]);
+  expect(summarizeRecall([offer], [decision], moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 1, caught: 1 });
+});
+
+test('recall counts real accepts (offers whose visit then moved into an offered time) and how many got that would-move', () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const slots = [{ date: '2026-10-06', start: '10:00' }, { date: '2026-10-07', start: '14:00' }];
+  const offer = (id, visit) => ({ id, kind: 'move_visit', scheduled_service_id: visit, sent_at: '2026-10-01T13:00:00Z', slots });
+  const offers = [offer('o1', 'v1'), offer('o2', 'v2'), offer('o3', 'v3'), { ...offer('o4', 'v4'), kind: 'book_new' }];
+  const moves = new Map([
+    ['v1', [{ created_at: '2026-10-01T20:00:00Z', new_date: '2026-10-07', new_window: '14:00-15:30' }]],
+    ['v2', [{ created_at: '2026-10-01T20:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]],
+    // moved, but not into an offered time: not a real accept of this offer
+    ['v3', [{ created_at: '2026-10-01T20:00:00Z', new_date: '2026-10-09', new_window: '10:00-11:00' }]],
+  ]);
+  const would = (date, start) => JSON.stringify({ kind: 'move_visit', date, start });
+  const decisions = [
+    { sms_offer_id: 'o1', outcome: 'would_move', would_have: would('2026-10-07', '14:00') },
+    // o2's real accept went to staff: missed
+    { sms_offer_id: 'o2', outcome: 'staff', would_have: would('2026-10-06', '10:00') },
+  ];
+  expect(summarizeRecall(offers, decisions, moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 2, caught: 1 });
+});
+
+test('recall counts one accept once when an offer was replaced by one carrying the same time', () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const slots = [{ date: '2026-10-06', start: '10:00' }];
+  const offers = [
+    { id: 'old', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T13:00:00Z', slots },
+    { id: 'new', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T15:00:00Z', slots },
+  ];
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]]]);
+  const decisions = [{ sms_offer_id: 'new', outcome: 'would_move', would_have: JSON.stringify({ date: '2026-10-06', start: '10:00' }) }];
+  expect(summarizeRecall(offers, decisions, moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 1, caught: 1 });
+});
+
+test('recall credits a correct decision on the original offer when a replacement with the same time came before the move', () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const slots = [{ date: '2026-10-06', start: '10:00' }];
+  const offers = [
+    { id: 'a', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T13:00:00Z', slots },
+    { id: 'b', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T15:00:00Z', slots },
+  ];
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]]]);
+  const would = JSON.stringify({ date: '2026-10-06', start: '10:00' });
+  expect(summarizeRecall(offers, [{ sms_offer_id: 'a', outcome: 'would_move', would_have: would, created_at: '2026-10-01T14:00:00Z' }], moves, new Date('2026-10-05T00:00:00Z')))
+    .toEqual({ real_accepts: 1, caught: 1 });
+  // A would-move recorded only after the move is not a catch.
+  expect(summarizeRecall(offers, [{ sms_offer_id: 'a', outcome: 'would_move', would_have: would, created_at: '2026-10-01T19:00:00Z' }], moves, new Date('2026-10-05T00:00:00Z')))
+    .toEqual({ real_accepts: 1, caught: 0 });
+});
+
+test('scoring starts when the reply arrived, and the exit sample counts distinct visit-move offers', () => {
+  const { summarizeDecisions } = require('../services/sms-scheduling-funnel');
+  const would = JSON.stringify({ kind: 'move_visit', scheduled_service_id: 'v1', date: '2026-10-06', start: '10:00' });
+  const row = (over) => ({ sms_offer_id: 'o1', offer_kind: 'move_visit', action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would,
+    replied_at: '2026-10-01T15:00:00Z', created_at: '2026-10-01T15:20:00Z', ...over });
+  // Staff moved it at 15:10: after the reply, before the classifier's row at 15:20.
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T15:10:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]]]);
+  const out = summarizeDecisions([
+    row(),
+    row({ outcome: 'staff', would_have: null }),
+    row({ sms_offer_id: 'o2', offer_kind: 'book_new', outcome: 'would_book', would_have: null }),
+    row({ sms_offer_id: 'o3', outcome: 'error', would_have: null }),
+  ], moves, new Date('2026-10-05T00:00:00Z'));
+  expect(out).toMatchObject({ total: 4, move_offers_decided: 1, would_move_matured: 1, would_move_matched: 1 });
 });

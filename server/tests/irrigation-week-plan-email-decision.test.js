@@ -155,7 +155,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // gh-r20/r21: confirmation is PER sizing field since the move — never the row-wide updated_at.
     // gh-r25: ONE shared resolver (irrigation-schedule-confirmation) for the sweep and the report,
     // over the prefs row PLUS the tech fallback figures the sweep selects.
-    expect(sweep).toMatch(/const scheduleUnconfirmed = scheduleUnconfirmedAfterMove\(customer\);/);
+    expect(sweep).toMatch(/const scheduleUnconfirmed = scheduleUnconfirmedAfterMove\(customer, table\);/); // the decision's own table, never a second gate read
     expect(sweep).toMatch(/require\('\.\/irrigation-schedule-confirmation'\)/);
     expect(sweep).not.toMatch(/prefs_updated_at|irrigation_settings_saved_at/);
     // gh-r22: the raw inputs still ride (the decision must route to the PLAN
@@ -168,7 +168,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     }
     expect(sweep).toMatch(/const lastWeekLine = scheduleUnconfirmed\s*\? `Rain near your home last week came to/);
     expect(sweep).toMatch(/'pp\.irrigation_confirmed_fields',\s*'pp\.irrigation_home_changed_at',/);
-    expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
+    expect(sweep).toMatch(/scheduleUnconfirmed,\s*rateTable: table,\s*\}\);/); // renderWeekPlanEmail ctx
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
     expect(sweep).toMatch(/weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding, home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip \} \}\) : null;/);
@@ -176,7 +176,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // A known move rides into the jurisdiction resolver (stale profile county rejected).
     expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, countyConfirmed: countyConfirmedAfterMove\(customer\) \}\)/);
     expect(sweep).not.toMatch(/turf_updated_at|profileUpdatedAt/); // gh-r32: the row-wide timestamp is not a premise confirmation
-    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*priorWeekPrescribedInches,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*now,/);
+    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*priorWeekPrescribedInches,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*rateTable: table,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).

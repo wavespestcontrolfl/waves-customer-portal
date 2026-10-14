@@ -44,7 +44,11 @@ function waterFacts(water, aftercare) {
   if (!water) return null;
   const plan = renderedWeekPlan(aftercare, water.weekPlan);
   return {
-    status: water.status, droughtSignal: water.droughtSignal ?? null, rain: water.rainInches, irrigation: water.irrigationInches, total: water.totalInches, target: water.targetInches, confidence: water.confidence, rainWindow: 'past 7 days ending on the visit date',
+    // GATE_LAWN_WATER_RAIN: the narrative's status vocabulary is balanced / high / low; a rain-covered week is none of them,
+    // so it is passed as unknown (no watering claim) with the fact that rain covered the week.
+    status: water.status === 'rain_covered' ? 'unknown' : water.status,
+    ...(water.status === 'rain_covered' ? { rainCoveredWeek: true } : {}),
+    droughtSignal: water.droughtSignal ?? null, rain: water.rainInches, irrigation: water.irrigationInches, total: water.totalInches, target: water.targetInches, confidence: water.confidence, rainWindow: 'past 7 days ending on the visit date',
     weekPlan: plan?.title ? { title: plan.title, detail: plan.detail || null, action: plan.action || null } : null,
   };
 }
@@ -225,7 +229,9 @@ function mergeNarrative(v2, out) {
   // A product-driven aftercare verdict owns the customer's task and the
   // watering story: the hero, insight cards, water explanation and product
   // note must state the same one, so the model may not rewrite them.
-  const verdictOwnsWatering = resolveLawnAftercare(v2.aftercare, v2.water?.weekPlan).verdict !== 'none';
+  // GATE_LAWN_WATER_RAIN: a rain card (water.rainCard) owns the watering story the same way: its fixed sentence is the
+  // one instruction, so no action field or the water explanation may be rewritten around it.
+  const verdictOwnsWatering = resolveLawnAftercare(v2.aftercare, v2.water?.weekPlan).verdict !== 'none' || v2.water?.rainCard === true;
   const rewriteAction = (modelValue, fallback) => (
     fallback && !verdictOwnsWatering ? safeText(modelValue, fallback) : fallback
   );
@@ -239,6 +245,7 @@ function mergeNarrative(v2, out) {
     const v = safeText(cats[d.key], d.explanation || d.customerExplanation);
     return { ...d, explanation: v, customerExplanation: v };
   });
+  // GATE_LAWN_WATER_RAIN: the rain card's sentences are fixed wording (water.rainCard); the model may not rewrite them.
   if (next.water && !verdictOwnsWatering) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
@@ -280,7 +287,9 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
   // affirmative and unopposed. Any narrative field could contradict it.
   const { verdict } = resolveLawnAftercare(guardedV2?.aftercare, guardedV2?.water?.weekPlan);
   const overlayAllowed = verdict === 'credit' || (verdict === 'none' && guardedV2?.aftercare?.neutral === true);
-  if (!guardedV2 || guardedV2.water?.droughtSignal !== true || !overlayAllowed) return guardedV2;
+  // GATE_LAWN_WATER_RAIN: a rain card is fixed watering advice too (water.rainCard), so the whole report stays
+  // deterministic: a model sentence in any field could contradict the card's one instruction.
+  if (!guardedV2 || guardedV2.water?.droughtSignal !== true || !overlayAllowed || guardedV2.water?.rainCard === true) return guardedV2;
   const facts = groundingFacts(guardedV2, ctx);
   const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
   // The cache holds the MODEL OUTPUT, never a merged report: every hit

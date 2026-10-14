@@ -1,10 +1,9 @@
-// GATE_LAWN_REPORT_COPY_V6 (lawn report rebuild P14) through the real report
+// The lawn v6 copy (lawn report rebuild P14) through the real report
 // builder (buildReportV1Data) and the reconcile pass. Fixed sentences, no
 // model (owner 2026-10-02); the shared dispatcher is mocked so no production
 // LLM API is called by the report's other lanes. Synthetic data only.
 //
-// Pins: gate off (or lead gate off) = no write, no key, the same payload and
-// PDF signature as before; gate on = the fields freeze at the first render
+// Pins: the fields freeze at the first render
 // (first writer wins per assessment) and reach the customer only through
 // reportV2.lead (the carrier never leaves the process); a later render replays
 // byte for byte whatever the facts now say; a degraded read creates no freeze.
@@ -167,8 +166,8 @@ const WEEK = { assessmentId: 'la-cur', serviceDate: '2026-09-30', rainInches: 1,
 const NARRATIVE_LANE = 'lawn_visit_narratives';
 const narrativeCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === NARRATIVE_LANE);
 
-describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
-  const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD', 'LAWN_REPORT_V2_NARRATIVE'];
+describe('the lawn v6 copy on the report payload', () => {
+  const ENV = ['LAWN_REPORT_V2_NARRATIVE'];
   const saved = {};
   beforeEach(() => {
     ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
@@ -185,37 +184,16 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     const { knex, log } = withRecords({ ...fixtures(), ...patch }, recs, hooks);
     return buildReportV1Data(svc, 'token-p14', knex, {}).then((data) => ({ data, log }));
   };
-  const live = () => { process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
   // The hand-off is non-enumerable (a clone would drop it): reconcile a shallow copy, as the route does.
   const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
 
-  test('gate off: no write, no key, and the payload is what it was', async () => {
-    const recs = records();
-    const { data, log } = await render(recs);
-    expect(log.updates).toHaveLength(0);
-    expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
-    expect(data.reportV2.copyV6).toBeUndefined();
-    expect(JSON.stringify(reconciled(data))).not.toMatch(/copyV6|lawnCopyV6/);
-  });
-
-  test('the v6 gate alone (lead gate off) is inert: byte-identical payload, no write', async () => {
-    const base = (await render(records())).data;
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    const recs = records();
-    const { data, log } = await render(recs);
-    expect(log.updates).toHaveLength(0);
-    expect(JSON.parse(JSON.stringify(data))).toEqual(JSON.parse(JSON.stringify(base)));
-  });
-
   test('while v6 is live the old narrative overlay does not run, even with LAWN_REPORT_V2_NARRATIVE set, and no model is asked for lead copy', async () => {
     process.env.LAWN_REPORT_V2_NARRATIVE = 'true';
-    live();
     await render(records());
     expect(narrativeCalls()).toHaveLength(0);
   });
 
   test('gate on: the first render freezes the fixed sentences once and the lead carries them; the carrier never leaves the payload', async () => {
-    live();
     const recs = records();
     const { data, log } = await render(recs);
     expect(log.updates).toHaveLength(1);
@@ -239,7 +217,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('a later render replays byte for byte, whatever the visit facts now say', async () => {
-    live();
     const recs = records();
     const first = (await render(recs)).data;
     const edited = { service_products: [{ id: 'sp-2', service_record_id: 'svc-cur', product_name: 'Test Fertilizer C', product_category: 'fertilizer', created_at: '2026-09-30T19:00:00Z' }] };
@@ -248,7 +225,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('a frozen headline replaces the live status line, so a later assessment correction cannot reach the lead fallback or the PDF', async () => {
-    live();
     const recs = records();
     await render(recs);
     // The record froze an older headline (the assessment was corrected since).
@@ -264,14 +240,12 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('a failed freeze serves the copy and marks the render uncacheable', async () => {
-    live();
     const { data } = await render(records(), {}, undefined, { failUpdate: true });
     expect(data.reportV2.copyV6.headline).toBe(data.reportV2.snapshot.statusHeadline);
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
   });
 
   test('a degraded read (a failed service_products read) creates no freeze and ships the lead\'s own copy; recovery freezes', async () => {
-    live();
     const recs = records();
     const { data, log } = await render(recs, { service_products: FAIL });
     expect(log.updates).toHaveLength(0);
@@ -290,7 +264,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('a frozen entry still replays when a later read fails (the treatment check never hides stored copy)', async () => {
-    live();
     const recs = records();
     const first = (await render(recs)).data;
     const { data } = await render(recs, { service_products: FAIL }, service(recs['svc-cur'].structured_notes));
@@ -311,7 +284,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
     const HOME_B = { service_address_line1: '200 Sample Oak Ln', service_address_city: 'Sarasota', service_address_zip: '34232' };
     const gapFor = async (nextStamp, extraRows = [], patch = {}) => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -351,7 +323,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     });
 
     test('no booking at this home: the gap is this visit\'s own plan cadence', async () => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -378,7 +349,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       });
 
       test('a booking at another home is never shown; the later booking at this home is', async () => {
-        live();
         const later = { id: 'ss-later', customer_id: CUSTOMER, scheduled_date: '2027-02-12', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
         const { data } = await render(records(), visitRows(HOME_B, [later]));
         expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' });
@@ -386,19 +356,16 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       });
 
       test('only another home has a booking and the plan names no cadence: no next visit is shown', async () => {
-        live();
         const { data } = await render(records(), visitRows(HOME_B));
         expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
       test('a next booking whose property cannot be placed: nothing is shown, never a guess', async () => {
-        live();
         const { data } = await render(records(), visitRows({}));
         expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
       test('this report\'s visit has no property evidence: the customer-wide booking counts only on a proven single-premises account', async () => {
-        live();
         const rows = {
           scheduled_services: [
             { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program' },
@@ -414,8 +381,74 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         expect(multi.data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
+      // These fixtures use fixed 2026/2027 dates on purpose. They are valid
+      // only because the enclosing describe's beforeEach pins Date to
+      // 2026-10-02 (buildReportV1Data filters against the ET date), so this
+      // guard fails loudly if that pin is ever removed or moved.
+      test('the clock is pinned, so the fixed next-visit fixtures below cannot go stale', () => {
+        expect(new Date().toISOString().slice(0, 10)).toBe('2026-10-02');
+        expect(Date.now()).toBe(new Date('2026-10-02T16:00:00Z').getTime());
+      });
+
+      // Prod shape (2026-10-06): the customer's recurring lawn rows (Nov 2 and
+      // on) carry NO property_id and no stamp; the one row with a property_id
+      // is a year out. The report's own visit is linked to the primary property.
+      const PRIMARY = { id: 'prop-primary', customer_id: CUSTOMER, address_line1: '100 Test Palm Way', address_line2: null, city: 'Bradenton', zip: '34201', is_primary: true };
+      const nullPropertyRows = (nextYear = {}) => ({
+        scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Every 6 Weeks Lawn Care Service', property_id: 'prop-primary' },
+          { id: 'ss-nov', customer_id: CUSTOMER, scheduled_date: '2026-11-02', status: 'pending', service_type: 'Every 6 Weeks Lawn Care Service', property_id: null },
+          { id: 'ss-dec', customer_id: CUSTOMER, scheduled_date: '2026-12-15', status: 'pending', service_type: 'Every 6 Weeks Lawn Care Service', property_id: null },
+          { id: 'ss-next-year', customer_id: CUSTOMER, scheduled_date: '2027-08-29', status: 'pending', service_type: 'Every 6 Weeks Lawn Care Service', property_id: 'prop-primary', ...nextYear },
+        ],
+        customer_properties: [PRIMARY],
+        customers: [{ id: CUSTOMER, has_multi_home: false }],
+      });
+      const svcAtPrimary = () => ({ ...service(records()['svc-cur'].structured_notes), address_line1: '100 Test Palm Way', city: 'Bradenton', zip: '34201' });
+
+      test('rows with no property_id, stamp or estimate link count at the primary property: the earlier one is the next visit, not a year-out linked one', async () => {
+        const { data } = await render(records(), nullPropertyRows(), svcAtPrimary());
+        expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' });
+        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/November 2/);
+      });
+
+      // Prod shape (2026-10-06): the recurring rows carry no property_id and no
+      // stamp, only the creating estimate's one-line Google address; the primary
+      // property spells the same house out.
+      const ESTIMATE_ID = 'est-recurring';
+      const estimateLinked = (estimateAddress) => {
+        const base = nullPropertyRows();
+        base.customer_properties = [{ ...PRIMARY, address_line1: '4610 61st Drive East', zip: '34203' }];
+        base.scheduled_services = base.scheduled_services.map((r) => (r.property_id === null ? { ...r, source_estimate_id: ESTIMATE_ID } : r));
+        base.estimates = [{ id: ESTIMATE_ID, status: 'accepted', property_id: null, address: estimateAddress }];
+        return base;
+      };
+      const svcAtDrive = () => ({ ...service(records()['svc-cur'].structured_notes), address_line1: '4610 61st Drive East', city: 'Bradenton', zip: '34203' });
+
+      test('estimate-linked rows (one-line "Dr E, ... USA" address) are this property: the next visit is the earlier one', async () => {
+        const { data } = await render(records(), estimateLinked('4610 61st Dr E, Bradenton, FL 34203, USA'), svcAtDrive());
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Monday, November 2');
+      });
+
+      test('estimate-linked rows for a different house in the same zip stay excluded', async () => {
+        const { data } = await render(records(), estimateLinked('4612 61st Dr E, Bradenton, FL 34203, USA'), svcAtDrive());
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Sunday, August 29, 2027');
+      });
+
+      test('a far-off date names its year, so it can never read as a past date', async () => {
+        const { data } = await render(records(), { scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+          { id: 'ss-far', customer_id: CUSTOMER, scheduled_date: '2027-08-29', status: 'pending', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+        ] });
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Sunday, August 29, 2027');
+      });
+
+      test('a date in this calendar year keeps the short label', async () => {
+        const { data } = await render(records(), nullPropertyRows(), svcAtPrimary());
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Monday, November 2');
+      });
+
       test('two lawn jobs on one day: the one at this home is shown whichever order they come back in', async () => {
-        live();
         const here = { id: 'ss-b', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
         const unplaced = { id: 'ss-a', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program' };
         const cur = { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
@@ -426,7 +459,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       });
 
       test('a completed report\'s FROZEN address is its property, whatever the linked visit resolves to now', async () => {
-        live();
         const svc = {
           ...service(records()['svc-cur'].structured_notes),
           service_data: JSON.stringify({ reportIdentitySnapshot: { version: 1, address: { line1: '100 Test Palm Way', line2: null, city: 'Bradenton', state: 'FL', zip: '34201' } } }),
@@ -441,15 +473,9 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         }, svc);
         expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
       });
-
-      test('gate off: the customer-wide lookup, as before (the other home\'s date still shows)', async () => {
-        const { data } = await render(records(), visitRows(HOME_B));
-        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
-      });
     });
 
     test('a cadence estimate already in the past shows no next visit and times nothing', async () => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -472,7 +498,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     });
 
     test('a FAILED property lookup is a degraded read (no freeze), never read as "another home"', async () => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -492,7 +517,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('a failed next-visit read (the gap that picks the by-next-visit sentence) is a degraded read: no freeze', async () => {
-    live();
     const recs = records();
     // Only the v6 copy's next-visit scan fails; every other scheduled_services read answers.
     const { knex: base } = withRecords(fixtures(), recs);
@@ -513,25 +537,21 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
 
   describe('an emailed (pinned) PDF waits for frozen copy: lawnCopyV6Unfrozen', () => {
     test('a healthy render that froze carries no flag', async () => {
-      live();
       const { data } = await render(records());
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBeUndefined();
     });
 
     test('a failed read (retryable) sets it', async () => {
-      live();
       const { data } = await render(records(), { service_products: FAIL });
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
     test('a failed freeze write (copy served, not saved) sets it', async () => {
-      live();
       const { data } = await render(records(), {}, undefined, { failUpdate: true });
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
     test('a failed treatment-catalog check (the guard\'s own lookup, not in readFailures) still holds the email: no freeze, flag set', async () => {
-      live();
       const recs = records();
       const products = [{ id: 'sp-9', service_record_id: 'svc-cur', product_name: 'Test Herbicide B', product_id: 'pc-1', created_at: '2026-09-30T18:00:00Z' }];
       const { knex: base } = withRecords({ ...fixtures(), service_products: products, products_catalog: [{ id: 'pc-1', name: 'Test Herbicide B' }] }, recs);
@@ -551,33 +571,11 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
-    test('gate off never sets it', async () => {
-      const { data } = await render(records(), { service_products: FAIL });
-      expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBeUndefined();
-    });
-
     test('the pinned delivery path defers with a retryable error on it', () => {
       const queueSource = require('fs').readFileSync(require('path').join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
       expect(queueSource).toMatch(/lawnCopyV6Unfrozen && isDeliveryPin/);
       expect(queueSource).toMatch(/lawn_copy_v6_unfrozen/);
     });
-  });
-
-  test('the PDF cache signature moves with the gate only while it is live (gate off is the signature it was)', async () => {
-    const sig = async () => {
-      const knex = makeKnex({ ...fixtures(), service_records: [] });
-      return (await resolveCanonicalLawnRender({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' }, knex)).signature;
-    };
-    const off = await sig();
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    expect(await sig()).toBe(off); // lead gate off: inert
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
-    delete process.env.GATE_LAWN_REPORT_COPY_V6;
-    const leadOnlySig = await sig();
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    const both = await sig();
-    expect(leadOnlySig).not.toBe(off);
-    expect(both).not.toBe(leadOnlySig);
   });
 
   test('a non-live render (PDF) prints "What to expect" without the by-next-visit sentences; the live view keeps them', async () => {
@@ -596,11 +594,235 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('the PDF key does not depend on the customer\'s bookings (the visit sentences never reach a PDF)', async () => {
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
     const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
     const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
     const visit = (date) => ({ id: `ss-${date}`, customer_id: CUSTOMER, scheduled_date: date, status: 'confirmed', service_type: 'Lawn Care Treatment Program' });
     expect(await sigWith([visit('2027-01-15')])).toBe(await sigWith([visit('2027-02-12')]));
+  });
+});
+
+// GATE_LAWN_TECH_PARAGRAPH (owner 2026-10-05) through the real report builder:
+// a render only READS the paragraph frozen at completion. No model call, no new
+// query, nothing on the payload but reportV2.lead.techParagraph, and the PDF key
+// follows the frozen text.
+describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
+  const ENV = ['GATE_LAWN_TECH_PARAGRAPH'];
+  const saved = {};
+  // A fixed-sentence entry (v2, owner 2026-10-06): the text must be the render of its slots.
+  const SLOTS = { observed: [{ condition: 'chinch_bugs', place: 'front_lawn' }], maybe: [], products: ['Arena 50 WDG'] };
+  const TEXT = 'Our technician saw chinch bugs in the front lawn. Today we applied Arena 50 WDG.';
+  const entry = (text = TEXT, slots = SLOTS) => ({ v: 2, promptVersion: 'lawn_tech_paragraph_v2', assessmentId: 'la-cur', text, slots, frozenAt: '2026-09-30T18:41:00.000Z' });
+  const recordsWith = (text, slots) => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK }, ...(text ? { lawnTechParagraph: { 'la-cur': entry(text, slots) } } : {}) } } });
+
+  beforeEach(() => {
+    ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const render = (recs) => {
+    const { knex, log } = withRecords(fixtures(), recs);
+    return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-tp', knex, {}).then((data) => ({ data, log }));
+  };
+  const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
+  const live = () => { process.env.GATE_LAWN_TECH_PARAGRAPH = 'true'; };
+  const techCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === 'lawn_tech_paragraph');
+
+  test('gate off: a frozen paragraph is invisible: same payload, no carrier, no key', async () => {
+    const bare = await render(recordsWith(null));
+    const frozen = await render(recordsWith(TEXT));
+    expect(frozen.data.reportV2.techParagraph).toBeUndefined();
+    expect(JSON.stringify(reconciled(frozen.data))).not.toContain(TEXT);
+    expect(JSON.parse(JSON.stringify(reconciled(frozen.data)))).toEqual(JSON.parse(JSON.stringify(reconciled(bare.data))));
+  });
+
+  test('a failed service_products read flags the build for the paragraph step, and changes no payload key (Codex r4)', async () => {
+    live();
+    const { knex } = withRecords({ ...fixtures(), service_products: FAIL }, recordsWith(null));
+    const data = await buildReportV1Data(service(recordsWith(null)['svc-cur'].structured_notes), 'token-tp', knex, {});
+    expect(data.lawnAssessment.productsReadFailed).toBe(true);
+    expect(Object.keys(data.lawnAssessment)).not.toContain('productsReadFailed');
+    const ok = await render(recordsWith(null));
+    expect(ok.data.lawnAssessment.productsReadFailed).toBeUndefined();
+  });
+
+  test('gate on: the lead carries the frozen text and nothing else carries it; no model call', async () => {
+    live();
+    const { data, log } = await render(recordsWith(TEXT));
+    expect(data.reportV2.techParagraph).toBe(TEXT);
+    expect(Object.keys(data.reportV2)).not.toContain('techParagraph');
+    const out = reconciled(data);
+    expect(out.reportV2.lead.techParagraph).toBe(TEXT);
+    expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'techParagraph')).toBe(false);
+    expect(JSON.stringify(out).split(TEXT).length - 1).toBe(1);
+    expect(techCalls()).toHaveLength(0);
+    // The only write is the v6 copy's own first-render freeze; the paragraph is read, never written.
+    expect(log.updates).toHaveLength(1);
+    expect(JSON.stringify(log.updates[0])).toContain('lawn_report_v6_fixed_1');
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+  });
+
+  test('gate on, nothing frozen (a miss at completion): no paragraph, healthy render, never a call at render time', async () => {
+    live();
+    const { data } = await render(recordsWith(null));
+    expect(data.reportV2.techParagraph).toBeUndefined();
+    expect(reconciled(data).reportV2.lead).not.toHaveProperty('techParagraph');
+    expect(techCalls()).toHaveLength(0);
+  });
+
+  test('a frozen text that fails the read-time screens prints nothing', async () => {
+    live();
+    const { data } = await render(recordsWith('We will be back soon to make sure everything recovers.'));
+    expect(data.reportV2.techParagraph).toBeUndefined();
+  });
+
+  test('the PDF cache signature: unchanged while the gate is off or nothing is frozen; moves with the frozen text', async () => {
+    const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+    const sig = async (text, slots) => (await resolveCanonicalLawnRender(svc, withRecords(fixtures(), recordsWith(text, slots)).knex)).signature;
+    const off = await sig(TEXT);
+    live();
+    const none = await sig(null);
+    const withText = await sig(TEXT);
+    const other = await sig('Today we applied LESCO 24-0-11.', { observed: [], maybe: [], products: ['LESCO 24-0-11'] });
+    process.env.GATE_LAWN_TECH_PARAGRAPH = 'false';
+    const leadOnly = await sig(TEXT);
+    expect(leadOnly).toBe(none); // gate off: the frozen text does not key the PDF
+    expect(withText).not.toBe(none);
+    expect(other).not.toBe(withText);
+    expect(off).not.toBe(withText);
+  });
+
+  test('an unreadable record stamps a one-off key, so the PDF re-renders instead of serving a stale hit', async () => {
+    live();
+    const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+    const { knex } = withRecords(fixtures(), recordsWith(TEXT));
+    const wrapped = (table) => {
+      const q = knex(table);
+      if (table === 'service_records') q.first = async () => { throw new Error('read failed'); };
+      return q;
+    };
+    wrapped.raw = knex.raw;
+    const a = (await resolveCanonicalLawnRender(svc, wrapped)).signature;
+    const b = (await resolveCanonicalLawnRender(svc, wrapped)).signature;
+    expect(a).not.toBe(b);
+  });
+});
+
+// The Visit Summary (PROTOTYPE ONLY): the PDF key's ':vs' component is a pure function of the record's frozen
+// summary (never of the gate or a renderer), derived from the SAME service row the render loaded.
+describe('the Visit Summary PDF key follows the loaded row, whatever the gate says', () => {
+  const saved = process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+  const summary = require('../services/service-report/lawn-visit-summary');
+  const composed = summary.composeVisitSummary({ season: 'fall', applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'weed_pressure', status: 'healthy' }] });
+  const FROZEN = { v: summary.FREEZE_VERSION, promptVersion: summary.COMPOSER_VERSION, assessmentId: 'la-cur', text: composed.paragraph, slots: composed.slots, frozenAt: '2026-09-30T18:41:00.000Z' };
+  const frozenNotes = { lawnWeekWeather: { 'la-cur': WEEK }, lawnVisitSummary: { 'la-cur': FROZEN } };
+  const bareNotes = { lawnWeekWeather: { 'la-cur': WEEK } };
+  const svc = (notes) => ({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30', ...(notes === undefined ? {} : { structured_notes: notes }) });
+  // The database holds `dbNotes`; the render loaded `rowNotes` (undefined = a partial cache-lookup row).
+  const sig = async (rowNotes, dbNotes) => (await resolveCanonicalLawnRender(svc(rowNotes), withRecords(fixtures(), { 'svc-cur': { structured_notes: dbNotes } }).knex)).signature;
+
+  beforeEach(() => {
+    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+  });
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; else process.env.GATE_LAWN_VISIT_SUMMARY_V2 = saved; });
+
+  test('a whole frozen summary keys the PDF with the gate OFF too; none keeps the key it had', async () => {
+    const none = await sig(bareNotes, bareNotes);
+    const frozen = await sig(frozenNotes, frozenNotes);
+    expect(frozen).not.toBe(none);
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    expect(await sig(frozenNotes, frozenNotes)).toBe(frozen); // the gate changes nothing at render
+    expect(await sig(bareNotes, bareNotes)).toBe(none);
+  });
+
+  test('race shape: the row was loaded before the freeze, the key is computed after it: the key names what the row renders', async () => {
+    const before = await sig(bareNotes, bareNotes);
+    expect(await sig(bareNotes, frozenNotes)).toBe(before); // db already frozen, the render's row is older
+    expect(await sig(frozenNotes, frozenNotes)).not.toBe(before);
+  });
+
+  test('a partial cache-lookup row (no structured_notes) reads the record', async () => {
+    expect(await sig(undefined, frozenNotes)).toBe(await sig(frozenNotes, frozenNotes));
+    expect(await sig(undefined, bareNotes)).toBe(await sig(bareNotes, bareNotes));
+  });
+
+  test('a render shows the frozen summary with the gate OFF (the gate controls only the freeze)', async () => {
+    const recs = { 'svc-cur': { structured_notes: frozenNotes } };
+    const { knex } = withRecords(fixtures(), recs);
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_LAWN_VISIT_SUMMARY_V2 = gate; else delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+      const data = await buildReportV1Data(service(frozenNotes), 'token-p14', knex, {});
+      expect(data.summary).toBe(FROZEN.text);
+      expect(data.summarySource).toBe('lawn_visit_summary');
+    }
+    // No frozen entry: the generic recap path, exactly as before.
+    const bare = await buildReportV1Data(service(bareNotes), 'token-p14', withRecords(fixtures(), { 'svc-cur': { structured_notes: bareNotes } }).knex, {});
+    expect(bare.summarySource).not.toBe('lawn_visit_summary');
+  });
+
+  test('a changed frozen text re-keys; a hand-edited (drifted) text keys as none', async () => {
+    const other = summary.composeVisitSummary({ season: 'spring', applied: [{ kind: 'herbicide', name: 'a' }], areas: [] });
+    const otherNotes = { ...frozenNotes, lawnVisitSummary: { 'la-cur': { ...FROZEN, text: other.paragraph, slots: other.slots } } };
+    expect(await sig(otherNotes, otherNotes)).not.toBe(await sig(frozenNotes, frozenNotes));
+    const drifted = { ...frozenNotes, lawnVisitSummary: { 'la-cur': { ...FROZEN, text: `${FROZEN.text} We guarantee results.` } } };
+    expect(await sig(drifted, drifted)).toBe(await sig(bareNotes, bareNotes));
+  });
+});
+
+// Codex r5: the Visit Summary's "At the next visit" sentence needs a booking at THIS property, so the
+// build hands the gate the property-scoped answer (programVisitOut.nextVisitBooked).
+describe('programVisitOut.nextVisitBooked is property-scoped', () => {
+  const ENV = [];
+  const saved = {};
+  const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
+  const HOME_B = { service_address_line1: '9 Other Test Road', service_address_city: 'Sarasota', service_address_zip: '34231' };
+  const visit = (id, date, status, stamp) => ({ id, customer_id: CUSTOMER, scheduled_date: date, status, service_type: 'Lawn Care Treatment Program', ...stamp });
+  beforeEach(() => {
+    ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const build = async (scheduled, options = { programVisitOut: {} }) => {
+    const recs = { 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK } } } };
+    const { knex } = withRecords({ ...fixtures(), scheduled_services: scheduled }, recs);
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p14', knex, options);
+    return { data, out: options.programVisitOut };
+  };
+
+  test('a booking only at property B: property A is told "no next visit" and the line does not show it', async () => {
+    const { data, out } = await build([
+      visit('ss-cur', '2026-09-30', 'completed', HOME_A),
+      visit('ss-next', '2027-01-15', 'confirmed', HOME_B),
+    ]);
+    expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
+    expect(out.nextVisitBooked).toBe(false);
+  });
+
+  test('a booking at this property: true', async () => {
+    const { out } = await build([
+      visit('ss-cur', '2026-09-30', 'completed', HOME_A),
+      visit('ss-next', '2027-01-15', 'confirmed', HOME_A),
+    ]);
+    expect(out.nextVisitBooked).toBe(true);
+  });
+
+  test('no booking at all: false; no out-param asked: nothing extra is read or set', async () => {
+    const { out } = await build([visit('ss-cur', '2026-09-30', 'completed', HOME_A)]);
+    expect(out.nextVisitBooked).toBe(false);
+    const options = {};
+    await build([visit('ss-cur', '2026-09-30', 'completed', HOME_A), visit('ss-next', '2027-01-15', 'confirmed', HOME_A)], options);
+    expect(options).toEqual({});
   });
 });

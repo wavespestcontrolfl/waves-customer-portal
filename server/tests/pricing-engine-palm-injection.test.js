@@ -6,6 +6,7 @@ const {
   getEffectiveDiscount,
   applyDiscount,
 } = require('../services/pricing-engine');
+const { PALM } = require('../services/pricing-engine/constants');
 
 const property = {};
 
@@ -297,6 +298,26 @@ describe('pricing engine palm injection revisions', () => {
       expect(result.annual).toBe(1000);
       expect(result.monthly).toBe(83.33);
       expect(result.annualBeforeCredits).toBe(1000);
+    });
+
+    test('lethal bronzing carries the permanent-hole and eligibility disclosure for the customer', () => {
+      const result = pricePalmInjection(property, {
+        treatmentType: 'lethalBronzing',
+        palmCount: 2,
+        palmStatus: 'healthy_preventive',
+      });
+      const note = 'Each injection leaves a small permanent hole in the trunk. We offer this only for healthy palms or palms next to an affected palm.';
+      expect(result.scopeNote).toBe(note);
+      expect(result.warnings.join(' ')).toContain('Each injection leaves a small permanent hole in the trunk.');
+      expect(result.warnings.join(' ')).toContain('We offer this only for healthy palms or palms next to an affected palm.');
+      expect(PALM.treatments.lethalBronzing.notes.join(' ')).toMatch(/permanent hole in the trunk/);
+      expect(PALM.treatments.lethalBronzing.notes.join(' ')).toMatch(/healthy palms or palms next to an affected palm/);
+      // The legacy mapper carries it to results.injection, which the public estimate reads.
+      const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+      const mapped = mapV1ToLegacyShape({ lineItems: [result], property: {}, summary: {}, discount: {}, waveGuard: {} });
+      expect(mapped.results.injection.scopeNote).toBe(note);
+      // Other palm treatments carry no such note.
+      expect(pricePalmInjection(property, { treatmentType: 'nutrition', palmCount: 2 }).scopeNote).toBeUndefined();
     });
 
     test('lethal bronzing customPricePerPalm 100 floors to 125', () => {

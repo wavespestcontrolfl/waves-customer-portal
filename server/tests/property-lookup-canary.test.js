@@ -49,6 +49,8 @@ jest.mock('../models/db', () => {
   }
   qb.fn = { now: () => 'NOW()' };
   qb.raw = (s) => ({ __raw: s });
+  // persistCheckStates writes every check in one transaction.
+  qb.transaction = async (fn) => fn(qb);
   return qb;
 });
 
@@ -276,9 +278,11 @@ describe('runPropertyLookupCanary', () => {
     const streakRe = /^Sarasota golden parcel: by-parcel lookup threw \(timeout\) — browser-UA probe: .+ — 3 nights running$/;
     expect(n3.failures.some((f) => streakRe.test(f))).toBe(true);
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+    // Keyed per ET day: the deploy-kill retry of a run that already alerted
+    // must not ring a second bell.
     expect(mockTriggerNotification).toHaveBeenCalledWith('property_lookup_canary_failed', {
       failures: [expect.stringMatching(streakRe)],
-    });
+    }, { dedupeKey: expect.stringMatching(/^property-lookup-canary:\d{4}-\d{2}-\d{2}$/) });
   });
 
   it('a blocked (non-2xx) browser-UA probe does NOT claim UA-scoring', async () => {

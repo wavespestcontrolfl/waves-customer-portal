@@ -16,6 +16,35 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+// The send lock needs the real db module's raw connections (its own suites: receipt-send-lock-postgres and
+// intelligence-bar-receipt-resend-claim-postgres); here db is a schema-scoped knex, so the lock is a passthrough.
+jest.mock('../services/receipt-send-lock', () => ({
+  withReceiptSendLock: async (_id, run) => ({
+    acquired: true,
+    // The owner's other two functions (the handoff keep-alive): a lease that always extends, and a statement
+    // on a connection of its own (not the pool), as the real lock session does.
+    value: await run({
+      lost: () => false,
+      extendLease: () => true,
+      query: async (sql, params) => {
+        const conn = await mockPg.client.acquireRawConnection();
+        try {
+          await conn.query(`SET search_path TO ${mockPg.client.config.searchPath[0]}`);
+          return await conn.query(sql, params);
+        } finally {
+          await new Promise((resolve) => { conn.end(resolve); });
+        }
+      },
+    }),
+  }),
+}));
+// The shared resend writer runs on the REAL queue below; only its senders are stubbed.
+const mockSendReceiptEmail = jest.fn();
+jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));
+const mockSendReceiptSms = jest.fn();
+jest.mock('../services/invoice', () => ({ sendReceipt: (...a) => mockSendReceiptSms(...a) }));
+jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => ({ closed: false, reason: 'gate_off' })) }));
+
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const jobsMigration = require('../models/migrations/20260530000001_payment_plans_and_receipt_delivery_jobs');
@@ -26,6 +55,7 @@ const {
   claimDueReceiptDeliveryJobs,
   enqueueReceiptDelivery,
   recordOperatorReceiptDelivered,
+  heartbeatOperatorReceiptClaim,
   _internals: { recoverStaleLocks },
 } = require('../services/receipt-delivery-queue');
 
@@ -50,7 +80,10 @@ postgres('operator receipt claim on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
     await jobsMigration.up(mockPg);
     await customerInitiatedMigration.up(mockPg);
-    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); t.uuid('visit_completion_packet_id'); });
+    await mockPg.schema.createTable('invoices', (t) => {
+      t.uuid('id').primary(); t.timestamp('receipt_sent_at'); t.uuid('visit_completion_packet_id');
+      t.string('status'); t.uuid('customer_id'); t.string('invoice_number'); t.text('receipt_memo');
+    });
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -316,5 +349,265 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await claimReceiptJobForOperatorSend(operatorHeld)).toEqual({ inFlight: true, byOperator: true });
     const drainHeld = await seedJob({ status: 'running', locked_at: new Date(), locked_by: 'host:123' });
     expect(await claimReceiptJobForOperatorSend(drainHeld)).toEqual({ inFlight: true, byOperator: false });
+  });
+
+  describe('heartbeatOperatorReceiptClaim keeps a claim from being settled while its provider request is in flight (Codex #5880 r3 P1)', () => {
+    const minutesAgo = (id, minutes) => mockPg('receipt_delivery_jobs').where({ id })
+      .update({ locked_at: mockPg.raw(`now() - interval '${minutes} minutes'`) });
+    const rawQuery = async (sql, params) => {
+      const conn = await mockPg.client.acquireRawConnection();
+      try {
+        await conn.query(`SET search_path TO ${schema}`);
+        return await conn.query(sql, params);
+      } finally {
+        await new Promise((resolve) => { conn.end(resolve); });
+      }
+    };
+
+    test.each([['the pool', undefined], ['a session of its own (the lock\'s)', rawQuery]])('handoff at minute 9 via %s: the claim is refreshed and stale recovery leaves it', async (_label, query) => {
+      const invoiceId = await seedJob({ status: 'retry_scheduled' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await minutesAgo(claim.id, 9);
+      expect(await heartbeatOperatorReceiptClaim(claim, query)).toBe(true);
+      const row = await job(invoiceId);
+      expect(Date.now() - new Date(row.locked_at).getTime()).toBeLessThan(30_000);
+      // Ten minutes after the ORIGINAL claim, i.e. one minute after the handoff: still not stale.
+      await minutesAgo(claim.id, 1);
+      await recoverStaleLocks();
+      expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: claim.token });
+    });
+
+    test('without the heartbeat the same claim IS settled past the window — and with it, a request that never resolves still ages out', async () => {
+      const stale = await seedJob({ status: 'retry_scheduled' });
+      const staleClaim = await claimReceiptJobForOperatorSend(stale);
+      await minutesAgo(staleClaim.id, 11);
+      await recoverStaleLocks();
+      expect((await job(stale)).status).toBe('retry_scheduled');
+      // Heartbeat at the handoff, then nothing resolves: past the staleness window from the handoff it is settled as before.
+      const created = randomUUID();
+      const createdClaim = await claimReceiptJobForOperatorSend(created);
+      await minutesAgo(createdClaim.id, 9);
+      expect(await heartbeatOperatorReceiptClaim(createdClaim)).toBe(true);
+      await recoverStaleLocks();
+      expect(await job(created)).toMatchObject({ status: 'running' });
+      await minutesAgo(createdClaim.id, 11);
+      await recoverStaleLocks();
+      expect(await job(created)).toBeUndefined(); // a claim-created row goes away, as before
+    });
+
+    test('a claim that is no longer this send\'s is not refreshed (settled, or re-owned); a claim that holds no job has nothing to keep', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: 'someone-else' });
+      expect(await heartbeatOperatorReceiptClaim(claim)).toBe(false);
+      expect(await heartbeatOperatorReceiptClaim(claim, rawQuery)).toBe(false);
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: claim.token });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
+      expect(await heartbeatOperatorReceiptClaim(claim)).toBe(false); // released: no longer running
+      const finished = await seedJob({ status: 'completed' });
+      const none = await claimReceiptJobForOperatorSend(finished);
+      expect(none.id).toBeNull();
+      expect(await heartbeatOperatorReceiptClaim(none)).toBe(true);
+    });
+  });
+
+  describe('releaseOperatorReceiptClaim reports what became of the automatic job (the IB tool words its result from this)', () => {
+    test('every disposition, on real rows', async () => {
+      // A claim that holds no job (the job already finished): nothing to settle.
+      const finished = await seedJob({ status: 'completed' });
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(finished), { emailDelivered: false })).toBe('none');
+      // A delivered email closes the job.
+      const delivered = await seedJob();
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(delivered), { emailDelivered: true })).toBe('completed');
+      // A claim-created row goes away.
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(randomUUID()), { emailDelivered: false })).toBe('removed');
+      // A queued job goes back to the queue — and WILL be delivered by the drain.
+      const queued = await seedJob({ status: 'retry_scheduled' });
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(queued), { emailDelivered: false })).toBe('returned_to_queue');
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).toContain(queued);
+      // An enqueue that took over the claim-created row is queued again.
+      const takenOver = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(takenOver);
+      await enqueueReceiptDelivery({ invoiceId: takenOver, source: 'ib_closeout_repair' });
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('returned_to_queue');
+      // Unknown outcome: held.
+      const held = await seedJob();
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(held), { emailDelivered: false, holdForReconciliation: true })).toBe('held_for_reconciliation');
+    });
+
+    test('report.stamped says whether THIS release wrote the invoice stamp (the send\'s own stamp may have been skipped)', async () => {
+      // Delivered email, invoice unstamped: the release stamps it and says so.
+      const unstamped = await seedJob();
+      await mockPg('invoices').insert({ id: unstamped, receipt_sent_at: null });
+      const report = {};
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(unstamped), { emailDelivered: true, report })).toBe('completed');
+      expect(report.stamped).toBe(true);
+      expect((await mockPg('invoices').where({ id: unstamped }).first()).receipt_sent_at).toBeInstanceOf(Date);
+      // Already stamped (by the send itself): the release wrote nothing, so it does not claim the stamp.
+      const stamped = await seedJob();
+      await mockPg('invoices').insert({ id: stamped, receipt_sent_at: new Date('2026-10-02T18:14:00Z') });
+      const report2 = {};
+      await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(stamped), { emailDelivered: true, report: report2 });
+      expect(report2.stamped).toBe(false);
+      // Nothing delivered: no stamp attempted, nothing reported as stamped.
+      const none = await seedJob();
+      await mockPg('invoices').insert({ id: none, receipt_sent_at: null });
+      const report3 = {};
+      await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(none), { emailDelivered: false, report: report3 });
+      expect(report3.stamped).not.toBe(true);
+      expect((await mockPg('invoices').where({ id: none }).first()).receipt_sent_at).toBeNull();
+    });
+
+    test('a release that touches no row (the claim was re-owned) is not reported as settled', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: 'someone-else' });
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('release_failed');
+    });
+  });
+
+  describe('releaseOperatorReceiptClaim: one ordered decision for every claimed job (prior state x takeover x outcome)', () => {
+    // The decision table (see releaseOperatorReceiptClaim):
+    //   1. email delivered by this send -> completed
+    //   2. hold (a leg's outcome unknown) -> failed ("held") for EVERY row, never queued; the claim-created row is kept too, so a later or concurrent enqueue stays deduped
+    //   3. otherwise: takeover -> queued; claim-created row -> removed; prior queued -> back as it was
+    // A completed or failed job is never claimed (claim returns { id: null }, release 'none'), so it has no cells here.
+    // [prior, takeover, outcome, final job status ('row removed' = no row), disposition]
+    const CELLS = [
+      ['queued', 'no', 'email delivered', 'completed', 'completed'],
+      ['queued', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['queued', 'no', 'definite failure', 'retry_scheduled', 'returned_to_queue'],
+      ['none', 'no', 'email delivered', 'completed', 'completed'],
+      ['none', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['none', 'no', 'definite failure', 'row removed', 'removed'],
+      ['none', 'yes', 'email delivered', 'completed', 'completed'],
+      ['none', 'yes', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['none', 'yes', 'definite failure', 'queued', 'returned_to_queue'],
+    ];
+    const OUTCOMES = {
+      'email delivered': { emailDelivered: true, emailResult: { ok: true, resend: true } },
+      'unknown / hold': { emailDelivered: false, holdForReconciliation: true, emailResult: { ok: false, error: 'lost' } },
+      'definite failure': { emailDelivered: false, emailResult: { ok: false, error: 'PDF generation failed' } },
+    };
+
+    test.each(CELLS)('prior %s, takeover %s, %s -> job %s, disposition %s', async (prior, takeover, outcome, finalStatus, disposition) => {
+      const invoiceId = prior === 'queued' ? await seedJob({ status: 'retry_scheduled', source: 'stripe_webhook' }) : randomUUID();
+      const before = await job(invoiceId);
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(claim.id).toEqual(expect.any(String));
+      if (takeover === 'yes') {
+        expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toMatchObject({ enqueued: true });
+        expect(await job(invoiceId)).toMatchObject({ status: 'running', source: 'ib_closeout_repair' });
+      }
+      expect(await releaseOperatorReceiptClaim(claim, OUTCOMES[outcome])).toBe(disposition);
+      const after = await job(invoiceId);
+      if (finalStatus === 'row removed') {
+        expect(after).toBeUndefined();
+        return;
+      }
+      expect(after).toMatchObject({ status: finalStatus, locked_by: null, locked_at: null });
+      // Never left queued for the drain after a confirmed or uncertain delivery.
+      if (outcome !== 'definite failure') expect(['completed', 'failed']).toContain(after.status);
+      if (finalStatus === 'failed') expect(after.last_error).toMatch(/held for reconciliation/);
+      // "As it was": a queued job's schedule is untouched.
+      if (prior === 'queued' && outcome === 'definite failure') expect(after.next_attempt_at.toISOString()).toBe(before.next_attempt_at.toISOString());
+      // The drain only ever picks up what the table queued.
+      const drained = (await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id);
+      expect(drained.includes(invoiceId)).toBe(['queued', 'retry_scheduled'].includes(finalStatus));
+    });
+
+    test('prior queued x takeover cannot occur: an enqueue only merges into a running operator_send row, and a queued job never has that source', async () => {
+      const invoiceId = await seedJob({ status: 'queued', source: 'stripe_webhook' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
+      expect(await job(invoiceId)).toMatchObject({ source: 'stripe_webhook' });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
+    });
+  });
+
+  describe('holdForReconciliation — an unknown provider outcome never goes back to the drain', () => {
+    test('a queued job the operator claimed is parked as failed, not re-queued; the drain and a new claim leave it alone', async () => {
+      const invoiceId = await seedJob({ status: 'retry_scheduled' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, emailResult: { ok: false, error: 'timeout' }, holdForReconciliation: true });
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed', locked_by: null, locked_at: null, email_result: { ok: false, error: 'timeout' }, last_error: expect.stringMatching(/held for reconciliation/) });
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
+    });
+
+    test('a job another path enqueued during the claim is held too', async () => {
+      const taken = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(taken);
+      await enqueueReceiptDelivery({ invoiceId: taken, source: 'ib_closeout_repair' });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, holdForReconciliation: true });
+      expect(await job(taken)).toMatchObject({ status: 'failed', source: 'ib_closeout_repair' });
+    });
+
+    test('a row the claim created is KEPT (failed) on hold: a later enqueue stays deduped and cannot re-send a receipt the provider may have accepted', async () => {
+      const invoiceId = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      // An enqueue racing the release (a delayed Stripe webhook, a closeout repair). The two are not ordered:
+      // it either lands after the release commits (deduped against the tombstone) or takes the still-running
+      // row over just before it (and the release then holds that row too). Either way the row ends failed.
+      const release = releaseOperatorReceiptClaim(claim, { emailDelivered: false, holdForReconciliation: true });
+      const racing = enqueueReceiptDelivery({ invoiceId, source: 'stripe_webhook' });
+      expect(await release).toBe('held_for_reconciliation');
+      const raced = await racing;
+      expect(raced.enqueued === true || raced.deduped === true).toBe(true);
+      // Once the release has committed, every enqueue is deduped.
+      expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed', source: raced.enqueued ? 'stripe_webhook' : 'operator_send', locked_by: null, last_error: expect.stringMatching(/held for reconciliation/) });
+      // Nothing for the drain, and a later operator send still works (a finished job is simply not claimed).
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
+    });
+
+    test('a delivered email still completes the job — hold only applies to an undelivered one', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: true, emailResult: { ok: true }, holdForReconciliation: true });
+      expect(await job(invoiceId)).toMatchObject({ status: 'completed' });
+    });
+
+    describe('through sendInvoiceReceipt (the Invoices route and the IB tool share it)', () => {
+      const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+      async function paidInvoiceWithQueuedJob() {
+        const id = await seedJob();
+        await mockPg('invoices').insert({ id, status: 'paid', customer_id: randomUUID(), invoice_number: 'WPC-2026-0900', receipt_sent_at: new Date('2026-10-02T18:14:00Z') });
+        return id;
+      }
+      beforeEach(() => { mockSendReceiptEmail.mockReset(); mockSendReceiptSms.mockReset(); });
+
+      test('tool (holdUnknownOutcome): an email timeout parks the queued automatic job so the worker cannot email again', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
+        const out = await sendInvoiceReceipt(id, { via: 'email', holdUnknownOutcome: true });
+        expect(out.body).toMatchObject({ ok: false, email: { ok: false, error: 'provider response lost' } });
+        expect(await job(id)).toMatchObject({ status: 'failed', last_error: expect.stringMatching(/held for reconciliation/) });
+        expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(id);
+      });
+
+      test('route default: the same timeout hands the job back as it always did', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
+        await sendInvoiceReceipt(id, { via: 'email' });
+        expect(await job(id)).toMatchObject({ status: 'queued', locked_by: null });
+      });
+
+      test('tool: a definite (non-timeout) failure still hands the job back — nothing is unknown', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'PDF generation failed' });
+        await sendInvoiceReceipt(id, { via: 'email', holdUnknownOutcome: true });
+        expect(await job(id)).toMatchObject({ status: 'queued' });
+      });
+
+      test('tool: a text timeout with the email not delivered also holds the job', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'PDF generation failed' });
+        mockSendReceiptSms.mockRejectedValue(Object.assign(new Error('receipt SMS blocked: PROVIDER_FAILURE'), { providerOutcome: { deliveryOutcome: 'uncertain', blocked: false } }));
+        await sendInvoiceReceipt(id, { via: 'both', holdUnknownOutcome: true });
+        expect(await job(id)).toMatchObject({ status: 'failed' });
+      });
+    });
   });
 });

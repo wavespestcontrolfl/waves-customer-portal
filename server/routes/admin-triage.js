@@ -11,12 +11,40 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { lockTriageCall } = require('../utils/triage-locks');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
+// survivor (owed_customer_open_ids).
+const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates', 'name_spelling_differs'];
+// Cards only an admin sees and settles: property-role proposals embed the customer's other property
+// addresses, and a family-account suggestion lists customers and the caller's number for the office to
+// link. Hidden from the tech list and counts, and refused on every shared transition.
+// Cards whose transitions must carry the version (expected_updated_at) the operator saw: a reprocess
+// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
+const VERSION_BOUND_REASONS = [
+  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
+  'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs', 'family_account_candidates', 'name_spelling_differs',
+];
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];
+// Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
+// the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
+// what the card asks).
+const NOT_A_VERDICT_MESSAGES = {
+  email_bounce_reverify: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.',
+  property_role_confirm: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.',
+  reschedule_link_promise: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.',
+  attached_booking_followup_unbooked: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.',
+  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
+  family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
+  text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
+  name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
+};
+
 
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
@@ -106,16 +134,67 @@ const CALLBACK_CARD_VERDICT = Object.freeze({
   VERIFIED_SAME_NUMBER: 'verified_same_number',
   REPLACEMENT_NUMBER: 'replacement_number',
 });
-async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict } = {}) {
-  if (!Object.values(CALLBACK_CARD_VERDICT).includes(numberVerdict)) {
+// A hold armed because the call's VALID extraction said the line cannot get texts (ani_cannot_text) is
+// marked payload.no_text_hold on both of its cards (call-routing-gates payload stamp). Exactly ONE thing
+// clears that hold: the explicit "Line can get texts" action on the text_number_differs card. Closing
+// callback_number_needed never does, in either close order, whatever the other card's state.
+function parsePayload(payload) {
+  if (typeof payload !== 'string') return payload || null;
+  try { return JSON.parse(payload); } catch { return null; }
+}
+function cardCarriesNoTextHold(item) {
+  return parsePayload(item?.payload)?.no_text_hold === true;
+}
+
+// A callback_number_needed card still OPEN on the call that stands for "that is not my number": filed
+// without the no-text mark, or marked ownership_disclaimed because the caller BOTH disclaimed the number
+// and said the line cannot get texts (codex #6112 r8 P1). "Line can get texts" proves only that the line
+// takes SMS, never who owns it, so only that card's own Resolve verifies the number.
+async function disclaimedCardOpen(trx, callLogId) {
+  const { OWNERSHIP_DISCLAIMER_CARD_SQL } = require('../services/disclaimed-number-holds');
+  // Open, in progress OR dismissed: Dismiss means no number was verified, so a dismissed ownership
+  // card still blocks "Line can get texts" (codex #6112 r12; same rule as the cross-call release).
+  const open = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
+    .whereIn('status', [...OPEN_STATES, 'dismissed'])
+    .whereRaw(OWNERSHIP_DISCLAIMER_CARD_SQL)
+    .first('id');
+  return !!open;
+}
+
+// A release of some lines of a call (phoneKeys) must not stamp the call-wide clearance on a visit whose
+// recipient phone is a line this call STILL holds: the visit evidence helper
+// (disclaimedNumberHoldEvidenceForVisit) reads "stamped and not cleared + an active hold on the customer's
+// phone" as held, and a cleared stamp would make a still-held line look released (#6292 r3 P1). So the
+// clearance is per visit, by the customer's phone: visits on a released line (or on no held line) clear; visits
+// on a line the call still actively holds keep a null clearance until that line is released too.
+async function visitsOnStillHeldLines(trx, callLogId, phoneKeys, liveHeldVisits) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const rows = await Holds.callLineRows(trx, callLogId);
+  const stillHeld = new Set(rows.filter((r) => r.active && !phoneKeys.includes(r.key)).map((r) => r.key));
+  if (!stillHeld.size) return [];
+  const visits = await liveHeldVisits().select('id', 'customer_id');
+  const customerIds = [...new Set(visits.map((v) => v.customer_id).filter(Boolean))];
+  if (!customerIds.length) return [];
+  const phones = new Map((await trx('customers').whereIn('id', customerIds).select('id', 'phone')).map((c) => [c.id, Holds.holdPhoneKey(c.phone)]));
+  return visits.filter((v) => stillHeld.has(phones.get(v.customer_id))).map((v) => v.id);
+}
+
+async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, noTextHold = false, phoneKeys = null } = {}) {
+  if (!Object.values(CALLBACK_CARD_VERDICT).includes(requestedVerdict)) {
     // Explicit by construction: a new caller must say which meaning it is.
-    throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${numberVerdict}`);
+    throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${requestedVerdict}`);
   }
+  // A no-text card's close is never a verified-same-number verdict: visits clear, the number stays held.
+  const numberVerdict = noTextHold ? CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER : requestedVerdict;
   const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
-  const visits = await trx('scheduled_services')
+  const liveHeldVisits = () => trx('scheduled_services')
     .where({ source_call_log_id: callLogId })
     .whereIn('status', CLEARABLE_SCHEDULED_SERVICE_STATUSES)
-    .whereNotNull('callback_number_hold_at')
+    .whereNotNull('callback_number_hold_at');
+  const keepIds = phoneKeys ? await visitsOnStillHeldLines(trx, callLogId, phoneKeys, liveHeldVisits) : [];
+  const visits = await liveHeldVisits()
+    .modify((q) => { if (keepIds.length) q.whereNotIn('id', keepIds); })
     .update({
       // call_sms_cleared_at >= callback_number_hold_at by construction
       // (GREATEST) so the call-level clearance post-dates the hold stamp.
@@ -124,7 +203,7 @@ async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numbe
     });
   const numbers = numberVerdict === CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER
     ? await require('../services/disclaimed-number-holds').clearDisclaimedNumberHoldsForCall({
-      callLogId, clearedBy, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
+      callLogId, clearedBy, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, phoneKeys, conn: trx,
     })
     : 0;
   return { visits, numbers, numberVerdict };
@@ -145,8 +224,171 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
     verdict: numberVerdict,
     disclaimed_number_hold: 'kept',
     number_holds_cleared: 0,
-    message: 'Card closed with the replacement number on file. The number the caller disclaimed stays blocked for texts — only the replacement was verified.',
+    message: 'Card closed. The number stays blocked for texts: only a replacement number was verified, or another open card on this call still says the line cannot get texts.',
   };
+}
+
+// text_number_differs card (owner ruling 2026-10-08): the caller's line cannot get texts.
+//   RESOLVE = "the phones are updated": nothing proved the line can get texts, so the number-keyed hold
+//     STAYS; only the visits' call-level clearance lifts (the replacement-number meaning).
+//   DISMISS just closes the card: nothing changes, the hold stays.
+//   RESOLVE with lineCanGetTexts ("Line can get texts", its own button and confirm) closes the card and
+//     releases the hold, unless a plain disclaimed callback_number_needed card is open (its own Resolve).
+// LOCK ORDER (every line release, this path and releaseClosedNoTextHold): per-call lockTriageCall (taken by
+// the caller) -> phone-wide pg_advisory_xact_lock(hashtext('no_text_line:' || E.164)), one per line being
+// released, sorted -> hold rows -> visit rows.
+// WHICH LINES: a call can hold several lines. The held-lines panel names one (`line_e164`): only that line
+// is released, on this call and on every other call that holds it; a line this call does not actively hold
+// is a 409 (NO_TEXT_LINE_NOT_HELD) and nothing changes. The inbox card names none: it releases EVERY line
+// the call ACTIVELY holds (each under its own phone lock), never "the newest" by guess and never a line the
+// call already released; with none active the card still resolves and no line is touched (lines_released: []).
+function lineNotHeldError() {
+  const err = new Error('That line is no longer held by this call. Reload the held lines and review the latest.');
+  err.statusCode = 409;
+  err.code = 'NO_TEXT_LINE_NOT_HELD';
+  return err;
+}
+
+// True when this call once held `key` (a hold row, or a card binding for it) and holds it no longer.
+async function lineReleasedMeanwhile(trx, callLogId, key) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const entry = (await Holds.callLineRows(trx, callLogId)).find((row) => row.key === key);
+  if (entry) return !entry.active;
+  const bound = await trx.raw(
+    `SELECT 1 FROM triage_items t, jsonb_array_elements(COALESCE(t.payload->'hold_bindings', '[]'::jsonb)) b
+      WHERE t.call_log_id = ? AND t.reason_code = 'text_number_differs' AND b->>'line_e164' = ? LIMIT 1`,
+    [callLogId, key],
+  );
+  return (bound?.rows || []).length > 0;
+}
+
+// The named line is already released: no lock, no propagation; the card still resolves.
+function alreadyReleasedResult(key) {
+  return {
+    cleared: { visits: 0, numbers: 0, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER },
+    lines: [], blocked: [], alreadyReleased: [key],
+  };
+}
+
+// The office verified the LINE, not one call: a shared office or relay number holds one row per call that
+// said it cannot get texts, and the send boundary blocks on any of them. Lift every no-text hold on each
+// released line (never a plain disclaimed-number hold: its own card releases it) and the visit-level holds
+// of the calls that placed them, touching only that line on those calls (codex #6112 r7 P2).
+async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const VERIFIED = CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER;
+  // Only lines the call STILL actively holds AS A NO-TEXT HOLD (a text card is bound to that arming): a line
+  // this call already released (say from the panel) may have been re-held by another call since, and an
+  // ownership-only hold of the same call is not this card's to clear.
+  const bound = new Set((await Holds.boundCardsForActiveHolds(trx, callLogId)).map((pair) => pair.phone_e164));
+  let lines = [...bound];
+  if (lineE164 != null) {
+    const key = Holds.holdPhoneKey(lineE164);
+    if (!key) throw lineNotHeldError();
+    if (!bound.has(key)) {
+      // A line this call held and that is no longer active was released meanwhile (say by another call's release of
+      // the shared line, which commits while this transition waits): the named release is already done, so the
+      // card resolves normally. A line the call never held, or an ownership-only hold it still has, is a 409.
+      if (await lineReleasedMeanwhile(trx, callLogId, key)) return alreadyReleasedResult(key);
+      throw lineNotHeldError();
+    }
+    lines = [key];
+  }
+  // Lock order step 2: no hold row is read-for-update or written before the phone locks, so two releases
+  // of one shared line serialize on the phone lock instead of crossing row locks (A->B / B->A, #6112 r15).
+  await Holds.lockNoTextLines(trx, lines);
+  // The LINE is checked, not only this call: another call that holds the same line with a "not my number"
+  // card still open keeps its row, so the line would stay blocked. Such a line is not released at all (the
+  // reply says so); the card the office clicked still resolves.
+  const blocked = await Holds.linesBlockedByOwnershipCard(trx, lines);
+  const releasable = lines.filter((key) => !blocked.has(key));
+  const cleared = await clearCallbackNumberHold(trx, callLogId, {
+    clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: releasable,
+  });
+  for (const key of releasable) {
+    const otherCalls = await Holds.clearNoTextHoldsForPhone({ phoneE164: key, exceptCallLogId: callLogId, clearedBy: assignedTo, reason: VERIFIED, conn: trx });
+    for (const otherCallLogId of otherCalls) {
+      await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: [key] });
+    }
+    cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
+  }
+  return { cleared, lines: releasable, blocked: lines.filter((key) => blocked.has(key)) };
+}
+
+// Returns the reply for the route, or `prior` when nothing ran.
+async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineCanGetTexts, lineE164 = null) {
+  if (item.reason_code !== 'text_number_differs' || !item.call_log_id || nextStatus !== 'resolved') return prior;
+  const ownershipCardOpen = lineCanGetTexts === true && await disclaimedCardOpen(trx, item.call_log_id);
+  const release = lineCanGetTexts === true && !ownershipCardOpen;
+  let cleared;
+  let lines = null;
+  let blockedLines = [];
+  let alreadyReleased = null;
+  if (release) {
+    ({ cleared, lines, blocked: blockedLines, alreadyReleased } = await releaseNoTextLines(trx, item.call_log_id, assignedTo, lineE164));
+  } else {
+    cleared = await clearCallbackNumberHold(trx, item.call_log_id, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER });
+  }
+  const reply = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
+  if (lines) reply.lines_released = lines;
+  if (alreadyReleased) {
+    reply.release = 'ok';
+    reply.already_released = alreadyReleased;
+  }
+  if (blockedLines.length) {
+    // Another call on the same line has an open "not my number" card: that call's hold stays, so the line
+    // stays blocked. Never report "texts will resume" over it.
+    reply.release = 'deferred';
+    reply.lines_blocked = blockedLines;
+    if (!lines.length) reply.disclaimed_number_hold = 'kept';
+    reply.message = 'Card closed, but the line stays blocked for texts: another call on this line has an open "not my number" card. Resolve that card first, then use Line can get texts again.';
+  }
+  if (ownershipCardOpen) {
+    // The office asked for the release and did not get it: say exactly why, so the inbox never
+    // reports "texts will resume" over a line that is still held (codex #6112 r10 P2).
+    reply.release = 'deferred';
+    reply.message = 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first, then use Line can get texts on this card again.';
+  }
+  return reply;
+}
+
+// True when `item` is not the current release surface for what it would release: for the named line, a newer
+// card is bound to that line's active hold; with no line named (the inbox card), the card is bound to no active
+// hold while others are, or a newer card is bound to a line this card is bound to. A line the call does not
+// actively hold is not judged here (releaseNoTextLines answers NO_TEXT_LINE_NOT_HELD).
+async function cardSupersededForRelease(trx, item, lineE164) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const pairs = await Holds.boundCardsForActiveHolds(trx, item.call_log_id);
+  const newest = new Map();
+  for (const pair of pairs) if (!newest.has(pair.phone_e164)) newest.set(pair.phone_e164, String(pair.card_id));
+  const mine = new Set(pairs.filter((pair) => String(pair.card_id) === String(item.id)).map((pair) => pair.phone_e164));
+  if (lineE164 != null) {
+    const key = Holds.holdPhoneKey(lineE164);
+    return newest.has(key) && newest.get(key) !== String(item.id);
+  }
+  return pairs.length > 0 && (mine.size === 0 || [...mine].some((key) => newest.get(key) !== String(item.id)));
+}
+
+// "Line can get texts" on a card that is ALREADY closed (Resolve and Dismiss both close it and leave the
+// hold in place): the same explicit, version-checked release, so staff who learn later that the line can
+// get texts are not stranded. Returns null when the card is not a closed text_number_differs card.
+async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo, lineE164 = null }) {
+  const item = await db('triage_items').where({ id }).first();
+  if (!item || item.reason_code !== 'text_number_differs' || !item.call_log_id || OPEN_STATES.includes(item.status)) return null;
+  return db.transaction(async (trx) => {
+    await lockTriageCall(trx, item.call_log_id);
+    const live = await trx('triage_items').where({ id }).first('updated_at');
+    if (!live || !expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+      return { outcome: 'stale_version' };
+    }
+    // A card releases only what it is bound to, and only while it is the newest card bound to it: a reprocess
+    // that re-armed a line filed a newer card for it (or re-stamped the open one), and an older closed card must
+    // not clear what that newer card still asks the office to review. The check is per line, never "newest
+    // card of the whole call" (a call can hold several lines on one card, or one card each).
+    if (await cardSupersededForRelease(trx, item, lineE164)) return { outcome: 'stale_version' };
+    const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true, lineE164);
+    return { outcome: 'ok', callbackNumber: reply, status: item.status };
+  });
 }
 
 // Upsert the single current verdict for a call (re-review overwrites). Links to
@@ -254,7 +496,7 @@ router.get('/', async (req, res) => {
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS);
       })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
@@ -295,7 +537,7 @@ router.get('/', async (req, res) => {
       .select('status')
       .count('* as n')
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('reason_code', ADMIN_ONLY_REASONS);
       })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
@@ -344,7 +586,7 @@ router.get('/', async (req, res) => {
 
     // A first-name card's "Open customer" links must reach an editable record: a listed customer
     // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
-    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    const nameCards = items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code));
     if (nameCards.length) {
       const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
       for (const item of nameCards) {
@@ -355,6 +597,10 @@ router.get('/', async (req, res) => {
         }
       }
     }
+
+    // The second-contact "Save to notes" action: the server's own rule decides
+    // which cards qualify, so the screen holds no second copy of it.
+    stampSaveContactNote(items);
 
     res.json({ items, counts });
   } catch (err) {
@@ -458,7 +704,7 @@ const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending vis
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
-async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition }) {
+async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition, lineCanGetTexts = false, lineE164 = null }) {
   const item = await conn('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
@@ -522,7 +768,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // newer one. Same rule as Apply — required (the lane is dark, no
     // legacy clients); checked under the lock.
     if (beforeTransition) await beforeTransition(trx);
-    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+    // Row-locked (after the advisory lock and the hold rows: the GLOBAL LOCK
+    // ORDER above): the processor's reprocess refresh updates this open row
+    // WITHOUT the advisory lock, so an unlocked read let a refresh commit
+    // between the version check and the update below and be closed unseen.
+    // Locked, a refresh either committed first (the version check refuses) or
+    // waits for this transaction and then finds no open row to merge into.
+    const live = await trx('triage_items').where({ id }).forUpdate().first('updated_at', 'payload');
     // Promise cards can gain another commitment while this action waits for
     // the call lock. The operator must review that newer payload before a
     // Resolve/Dismiss settles every commitment now attached to the card.
@@ -533,19 +785,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // force-reprocess refreshes in place: "Follow-up booked" on the old
     // screen must not settle the newer obligation (pre-push audit P1 after
     // r27).
-    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
-      || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
-      // …and the recovery task a settlement refreshes in place (window,
-      // address, retained visit) — a stale click must not close the newer
-      // obligation (codex r30 P1).
-      || item.reason_code === 'auto_booking_skipped_after_approval'
-      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
-      // Resolve / Dismiss must not settle a customer the operator never saw.
-      || item.reason_code === 'missing_first_name'
-      // …and email review cards (codex round-3 P1): the client already
-      // sends expected_updated_at on every resolve/dismiss, so a stale view
-      // of a card whose evidence has since changed refuses instead of
-      // settling evidence the operator never saw.
+    // VERSION_BOUND_REASONS: property-role, reschedule-promise, house-number-conflict, attached-follow-up,
+    // recovery-task, owed-first-name and family-account cards, each of which a reprocess refreshes in
+    // place — a stale Resolve / Dismiss must not settle evidence the operator never saw.
+    if (VERSION_BOUND_REASONS.includes(item.reason_code)
       || emailReviewCard
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
@@ -627,10 +870,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // Round 7 P1: this is the VERIFIED_SAME_NUMBER meaning — the one
       // action that lifts the number-keyed row too (see the helper).
       const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER,
+        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, noTextHold: cardCarriesNoTextHold({ ...item, ...liveCard }),
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }
+    callbackNumber = await releaseNoTextHold(trx, item, nextStatus, assignedTo, callbackNumber, lineCanGetTexts, lineE164);
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
       // underlying call_commitments row and its outbox_messages row must
@@ -695,6 +939,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // items — inside the same locked transaction (the interleaved-count
     // race is what the advisory lock exists to remove).
     if (item.call_log_id) {
+      // Lock the call_log row FIRST, in its own statement: the count below then takes a fresh snapshot, so it sees a
+      // sibling resolution (a cross-call release closes cards without this call lock) that committed while we waited.
+      await trx.raw('SELECT id FROM call_log WHERE id = ? FOR UPDATE', [item.call_log_id]);
       const stillOpen = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         .whereIn('status', OPEN_STATES)
@@ -758,27 +1005,34 @@ function sendTransitionResult(res, result, id, nextStatus) {
 
 async function transition(req, res, nextStatus) {
   const { id } = req.params;
-  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
-  // property_role_confirm cards are admin-territory end to end (codex
-  // #3418 r5): hiding them from the tech list is not enforcement — a tech
-  // holding the UUID must not be able to resolve/dismiss a pending admin
-  // property correction through these shared transitions either.
+  const body = req.body || {};
+  const note = typeof body.note === 'string' ? body.note.slice(0, 500) : null;
+  // property_role_confirm cards are admin-territory end to end (codex #3418 r5): hiding them from the tech
+  // list is not enforcement, so a tech holding the UUID must not resolve/dismiss one through these shared
+  // transitions either. A missing first name is settled on the customer record, which only an admin edits:
+  // its Resolve is admin-only (Dismiss stays open to the office).
   if (req.techRole !== 'admin') {
     const guarded = await db('triage_items').where({ id }).first('reason_code');
-    if (guarded && guarded.reason_code === 'property_role_confirm') {
+    if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
-    // A missing first name is settled on the customer record, which only an admin edits:
-    // Resolve is admin-only (Dismiss stays open to the office).
     if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
-  const result = await transitionCore({
-    id, nextStatus, note, assignedTo: req.technicianId,
-    expectedUpdatedAt: req.body?.expected_updated_at || null,
-  });
-  return sendTransitionResult(res, result, id, nextStatus);
+  // "Line can get texts": on a card that is already closed it is its own version-checked release (null =
+  // not that case, fall through to the ordinary transition). The held-lines panel names the line it
+  // releases (line_e164); the inbox card names none (see releaseNoTextHold).
+  const lineCanGetTexts = body.line_can_get_texts === true;
+  const lineE164 = (typeof body.line_e164 === 'string' && body.line_e164.trim().slice(0, 40)) || null;
+  // Releasing a named line is the held-lines panel's act, and that panel is admin-only.
+  if (lineE164 && req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  const expectedUpdatedAt = body.expected_updated_at || null;
+  const closed = lineCanGetTexts && nextStatus === 'resolved'
+    ? await releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo: req.technicianId, lineE164 })
+    : null;
+  const result = closed || await transitionCore({ id, nextStatus, note, assignedTo: req.technicianId, expectedUpdatedAt, lineCanGetTexts, lineE164 });
+  return sendTransitionResult(res, result, id, closed ? closed.status : nextStatus);
 }
 
 // PUT /api/admin/triage/:id/resolve   { note? }
@@ -1513,6 +1767,126 @@ router.post('/:id/apply-property-roles', async (req, res) => {
   }
 });
 
+// What a secondary_contact_captured card lets the office file as a note: a card
+// that names exactly ONE person, who is not a message recipient. The entry list
+// is the one the card shows: the singleton plus secondary_contacts after its
+// first entry (entry 0 is the raw V2 mirror of the singleton, never written).
+// Anything more, a contact the slot writer owns (wants_notifications, an
+// on-site opt-in candidate) or a missing name/phone/email is refused whole, so
+// a card is never closed over a party that was not filed. The list route
+// stamps the verdict on each card (can_save_contact_note) for the screen.
+function stampSaveContactNote(items) {
+  for (const item of items) {
+    if (item.reason_code !== 'secondary_contact_captured') continue;
+    const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+    item.can_save_contact_note = !secondContactNote(payload).refusal;
+  }
+}
+
+function secondContactNote(payload) {
+  const { isImpossibleNanpPhone } = require('../utils/phone');
+  const oneLine = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const c = payload?.secondary_contact;
+  const more = Array.isArray(payload?.secondary_contacts) ? payload.secondary_contacts.slice(1).filter(Boolean) : [];
+  if (!c || typeof c !== 'object') return { refusal: 'Card names no contact' };
+  if (more.length || payload.other_parties_mentioned === true) {
+    return { refusal: 'Card names more than one person — add them to the customer by hand' };
+  }
+  if (['wants_notifications', 'wants_appointment_texts', 'on_site', 'is_billing_party'].some((flag) => c[flag] === true)) {
+    return { refusal: 'This person gets messages, is on site or pays the bill — they are not a plain note' };
+  }
+  const name = oneLine(c.name_full || [c.first_name, c.last_name].filter(Boolean).join(' '));
+  const rawPhone = oneLine(c.phone || c.phone_e164);
+  // A phone no NANP line can have is dropped, like the slot writer does.
+  const phone = rawPhone && !isImpossibleNanpPhone(rawPhone) ? rawPhone : '';
+  const email = oneLine(c.email);
+  if (!name || (!phone && !email)) return { refusal: 'Card names no contact with a name and a phone or email' };
+  const role = oneLine(c.role).toLowerCase().replace(/_/g, ' ');
+  const who = ['', 'unknown'].includes(role) ? name : `${name} (${role})`;
+  const notes = oneLine(c.notes);
+  return { line: `Contact named on call (not a message recipient): ${[who, phone, email].filter(Boolean).join(' · ')}.${notes ? ` ${notes}` : ''}`.slice(0, 500) };
+}
+
+// POST /api/admin/triage/:id/save-contact-note   { expected_updated_at }
+// One tap on a secondary_contact_captured card: files the one person it names
+// as a dated line in the linked customer's crm_notes (the notes Customer 360
+// shows and edits) and resolves the card. A PURE internal note — it never
+// touches the service-contact slots, the customer's own phone/email or any
+// consent column, and sends nothing; the pipeline's slot write
+// (persistCallSecondaryContact) stays the only path that makes a named person
+// a message recipient. Idempotent: a line already in the notes is not added
+// twice. Settled through transitionCore with requireVersion, so a card a
+// reprocess refreshed since it was displayed is a 409.
+//
+// LOCK ORDER as apply-property-roles / the Customer 360 PATCH: customers row
+// FIRST, then (inside transitionCore) the call advisory lock, then the
+// call_log row. The call_log row lock is the relink fence: the relink
+// (admin-call-recordings PUT /calls/:id/customer) updates call_log without the
+// call advisory lock, but it must wait on this row, and a relink that
+// committed before it is seen as a changed customer_id and 409s.
+router.post('/:id/save-contact-note', async (req, res) => {
+  try {
+    // Customer notes are admin-territory, like the property-role apply.
+    if (req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid card id' });
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+    if (item.reason_code !== 'secondary_contact_captured') {
+      return res.status(400).json({ error: 'Not a second-contact card' });
+    }
+    if (!item.call_log_id) return res.status(409).json({ error: 'This card has no call to take a customer from' });
+    const parsed = (row) => (typeof row.payload === 'string' ? (() => { try { return JSON.parse(row.payload); } catch { return null; } })() : row.payload);
+    const early = secondContactNote(parsed(item));
+    if (early.refusal) return res.status(400).json({ error: early.refusal });
+
+    let result;
+    await db.transaction(async (trx) => {
+      const call = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
+      const customer = call?.customer_id
+        ? await trx('customers').where({ id: call.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'crm_notes')
+        : null;
+      if (!customer) {
+        throw Object.assign(new Error('This call has no linked customer — link the call to a customer first'), { noCustomer: true });
+      }
+      result = await transitionCore({
+        id: item.id, nextStatus: 'resolved', note: 'contact saved to customer notes', assignedTo: req.technicianId,
+        expectedUpdatedAt: req.body?.expected_updated_at || null, conn: trx, requireVersion: true,
+        beforeTransition: async (t) => {
+          const live = await t('call_log').where({ id: item.call_log_id }).forUpdate().first('customer_id');
+          if (!live || String(live.customer_id) !== String(customer.id)) {
+            throw Object.assign(new Error('the call was relinked to another customer — reload and retry'), { conflict: true });
+          }
+        },
+        afterTransition: async (t) => {
+          // The LIVE payload, under the locks: transitionCore already proved it is the version displayed.
+          const livePayload = parsed(await t('triage_items').where({ id: item.id }).first('payload'));
+          const { line, refusal } = secondContactNote(livePayload);
+          if (refusal) throw Object.assign(new Error(refusal), { refused: true });
+          // The call's Eastern day: an evening call is already the next day in UTC.
+          const callDay = require('../utils/datetime-et').etDateString(new Date(call.created_at));
+          const notes = require('../services/call-profile-enrichment').appendWithProvenance(customer.crm_notes, line, callDay, '\n\n');
+          // crm_notes only — no slot, phone/email or consent column.
+          if (notes !== customer.crm_notes) await t('customers').where({ id: customer.id }).update({ crm_notes: notes, updated_at: new Date() });
+          // Ids only: the contact's name, phone and email stay out of logs.
+          logger.info(`[admin-triage] save-contact-note card=${item.id} customer=${customer.id}`);
+        },
+      });
+    });
+    return sendTransitionResult(res, result, item.id, 'resolved');
+  } catch (err) {
+    if (err.noCustomer || err.conflict) return res.status(409).json({ error: err.message });
+    if (err.refused) return res.status(400).json({ error: err.message });
+    // Code/name only: a knex message embeds the bound note text.
+    logger.error(`[admin-triage] save-contact-note failed: ${err.code || err.name || 'error'}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to save contact note' });
+  }
+});
+
 // Is the customer's LIVE address one of the two premises the reviewer
 // compared (the office adopted the caller's number, or the on-file line
 // was retyped)? Street line, unit (explicit or embedded) and locality all
@@ -1847,31 +2221,11 @@ router.post('/:id/verdict', async (req, res) => {
     // arrive DAYS after the call and say nothing about whether the AI routed
     // it correctly. They resolve individually via /resolve; recording an
     // accept/deny on one would pollute route_feedback calibration.
-    if (item.reason_code === 'email_bounce_reverify') {
-      return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
-    }
-    // Property-role cards are pending DATA changes, not call-routing
-    // judgments — they apply via /apply-property-roles or dismiss.
-    if (item.reason_code === 'property_role_confirm') {
-      return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
-    }
-    // A parked reschedule-link promise is exception handling on an
-    // OBLIGATION, not a call-routing judgment — and settling it (see
-    // transitionCore) needs the single-card Resolve/Dismiss transition, not
-    // a call-level cascade that never touches the underlying commitment.
-    if (item.reason_code === 'reschedule_link_promise') {
-      return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
-    }
-    // An owed follow-up visit is booked by hand and settled by its own
-    // Resolve — a call verdict says nothing about visit 2 and the bulk
-    // resolve below leaves this card out on purpose (codex r10 P1).
-    if (item.reason_code === 'attached_booking_followup_unbooked') {
-      return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
-    }
-    // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
-    // customer record, not a routing judgment — a verdict would close it without a name.
-    if (item.reason_code === 'missing_first_name') {
-      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
+    // Cards that are not a call verdict (bounced-email follow-up, property roles, a parked reschedule-link
+    // promise, an owed follow-up visit, an owed first name, a family-account suggestion): see
+    // NOT_A_VERDICT_MESSAGES. Their bulk-resolve exclusions are listed below.
+    if (NOT_A_VERDICT_MESSAGES[item.reason_code]) {
+      return res.status(400).json({ error: NOT_A_VERDICT_MESSAGES[item.reason_code] });
     }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
@@ -2114,6 +2468,12 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
+          'family_account_candidates',
+          // …and a no-text line card (text_number_differs): settled by its own Resolve/Dismiss only.
+          'text_number_differs',
+          // …and a name-spelling check, settled by its own Resolve / Dismiss.
+          'name_spelling_differs',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
@@ -2339,6 +2699,48 @@ router.post('/:id/verdict', async (req, res) => {
   }
 });
 
+// GET /api/admin/triage/held-lines → every line whose texts are held because the caller said it cannot
+// get texts (#6112 follow-up). The inbox tabs show only the newest 100 closed cards, but the number-wide
+// hold outlives its card, so this list reads the hold rows themselves. A no-text hold is a hold row with a
+// text_number_differs card bound to it for that line and that arming (NO_TEXT_CARD_FOR_HOLD_SQL, also used by
+// clearNoTextHoldsForPhone); the newest bound card is the one the "Line can get texts" button resolves.
+// ONE row per line (the newest hold on it), with calls_on_line and line_since, and the 500 cap applies to
+// lines, so one busy line cannot hide the others. blocked_by_ownership_card is the LINE's flag: any active
+// hold on the line whose call has an unresolved "not my number" card (the same predicate as the release check).
+const HELD_LINES_SQL = `
+  SELECT * FROM (
+    SELECT DISTINCT ON (h.phone_e164)
+           h.id AS hold_id, h.phone_e164, h.held_at, h.source_call_log_id,
+           c.created_at AS call_created_at, c.customer_id, cu.first_name, cu.last_name,
+           card.id AS card_id, card.status AS card_status, card.updated_at AS card_updated_at,
+           __BLOCK__ AS blocked_by_ownership_card,
+           (COUNT(*) OVER (PARTITION BY h.phone_e164))::int AS calls_on_line,
+           MIN(h.held_at) OVER (PARTITION BY h.phone_e164) AS line_since
+      FROM disclaimed_number_holds h
+      JOIN LATERAL (SELECT t.id, t.status, t.updated_at FROM triage_items t
+                     WHERE __CARD__
+                     ORDER BY t.created_at DESC LIMIT 1) card ON true
+      LEFT JOIN call_log c ON c.id = h.source_call_log_id
+      LEFT JOIN customers cu ON cu.id = c.customer_id
+     WHERE h.cleared_at IS NULL
+     ORDER BY h.phone_e164, h.held_at DESC) lines
+   ORDER BY held_at DESC
+   LIMIT 500`;
+
+// Admin only: it lists up to 500 held numbers with names and has no assignment scope (the triage UI is admin-only).
+router.get('/held-lines', requireAdmin, async (_req, res) => {
+  try {
+    const { NO_TEXT_CARD_FOR_HOLD_SQL, lineOwnershipBlockSql } = require('../services/disclaimed-number-holds');
+    const result = await db.raw(HELD_LINES_SQL
+      .replace('__CARD__', () => NO_TEXT_CARD_FOR_HOLD_SQL)
+      .replace('__BLOCK__', () => lineOwnershipBlockSql('h.phone_e164')));
+    res.json({ lines: result?.rows || [] });
+  } catch (err) {
+    logger.error(`[admin-triage] held-lines list failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load held lines' });
+  }
+});
+
 // GET /api/admin/triage/auto-routed?limit=  → calls the gate AUTO-routed (these
 // never create triage_items), with any existing verdict, so a bad auto-book can
 // be caught and denied.
@@ -2443,4 +2845,5 @@ module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
-  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };
+  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL,
+  stampSaveContactNote };

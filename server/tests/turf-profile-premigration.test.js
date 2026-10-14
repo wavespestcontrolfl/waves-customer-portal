@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
   const db = table => ({ where: () => ({ first: async () => ({ id: 'cust-1' }) }) });
   return db;
 });
-jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (r, s, n) => n(), requireTechOrAdmin: (r, s, n) => n() }));
+jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (r, s, n) => n(), requireTechOrAdmin: (r, s, n) => n(), requireAdmin: (r, s, n) => n() }));
 jest.mock('../services/technician-visit-scope', () => ({ technicianServicesCustomer: async () => true }));
 jest.mock('../services/customer-pricing-ai', () => ({ withTurfProfileFence: async (_db, _id, fn) => fn(mockTrx) }));
 jest.mock('../services/irrigation-schedule-confirmation', () => ({ COUNTY_CONFIRMED_FIELD: 'county', confirmIrrigationFields: jest.fn() }));

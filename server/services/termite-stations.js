@@ -323,6 +323,18 @@ async function stationCapWouldOverflow(db, customerId, entries = [], program = '
  *          stationIdByIndex maps payload index → station id (created or
  *          existing) so check rows can be written for new stations too.
  */
+// THE station roster lock, one key formula: a transaction-level advisory lock per
+// (customer, program), released at the end of the caller's transaction. Every
+// write that changes which stations a property has (create, move, retire) takes
+// it, and so does a completion that asserts the roster. LOCK ORDER: it is always
+// the LAST lock taken. The office save and the post-commit sync take it first in
+// their own transaction and then only read `customers` and write station rows,
+// with no customer or visit row lock after it; the completion takes customer,
+// then visit, then this. So no cycle.
+function lockStationRoster(trx, customerId, program) {
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}:${normalizeProgram(program)}`]);
+}
+
 async function upsertStationsForCustomer(trx, { customerId, entries = [], program = 'termite' } = {}) {
   const summary = {
     created: 0, moved: 0, retired: 0, deduped: 0, skipped: [], stationIdByIndex: new Map(),
@@ -339,11 +351,11 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [], progra
   // write (creates AND moves); it releases at transaction end, so this
   // function MUST run inside a transaction (both callers do). Status-only
   // payloads skip the lock.
-  const hasGeometryWrites = entries.some((entry) => entry && entry.retire !== true
-    && entry.shape != null);
-  if (hasGeometryWrites) {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}:${stationProgram}`]);
-  }
+  // A RETIRE changes the roster too, so it takes the same lock: a Fast Complete
+  // station sheet completion holds it from its roster check to its commit
+  // (visit-station-facts.js), and a retire must not land in between.
+  const changesRoster = entries.some((entry) => entry && (entry.retire === true || entry.shape != null));
+  if (changesRoster) await lockStationRoster(trx, customerId, stationProgram);
 
   // Who owns stations created in THIS write (owner 2026-07-26).
   //
@@ -1085,6 +1097,7 @@ module.exports = {
   rodentConsumptionConflict,
   trapCaptureConflict,
   stationCapWouldOverflow,
+  lockStationRoster,
   upsertStationsForCustomer,
   syncStationsForCompletion,
   loadStationsForPropertyMap,

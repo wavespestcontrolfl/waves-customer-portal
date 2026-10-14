@@ -479,31 +479,53 @@ const numOrNull = (v) => (v === null || v === undefined ? null : Number(v));
  * permit is not a building. Must stay cheap and fail-open (callers swallow
  * throws).
  */
-async function findPermitBuildingFacts({ parcelPin, looseKey } = {}) {
+// Address-tier candidates read per call when the caller supplies a street
+// check: newest first, the first whose job address passes wins. Small —
+// a loose key names one house number on one ZIP; more than a handful of
+// new-dwelling permits there is a collision class, not a street.
+const ADDRESS_TIER_CANDIDATES = 10;
+
+async function findPermitBuildingFacts({ parcelPin, looseKey, addressMatches = null } = {}) {
   const tiers = [
     parcelPin ? ['parcel_pin', String(parcelPin)] : null,
     looseKey ? ['address_loose_key', looseKey] : null,
   ].filter(Boolean);
   let row = null;
   for (const [col, val] of tiers) {
+    const addressTier = col !== 'parcel_pin';
     const query = db('construction_permit_records')
       .where(col, val)
       .where('detail_status', 'ok')
       .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
       .orderByRaw('issued_date DESC NULLS LAST')
-      .orderBy('detail_fetched_at', 'desc')
-      .first();
-    if (col !== 'parcel_pin' && parcelPin) {
+      .orderBy('detail_fetched_at', 'desc');
+    if (addressTier && parcelPin) {
       query.where((b) => b.whereNull('parcel_pin')
         .orWhere('parcel_pin', String(parcelPin))
         .orWhereRaw("parcel_pin !~ '^[0-9]{10}$'"));
     }
-    row = await query;
-    if (row) break;
+    if (addressTier && typeof addressMatches === 'function') {
+      // The loose key (house number + first street word + ZIP) is shared by
+      // "100 Oak St" and "100 Oak Ln": the caller's full-street check picks
+      // the candidate, so a newer permit on the other street never hides
+      // this address's own older one. A parcel-tier hit is the parcel's own
+      // permit and needs no street check.
+      const rows = await query.limit(ADDRESS_TIER_CANDIDATES);
+      row = (Array.isArray(rows) ? rows : []).find((r) => addressMatches(r.address_raw || null)) || null;
+    } else {
+      row = await query.first();
+    }
+    if (row) { row._matchedBy = addressTier ? 'address' : 'parcel'; break; }
   }
   if (!row) return null;
   return {
     source: 'manatee_permit_detail',
+    // Which tier matched, and the permit's own one-line job address, so a
+    // reader can hold an ADDRESS-tier hit to a full street-name check (the
+    // loose key is house number + first street word + ZIP, which two
+    // streets can share).
+    matchedBy: row._matchedBy,
+    addressRaw: row.address_raw || null,
     permitNo: row.permit_no,
     typeOfWork: row.type_of_work || null,
     issuedAt: toIso(row.issued_date),

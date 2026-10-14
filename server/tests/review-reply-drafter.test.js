@@ -98,7 +98,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, thank you for choosing Waves Lawn and Pest for your home. Marcus got the ants.'))).toBe('legacy_brand');
     expect(verify(good('Hi Dana, thank you for choosing Waves Lawn for your home. Marcus got the ants.'))).toBe('legacy_brand');
     expect(verify(good('Hi Dana, thank you for choosing Waves Pest Control for your home. Marcus got the ants.'))).toBe(null);
-    expect(verify(good('Hi Dana, thank you for your kind words about Marcus and the ants.'))).toBe('stock_phrase');
+    expect(verify(good('Hi Dana, it means the world that Marcus got the ants out of your kitchen.'))).toBe('stock_phrase');
   });
   test('never a link, email, phone, money, or street address', () => {
     expect(verify(good('Hi Dana, see wavespestcontrol.com/ants for more on what Marcus did.'))).toBe('url');
@@ -581,6 +581,55 @@ describe('verifyReplyText — public-surface safety net', () => {
     // The old fixed "pest and lawn team" line can never post again (2026-09-24
     // fix): it is now a banned stock phrase, not a passing no_text reply.
     expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBe('stock_phrase');
+    // Owner 2026-10-03: "kind" and "kind words" are fine. A 5-star review
+    // parked after two drafts failed on that one word.
+    expect(verify(good('Hello there, that is kind of you. Thanks for the rating.'), g)).toBeNull();
+    expect(verify(good('Hello there, thanks for the kind words and the rating.'), g)).toBeNull();
+    // "kind" about staff still needs the reviewer's words (codex #5788 r1),
+    // and a review that negates it is never contradicted.
+    expect(verify(good("Hello there, we're glad our technician was kind. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+    const notKind = grounding({ text: 'The technician was not kind, but the ants are gone.', rating: 4, mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hi Dana, we're glad our technician was kind and the ants are gone."), notKind)).toBe('negated_review_claim');
+    expect(verify(good('Hi Dana, that is kind of you. We are glad the ants are gone.'), notKind)).toBeNull();
+    expect(verify(good('Hi Dana, our technician was kind enough to help and the ants are gone.'), notKind)).toBe('negated_review_claim');
+    // Only reviewer-directed thank-you shapes pass (codex #5788 r2): staff
+    // "kind words / note / message" would invent an interaction.
+    for (const line of ['our team had kind words for you', 'our team wrote a kind note', 'the team sent a kind message']) {
+      expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
+    }
+    // A negated shape is not a thank-you (codex #5788 r3).
+    for (const line of ['that was not kind of you', "we don't think that was kind of you", 'we never got your kind words']) {
+      expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
+    }
+    for (const line of ['thank you for your kind review', 'thank you so much for the kind words', 'we appreciate your kind words', 'we appreciate the kind words and your rating', 'we are grateful for the kind words']) {
+      expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
+    }
+    // The allowlist needs an acknowledgment lead-in: adverse or counterfactual
+    // copy is refused, and the two affirmative idioms pass (codex #5788 r5).
+    for (const line of ['your kind words were unwanted', 'we regret your kind comments', 'it would have been kind of you to leave a comment', "we don't appreciate the kind words"]) {
+      expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
+    }
+    for (const line of ["we can't thank you enough for the kind words and rating", "we couldn't be more grateful for the kind words and rating"]) {
+      expect(verify(good(`Hello there, ${line}.`), g)).toBeNull();
+    }
+    // codex #5788 r6: the idiom vouches only inside its own clause, plain
+    // modifiers are allowed, and every staff "kind <noun>" needs the phrase.
+    expect(verify(good("Hello there, we can't thank you enough. We don't appreciate your kind words."), g)).toBe('unlisted_experience_claim');
+    for (const line of ['thank you for the very kind words', 'we appreciate your truly kind words']) {
+      expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
+    }
+    // The whole phrase in the review sources a staff-directed "kind words".
+    const kindWords = grounding({ text: 'Marcus had kind words for our family and was very helpful.', topics: [], account: null });
+    expect(verify(good('Hi Dana, we are glad Marcus had kind words for your family and was helpful.'), kindWords)).toBeNull();
+    // A referral or recommendation is a separate act, not the review (codex #5788 r4).
+    expect(verify(good('Hello there, thank you for your kind referral. We are glad to help.'), g)).toBe('unlisted_experience_claim');
+    // Staff "kind words" is refused even when the review itself says "kind" (codex #5788 r4).
+    const saidKind = grounding({ text: 'Marcus was kind and the ants are gone.', topics: [], account: null });
+    expect(verify(good('Hi Dana, Marcus had kind words for you and the ants are gone.'), saidKind)).toBe('unlisted_experience_claim');
+    expect(verify(good('Hi Dana, we are glad Marcus was kind and the ants are gone.'), saidKind)).toBeNull();
+    for (const line of ['Marcus wrote a kind note for you', 'Marcus sent a kind message to you']) {
+      expect(verify(good(`Hi Dana, ${line} and the ants are gone.`), saidKind)).toBe('unlisted_experience_claim');
+    }
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
@@ -1061,9 +1110,9 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(prompts.some((p) => p.includes('give Jane and Marcus five stars'))).toBe(true);
     // A fixed-vocabulary span is stored as-is.
     mockDispatch.mockReset();
-    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana,\n\nGlad Marcus got the ants. Thanks for the kind words.') });
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana,\n\nGlad Marcus got the ants. That made our day.') });
     const r5 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
-    expect(r5.rejectionDetails[0]).toEqual({ attempt: 1, code: 'stock_phrase', span: 'kind words' });
+    expect(r5.rejectionDetails[0]).toEqual({ attempt: 1, code: 'stock_phrase', span: 'made our day' });
   });
   test('the first prompt names the reviewer phrases the reply may not echo, and the relationship rule', () => {
     const g = grounding({ text: 'If you want to be bug free call Marcus, absolutely the best pest control around.', account: null });

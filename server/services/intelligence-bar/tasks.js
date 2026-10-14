@@ -24,11 +24,14 @@ function withoutImages(messages) {
     : message.content }));
 }
 
-async function begin({ actorId, sessionId, requestKey, request, pageContext }) {
+// identityRequest: what the request key is matched against, when it differs
+// from the stored request (the idle-thread rollover stores the rolled-over
+// request but a retry still sends the original). Defaults to `request`.
+async function begin({ actorId, sessionId, requestKey, request, identityRequest = request, pageContext }) {
   if (!actorId || !UUID_RE.test(sessionId || '') || !REQUEST_KEY_RE.test(requestKey || '')) {
     return { error: 'A valid session and request key are required', code: 'invalid_request_identity' };
   }
-  const hash = requestHash(request);
+  const hash = requestHash(identityRequest);
   // Images remain ephemeral, as in threads. Their hash still participates in
   // request identity so swapping an attachment cannot replay an old response.
   const { images, ...persistedRequest } = request;
@@ -73,8 +76,14 @@ async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
     : { error: 'This task is already running', code: 'already_running' };
 }
 
+// Outcomes a task can continue past. An expired step never ran and is not an
+// unresolved outcome: continuing proposes it again inside the task (Codex
+// #6111 r3), and nothing commits. One list for the continue check, the
+// exposed state and the saved-task list, so they cannot disagree.
+const CONTINUABLE_OUTCOMES = ['completed', 'provider_accepted', 'expired'];
+
 function continuationError(task, receipts, { selectedTarget } = {}) {
-  if (receipts.some(r => !['completed', 'provider_accepted'].includes(r.outcome))) {
+  if (receipts.some(r => !CONTINUABLE_OUTCOMES.includes(r.outcome))) {
     return { error: 'Resolve the saved action outcomes before continuing', code: 'steps_unresolved' };
   }
   // Images are never persisted and a checkpoint holds only their text
@@ -85,6 +94,11 @@ function continuationError(task, receipts, { selectedTarget } = {}) {
       || (task.state === 'needs_information' && !selectedTarget)
       || (task.state === 'awaiting_approval' && !receipts.length)) {
     return { error: 'This task has no interrupted step to continue.', code: 'not_resumable' };
+  }
+  // A history with tool-search blocks AND thinking blocks cannot be rewritten for
+  // a resume (a model change between the request and the resume): refuse it.
+  if (require('./tool-search').hasSearchAndThinking(task.checkpoint)) {
+    return { error: 'This saved request cannot be continued after a model change. Start the request again.', code: 'not_resumable' };
   }
   if (task.state === 'running' && new Date(task.lease_expires_at).getTime() >= Date.now()) {
     return { error: 'This task is already running', code: 'already_running' };
@@ -106,7 +120,10 @@ async function snapshot(task, actorId) {
       expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     });
   }
-  return { ...(task.response || {}), taskId: task.id, taskState: exposedTaskState(task, receipts),
+  // A request rolled over to a new conversation (idle thread) replays that first
+  // decision; the key is always present so the /query reply flag does not add its own.
+  return { ...(task.response || {}), threadRolledOver: task.request?.thread_rolled_over ? true : undefined,
+    taskId: task.id, taskState: exposedTaskState(task, receipts),
     taskTarget: task.target?.target || null, pendingActions, receipts,
     canContinue: !continuationError(task, receipts),
     response: task.response?.response || (task.request?.had_images ? ATTACHMENTS_LOST
@@ -123,9 +140,18 @@ function exposedTaskState(task, receipts) {
   const outcomes = new Set(receipts.map(receipt => receipt.outcome));
   if (outcomes.has('awaiting_approval')) return 'awaiting_approval';
   if (outcomes.has('outcome_unknown')) return 'outcome_unknown';
-  if ([...outcomes].every(outcome => ['completed', 'provider_accepted'].includes(outcome))) return 'ready_to_continue';
+  if ([...outcomes].every(outcome => CONTINUABLE_OUTCOMES.includes(outcome))) return 'ready_to_continue';
   if (outcomes.has('completed') || outcomes.has('provider_accepted') || outcomes.has('partially_completed')) return 'partially_completed';
   return outcomes.size === 1 && outcomes.has('canceled') ? 'canceled' : 'failed';
+}
+
+// When the request behind a task started, as epoch milliseconds. A resumed task
+// (/tasks/:id/resume, /tasks/:id/select-target) keeps its ORIGINAL start (the
+// task row's created_at), so a card it proposes late is still ordered as the
+// older request it is; a fresh request starts now.
+function requestStartedAt(resumedTask) {
+  const created = resumedTask?.created_at ? new Date(resumedTask.created_at).getTime() : NaN;
+  return Number.isNaN(created) ? Date.now() : created;
 }
 
 async function get(id, actorId, sessionId) {
@@ -147,7 +173,7 @@ async function list(actorId, sessionId) {
     .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at',
       db.raw("(request->>'had_images')::boolean AS had_images"));
   if (!tasks.length) return tasks;
-  const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
+  const actions = PendingActions.taskSteps(await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id)));
   const recent = new Set(latest);
   return tasks.map(task => {
     const receipts = actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt);
@@ -172,4 +198,4 @@ async function purgeExpiredTasks() {
     .where('lease_expires_at', '<=', db.fn.now()).del();
 }
 
-module.exports = { REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages, purgeExpiredTasks };
+module.exports = { continuationError, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };

@@ -31,7 +31,7 @@ const {
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
-    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
+    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNotExists', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'skipLocked', 'update', 'insert', 'del', 'count', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'limit',
   ];
@@ -545,6 +545,43 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.updated.billing_channel).toBe('email');    // never resume SMS
     expect(state.updated.quiet_hours_start).toBe('22:00');  // fill-if-empty
     expect(state.deleted).toBe(true);
+  });
+
+  describe('property_preferences new-sod record (sod_laid_on, sod_covers, sod_area, sod_rooted_on)', () => {
+    const SOD_COLUMNS = ['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on'];
+    const blank = { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };
+    const whole = { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null, sod_rooted_on: '2026-10-20' };
+    const part = { sod_laid_on: '2026-09-01', sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
+    const prefs = (customer_id, sod, extra = {}) => ({ id: `p-${customer_id}`, customer_id, ...sod, pet_details: null, created_at: 'x', updated_at: 'x', ...extra });
+    const sodKeys = (updated) => Object.keys(updated || {}).filter((k) => SOD_COLUMNS.includes(k));
+
+    it('different homes (and by default): none of the loser\'s record is copied onto a winner that has none', async () => {
+      for (const options of [undefined, { copyNewSod: false }]) {
+        const { trx, state } = stubTrx({ winnerRow: prefs('W', blank), loserRow: prefs('L', whole, { pet_details: 'one dog' }) });
+        await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', options);
+        expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
+        expect(sodKeys(state.updated)).toEqual([]);
+        expect(state.deleted).toBe(true);
+      }
+    });
+
+    it('SAME home: a winner with no date takes the loser\'s whole record together', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', blank), loserRow: prefs('L', part) });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { copyNewSod: true });
+      expect(state.updated).toMatchObject(part);
+    });
+
+    it('SAME home: a winner with a date keeps its own record whole, even where its area is empty and the loser\'s is not', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', whole), loserRow: prefs('L', part) });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { copyNewSod: true });
+      expect(sodKeys(state.updated)).toEqual([]);
+    });
+
+    it('the winner\'s own record stands, whatever the loser holds (the winner\'s home did not move)', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', part), loserRow: prefs('L', whole, { pet_details: 'one dog' }) });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
+      expect(sodKeys(state.updated)).toEqual([]);
+    });
   });
 
   it('notification_prefs: a duplicate\'s payment_receipt=false never carries onto the kept profile', async () => {
@@ -1183,9 +1220,18 @@ describe('executeMerge', () => {
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
     const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'invoices', column_name: 'customer_id' }] });
     db.transaction.mockImplementation(async (fn) => fn(trx));
-    trx.transaction = jest.fn(async () => { const e = new Error('boom'); e.code = '23505'; throw e; });
-    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
-      .rejects.toThrow(/repoint failed on invoices/);
+    // The first savepoint is the loser's pin-suggestion retire (stubbed to succeed); every later one is the FK sweep's.
+    const pins = jest.spyOn(require('../services/customer-pin-suggestions'), 'retireOnMerge').mockResolvedValue(0);
+    let savepoints = 0;
+    trx.transaction = jest.fn(async (fn) => {
+      savepoints += 1;
+      if (savepoints === 1) return fn(trx);
+      const e = new Error('boom'); e.code = '23505'; throw e;
+    });
+    try {
+      await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+        .rejects.toThrow(/repoint failed on invoices/);
+    } finally { pins.mockRestore(); }
   });
 
   it('refuses identical or missing ids', async () => {
@@ -1531,6 +1577,77 @@ describe('executeMerge', () => {
     expect(moved.result.repointed['property_preferences.irrigation_home_changed_at']).toBe(1);
     const same = await run({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
     expect(same.stamps).toEqual([]);
+  });
+
+  // The loser's whole preferences row moves to a winner that has none (a plain, row-level-journaled
+  // repoint). Its new-sod record describes the LOSER's home: cleared (all four columns) when the homes
+  // differ, with the original journaled for the undo (customer-dedupe-undo.test.js restores it); kept
+  // for the same home.
+  describe('the new-sod record on a preferences row that moves whole to a winner with none', () => {
+    const MOVED_ROW = { id: 'pp-1', sod_laid_on: new Date('2026-10-01T00:00:00Z'), sod_covers: 'part', sod_area: 'back lawn by the pool cage', sod_rooted_on: null };
+    async function merge(loserAddr, { hasRecord = true, winnerAddr = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' } } = {}) {
+      const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', ...winnerAddr };
+      const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', ...loserAddr };
+      const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'property_preferences', column_name: 'customer_id' }] });
+      const base = trx.getMockImplementation();
+      const prefUpdates = [];
+      trx.mockImplementation((table) => (table !== 'property_preferences' ? base(table) : makeChain(table, (q) => {
+        if (q.called('first')) return hasRecord ? MOVED_ROW : { id: 'pp-1', sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };
+        if (q.called('select')) return [{ id: 'pp-1' }];
+        if (q.called('update')) { prefUpdates.push([q.args('where')[0], q.args('update')[0]]); return 1; }
+        return [];
+      })));
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      return { prefUpdates, result, recorded: JSON.parse(state.journal.repointed_ids) };
+    }
+    const touchesSod = (prefUpdates) => prefUpdates.some(([, payload]) => 'sod_laid_on' in payload);
+
+    it('different homes: the moved row\'s whole record is cleared on the winner and the original is journaled for the undo', async () => {
+      const { prefUpdates, result, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' });
+      expect(recorded.tables['property_preferences.customer_id']).toEqual(['pp-1']);
+      expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null }]);
+      expect(recorded.moved_pref_new_sod).toEqual({
+        row_id: 'pp-1',
+        before: { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn by the pool cage', sod_rooted_on: null },
+      });
+      expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
+      // The stamp itself never clears the record (it has no before-image of its own).
+      const stamp = prefUpdates.find(([, payload]) => payload.irrigation_home_changed_at);
+      expect(stamp[1]).not.toHaveProperty('sod_laid_on');
+    });
+
+    it('same home: the record stays on the moved row and nothing is journaled', async () => {
+      const { prefUpdates, recorded } = await merge({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
+      expect(touchesSod(prefUpdates)).toBe(false);
+      expect(recorded.moved_pref_new_sod).toBe(null);
+    });
+
+    it('the loser has NO address (unknown home): the record is not carried to the winner\'s addressed home; cleared and journaled', async () => {
+      const { prefUpdates, result, recorded } = await merge({ address_line1: null, city: null, zip: null });
+      expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null }]);
+      expect(recorded.moved_pref_new_sod.before.sod_laid_on).toBe('2026-10-01');
+      expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
+    });
+
+    it('an addressless winner shell inherits the loser\'s home: the record stays on the moved row and nothing is journaled', async () => {
+      const { prefUpdates, recorded } = await merge(
+        { address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' },
+        { winnerAddr: { address_line1: null, city: null, zip: null } },
+      );
+      expect(touchesSod(prefUpdates)).toBe(false);
+      expect(recorded.moved_pref_new_sod).toBe(null);
+    });
+
+    it('different homes but the moved row carries no record: nothing to clear, the empty record is still journaled for the undo guard', async () => {
+      const { prefUpdates, recorded, result } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { hasRecord: false });
+      expect(touchesSod(prefUpdates)).toBe(false);
+      expect(recorded.moved_pref_new_sod).toEqual({
+        row_id: 'pp-1',
+        before: { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null },
+      });
+      expect(result.repointed['property_preferences.new_sod_cleared']).toBeUndefined();
+    });
   });
 
   it('an addressless surviving shell inherits the loser\'s home — no move stamp (codex gh-r25)', async () => {
@@ -3772,3 +3889,115 @@ describe('merge carries the per-phone consent boundary (service_preferences)', (
   });
 });
 
+
+
+// ---------------------------------------------------------------------------
+// duplicateWinnerFor — the retained record from ONE queue build
+// ---------------------------------------------------------------------------
+describe('duplicateWinnerFor', () => {
+  const winner = {
+    id: 'dddddddd-0000-0000-0000-000000000001',
+    first_name: 'Synthetic', last_name: 'Winner', phone: '+15550100123',
+    address_line1: '100 Test Street', zip: '34207',
+    stripe_customer_id: 'cus_winner', pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shell = { id: 'dddddddd-0000-0000-0000-000000000002', first_name: 'Synthetic', last_name: null, phone: '5550100123', address_line1: null, zip: null, pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+  const addressConflict = { id: 'dddddddd-0000-0000-0000-000000000003', first_name: 'Synthetic', last_name: null, phone: '5550100123', address_line1: '999 Different St', zip: '34211', pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+  const stranger = { id: 'dddddddd-0000-0000-0000-000000000004', first_name: 'Other', last_name: 'Person', phone: '+15550100123', address_line1: '200 Different Test Street', zip: '34211', pipeline_stage: 'active_customer', created_at: '2026-07-01' };
+
+  const route = ({ customers = [], dismissals = [] }) => (table) => {
+    if (table === 'customers') return customers;
+    if (table === 'customer_duplicate_dismissals') return dismissals;
+    return [];
+  };
+
+  it('names the queue winner and the eligible verdict from a single queue scan', async () => {
+    const seen = [];
+    const inner = route({ customers: [winner, shell] });
+    installDb((table, q) => { seen.push(table); return inner(table, q); });
+    const result = await dedupe.duplicateWinnerFor(shell.id);
+    expect(result).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+    // ONE read of the customers table, however many records share the phone.
+    expect(seen.filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('one scan with several records on the phone still names the one winner', async () => {
+    const extra = Array.from({ length: 6 }, (_, i) => ({ ...shell, id: `dddddddd-0000-0000-0000-0000000001${i}0` }));
+    const seen = [];
+    const inner = route({ customers: [winner, shell, ...extra] });
+    installDb((table, q) => { seen.push(table); return inner(table, q); });
+    const result = await dedupe.duplicateWinnerFor(shell.id);
+    expect(result).toMatchObject({ winnerId: winner.id, eligible: true });
+    expect(seen.filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('reads a refused candidate the way duplicatePairEligibility does (address conflict, red pair) and still names its winner', async () => {
+    installDb(route({ customers: [winner, addressConflict] }));
+    expect(await dedupe.duplicateWinnerFor(addressConflict.id)).toMatchObject({ winnerId: winner.id, eligible: false, code: 'address_conflict' });
+    installDb(route({ customers: [winner, stranger] }));
+    expect(await dedupe.duplicateWinnerFor(stranger.id)).toMatchObject({ winnerId: winner.id, eligible: false, code: 'red_pair' });
+  });
+
+  it('a record the queue keeps (the winner itself) or does not list gets no winner', async () => {
+    installDb(route({ customers: [winner, shell] }));
+    expect(await dedupe.duplicateWinnerFor(winner.id)).toMatchObject({ winnerId: null, eligible: false, code: 'not_in_queue' });
+    expect(await dedupe.duplicateWinnerFor('dddddddd-0000-0000-0000-000000000099')).toMatchObject({ winnerId: null, code: 'not_in_queue' });
+  });
+
+  it('a dismissed pair is not listed; unreadable dismissals fail CLOSED', async () => {
+    installDb(route({ customers: [winner, shell], dismissals: [{ customer_id_a: winner.id, customer_id_b: shell.id, reason: 'not_duplicates' }] }));
+    expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'not_in_queue' });
+    const inner = route({ customers: [winner, shell] });
+    installDb((table, q) => { if (table === 'customer_duplicate_dismissals') throw new Error('relation unreadable'); return inner(table, q); });
+    expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'dismissals_unreadable' });
+  });
+
+  describe('requireSameIdentity (the delete tool): a possible match is not a confirmed duplicate', () => {
+    const nameConflict = { id: 'dddddddd-0000-0000-0000-000000000005', first_name: 'Other', last_name: 'Winner', phone: '5550100123', address_line1: null, zip: null, pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+    const POSSIBLE = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+
+    it('refuses a yellow name-conflict candidate, while the default read (merge_customers) still accepts it', async () => {
+      installDb(route({ customers: [winner, nameConflict] }));
+      const strict = await dedupe.duplicateWinnerFor(nameConflict.id, undefined, { requireSameIdentity: true });
+      expect(strict).toMatchObject({ winnerId: winner.id, eligible: false, code: 'possible_match_only', reason: POSSIBLE });
+      expect(strict.candidate.reasons).toContain('name_conflict');
+      expect(await dedupe.duplicateWinnerFor(nameConflict.id)).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+      expect(await dedupe.duplicatePairEligibility(winner.id, nameConflict.id)).toMatchObject({ eligible: true });
+    });
+
+    it('refuses a candidate demoted by group_has_identity_conflict (a second identity on the same line)', async () => {
+      installDb(route({ customers: [winner, shell, nameConflict] }));
+      const strict = await dedupe.duplicateWinnerFor(shell.id, undefined, { requireSameIdentity: true });
+      expect(strict.candidate.reasons).toContain('group_has_identity_conflict');
+      expect(strict).toMatchObject({ eligible: false, code: 'possible_match_only', reason: POSSIBLE });
+      expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ eligible: true });
+    });
+
+    it('accepts a green same-identity candidate', async () => {
+      installDb(route({ customers: [winner, shell] }));
+      const strict = await dedupe.duplicateWinnerFor(shell.id, undefined, { requireSameIdentity: true });
+      expect(strict).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+      expect(strict.candidate.tier).toBe('green');
+    });
+
+    it('keeps the address and red refusals ahead of it', async () => {
+      installDb(route({ customers: [winner, addressConflict] }));
+      expect(await dedupe.duplicateWinnerFor(addressConflict.id, undefined, { requireSameIdentity: true })).toMatchObject({ code: 'address_conflict' });
+      installDb(route({ customers: [winner, stranger] }));
+      expect(await dedupe.duplicateWinnerFor(stranger.id, undefined, { requireSameIdentity: true })).toMatchObject({ code: 'red_pair' });
+    });
+  });
+
+  it('agrees with duplicatePairEligibility on the same fixtures', async () => {
+    installDb(route({ customers: [winner, shell] }));
+    const single = await dedupe.duplicatePairEligibility(winner.id, shell.id);
+    const once = await dedupe.duplicateWinnerFor(shell.id);
+    expect({ eligible: once.eligible, code: once.code, reason: once.reason }).toEqual({ eligible: single.eligible, code: single.code, reason: single.reason });
+  });
+
+  it('decideWinner is gone from the engine (it had no caller once the tool stopped scanning)', () => {
+    expect(dedupe.decideWinner).toBeUndefined();
+    expect(dedupe.loserAutoBlockers).toEqual(expect.any(Function));
+    expect(dedupe.REPOINT_EXCLUDED_TABLES).toBeInstanceOf(Set);
+  });
+});

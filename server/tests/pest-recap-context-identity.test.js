@@ -8,7 +8,7 @@ jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn().mockResolvedValue({ category: 'pest_control' }),
 }));
 
-const { buildRecapContext } = require('../services/pest-recap');
+const { buildRecapContext, traceOnReportForVisit } = require('../services/pest-recap');
 
 function contextDb(visit, { linkedProject = null, projectReadFails = false, projectLinkColumns = [] } = {}) {
   return jest.fn((table) => {
@@ -296,6 +296,26 @@ describe('the typed form the Fast Complete sheet reads (GATE_TYPED_VOICE_FILL)',
       const db = contextDb(visit);
       await buildRecapContext(visit.id, db);
       expect(db).not.toHaveBeenCalledWith('projects');
+    });
+
+    // A plain pest visit reads no lane and no typed form, so the context
+    // says outright whether the report flow is live.
+    test.each([['true', true], [undefined, false], ['', false], ['false', false], ['1', false], ['TRUE', false]])('report-flow gate %p: a plain pest visit is told reportFlow %p', async (value, live) => {
+      if (value === undefined) delete process.env.GATE_FAST_COMPLETE_REPORT; else process.env.GATE_FAST_COMPLETE_REPORT = value;
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'pest_control', serviceKey: 'pest_general_quarterly' });
+      expect(await buildRecapContext(visit.id, contextDb(visit))).toMatchObject({ eligible: true, reportFlow: live });
+    });
+
+    // The completion re-judges a hidden trace under the visit lock with this
+    // helper. It must read the lane as the context does (awaited, on the
+    // handle it was given): with trace eligibility off, the lane alone decides.
+    test('the completion\'s trace verdict reads the lane on the handle it was given', async () => {
+      delete process.env.GATE_TRACE_ELIGIBILITY;
+      const fireAnt = { ...visit, service_type: 'Fire Ant Treatment' };
+      const bedBugDb = contextDb(bedBug);
+      expect(await traceOnReportForVisit(bedBug, BED_BUG, bedBugDb)).toBe(false);
+      expect(bedBugDb).toHaveBeenCalledWith('projects');
+      expect(await traceOnReportForVisit(fireAnt, { category: 'specialty', serviceKey: 'fire_ant' }, contextDb(fireAnt))).toBe(true);
     });
   });
 

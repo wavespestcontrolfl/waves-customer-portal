@@ -43,6 +43,8 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
+  // The checkbox is controlled: read its new value before the request, not after.
+  const setRequired = required => act(async () => { await request(`/${document.id}/onboarding-required`, { required }); onSaved(required ? 'Required at onboarding.' : 'No longer required at onboarding.'); });
   async function download(ack = null) {
     const query = new URLSearchParams({ version: version.id });
     if (ack) query.set('acknowledgment', ack.id);
@@ -61,7 +63,8 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     {version.content_hash && <details><summary style={{ cursor: 'pointer', padding: '10px 0' }}>Version identity</summary><p style={{ overflowWrap: 'anywhere', fontSize: 14 }}>SHA-256: {version.content_hash}</p><p>Version ID: {version.id}</p></details>}
     {rendered.unresolved.length > 0 && <div style={{ padding: 16, background: D.bg, borderRadius: 6 }}><strong>Decisions needed before issuance</strong><ul>{rendered.unresolved.map(value => <li key={value} style={{ overflowWrap: 'anywhere', marginTop: 6 }}>{value}</li>)}</ul></div>}
     {error && <p role="alert">{error}</p>}
-    {manage && <div style={{ ...row, margin: '18px 0' }}><button style={buttonStyle} disabled={busy} onClick={onEdit}>Create revision</button></div>}
+    {manage && <div style={{ ...row, margin: '18px 0' }}><button style={buttonStyle} disabled={busy} onClick={onEdit}>Create revision</button>
+      <label style={row}><input type="checkbox" disabled={busy} checked={document.onboarding_required === true} onChange={e => setRequired(e.target.checked)} />Required at onboarding</label></div>}
     {needsPreview && <p role="status">{previewError || (previewReady ? 'Wording for the selected effective date is shown below.' : 'Loading wording for the selected effective date…')}</p>}
     <nav aria-label="Document clauses" style={{ ...row, margin: '20px 0' }}>{rendered.sections.map(section => <a key={section.id} href={`#${section.id}`} style={{ color: D.text, textDecoration: 'underline', padding: '6px 0' }}>{section.number}. {section.title}</a>)}</nav>
     {rendered.sections.map(section => {

@@ -360,4 +360,42 @@ describe('completion route wires dues-collected coverage', () => {
     expect(coverageAt).toBeGreaterThan(lookupAt);
     expect(freezeAt).toBeGreaterThan(coverageAt);
   });
+
+  // B08: dues are owed once per month. The lookup must not count the visit's
+  // own invoice, and the mint must stamp the visit's month on a dues invoice
+  // (the only durable marker monthlyDuesCollected can read).
+  test('the lookup excludes the visit itself and the dues mint stamps the visit month', () => {
+    expect(source).toMatch(/new Date\(`\$\{serviceDateOnly\(svc\.scheduled_date\)\}T12:00:00Z`\),\s*\n\s*\{ excludeScheduledServiceId: svc\.id \},/);
+    expect(source).toMatch(/\? serviceDateOnly\(svc\.scheduled_date\)\.slice\(0, 7\)/);
+    expect(source).toMatch(/if \(membershipDuesMonth\) mintOptions\.membershipDuesMonth = membershipDuesMonth;/);
+  });
+
+  // B08 race: a dues month covered while the mint waited on the per
+  // customer-month lock is the SAME outcome as dues covered before the mint —
+  // not the manual-billing bell, not a release-for-resume.
+  test('MEMBERSHIP_DUES_COVERED under the dues lock takes the covered path, never the failure bell', () => {
+    expect(source).toMatch(/const duesCoveredUnderLock = invErr\?\.code === 'MEMBERSHIP_DUES_COVERED' && !invoice\?\.id;/);
+    expect(source).toMatch(/if \(duesCoveredUnderLock\) \{\s*\n\s*membershipDuesCoveredAtMint = true;[\s\S]{0,400}\} else if \(!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice\?\.id\) \{/);
+    expect(source).toMatch(/\} else if \(!duesCoveredUnderLock\) \{\s*\n\s*logger\.error\(`\[dispatch\] Auto-invoice failed \(non-blocking\)/);
+    // An unreadable month under the lock is a retryable release, never a mint or a quiet finalize.
+    expect(source).toMatch(/invErr\?\.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' \|\| invErr\?\.code === 'SCHEDULED_BILLING_SOURCE_MOVED'\) && !invoice\?\.id\) \{[\s\S]{0,900}releaseCompletionAttemptForResume\(completionAttempt, invErr\)[\s\S]{0,900}code: 'membership_dues_coverage_unverified'/);
+    // A covered-skip verdict is confirmed under the dues-month lock before it is trusted.
+    expect(source).toMatch(/if \(duesCollectedThisMonth && !db\.isTransaction\) \{[\s\S]{0,400}acquireMembershipDuesMonthLock\(trx, svc\.customer_id, dueMonth\)/);
+    // The authoritative confirmation is inside the completion transaction, under a
+    // transaction-scoped TRY lock, before the status flip; packets are not exempt.
+    expect(source).toMatch(/if \(duesCollectedThisMonth && autopayCoversVisit\) \{[\s\S]{0,500}tryAcquireMembershipDuesMonthLock\(trx, svc\.customer_id, dueMonth\)[\s\S]{0,900}MEMBERSHIP_DUES_COVERAGE_CHANGED[\s\S]{0,700}await transitionJobStatus\(\{\s*\n\s*jobId: svc\.id,/);
+    // Covered is not settled: the paid completion template needs SETTLED dues coverage
+    // (a collected payment or a paid / prepaid / processing stamped invoice), not an open one.
+    expect(source).toMatch(/openInvoiceCovers: false/);
+    expect(source).toMatch(/const duesCoverageClaimsPaid = \(autopayCoversVisit \|\| membershipDuesCoveredAtMint\)\s*\n\s*&& \(customerAutopayActive \|\| await duesCoverageIsSettled\(\)\);/);
+    expect(source).toMatch(/\|\| duesCoverageClaimsPaid\s*\n\s*\|\| \['paid', 'prepaid'\]\.includes/);
+    // Dues provenance never hinges on a FROZEN amount still equalling today's rate: a required
+    // resume with a frozen amount always asks for the stamp (the stamp helper's locked validation
+    // refuses a stale figure retryably); every other mint keeps the live amount-equals-rate check.
+    expect(source).toMatch(/&& \(\(backfillReviewMintRequired && backfillFrozenMintAmount != null\)\s*\n\s*\|\| Math\.round\(Number\(mintInvoiceAmount\) \* 100\) === Math\.round\(Number\(svc\.cust_monthly_rate\) \* 100\)\)\s*\n\s*\? serviceDateOnly\(svc\.scheduled_date\)\.slice\(0, 7\)/);
+    // ...and the stale refusal refreshes the frozen amount so the resume bills the current rate.
+    expect(source).toMatch(/invErr\?\.reason === 'dues_amount_stale'[\s\S]{0,900}backfillMintAmountCents: invErr\.currentMonthlyRateCents/);
+    // The covered visit reads like one covered before the mint at every later reader.
+    expect((source.match(/membershipDuesCoveredAtMint/g) || []).length).toBeGreaterThanOrEqual(5);
+  });
 });

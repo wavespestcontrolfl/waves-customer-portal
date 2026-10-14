@@ -219,11 +219,10 @@ suite('existing-customer estimates from another workspace', () => {
     expect(saved.token).toBe(before.token);
   }, 90000);
 
-  test('a cadence revision preserves the naming audit and customer-facing service name on the same live link', async () => {
+  test('a cadence revision of an unsent draft preserves the naming audit and customer-facing service name on the same link', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
     const estimateId = created.body.result.estimate_id;
-    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
     const before = await db('estimates').where({ id: estimateId }).first();
     const renamed = await require('../services/intelligence-bar/estimate-tools').executeEstimateTool('set_estimate_presentation', {
       estimate_identifier: estimateId, service: before.estimate_data.engineResult.lineItems[0].service,
@@ -292,9 +291,9 @@ suite('existing-customer estimates from another workspace', () => {
       estimateData: data,
     }, 'PUT');
     expect(native.status).toBe(200);
-    // A sent revision changes the existing link. Prime the real pricing cache
-    // first so the proposed revision must not reuse or overwrite its prices.
-    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: db.fn.now() });
+    // An unsent draft is revisable. Prime the real pricing cache first so the
+    // proposed revision must not reuse or overwrite its prices. (A sent quote
+    // is refused, W8-dev-07: see the next test.)
     const sent = await db('estimates').where({ id: estimateId }).first();
     const publicRoute = require('../routes/estimate-public');
     await publicRoute.buildPricingBundle(sent);
@@ -315,7 +314,75 @@ suite('existing-customer estimates from another workspace', () => {
     for (const frequency of offered) {
       expect(effects).toContain(`Customer option${frequency.visitsPerYear === 12 ? ' (selected)' : ''}: ${frequency.visitsPerYear} applications per year at $${Number(frequency.perTreatment).toFixed(2)} per application`);
     }
-    expect(effects).toContain('Updates the saved estimate and its existing customer link. No message is sent.');
+    expect(effects).toContain('Saves a draft. No customer message, appointment or scheduled send.');
+  }, 60000);
+
+  test.each([
+    ['sent', { status: 'sent', sent_at: new Date() }],
+    ['viewed', { status: 'viewed', sent_at: new Date(), viewed_at: new Date() }],
+    // An expired quote the customer received stays honored even where the
+    // editor's expired-row recovery would allow a revision (Codex r3 on #6023).
+    ['expired-but-delivered', { status: 'expired', sent_at: new Date(Date.now() - 40 * 86400000), expires_at: new Date(Date.now() - 86400000) }],
+  ])('a %s quote is honored: the revision is refused at proposal with estimate_already_sent, no card, no write (W8-dev-07)', async (_label, stamp) => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update(stamp);
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    const refused = await require('../services/intelligence-bar/customer-estimate-tools')
+      .executeCustomerEstimateTool('save_customer_estimate', {
+        customer_id: fixture.customer.id, property_id: fixture.property.id, estimate_id: estimateId, lawn_applications: 12,
+      });
+    expect(refused).toMatchObject({ success: false, code: 'estimate_already_sent', error: expect.stringMatching(/already sent .* honored/) });
+    expect(refused.error).toMatch(/new estimate draft/);
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toEqual([before]);
+  }, 60000);
+
+  test('a sent quote whose lawn facts were cleared since is still answered "honored", not "repair the facts" (Codex r1 on #6023)', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    await db('customer_properties').where({ id: fixture.property.id }).update({ property_sqft: null });
+    await db('customers').where({ id: fixture.customer.id }).update({ property_sqft: null });
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const { executeCustomerEstimateTool } = require('../services/intelligence-bar/customer-estimate-tools');
+    const fresh = await executeCustomerEstimateTool('save_customer_estimate', { customer_id: fixture.customer.id, property_id: fixture.property.id });
+    expect(fresh).toMatchObject({ success: false, code: 'missing_information' }); // the facts really are missing for a NEW draft
+    const refused = await executeCustomerEstimateTool('save_customer_estimate', {
+      customer_id: fixture.customer.id, property_id: fixture.property.id, estimate_id: estimateId, lawn_applications: 12,
+    });
+    expect(refused).toMatchObject({ success: false, code: 'estimate_already_sent' });
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toEqual([before]);
+  }, 60000);
+
+  test('a sent quote that belongs to another customer still gets the relationship refusal, not "honored"', async () => {
+    const owner = await customerFixture();
+    const other = await customerFixture();
+    const created = await confirm(await propose(owner));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    const refused = await require('../services/intelligence-bar/customer-estimate-tools').executeCustomerEstimateTool('save_customer_estimate', {
+      customer_id: other.customer.id, property_id: other.property.id, estimate_id: estimateId, lawn_applications: 12,
+    });
+    expect(refused).toMatchObject({ success: false, code: 'target_relationship_mismatch' });
+  }, 60000);
+
+  test('a quote sent after the card was made is refused at Confirm and stays unchanged (W8-dev-07)', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const refused = await confirm(proposed);
+    // The confirm route re-runs the preview, sees the sent quote, and answers with a fresh-card refusal.
+    expect(refused.body).toMatchObject({ preview_changed: true });
+    expect(refused.body.success).not.toBe(true);
+    expect(await db('estimates').where({ id: estimateId }).first()).toEqual(before);
   }, 60000);
 
   test('a change to an alternate offered cadence invalidates confirmation before saving', async () => {
@@ -594,7 +661,6 @@ suite('existing-customer estimates from another workspace', () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
     const estimateId = created.body.result.estimate_id;
-    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
     const before = await db('estimates').where({ id: estimateId }).first();
     const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
     const acceptance = await db.transaction();
@@ -655,7 +721,7 @@ suite('existing-customer estimates from another workspace', () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
     const estimateId = created.body.result.estimate_id, groupId = crypto.randomUUID();
-    await db('estimates').where({ id: estimateId }).update({ estimate_group_id: groupId, status: 'sent', sent_at: new Date() });
+    await db('estimates').where({ id: estimateId }).update({ estimate_group_id: groupId });
     const before = await db('estimates').where({ id: estimateId }).first();
     const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
     const acceptance = await db.transaction(), editor = await db.transaction();

@@ -39,6 +39,14 @@ it('scores the picked hour on the day and searches the next 3 days for the singl
   expect(result.current.bestInRange).toMatchObject({ date: '2035-01-03', start: '13:00', driveInMinutes: 5, fromHomeBase: true });
 });
 
+it('a capacity slot (no insertion) keeps its own origin labels on the plain path (Codex #6045 r11)', async () => {
+  const capacity = { date: '2035-01-02', start_time: '09:00', end_time: '10:00', detour_minutes: 20, drive_in_minutes: 15, from_home_base: true, from_name: null, technician: { id: 'tech', name: 'A' } };
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [capacity] }) }));
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech' }));
+  await waitFor(() => expect(result.current.bestTimes).toHaveLength(1));
+  expect(result.current.bestTimes[0]).toMatchObject({ driveInMinutes: 15, fromHomeBase: true, fromName: null });
+});
+
 it('trims a stored HH:MM:SS window to the picked hour (edit form initial state)', async () => {
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
   vi.stubGlobal('fetch', fetch);
@@ -127,12 +135,81 @@ it('summary mode: one search around the picked date answers availability and not
     pickedDate: '2035-01-05',
     days: [
       { date: '2035-01-01', status: 'full', hours: [] },
-      { date: '2035-01-02', status: 'open', hours: [{ date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, technicianId: 'tech', technicianName: null }] },
+      { date: '2035-01-02', status: 'open', hours: [{
+        date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, driveInMinutes: null, fromHomeBase: null, fromName: null,
+        driveSource: null, rainChance: null, stopsThatDay: null, technicianId: 'tech', technicianName: null,
+      }] },
     ],
-    picked: { start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null },
+    best: null,
+    picked: {
+      start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null,
+      driveInMinutes: null, fromHomeBase: null, fromName: null, driveSource: null, rainChance: null,
+    },
   });
   expect(result.current.bestTimes).toEqual([]);
   expect(result.current.bestInRange).toBeNull();
+});
+
+it('summary mode: a pick two weeks out asks once more for the next-7-days row (Codex #6045 r1)', async () => {
+  const far = {
+    ...summaryAnswer,
+    summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } },
+  };
+  const week = {
+    slots: [],
+    summary: { days: [], best: { day: [], week: [{ date: '2035-01-02', start_time: '10:00', end_time: '11:00', detour_minutes: 12 }], week_covered: true } },
+  };
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    summary: true, bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(fetch).toHaveBeenCalledTimes(2);
+  // The picked search keeps its window around the pick (Codex #6045 r2).
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ bestRows: true, dateFrom: '2035-01-02', dateTo: '2035-01-12' });
+  const second = JSON.parse(fetch.mock.calls[1][1].body);
+  expect(second).toMatchObject({ summary: true, pickedDate: '2035-01-05' });
+  expect(second.pickedStart).toBeUndefined();
+  expect(result.current.availability.best.weekCovered).toBe(true);
+  expect(result.current.availability.best.week.map((h) => h.start)).toEqual(['10:00']);
+  // The pills stay the picked search's days.
+  expect(result.current.availability.days.map((d) => d.date)).toEqual(['2035-01-01', '2035-01-02']);
+});
+
+it('best rows send the booking\'s services on every request, the week fallback included (Codex #6102 r1)', async () => {
+  const far = {
+    ...summaryAnswer,
+    summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } },
+  };
+  const week = { slots: [], summary: { days: [], best: { day: [], week: [], week_covered: true } } };
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    summary: true, bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
+    serviceTypes: ['General Pest Control', 'WDO Inspection'],
+    serviceKeys: ['pest_general_quarterly', ''],
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(fetch).toHaveBeenCalledTimes(2);
+  for (const call of fetch.mock.calls) {
+    expect(JSON.parse(call[1].body).serviceTypes).toEqual(['General Pest Control', 'WDO Inspection']);
+    // The selected catalog rows' keys ride in the same order (Codex #6120 r1).
+    expect(JSON.parse(call[1].body).serviceKeys).toEqual(['pest_general_quarterly', '']);
+  }
+});
+
+it('summary mode without bestRows never asks for the rows', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(JSON.parse(fetch.mock.calls[0][1].body).bestRows).toBeUndefined();
+  expect(fetch).toHaveBeenCalledOnce();
 });
 
 it('summary mode keeps "could not check" apart from a miss', async () => {
@@ -224,3 +301,37 @@ it('a re-check for the same visit holds the last summary as stale instead of cle
   expect(result.current.availability).toBeNull();
 });
 
+it('the move choice on a shared stop rides the request, and changing it searches again', async () => {
+  const fetch = vi.fn().mockImplementation(async () => ({ ok: true, json: async () => ({ slots: [daySlot] }) }));
+  vi.stubGlobal('fetch', fetch);
+  const { rerender } = renderHook(({ moveScope }) => useBestTimes({ date: '2035-01-02', serviceId: 'combo-fixture', technicianId: 'tech', arrivalWindows: true, moveScope }), { initialProps: { moveScope: 'together' } });
+  // Only this hook's own requests (an earlier test's debounce can still fire).
+  const scopes = () => fetch.mock.calls.map((c) => JSON.parse(c[1].body)).filter((body) => body.serviceId === 'combo-fixture').map((body) => body.moveScope);
+  await waitFor(() => expect(scopes().length).toBeGreaterThan(0));
+  expect([...new Set(scopes())]).toEqual(['together']);
+  rerender({ moveScope: 'separate' });
+  await waitFor(() => expect(scopes()).toContain('separate'));
+});
+
+
+it('prices the typed hour on every route in auto mode and drops the single-route verdict', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    slots: [],
+    pickedByTech: [{ start: '13:00', fits: true, detour_minutes: 12, drive_in_minutes: 9, from_home_base: false, from_name: 'S', technician: { id: 't-b', name: 'Tech B' } }],
+  }) });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', customerId: 'fixture', compareTechsAt: '13:00' }));
+  await waitFor(() => expect(result.current.pickedByTech).toHaveLength(1));
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ pickedStart: '13:00', compareTechs: true });
+  expect(result.current.pickedByTech[0]).toMatchObject({ technicianId: 't-b', detourMinutes: 12 });
+});
+
+it('never compares routes once one technician is chosen', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  renderHook(() => useBestTimes({ date: '2035-01-02', customerId: 'fixture', technicianId: 'tech', compareTechsAt: '13:00' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  const body = JSON.parse(fetch.mock.calls[0][1].body);
+  expect(body.compareTechs).toBeUndefined();
+  expect(body.pickedStart).toBeUndefined();
+});

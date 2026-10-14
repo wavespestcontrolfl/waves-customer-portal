@@ -837,4 +837,19 @@ describe('one-time itemization reads the frozen send-snapshot bundle first (code
       ['Rodent Exclusion — Wire Mesh Points', 300],
     ]);
   });
+
+  // Codex round 24 on #6135: an area add-on's price is one application on every customer estimate surface.
+  test('a row priced per application reads "Per application"; it stays a one-time line for the totals', () => {
+    const p = normalizeProposal({
+      customer_name: 'S', address: '4 Attic Ln', monthly_total: 0, onetime_total: 249,
+      estimate_data: { sendSnapshot: { pricingBundle: { oneTimeBreakdown: { total: 249, items: [
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 150, kind: 'charge' },
+        { service: 'area_addon', label: 'Fire Ant Yard Treatment', amount: 99, kind: 'charge', addOnKey: 'fire_ant_yard', priceUnit: 'application' },
+      ] } } } },
+    });
+    expect(p.buildings[0].lineItems.map((l) => [l.description, l.frequency, l.frequencyLabel])).toEqual([
+      ['One-Time Pest Control', 'one_time', 'One-time'],
+      ['Fire Ant Yard Treatment', 'one_time', 'Per application'],
+    ]);
+  });
 });

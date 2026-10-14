@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }))
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1', useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
+vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
@@ -44,11 +44,11 @@ let briefStatus;
 let fetchMock;
 let followThrough;
 
-function mount(path = '/admin/today', { enabled = true, role = 'technician' } = {}) {
+function mount(path = '/admin/today', { role = 'technician', techRole = null } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy, techRole }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -79,6 +79,7 @@ beforeEach(() => {
       data = status === 200 ? { facts: { access: { accessNotes: 'Use the side gate' } } } : { error: status === 404 ? 'Not found' : 'Brief unavailable' };
     }
     if (path.includes('/tech/line')) data = { line: null };
+    if (path.includes('/admin/schedule/held-visits')) data = { heldVisits: [{ call_log_id: 'call-held', kind: 'confirmed', time_label: '11:00 AM', minutes: 660, caller_name: 'Riley Example', address: { line1: '12 Test Lane', city: 'Bradenton' }, service: 'General Pest Control' }] };
     return { ok: status === 200, status, json: async () => data };
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -86,6 +87,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('Tech field workspace uses the existing route workflow', () => {
+  // Held visits (GATE_CALL_HELD_VISIT) belong to no technician: an admin login sees them on
+  // Today, a technician login never asks for them.
+  it('shows visits from calls that are not on the calendar to an admin login only', async () => {
+    const heldReads = () => fetchMock.mock.calls.filter(([path]) => String(path).includes('/held-visits'));
+    mount('/admin/today', { role: 'admin', techRole: 'admin' });
+    expect(await screen.findByText('11:00 AM · Riley Example')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Book in Dispatch' })).toBeInTheDocument();
+    cleanup();
+    fetchMock.mockClear();
+    mount('/admin/today', { role: 'technician', techRole: 'technician' });
+    expect(await screen.findByText('Fixture one')).toBeInTheDocument();
+    expect(heldReads()).toHaveLength(0);
+    expect(screen.queryByText('11:00 AM · Riley Example')).not.toBeInTheDocument();
+  });
+
   it('shows shared callback actions in the field workspace even when its route fails', async () => {
     scheduleFails = true;
     followThrough = { callbacks_enabled: true, commitments: [{ id: 'callback-fixture', kind: 'callback', party: 'waves', customer_first_name: 'Fixture',
@@ -274,7 +290,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     rows = [row('one')];
     mount('/admin/today/tools');
     fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Queue report photo' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Queue report photo' }));
     await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear report photos' }));
@@ -289,7 +305,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     const initialReads = scheduleReads();
     fireEvent.click(report);
     rows = [row('one', { linkedProject: { id: 'created-report', status: 'draft' } })];
-    fireEvent.click(screen.getByRole('button', { name: 'Finish partial report' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish partial report' }));
 
     expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
     await waitFor(() => expect(scheduleReads()).toBeGreaterThan(initialReads));
@@ -391,9 +407,15 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.queryByText('Messages')).not.toBeInTheDocument();
   });
 
-  it('keeps the legacy route when the workspace flag is off', async () => {
-    mount('/admin/today/tools', { enabled: false });
-    expect(await screen.findByRole('heading', { name: 'Quick Actions' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Tools' })).not.toBeInTheDocument();
+  it.each([
+    ['the Today overview (shown in the page)', '/admin/today', 'true', 'page'],
+    ['Tools', '/admin/today/tools', 'false', 'elsewhere'],
+    ['More', '/admin/today/more', 'false', 'elsewhere'],
+    ['an open visit', '/admin/today?visit=row%3Atwo', 'false', 'elsewhere'],
+  ])('schedule changes stop floating only on %s; notices sit in the page only on Today (owner 2026-10-05)', async (_label, path, inline, placement) => {
+    mount(path);
+    await waitFor(() => expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-inline', inline));
+    expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-placement', placement);
   });
+
 });

@@ -370,4 +370,153 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const partialCard = await db('triage_items').where({ id: partial.cardId }).first();
     expect(partialCard.status).toBe('open');
   });
+
+  // ── Staff work closes the card (quote_sent_to_customer /
+  // staff_booked_after_card / staff_booked_at_account_address) ───────────
+  // Only the CALL LINK is waived: the card's own ask must still be answered.
+  const NO_ADDRESS = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+  const ON_FILE = { address_line1: '1234 Fixture Ave', address_line2: null, city: null, zip: '34205' };
+  // A call + customer (one active property) + one open card per entry of
+  // `cardAges` (minutes), each on its own call.
+  async function seedStaffCall(sid, { reason, cardAges = [60], stage = 'active_customer', extraction = null, categories = ['pest_control'], onFile = ON_FILE }) {
+    const { customerId, propertyId } = await seedCustomer(sid.slice(-2));
+    if (stage !== 'active_customer') await db('customers').where({ id: customerId }).update({ pipeline_stage: stage });
+    const requestedDay = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const ask = { requested_service_categories: categories, requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: NO_ADDRESS };
+    const payload = reason === 'quote_promised'
+      ? { flag: reason, scheduling_status: 'requested', on_file_address: onFile, quote_scope: ask }
+      : { flag: reason, scheduling_status: 'requested', on_file_address: onFile, scheduling_window: { ...ask, status: 'requested', requested_date_range_start: requestedDay, preferred_time_of_day: null } };
+    const calls = [];
+    for (const [i, age] of cardAges.entries()) {
+      const callSid = i === 0 ? sid : `${sid.slice(0, -4)}x${i}${sid.slice(-2)}`;
+      const [call] = await db('call_log').insert({
+        twilio_call_sid: callSid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
+        status: 'completed', duration_seconds: 120, processing_status: 'processed',
+        customer_id: customerId, review_status: 'open', created_at: new Date(Date.now() - (age + 5) * 60000),
+        ...(extraction ? { ai_extraction_enriched: JSON.stringify(extraction) } : {}),
+      }).returning('id');
+      ids.calls.push(call.id);
+      const cardAt = new Date(Date.now() - age * 60000);
+      const [card] = await db('triage_items').insert({
+        call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: reason,
+        status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt, payload: JSON.stringify(payload),
+      }).returning('id');
+      calls.push({ callId: call.id, cardId: card.id });
+    }
+    return { customerId, propertyId, calls };
+  }
+  const cardRow = async (cardId) => db('triage_items').where({ id: cardId }).first();
+  // A hand-made estimate (no call stamp) whose send stamped its scope.
+  async function seedHandEstimate(customerId, { sentAgeMin, status = 'sent', deliveredAgeMin = sentAgeMin, service = 'Pest Control', address = '1234 Fixture Ave, 34205', priceLockedBy = null }) {
+    const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
+    const priced = { service_interest: service, onetime_total: 120, address };
+    const [est] = await db('estimates').insert({
+      customer_id: customerId, status, source: 'manual', ...priced, price_locked_by: priceLockedBy,
+      sent_at: new Date(Date.now() - sentAgeMin * 60000),
+      estimate_data: JSON.stringify({
+        sendSnapshot: { scope: deliveredEstimateScope({ ...priced, estimate_data: {} }) },
+        ...(deliveredAgeMin === null ? {} : { deliveryState: { lastDeliveredAt: new Date(Date.now() - deliveredAgeMin * 60000).toISOString() } }),
+      }),
+    }).returning('id');
+    ids.estimates.push(est.id);
+  }
+  async function seedHandVisit(customerId, { ageMin, propertyId = null, service = 'Quarterly Pest Control', address = null, status = 'confirmed', recurring = false }) {
+    const [visit] = await db('scheduled_services').insert({
+      customer_id: customerId, property_id: propertyId, service_type: service, status, is_recurring: recurring,
+      scheduled_date: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+      created_at: new Date(Date.now() - ageMin * 60000),
+      ...(address || {}),
+    }).returning('id');
+    ids.visits.push(visit.id);
+  }
+
+  test('quote_promised closes on a hand-made estimate delivered to the call\'s customer after the card that COVERS its ask — single claimant, within 14 days, a real post-card witness', async () => {
+    const sent = await seedStaffCall(SID.replace(/e2$/, 's1'), { reason: 'quote_promised' });
+    await seedHandEstimate(sent.customerId, { sentAgeMin: 10 });
+    const before = await seedStaffCall(SID.replace(/e2$/, 's2'), { reason: 'quote_promised', cardAges: [10] });
+    await seedHandEstimate(before.customerId, { sentAgeMin: 60 });
+    // Two open quote cards for one customer: one estimate cannot answer both.
+    const two = await seedStaffCall(SID.replace(/e2$/, 's3'), { reason: 'quote_promised', cardAges: [120, 60] });
+    await seedHandEstimate(two.customerId, { sentAgeMin: 10 });
+    const late = await seedStaffCall(SID.replace(/e2$/, 's4'), { reason: 'quote_promised', cardAges: [30 * 24 * 60] });
+    await seedHandEstimate(late.customerId, { sentAgeMin: 10 * 24 * 60 });
+    // A suppressed send stamps sent_at but no delivery.
+    const suppressed = await seedStaffCall(SID.replace(/e2$/, 's5'), { reason: 'quote_promised' });
+    await seedHandEstimate(suppressed.customerId, { sentAgeMin: 10, deliveredAgeMin: null });
+    // Accepted by the customer after the card counts; a manual accept does not.
+    const accepted = await seedStaffCall(SID.replace(/e2$/, 's6'), { reason: 'quote_promised' });
+    await seedHandEstimate(accepted.customerId, { sentAgeMin: 10, status: 'accepted', deliveredAgeMin: null });
+    await db('estimates').where({ customer_id: accepted.customerId }).update({ accepted_at: new Date(Date.now() - 5 * 60000) });
+    const manual = await seedStaffCall(SID.replace(/e2$/, 's7'), { reason: 'quote_promised' });
+    await seedHandEstimate(manual.customerId, { sentAgeMin: 10, status: 'accepted', deliveredAgeMin: null, priceLockedBy: 'manual_accept' });
+    await db('estimates').where({ customer_id: manual.customerId }).update({ accepted_at: new Date(Date.now() - 5 * 60000) });
+    // Viewed before the card, resent after it with the send suppressed: the
+    // current status is stale, nothing reached the customer after the card.
+    const staleViewed = await seedStaffCall(SID.replace(/e2$/, 's8'), { reason: 'quote_promised', cardAges: [30] });
+    await seedHandEstimate(staleViewed.customerId, { sentAgeMin: 5, status: 'viewed', deliveredAgeMin: 60 });
+    // Scope: another service, another address.
+    const otherService = await seedStaffCall(SID.replace(/e2$/, 's9'), { reason: 'quote_promised' });
+    await seedHandEstimate(otherService.customerId, { sentAgeMin: 10, service: 'Lawn Care' });
+    const otherAddress = await seedStaffCall(SID.replace(/e2$/, 'sa'), { reason: 'quote_promised' });
+    await seedHandEstimate(otherAddress.customerId, { sentAgeMin: 10, address: '99 Elsewhere Rd, 34205' });
+    await sweep.runTriageAutoResolve({ now: new Date() });
+    const sentRow = await cardRow(sent.calls[0].cardId);
+    expect(sentRow.status).toBe('resolved');
+    expect(sentRow.resolution_rule).toBe('quote_sent_to_customer');
+    expect((await cardRow(accepted.calls[0].cardId)).resolution_rule).toBe('quote_sent_to_customer');
+    for (const c of [before, late, suppressed, manual, staleViewed, otherService, otherAddress]) expect((await cardRow(c.calls[0].cardId)).status).toBe('open');
+    for (const c of two.calls) expect((await cardRow(c.cardId)).status).toBe('open');
+  });
+
+  test('not_confirmed closes on a hand-made booking that ANSWERS the card\'s ask — not another service or cadence, not two cards, not another call\'s or a cancelled booking', async () => {
+    const booked = await seedStaffCall(SID.replace(/e2$/, 'n1'), { reason: 'not_confirmed' });
+    await seedHandVisit(booked.customerId, { ageMin: 10 });
+    const two = await seedStaffCall(SID.replace(/e2$/, 'n2'), { reason: 'not_confirmed', cardAges: [120, 60] });
+    await seedHandVisit(two.customerId, { ageMin: 10 });
+    const cancelled = await seedStaffCall(SID.replace(/e2$/, 'n3'), { reason: 'not_confirmed' });
+    await seedHandVisit(cancelled.customerId, { ageMin: 10, status: 'cancelled' });
+    const before = await seedStaffCall(SID.replace(/e2$/, 'n4'), { reason: 'not_confirmed', cardAges: [10] });
+    await seedHandVisit(before.customerId, { ageMin: 60 });
+    const otherService = await seedStaffCall(SID.replace(/e2$/, 'n5'), { reason: 'not_confirmed' });
+    await seedHandVisit(otherService.customerId, { ageMin: 10, service: 'WDO Inspection Service' });
+    const partial = await seedStaffCall(SID.replace(/e2$/, 'n6'), { reason: 'not_confirmed', categories: ['pest_control', 'lawn_care'] });
+    await seedHandVisit(partial.customerId, { ageMin: 10 });
+    await sweep.runTriageAutoResolve({ now: new Date() });
+    const bookedRow = await cardRow(booked.calls[0].cardId);
+    expect(bookedRow.status).toBe('resolved');
+    expect(bookedRow.resolution_rule).toBe('staff_booked_after_card');
+    for (const c of two.calls) expect((await cardRow(c.cardId)).status).toBe('open');
+    for (const c of [cancelled, before, otherService, partial]) expect((await cardRow(c.calls[0].cardId)).status).toBe('open');
+  });
+
+  test('address cards close on a booking staff made at the property the card was FILED against — not one stamped elsewhere, a re-unitted property, or a two-property account', async () => {
+    const empty = { property: { service_address: { raw_text: null, street_line_1: null, city: null, postal_code: null } } };
+    const opts = { reason: 'missing_service_address', stage: 'new_lead', extraction: empty };
+    const ok = await seedStaffCall(SID.replace(/e2$/, 'd1'), opts);
+    await seedHandVisit(ok.customerId, { ageMin: 10 });
+    const atProperty = await seedStaffCall(SID.replace(/e2$/, 'd2'), opts);
+    await seedHandVisit(atProperty.customerId, { ageMin: 10, propertyId: atProperty.propertyId });
+    const elsewhere = await seedStaffCall(SID.replace(/e2$/, 'd3'), opts);
+    await seedHandVisit(elsewhere.customerId, { ageMin: 10, address: { service_address_line1: '99 Elsewhere Rd', service_address_zip: '34205' } });
+    const multi = await seedStaffCall(SID.replace(/e2$/, 'd4'), opts);
+    const [second] = await db('customer_properties').insert({ customer_id: multi.customerId, address_line1: '5 Second St', zip: '34205', active: true }).returning('id');
+    ids.properties.push(second.id);
+    await seedHandVisit(multi.customerId, { ageMin: 10 });
+    // Filed against another unit / another ZIP / no snapshot: the sole property is not that premise.
+    const otherUnit = await seedStaffCall(SID.replace(/e2$/, 'd5'), { ...opts, onFile: { ...ON_FILE, address_line2: 'Unit 2' } });
+    await seedHandVisit(otherUnit.customerId, { ageMin: 10 });
+    const otherZip = await seedStaffCall(SID.replace(/e2$/, 'd6'), { ...opts, onFile: { ...ON_FILE, zip: '34211' } });
+    await seedHandVisit(otherZip.customerId, { ageMin: 10 });
+    const noSnapshot = await seedStaffCall(SID.replace(/e2$/, 'd7'), { ...opts, onFile: null });
+    await seedHandVisit(noSnapshot.customerId, { ageMin: 10 });
+    // A stamp on the same street in another ZIP loses even with property_id pointing at the property.
+    const conflictingStamp = await seedStaffCall(SID.replace(/e2$/, 'd8'), opts);
+    await seedHandVisit(conflictingStamp.customerId, { ageMin: 10, propertyId: conflictingStamp.propertyId, address: { service_address_line1: '1234 Fixture Ave', service_address_zip: '34211' } });
+    await sweep.runTriageAutoResolve({ now: new Date() });
+    const okRow = await cardRow(ok.calls[0].cardId);
+    expect(okRow.status).toBe('resolved');
+    expect(okRow.resolution_rule).toBe('staff_booked_at_account_address');
+    expect((await cardRow(atProperty.calls[0].cardId)).status).toBe('resolved');
+    for (const c of [elsewhere, multi, otherUnit, otherZip, noSnapshot, conflictingStamp]) expect((await cardRow(c.calls[0].cardId)).status).toBe('open');
+  });
 });

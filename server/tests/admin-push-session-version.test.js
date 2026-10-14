@@ -119,7 +119,31 @@ describe('admin push staff-session binding', () => {
       role: 'technician',
       active: true,
       staff_token_version: 7,
+      // No two-step claim on the registering session (GATE_ADMIN_MFA).
+      staff_mfa: false,
     }));
+  });
+
+  test('records that the registering session passed the two-step code', async () => {
+    const technician = builder({
+      first: {
+        id: 'tech-1', active: true, role: 'admin', auth_token_version: 7,
+        must_change_password: false,
+      },
+    });
+    const lookup = builder({ rows: [] });
+    const insert = builder({ returning: [{ id: 'sub-1' }] });
+    installTransaction([
+      { table: 'technicians', query: technician },
+      { table: 'push_subscriptions', query: lookup },
+      { table: 'push_subscriptions', query: insert },
+    ]);
+    const req = request();
+    req.staffToken.mfa = true;
+
+    await subscribe(req, response(), jest.fn());
+
+    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ staff_mfa: true }));
   });
 
   test('reactivation refreshes the version and deactivates endpoint duplicates', async () => {
@@ -146,6 +170,7 @@ describe('admin push staff-session binding', () => {
     expect(keep.update).toHaveBeenCalledWith(expect.objectContaining({
       active: true,
       staff_token_version: 7,
+      staff_mfa: false,
     }));
     expect(duplicates.whereIn).toHaveBeenCalledWith('id', ['sub-duplicate']);
     expect(duplicates.update).toHaveBeenCalledWith({ active: false });

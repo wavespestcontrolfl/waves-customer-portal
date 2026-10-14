@@ -38,6 +38,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
+import HourTechCompare from './HourTechCompare';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
@@ -1492,7 +1493,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1950,7 +1951,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     ? `${_rounded.getFullYear()}-${String(_rounded.getMonth() + 1).padStart(2, '0')}-${String(_rounded.getDate()).padStart(2, '0')}`
     : _ymd;
   const [apptDate, setApptDate] = useState(defaultDate || _defaultDate);
-  const [windowStart, setWindowStart] = useState(normalizeHourTime(defaultWindowStart || _hhmm, _hhmm));
+  const [windowStart, setWindowStartValue] = useState(normalizeHourTime(defaultWindowStart || _hhmm, _hhmm));
+  // requireTimeChoice (Dispatch "Book it" on a call with no agreed whole-hour time): the form
+  // has no agreed time to open on, so the person must pick one before it can be saved. Every
+  // way of setting the time (the selector, a suggested slot) counts as that choice.
+  const [timeChosen, setTimeChosen] = useState(!requireTimeChoice);
+  const setWindowStart = (value) => { setWindowStartValue(value); setTimeChosen(true); };
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
   const [techId, setTechId] = useState(defaultTechId || '');
   const [techs, setTechs] = useState([]);
@@ -2119,7 +2125,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
-  const [internalNotes, setInternalNotes] = useState('');
+  // defaultInternalNotes: Dispatch "Book it" on a held visit prefills the call marker here.
+  const [internalNotes, setInternalNotes] = useState(defaultInternalNotes || '');
   const [sendSms, setSendSms] = useState(true);
   // Secure-card / Auto Pay setup text — OFF by default (owner call): the
   // office opts in per booking; server-side policy (payer exemption,
@@ -3969,7 +3976,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
   // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
   // availability strip (days around the chosen date) instead.
-  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+  const { bestTimes, picked, pickedByTech, bestInRange, availability } = useBestTimes({
     summary: true,
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
@@ -3986,7 +3993,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // scored one — a cost for a route the booking will not use. Chips stay:
     // picking one adopts its technician (Codex #4120 r5 P2).
     pickedStart: techMode === 'choose' && techId ? windowStart : undefined,
+    // Auto mode: price the typed hour on every technician's route instead,
+    // so the operator can see who adds the least drive and pick them.
+    compareTechsAt: techMode === 'choose' ? undefined : windowStart,
+    serviceTypes: services.map((svc) => svc?.name).filter(Boolean),
+    // Same order as serviceTypes: the selected catalog row's key.
+    serviceKeys: services.filter((svc) => svc?.name).map((svc) => (svc?.service_key ?? svc?.serviceKey) || ''),
     rangeFrom: etDateString(),
+    bestRows: true,
   });
 
   // Submit
@@ -4899,7 +4913,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
   // primary before the operator was shown the choice.
-  const canSubmit = canSubmitAppointments({
+  const canSubmit = timeChosen && canSubmitAppointments({
     selectedCustomer,
     services,
     bookingPropertyState,
@@ -6328,7 +6342,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
             <div>
               <label style={labelStyle}>Time</label>
-              <select value={windowStart} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
+              <select value={timeChosen ? windowStart : ''} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
+                {!timeChosen && <option value="" disabled>Choose a time</option>}
                 {HOURLY_TIME_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
@@ -6397,6 +6412,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           />
           <AvailabilityStrip
             availability={availability}
+            bestRows
             currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentStart={windowStart}
             currentTechnicianId={techMode === 'choose' ? techId : null}
@@ -6410,6 +6426,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 setTechId(slot.technicianId);
                 appliedSuggestionRef.current = true;
               }
+            }}
+            style={{ marginBottom: 10 }}
+          />
+          <HourTechCompare
+            // A partly committed booking is locked to retry or close: the
+            // remaining groups must keep the technician already chosen.
+            rows={partialCommitLocked ? [] : pickedByTech}
+            onPick={(row) => {
+              // The drive was priced on this technician's route: picking
+              // the row books them, as the hint chips do.
+              setTechMode('choose');
+              setTechId(row.technicianId);
+              appliedSuggestionRef.current = true;
             }}
             style={{ marginBottom: 10 }}
           />

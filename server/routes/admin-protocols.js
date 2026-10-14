@@ -8,14 +8,34 @@ const {
   calculateProductAmount,
   effectiveAreaFactor,
   matchCatalogProduct,
-  parseVisitNutrientTargets,
+  visitNutrientTargets,
+  sheetReadsPlansStep,
+  fungusNitrogenNotes,
   parseProtocolLines,
   resolveProtocolItems,
   summarizeMaterialCost,
+  loadV13RowsForMonth,
+  v13RateOptions,
+  v13ItemFields,
+  v13LineState,
+  planLineFields,
+  v13SelectedGateWarnings,
+  v13SelectionBlocks,
+  visitForPlan,
+  loadVisitForPlan,
+  loadVisitCity,
+  holdNorthPortProducts,
+  v13HoldWarnings,
+  v13NorthPortReferenceWarnings,
+  v13VisitLimits,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
+const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
-const { gateEnvValue } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+const { gateEnvValue } = featureGates;
 const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
@@ -26,6 +46,8 @@ const {
   protocolReferenceSyncIssues,
   lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
+const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/lawn-program');
+const bermudaRemoval = require('../services/lawn-bermuda-removal');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -79,7 +101,7 @@ function lawnTrackFromInput(value) {
   const text = normalizeText(value);
   if (text.includes('bermuda')) return 'bermuda';
   if (text.includes('zoysia')) return 'zoysia';
-  if (text.includes('bahia')) return 'bahia';
+  if (isBahiaGrass(value)) return 'bahia';
   return 'st_augustine';
 }
 
@@ -147,6 +169,10 @@ function serializeProtocolProduct(product) {
   };
 }
 
+// A product's catalog rates, cleared where the v13 program supplies the amount.
+const lawnV13On = () => featureGates.lawnV13Live?.() === true;
+const NO_PRODUCT_RATES = { defaultRatePer1000: null, defaultRate: null, maxLabelRatePer1000: null };
+
 function parsePositiveNumber(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
@@ -205,6 +231,7 @@ function protocolSopSlug(protocol, window) {
 function renderWindowSopMarkdown({ protocol, window, products = [], gates = [] }) {
   const defaultProducts = products.filter((product) => product.default_in_plan);
   const conditionalProducts = products.filter((product) => !product.default_in_plan);
+  const safetyRules = fertilizerSafetyRules(products);
   const applicableGates = gates.filter((gate) => {
     const logic = gate.logic || {};
     const months = Array.isArray(logic.months) ? logic.months : [];
@@ -244,6 +271,7 @@ function renderWindowSopMarkdown({ protocol, window, products = [], gates = [] }
     '## Product Restrictions',
     markdownList(applicableGates, (gate) => `${gate.title}: ${gate.rule_text}`),
     '',
+    ...(safetyRules.length ? ['## Fertilizer Safety', markdownList(safetyRules), ''] : []),
     '## Customer Note Templates',
     markdownList(window.customer_note_templates),
     '',
@@ -260,7 +288,8 @@ async function loadWindowSopPayload(knex, protocolId, windowKey) {
     .first();
   if (!window) return null;
   const [products, gates] = await Promise.all([
-    knex('lawn_protocol_products')
+    // The SOP and its wiki sync tell people what to apply: a retired row is left out.
+    activeProtocolProducts(knex('lawn_protocol_products'))
       .where({ lawn_protocol_window_id: window.id })
       .orderBy('sort_order', 'asc'),
     knex('lawn_protocol_gates')
@@ -912,26 +941,149 @@ function stripLawnMixItemPricing(item) {
   };
 }
 
+// The catalog fields a tank-sheet row shows: [out, source, fallback, transform].
+// A fallback replaces a falsy value (null, [] ...); no fallback copies the value;
+// a transform runs instead of both.
+const toNumberOrNull = (value) => (value != null ? Number(value) : null);
+const LAWN_MIX_PRODUCT_FIELDS = [
+  ['id', 'id'], ['name', 'name'], ['category', 'category'], ['activeIngredient', 'active_ingredient'],
+  ['labelVerifiedAt', 'label_verified_at', null],
+  ['bestPrice', 'best_price', null, toNumberOrNull], ['costPerUnit', 'cost_per_unit', null, toNumberOrNull],
+  ['costUnit', 'cost_unit', null], ['containerSize', 'container_size', null],
+  ['unitSizeOz', 'unit_size_oz', null, toNumberOrNull], ['needsPricing', 'needs_pricing', null, (v) => v === true],
+  ['rainfastMinutes', 'rainfast_minutes', null], ['reiHours', 'rei_hours', null, (v) => v ?? null],
+  ['labeledTurfSpecies', 'labeled_turf_species', []], ['excludedTurfSpecies', 'excluded_turf_species', []],
+  ['requiresSurfactant', 'requires_surfactant'], ['allowsSurfactant', 'allows_surfactant'],
+  ['mixingOrderCategory', 'mixing_order_category'], ['mixingInstructions', 'mixing_instructions'],
+  ['labelSourceNote', 'label_source_note'], ['labelUrl', 'label_url', null], ['sdsUrl', 'sds_url', null],
+  ['epaRegNumber', 'epa_reg_number', null], ['manufacturer', 'manufacturer', null],
+  ['ppeRequired', 'ppe_required', null], ['signalWord', 'signal_word', null],
+  ['compatibilityNotes', 'compatibility_notes', null], ['doNotTankMixWith', 'do_not_tank_mix_with', []],
+  ['irrigationNotes', 'irrigation_notes', null], ['pollinatorPrecautions', 'pollinator_precautions', null],
+  ['ppeText', 'ppe_text', null], ['reentryText', 'reentry_text', null],
+];
+const lawnMixProductView = (product) => ({
+  ...Object.fromEntries(LAWN_MIX_PRODUCT_FIELDS.map(([out, source, fallback, transform]) => [
+    out, transform ? transform(product[source]) : (fallback === undefined ? product[source] : (product[source] || fallback)),
+  ])),
+  groups: Object.fromEntries(['moa', 'frac', 'irac', 'hrac'].map((group) => [group, product[`${group}_group`] || null])),
+});
+
+// The rig, derived once: carrier, tank size, the coverage one tank gives, and the equipment view.
+function lawnMixRig(calibration) {
+  const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
+  const tankCoverageSqft = carrier ? (tankCapacity / carrier) * 1000 : 0;
+  const equipment = calibration ? {
+    equipmentSystemId: calibration.equipment_system_id,
+    calibrationId: calibration.id,
+    systemName: calibration.system_name,
+    systemType: calibration.system_type,
+    carrierGalPer1000: carrier,
+    tankCapacityGal: tankCapacity || null,
+    tankCoverageSqft: tankCoverageSqft ? Math.round(tankCoverageSqft) : null,
+    expiresAt: calibration.expires_at || null,
+  } : null;
+  return { carrier, tankCoverageSqft, equipment };
+}
+
+// The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
+// selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
+// the restriction on every gated row), then the cadence and limit warnings.
+function lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
+  const warnings = [];
+  if (!calibration) {
+    warnings.push({
+      code: 'missing_calibration',
+      message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
+    });
+  }
+  const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
+  if (unmatchedPricedLines.length) {
+    warnings.push({
+      code: 'unmatched_product',
+      lines: unmatchedPricedLines,
+      message: `${unmatchedPricedLines.length} priced protocol line${unmatchedPricedLines.length === 1 ? ' has' : 's have'} no product catalog match; label-rate math is unavailable for: ${unmatchedPricedLines.join(' | ')}`,
+    });
+  }
+  warnings.push(...v13SelectedGateWarnings(selectedItems));
+  warnings.push(...(municipality ? v13HoldWarnings(items) : v13NorthPortReferenceWarnings(items)));
+  warnings.push(...cadenceWarnings, ...limitCheck.warnings);
+  return warnings;
+}
+
+// The tank-sheet response. A viewer who sees no pricing gets every price stripped (codex round-3 P2:
+// ProtocolReferenceTabV2.jsx rendered the now-absent materialCostSummary as "0/N lines priced", a
+// stripped-for-role response looking identical to a genuinely-unpriced one; viewerRole lets the
+// client tell the difference and hide the Material Cost card and column instead of a fabricated zero).
+function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck, mixable = () => true, mixInput = null, bermudaOrder = {}, extraBlocks = [] }) {
+  const view = seesPricing ? (list) => list : (list) => list.map(stripLawnMixItemPricing);
+  const payload = {
+    track: { key: trackKey, name: track.name },
+    month,
+    viewerRole: seesPricing ? 'admin' : 'technician',
+    visit: {
+      visit: visit.visit,
+      objective: visit.notes,
+      primary: visit.primary,
+      secondary: visit.secondary,
+      tiers: visit.tiers,
+    },
+    equipment,
+    areaSqft,
+    materialCostSummary: seesPricing ? materialCostSummary : null,
+    items: view(items),
+    selectedItems: view(selectedItems),
+    mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.filter(mixable).map(mixInput || ((item) => ({
+      raw: item.raw,
+      product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
+    }))), limitCheck.capped),
+    ...bermudaOrder,
+    warnings,
+    blocks: [...blocks, ...limitCheck.blocks, ...extraBlocks],
+  };
+  return seesPricing ? payload : deepStripPriceTokens(payload);
+}
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
-    const protocols = require('../config/protocols.json');
     const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
-    const track = protocols.lawn?.[trackKey];
+    const track = lawnProtocols()?.[trackKey];
     if (!track) return res.status(404).json({ error: 'Lawn protocol track not found' });
 
     const month = monthAbbr(req.query.month);
-    const visit = track.visits?.find((v) => v.month === month);
-    if (!visit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+    const recipeVisit = track.visits?.find((v) => v.month === month);
+    if (!recipeVisit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+    // The visit the sheet is opened from (?scheduledServiceId=): its plan picks a cadence-
+    // dependent step (v13 April, 9x; ?visitsPerYear= overrides it) and its customer,
+    // property and date decide the application limits. With no visit (the reference tab)
+    // the sheet keeps the 12x step, warns, and checks no limits.
+    const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
+    const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
+    // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated, so the
+    // line text, the objective and the amount agree. Only a visit the planner would also plan on v13, and only for the month of the
+    // window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
+    const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
     const products = await getProtocolProducts();
-    const baseLines = parseProtocolLines(visit.primary, 'base');
-    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
+    const exactName = track.exact_catalog_names === true;
+    const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
+    // GATE_LAWN_BERMUDA_REMOVAL: a sheet opened for a visit (`scheduledServiceId`) carries the
+    // April / June bermuda removal step when that visit's account asked for it. The step is
+    // one projection (lawn-bermuda-removal.js openStep) shared with the plan and the
+    // completion actions; off, every part of it is a no-op and the sheet is the old one.
+    const bermuda = await bermudaRemoval.openStep(db, {
+      loadVisit: async () => scheduled, trackKey, month,
+      parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
+      loadRows: (options) => loadV13RowsForMonth(db, trackKey, month, options),
+      probeLimits: (probe) => v13VisitLimits(db, scheduled, probe, v13Rows),
+      productOf: (id) => products.find((p) => String(p.id) === String(id)) || null,
+    });
+    const conditionalLines = [...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
     const allLines = [...baseLines, ...conditionalLines];
-    const nutrientTargets = parseVisitNutrientTargets(visit.notes);
 
-    const resolvedLines = resolveProtocolItems(allLines, products, {
+    const matchedLines = resolveProtocolItems(allLines, products, {
       selectedConditionalProductIds: req.query.selectedConditionalProductIds,
       selectedConditionalProductNames: req.query.selectedConditionalProductNames,
       selectedConditionalRaw: req.query.selectedConditionalRaw,
@@ -942,170 +1094,110 @@ router.get('/lawn-mix', async (req, res, next) => {
       includePremiumOnly: req.query.includePremiumOnly === 'true',
     });
 
-    const items = resolvedLines.map((line) => {
-      const product = line.product;
-      const selected = line.selected;
-      const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
-      const areaContext = {
-        plan: req.query.plan,
-        weedPressure: req.query.weedPressure,
-        conditionFlags: req.query.conditionFlags,
-        propertyFlags: req.query.propertyFlags,
-        includePremiumOnly: req.query.includePremiumOnly === 'true',
-        isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
-      };
-      const areaFactor = effectiveAreaFactor(line, areaContext);
-      const jobMix = selected && product && carrier
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets })
-        : null;
+    // GATE_LAWN_V13: the tank sheet uses the staged protocol's stated rates and
+    // nutrient-target derivation, as the plan does; no staged protocol = no sheet.
+    let v13Rows;
+    try {
+      v13Rows = await loadV13RowsForMonth(db, trackKey, month, bermuda.rowOptions);
+    } catch (err) {
+      if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
+      throw err;
+    }
+    // The city the visit is judged under (as the plan resolves it); none for the reference sheet.
+    // A product the city bans for this window (North Port Nutra-TECH, June to September) is held
+    // back as in the plan: not selected, no amount, the plan's warning.
+    const municipality = await loadVisitCity(db, scheduled);
+    let resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality);
+    const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
+    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, municipality };
+    const areaContext = {
+      plan: req.query.plan,
+      weedPressure: req.query.weedPressure,
+      conditionFlags: req.query.conditionFlags,
+      propertyFlags: req.query.propertyFlags,
+      includePremiumOnly: req.query.includePremiumOnly === 'true',
+      isFirstYear: req.query.isFirstYear !== 'false',
+    };
+    // An apply-alone product selected beside another product is a block: judged
+    // first, so the sheet withholds every quantity of the selected products and
+    // offers no combined mixing order (the plan does the same).
+    const v13Active = lawnV13On();
+    // The step is one selection, whole or absent (see openStep / projectBermudaStep).
+    resolvedLines = bermuda.select(resolvedLines);
+    const settled = await bermuda.settle(resolvedLines, v13Rows);
+    resolvedLines = settled.items;
+    // Step blocks are product-scoped and ride the response beside the limit blocks: they
+    // never hold the base products' quantities or the mixing order.
+    const blocks = v13SelectionBlocks(resolvedLines, (line) => bermudaRemoval.rowFor(v13Rows, line.product.id, line.bermudaStep === true), gateContext);
+    // The plan's own application-limit decision for a sheet opened from a visit: a capped
+    // product gets no amount and its limit message (a block beside the apply-alone ones, not
+    // holding the rest of the mix), a warning-level limit a sheet warning.
+    const limitCheck = await v13VisitLimits(db, scheduled, resolvedLines, v13Rows, nutrientTargets);
+    const builtItems = resolvedLines.map((line) => {
+      const { product, selected } = line;
+      // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
+      // no quantity at all; a capped line none either).
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
+      const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
+      const mixAt = (sqft, areaFactor) => calculateProductAmount({
+        product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
+      });
+      // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
+      // no turf profile, so it takes the half the plan's own default assumes.
+      const sizedLine = v13Line?.row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
+      const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,
       // premium add-on taken). Inspection/scout lines keep a zero factor so a
       // "SKIP" or audit line never shows product math. jobMix stays
-      // selected-only — it alone feeds the material-cost summary.
+      // selected-only: it alone feeds the material-cost summary.
       const plannedAreaFactor = selected
         ? areaFactor
-        : effectiveAreaFactor({ ...line, selected: true }, { ...areaContext, includePremiumOnly: true });
-      const plannedMix = jobMix || (product && carrier && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets })
-        : null);
-      const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
-      const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
-      const fullTankMix = selected && product && carrier && tankCoverageSqft
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
-        : null;
-      const plannedFullTankMix = fullTankMix || (product && carrier && tankCoverageSqft && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
-        : null);
-
+        : effectiveAreaFactor({ ...sizedLine, selected: true }, { ...areaContext, includePremiumOnly: true });
+      const mixPair = (sqft, jobFactor, plannedFactor) => {
+        const job = canMix && selected ? mixAt(sqft, jobFactor) : null;
+        return [job, job || (canMix && plannedAreaFactor > 0 ? mixAt(sqft, plannedFactor) : null)];
+      };
+      const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
+      const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
       return {
-        raw: line.raw,
-        role: line.role,
-        conditional: line.conditional,
-        scope: line.scope,
-        conditionFlag: line.conditionFlag,
-        branchGroupId: line.branchGroupId,
-        branch: line.branch || null,
-        areaFactorDefault: line.areaFactorDefault,
-        areaFactorClean: line.areaFactorClean,
-        areaFactorHeavy: line.areaFactorHeavy,
-        areaFactorBroadcast: line.areaFactorBroadcast,
-        selectionReason: line.selectionReason,
-        selected,
+        ...planLineFields(line),
+        // Gate off: no v13 field at all.
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, fungusNitrogenNotes(plannedMix, nitrogenCut)) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
         // them as tasks instead of alerting on a missing product match.
         taskLine: !product && !isPricedProtocolLine(line.raw),
-        product: product ? {
-          id: product.id,
-          name: product.name,
-          category: product.category,
-          activeIngredient: product.active_ingredient,
-          groups: {
-            moa: product.moa_group || null,
-            frac: product.frac_group || null,
-            irac: product.irac_group || null,
-            hrac: product.hrac_group || null,
-          },
-          labelVerifiedAt: product.label_verified_at || null,
-          bestPrice: product.best_price != null ? Number(product.best_price) : null,
-          costPerUnit: product.cost_per_unit != null ? Number(product.cost_per_unit) : null,
-          costUnit: product.cost_unit || null,
-          containerSize: product.container_size || null,
-          unitSizeOz: product.unit_size_oz != null ? Number(product.unit_size_oz) : null,
-          needsPricing: product.needs_pricing === true,
-          rainfastMinutes: product.rainfast_minutes || null,
-          reiHours: product.rei_hours ?? null,
-          labeledTurfSpecies: product.labeled_turf_species || [],
-          excludedTurfSpecies: product.excluded_turf_species || [],
-          requiresSurfactant: product.requires_surfactant,
-          allowsSurfactant: product.allows_surfactant,
-          mixingOrderCategory: product.mixing_order_category,
-          mixingInstructions: product.mixing_instructions,
-          labelSourceNote: product.label_source_note,
-          labelUrl: product.label_url || null,
-          sdsUrl: product.sds_url || null,
-          epaRegNumber: product.epa_reg_number || null,
-          manufacturer: product.manufacturer || null,
-          ppeRequired: product.ppe_required || null,
-          signalWord: product.signal_word || null,
-          compatibilityNotes: product.compatibility_notes || null,
-          doNotTankMixWith: product.do_not_tank_mix_with || [],
-          irrigationNotes: product.irrigation_notes || null,
-          pollinatorPrecautions: product.pollinator_precautions || null,
-          ppeText: product.ppe_text || null,
-          reentryText: product.reentry_text || null,
-        } : null,
+        product: product ? lawnMixProductView(product) : null,
         jobMix,
         fullTankMix,
         plannedMix,
         plannedFullTankMix,
       };
     });
-
+    const items = bermuda.decorate(builtItems);
     const selectedItems = items.filter((item) => item.selected);
+    // A mixing-order input: the line's recipe text, its catalog product, and the step marks.
+    const mixInput = (item) => ({
+      raw: item.raw,
+      bermudaStep: item.bermudaStep,
+      unavailable: item.unavailable,
+      product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
+    });
     const materialCostSummary = summarizeMaterialCost(selectedItems.map((item) => ({
       selected: item.selected,
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [];
-    if (!calibration) {
-      warnings.push({
-        code: 'missing_calibration',
-        message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
-      });
-    }
-    const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
-    if (unmatchedPricedLines.length) {
-      warnings.push({
-        code: 'unmatched_product',
-        lines: unmatchedPricedLines,
-        message: `${unmatchedPricedLines.length} priced protocol line${unmatchedPricedLines.length === 1 ? ' has' : 's have'} no product catalog match; label-rate math is unavailable for: ${unmatchedPricedLines.join(' | ')}`,
-      });
-    }
+    const warnings = [...settled.warnings, ...lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
 
-    const seesPricing = viewerSeesPricing(req);
-    const payload = {
-      track: { key: trackKey, name: track.name },
-      month,
-      // codex round-3 P2: ProtocolReferenceTabV2.jsx rendered the now-absent
-      // materialCostSummary as "0/N lines priced" — a stripped-for-role
-      // response looking identical to a genuinely-unpriced one. This flag
-      // lets the client tell the difference and hide the Material Cost
-      // card/column instead of showing a fabricated zero.
-      viewerRole: seesPricing ? 'admin' : 'technician',
-      visit: {
-        visit: visit.visit,
-        objective: visit.notes,
-        primary: visit.primary,
-        secondary: visit.secondary,
-        tiers: visit.tiers,
-      },
-      equipment: calibration ? {
-        equipmentSystemId: calibration.equipment_system_id,
-        calibrationId: calibration.id,
-        systemName: calibration.system_name,
-        systemType: calibration.system_type,
-        carrierGalPer1000: Number(calibration.carrier_gal_per_1000),
-        tankCapacityGal: calibration.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
-        tankCoverageSqft: calibration.tank_capacity_gal && calibration.carrier_gal_per_1000
-          ? Math.round((Number(calibration.tank_capacity_gal) / Number(calibration.carrier_gal_per_1000)) * 1000)
-          : null,
-        expiresAt: calibration.expires_at || null,
-      } : null,
-      areaSqft,
-      materialCostSummary: seesPricing ? materialCostSummary : null,
-      items: seesPricing ? items : items.map(stripLawnMixItemPricing),
-      selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
-      mixingOrder: buildMixOrder(selectedItems.map((item) => ({
-        raw: item.raw,
-        product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
-      }))),
-      warnings,
-    };
-    res.json(seesPricing ? payload : deepStripPriceTokens(payload));
+    res.json(lawnMixResponse({
+      seesPricing: viewerSeesPricing(req),
+      trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck,
+      // The bermuda step: its lines stay out of the base mixing order, its own order and its blocks ride beside.
+      mixable: bermuda.mixable, mixInput, bermudaOrder: bermuda.mixOrderField(items.map(mixInput), blocks.length > 0), extraBlocks: settled.blocks,
+    }));
   } catch (err) { next(err); }
 });
 
@@ -1116,6 +1208,7 @@ router.get('/lawn/active', async (req, res, next) => {
       grassTrack: req.query.grassTrack || req.query.grass_track || 'st_augustine',
       region: req.query.region || 'swfl',
       protocolKey: req.query.protocolKey || req.query.protocol_key || null,
+      planning: true,
     });
     if (!protocol) return res.status(404).json({ error: 'Active lawn protocol not found' });
     res.json({ protocol });
@@ -1131,6 +1224,7 @@ router.get('/lawn/window', async (req, res, next) => {
       serviceDate,
       grassTrack: req.query.grassTrack || req.query.grass_track || 'st_augustine',
       region: req.query.region || 'swfl',
+      planning: true,
     });
     if (!context?.protocol) return res.status(404).json({ error: 'Active lawn protocol not found' });
     res.json({ context: summarizeProtocolContext(context) });
@@ -1142,6 +1236,7 @@ router.get('/lawn/window', async (req, res, next) => {
 router.get('/completion-actions', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
+    const visitOnce = bermudaRemoval.once(() => loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q)));
     const serviceType = req.query.serviceType || req.query.service_type || '';
     const products = await getProtocolProducts();
     let programKey;
@@ -1152,8 +1247,16 @@ router.get('/completion-actions', async (req, res, next) => {
 
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
-      track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
-      program = protocols.lawn?.[track] || protocols.lawn?.st_augustine;
+      // Celsius and Blindside are not labeled for bahiagrass, so under v13 a bahia lawn (any of its
+      // spellings, in any of the three inputs) gets no chips, never another grass's: decided on the raw
+      // inputs, before lawnTrackFromInput defaults an unknown value to St. Augustine.
+      const lawnInputs = [req.query.lawnType, req.query.grassType, req.query.track];
+      if (lawnInputs.some(bahiaHasNoProgram)) {
+        return res.status(404).json({ error: 'Bahiagrass has no lawn program under v13', code: 'lawn_v13_bahia_no_program' });
+      }
+      // With a booked visit the active turf profile's grass sets the track, not the request's.
+      track = await bermudaRemoval.trackForVisit(db, visitOnce, lawnTrackFromInput(lawnInputs.find(Boolean)));
+      program = lawnProtocols()?.[track];
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
     } else {
@@ -1166,14 +1269,38 @@ router.get('/completion-actions', async (req, res, next) => {
 
     if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
 
-    const baseLines = parseProtocolLines(visit.primary, 'base');
-    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
-    const actions = buildCompletionActions({
-      lines: [...baseLines, ...conditionalLines],
+    const exactName = program.exact_catalog_names === true;
+    const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
+    // GATE_LAWN_BERMUDA_REMOVAL: with `scheduledServiceId`, a visit whose account asked for
+    // bermuda removal gets the step's three actions through the SAME projection as the plan
+    // and the tank sheet: the serving v13 window's staged rows must link all three, and
+    // neither limited product may be capped or too soon, or none of the three is offered
+    // (with a warning). Off, every part of it is a no-op.
+    const bermuda = await bermudaRemoval.openStep(db, {
+      loadVisit: visitOnce,
+      trackKey: track, month,
+      parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
+      loadRows: (options) => loadV13RowsForMonth(db, track, month, options),
+      probeLimits: async (probe, rows) => v13VisitLimits(db, await visitOnce(), probe, rows || new Map()),
+      productOf: (id) => serializeProtocolProduct(products.find((p) => String(p.id) === String(id)) || null),
+      reportLimitWarnings: true,
+    });
+    const actionLines = [...baseLines, ...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
+    const settled = await bermuda.settle(bermuda.tagActions(buildCompletionActions({
+      lines: actionLines,
       products,
       programKey,
       visit,
-    });
+    }), actionLines));
+    const actions = bermuda.decorate(settled.items);
+    // GATE_LAWN_V13: this fallback never sizes a lawn product from the catalog defaults
+    // (January Nutra-TECH is 6 fl oz in the v13 program, not the catalog's 12; spot
+    // products have no amount). Amounts come from the visit plan's completion defaults,
+    // the single source; the actions carry products with no rates.
+    const noRates = (action) => (action.product ? { ...action, product: { ...action.product, ...NO_PRODUCT_RATES } } : action);
+    const v13Extra = programKey === 'lawn' && lawnV13On()
+      ? { actions: actions.map(noRates), note: 'The v13 program takes its amounts from the visit plan; these actions list products with no amounts.' }
+      : {};
 
     res.json(protocolCatalogForViewer(req, {
       serviceType,
@@ -1187,6 +1314,8 @@ router.get('/completion-actions', async (req, res, next) => {
         objective: visit.notes,
       },
       actions,
+      ...settled.warningFields,
+      ...v13Extra,
     }));
   } catch (err) { next(err); }
 });
@@ -1814,12 +1943,13 @@ router.get('/programs', async (req, res, next) => {
     // Backward compat: map old track letters to new keys
     const TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
     const resolvedTrack = TRACK_MAP[track] || track;
-    if (resolvedTrack && protocols.lawn[resolvedTrack]) {
-      return res.json(protocolCatalogForViewer(req, { track: protocols.lawn[resolvedTrack] }));
+    const lawn = lawnProtocols();
+    if (resolvedTrack && lawn[resolvedTrack]) {
+      return res.json(protocolCatalogForViewer(req, { track: lawn[resolvedTrack] }));
     }
 
     // Return summary of all tracks
-    const summary = Object.entries(protocols.lawn).map(([key, t]) => ({
+    const summary = Object.entries(lawn).map(([key, t]) => ({
       key, name: t.name, visits: t.visits.length, notes: t.notes.length,
     }));
 
@@ -1852,7 +1982,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
 
     const VISIT_TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
     const resolvedVisitTrack = VISIT_TRACK_MAP[track] || track;
-    const trackData = protocols.lawn[resolvedVisitTrack];
+    const trackData = lawnProtocols()[resolvedVisitTrack];
     if (!trackData) return res.status(404).json({ error: 'Track not found' });
 
     const visit = trackData.visits.find(v => v.visit === parseInt(num));
@@ -1865,6 +1995,8 @@ router._internals = {
   stockStatusForProduct,
   unmatchedPricedProtocolLines,
   isPricedProtocolLine,
+  loadWindowSopPayload,
+  renderWindowSopMarkdown,
 };
 
 module.exports = router;

@@ -50,6 +50,21 @@
 // charge and no pay link (codex round-4 P1). Only an unchanged base whose
 // credit-card surcharge would push past the frozen total is skipped (the
 // charge service's own quote, checked first) and gets the pay link.
+//
+// Charge AFTER INSTALLATION (owner ruling 2026-09-30, clause approved
+// 2026-10-03): an agreement whose signed BILLING clause carries
+// ANNUAL_AFTER_INSTALL_CHARGE_AUTHORIZATION is not charged at signing. The
+// sign-time entry records { status: 'awaiting_installation' } instead of
+// claiming — no charge, no pay link — and the daily sweep
+// (termite-annual-activation.js chargeInstalledTerms) calls
+// chargeAnnualInvoiceAfterInstallation once the plan's installation visit
+// is completed. That entry claims by compare-and-swap FROM
+// 'awaiting_installation' and then runs the very same claimed-charge path,
+// so the at-most-once rule, the consent record, the frozen-total cap, the
+// base-drift hold and every bell are shared. Which wording was signed
+// decides the timing; an agreement signed on the at-signing wording is
+// never deferred, and one signed on the after-installation wording is never
+// charged at signing. A payer-billed invoice never enters the deferral.
 // ============================================================
 
 const crypto = require('crypto');
@@ -71,17 +86,33 @@ function parseJsonish(raw) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
+const AWAITING_INSTALLATION = 'awaiting_installation';
+const INSTALLATION_TRIGGER = 'installation_complete';
+// Owner ruling R8 (2026-10-01): 14 days with no performed first visit
+// raises one office alert.
+const NEVER_INSTALLED_ALERT_DAYS = 14;
+
+// The same bells serve both timings; only the moment named differs.
+const chargeWord = (ctx) => (ctx.afterInstall ? 'after-installation charge' : 'signing charge');
+
 const BELL_COPY = {
-  charge_declined: (ctx) => ({
+  charge_declined: (ctx) => (ctx.afterInstall ? {
+    title: 'Termite annual plan — card on file declined after installation',
+    body: `The station installation for the annual termite plan (estimate #${ctx.estimateId}) is completed, but charging the payment method on file for invoice #${ctx.invoiceId} failed: ${ctx.reason}. The pay link is being sent instead. The card will NOT be retried automatically.`,
+  } : {
     title: 'Termite annual plan — card on file declined at signing',
     body: `The customer signed the annual termite agreement (estimate #${ctx.estimateId}) and the plan is active, but charging the payment method on file for invoice #${ctx.invoiceId} failed: ${ctx.reason}. The pay link is being sent instead. The card will NOT be retried automatically.`,
   }),
+  never_installed: (ctx) => ({
+    title: 'Termite annual plan — signed, installation has not released the charge',
+    body: `The customer signed the annual termite agreement (estimate #${ctx.estimateId}) ${NEVER_INSTALLED_ALERT_DAYS} or more days ago and no completed installation visit has released the charge for invoice #${ctx.invoiceId}. Either the installation is not done yet (schedule it, or cancel the plan if the customer will not go ahead), or it was paid another way or billed to a payer (then collect or settle this invoice by hand — it is not charged automatically).`,
+  }),
   charge_unresolved: (ctx) => ({
-    title: 'Termite annual plan — signing charge needs reconciliation',
+    title: `Termite annual plan — ${chargeWord(ctx)} needs reconciliation`,
     body: `The charge for invoice #${ctx.invoiceId} (estimate #${ctx.estimateId}) may or may not have gone through (${ctx.reason}). No pay link was sent. Check Stripe and the invoice before collecting any other way.`,
   }),
   charge_deferred: (ctx) => ({
-    title: 'Termite annual plan — signing charge not attempted',
+    title: `Termite annual plan — ${chargeWord(ctx)} not attempted`,
     body: `Invoice #${ctx.invoiceId} (estimate #${ctx.estimateId}) was not charged and no pay link was sent: ${ctx.reason}. Resolve it and collect from the invoice.`,
   }),
   surcharge_not_authorized: (ctx) => ({
@@ -101,15 +132,20 @@ const BELL_COPY = {
 async function ringBell(kind, ctx) {
   try {
     const { title, body } = BELL_COPY[kind](ctx);
-    await require('./notification-service').notifyAdmin('billing', title, body, {
+    // notifyAdmin resolves null (it does not throw) when its own insert or
+    // dedupe transaction fails: only a persisted or deduped row is a landed
+    // bell.
+    const landed = await require('./notification-service').notifyAdmin('billing', title, body, {
       icon: '⚠️',
       link: `/admin/estimates?estimateId=${ctx.estimateId}`,
       bell: true,
       dedupeKey: `termite-annual-signature-charge:${ctx.estimateId}:${kind}`,
       metadata: { estimateId: ctx.estimateId, invoiceId: ctx.invoiceId, reason: ctx.reason },
     });
+    return !!landed;
   } catch (err) {
     logger.error(`[termite-annual-charge] bell failed for estimate ${ctx.estimateId}: ${err.message}`);
+    return false;
   }
 }
 
@@ -135,13 +171,15 @@ async function resolveClaim(conn, estimateId, claimToken, outcome) {
 }
 
 // Release a claim for an attempt that provably never reached Stripe, so
-// the reconciliation sweep can try again.
-async function releaseClaim(conn, estimateId, claimToken) {
+// the reconciliation sweep can try again. A claim taken from
+// 'awaiting_installation' goes back to exactly that record (`restore`),
+// never to NULL — NULL would read as "never decided".
+async function releaseClaim(conn, estimateId, claimToken, restore = null) {
   try {
     await conn('estimates')
       .where({ id: estimateId })
       .whereRaw("annual_plan_signature_charge ->> 'claim_token' = ?", [claimToken])
-      .update({ annual_plan_signature_charge: null });
+      .update({ annual_plan_signature_charge: restore ? JSON.stringify(restore) : null });
   } catch (err) {
     logger.error(`[termite-annual-charge] claim release failed for estimate ${estimateId}: ${err.message}`);
   }
@@ -153,6 +191,9 @@ const IN_FLIGHT_CLAIM_MS = 60 * 60 * 1000;
 
 async function followExistingOutcome(existing, ctx) {
   const status = existing?.status || 'claimed';
+  // Waiting for the installation visit: nothing to collect yet, by the
+  // signed agreement's own terms.
+  if (status === AWAITING_INSTALLATION) return { status, reason: null, deliverPayLink: false };
   if (PAY_LINK_OUTCOMES.has(status)) return { status, reason: existing.reason || null, deliverPayLink: true };
   if (SETTLED_OUTCOMES.has(status)) return { status, reason: existing.reason || null, deliverPayLink: false };
   if (status === 'deferred') {
@@ -250,17 +291,21 @@ function classifyVerifiedCharge(freshInvoice, chargeResult) {
   return { status: 'declined', reason: `post-charge status ${freshInvoice?.status || 'unknown'}` };
 }
 
-// Everything between a won claim and the Stripe call. Returns an outcome to
-// record, or { release: true } when nothing was attempted and the claim
-// should be handed back for a later retry.
-async function runClaimedCharge({ conn, ctx, trigger }) {
+// The claimed charge runs in three steps; each of the first two either ends
+// the attempt with an outcome to record ({ outcome }) or hands the next step
+// what it verified. An outcome of { release: true } means nothing was
+// attempted and the claim goes back for a later retry.
+//
+// Step 1 — is this invoice ours to charge, for the amount the customer
+// signed, with a saved method?
+async function preflightClaimedCharge({ conn, ctx, trigger }) {
   const RecurringCards = require('./recurring-card-on-file');
 
   const invoice = await conn('invoices').where({ id: ctx.invoiceId })
     .first('id', 'customer_id', 'payer_id', 'payer_statement_id', 'status', 'subtotal', 'discount_amount', 'tax_amount', 'total');
-  if (!invoice) return { status: 'skipped', reason: 'invoice_missing' };
-  if (invoice.payer_statement_id) return { status: 'payer_routed', reason: 'payer_statement' };
-  if (invoice.payer_id) return { status: 'skipped', reason: 'payer_billed' };
+  if (!invoice) return { outcome: { status: 'skipped', reason: 'invoice_missing' } };
+  if (invoice.payer_statement_id) return { outcome: { status: 'payer_routed', reason: 'payer_statement' } };
+  if (invoice.payer_id) return { outcome: { status: 'skipped', reason: 'payer_billed' } };
 
   // Automatic (sweep) charges honor an active collections dispute hold
   // (B10); the signature-time charge answers the customer's own signing and
@@ -277,7 +322,7 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
     }
     if (held) {
       await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
-      return { release: true, reason: 'collection_hold' };
+      return { outcome: { release: true, reason: 'collection_hold' } };
     }
   }
 
@@ -287,7 +332,7 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
     frozen = require('./estimate-converter').frozenTermiteAnnualFinancialsFor(estimate);
   } catch {
     await ringBell('no_accepted_amount', ctx);
-    return { status: 'skipped', reason: 'no_accepted_amount' };
+    return { outcome: { status: 'skipped', reason: 'no_accepted_amount' } };
   }
   const frozenTotalCents = Math.round(frozen.total * 100);
 
@@ -298,17 +343,34 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   const drift = invoiceBaseDrift(invoice, frozen);
   if (drift) {
     await ringBell('invoice_base_drift', { ...ctx, reason: drift });
-    return { status: 'deferred', reason: 'invoice_base_drift', detail: drift, belled: true };
+    return { outcome: { status: 'deferred', reason: 'invoice_base_drift', detail: drift, belled: true } };
   }
 
-  if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { status: 'skipped', reason: 'gate_off' };
+  // After installation the wait record names the agreement that deferred
+  // the charge. If staff cancelled it since, NOTHING is authorized — not the
+  // charge, and not the pay-link fallbacks just below (charging off, no
+  // saved method). Checked before any of them; the office owns it (pre-push
+  // audit P1 on #5816).
+  if (trigger === INSTALLATION_TRIGGER && ctx.contractId) {
+    const agreement = await conn('customer_contracts').where({ id: ctx.contractId }).first('status');
+    if (agreement && String(agreement.status || '') !== 'signed') {
+      return { outcome: { status: 'deferred', reason: 'agreement_no_longer_signed', detail: 'the signed agreement was cancelled; nothing was charged and no pay link was sent' } };
+    }
+  }
+
+  if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { outcome: { status: 'skipped', reason: 'gate_off' } };
 
   const method = await RecurringCards.resolvePrepayChargeMethod({
     policy: { exemptReason: 'autopay_already_active' },
     customerId: invoice.customer_id,
   });
-  if (!method?.paymentMethodRowId) return { status: 'skipped', reason: 'no_enrolled_method' };
+  if (!method?.paymentMethodRowId) return { outcome: { status: 'skipped', reason: 'no_enrolled_method' } };
+  return { invoice, frozenTotalCents, method };
+}
 
+// Step 2 — do the SIGNED agreement's own words authorize this charge at this
+// moment, within the signed total, and is that authorization on record?
+async function authorizeClaimedCharge({ conn, ctx, trigger, invoice, frozenTotalCents, method }) {
   let contract;
   try {
     contract = await signedAnnualContractFor(conn, ctx.estimateId, ctx.contractId);
@@ -316,13 +378,16 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   } catch (err) {
     logger.warn(`[termite-annual-charge] signed agreement read failed for estimate ${ctx.estimateId} — releasing for retry: ${err.message}`);
     await ringBell('charge_deferred', { ...ctx, reason: 'the signed agreement could not be read yet; the daily sweep will retry' });
-    return { release: true };
+    return { outcome: { release: true } };
   }
   // Only the agreement's own signed words authorize this charge — never an
   // Auto Pay enrollment on its own.
-  const { agreementAuthorizesInitialCharge } = require('./termite-program-agreement');
-  if (!agreementAuthorizesInitialCharge(contract.contract_text_snapshot)) {
-    return { status: 'skipped', reason: 'no_initial_charge_authorization' };
+  // Each timing needs its OWN signed wording: the after-installation charge
+  // is never taken on an at-signing agreement, nor the reverse.
+  const { agreementAuthorizesInitialCharge, agreementAuthorizesAfterInstallCharge } = require('./termite-program-agreement');
+  const authorizes = trigger === INSTALLATION_TRIGGER ? agreementAuthorizesAfterInstallCharge : agreementAuthorizesInitialCharge;
+  if (!authorizes(contract.contract_text_snapshot)) {
+    return { outcome: { status: 'skipped', reason: 'no_initial_charge_authorization' } };
   }
 
   // The agreement's prices are total maximums: a credit-card surcharge
@@ -336,7 +401,7 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
     const quote = await StripeService.quoteInvoiceSavedCardCharge(ctx.invoiceId, method.paymentMethodRowId);
     if (Math.round(Number(quote?.total) * 100) > frozenTotalCents) {
       await ringBell('surcharge_not_authorized', ctx);
-      return { status: 'skipped', reason: 'surcharge_exceeds_accepted_total' };
+      return { outcome: { status: 'skipped', reason: 'surcharge_exceeds_accepted_total' } };
     }
   } catch (err) {
     logger.warn(`[termite-annual-charge] pre-charge quote failed for invoice ${ctx.invoiceId} — relying on the charge ceiling: ${err.message}`);
@@ -349,9 +414,15 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   } catch (err) {
     logger.warn(`[termite-annual-charge] consent record failed for estimate ${ctx.estimateId} — releasing for retry: ${err.message}`);
     await ringBell('charge_deferred', { ...ctx, reason: 'the signing authorization could not be recorded yet; the daily sweep will retry' });
-    return { release: true };
+    return { outcome: { release: true } };
   }
+  return { contract };
+}
 
+// Step 3 — the charge itself, with every eligibility read above bound again
+// inside the charge transaction, and its outcome classified.
+async function submitClaimedCharge({ conn, ctx, trigger, installation, invoice, frozenTotalCents, method, contract }) {
+  const StripeService = require('./stripe');
   let chargeResult;
   try {
     chargeResult = await StripeService.chargeInvoiceWithSavedCard(ctx.invoiceId, method.paymentMethodRowId, {
@@ -363,6 +434,22 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
       // Serialize against an Auto Pay pause/opt-out committing mid-charge.
       requireAutopayForCustomerId: invoice.customer_id,
       requireSelfPayCustomerId: invoice.customer_id,
+      // The agreement read above is re-checked, locked, inside the charge
+      // transaction: a contract cancelled in between authorizes nothing.
+      requireSignedContractId: contract.id,
+      // After installation: the eligibility read under our claim is bound
+      // again INSIDE the charge transaction, under the visit's lock — still
+      // self-pay, still completed, its current closeout still performed, and
+      // still stamped by this plan's term. A reopen, a payer assignment, a
+      // payment another way or a cleared stamp after the preflight refuses
+      // before Stripe (GitHub Codex #5816 r2).
+      ...(installation ? {
+        requireSelfPayScheduledServiceId: installation.visitId,
+        requireCompletedVisit: true,
+        requirePerformedVisit: true,
+        requireHeldTermId: installation.termId,
+        requireNoOtherVisitInvoice: true,
+      } : {}),
       // The daily sweep is machine-initiated: the charge primitive refuses
       // an active collections dispute hold for it BY DEFAULT (B10). The
       // signature-time charge answers the customer's own signing
@@ -377,6 +464,25 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
     // payer refusal, no pay link.
     // Also covers COLLECTION_HOLD_CHECK_FAILED: the locked hold lookup itself
     // failed after a good preflight (still pre-Stripe) — same retry.
+    // The locked installation guards above refused (pre-Stripe, nothing
+    // charged): the plan goes back to waiting — never a decline, never a pay
+    // link beside a visit that is no longer this plan's installation.
+    // The office is told (one deduped alert): a refusal that never clears —
+    // an invoice linked to the visit after its closeout, a payment recorded
+    // another way — would otherwise wait silently, because the plan keeps
+    // its completed stamp and so never reaches the never-released alert.
+    if (installation && err?.code === 'VISIT_NOT_COMPLETED') {
+      await ringBell('charge_deferred', {
+        ...ctx,
+        reason: `the installation visit no longer qualifies for the automatic charge (${err.message}) The plan is still waiting; collect this invoice by hand, or correct the visit and the daily sweep will charge it`,
+      });
+      return { release: true, reason: 'installation_no_longer_eligible' };
+    }
+    // The agreement stopped being signed before money moved (pre-Stripe):
+    // nothing authorizes a charge or a pay link. Staff own it.
+    if (err?.code === 'CONTRACT_NOT_SIGNED') {
+      return { status: 'deferred', reason: 'agreement_no_longer_signed', detail: 'the signed agreement was cancelled before the charge; nothing was charged' };
+    }
     if (isCollectionHoldRefusal(err)) {
       await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
       return { release: true, reason: 'collection_hold' };
@@ -394,6 +500,19 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   }
 }
 
+// Everything between a won claim and the Stripe call. Returns an outcome to
+// record, or { release: true } when nothing was attempted and the claim
+// should be handed back for a later retry.
+async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
+  const preflight = await preflightClaimedCharge({ conn, ctx, trigger });
+  if (preflight.outcome) return preflight.outcome;
+  const authorization = await authorizeClaimedCharge({ conn, ctx, trigger, ...preflight });
+  if (authorization.outcome) return authorization.outcome;
+  return submitClaimedCharge({
+    conn, ctx, trigger, installation, ...preflight, contract: authorization.contract,
+  });
+}
+
 /**
  * Attempt the at-most-once signature charge for an activated termite annual
  * plan invoice. Never throws.
@@ -404,6 +523,8 @@ async function chargeAnnualInvoiceAtSignature({
   estimateId, contractId = null, invoiceId, conn = db, trigger = 'sweep',
 }) {
   const ctx = { estimateId, contractId, invoiceId };
+  const deferral = await deferToInstallationIfAgreed({ conn, ctx, trigger });
+  if (deferral) return deferral;
   const claimToken = crypto.randomUUID();
   let claimed = 0;
   try {
@@ -424,19 +545,7 @@ async function chargeAnnualInvoiceAtSignature({
 
   try {
     if (claimed !== 1) return await followExistingOutcome(await readChargeState(conn, estimateId), ctx);
-
-    const outcome = await runClaimedCharge({ conn, ctx, trigger });
-    if (outcome.release) {
-      await releaseClaim(conn, estimateId, claimToken);
-      return { status: 'deferred', reason: outcome.reason || 'consent_record_failed', deliverPayLink: false };
-    }
-    const { belled, ...recorded } = outcome;
-    await resolveClaim(conn, estimateId, claimToken, recorded);
-    if (outcome.status === 'declined') await ringBell('charge_declined', { ...ctx, reason: outcome.reason });
-    if (outcome.status === 'ambiguous') await ringBell('charge_unresolved', { ...ctx, reason: outcome.reason });
-    if (outcome.status === 'deferred' && !belled) await ringBell('charge_deferred', { ...ctx, reason: outcome.reason });
-    logger.info(`[termite-annual-charge] estimate ${estimateId} invoice ${invoiceId}: ${outcome.status}${outcome.reason ? ` (${outcome.reason})` : ''}`);
-    return { status: outcome.status, reason: outcome.reason || null, deliverPayLink: PAY_LINK_OUTCOMES.has(outcome.status) };
+    return await settleClaimedCharge({ conn, ctx, claimToken, trigger });
   } catch (err) {
     // Unexpected: our claim stands unresolved, so it is treated as
     // ambiguous from here on — never retried, never a pay link.
@@ -446,8 +555,198 @@ async function chargeAnnualInvoiceAtSignature({
   }
 }
 
+// Run a WON claim to its recorded outcome. `restore` is the record a
+// released claim goes back to (see releaseClaim).
+async function settleClaimedCharge({ conn, ctx, claimToken, trigger, restore = null, installation = null }) {
+  const { estimateId, invoiceId } = ctx;
+  const outcome = await runClaimedCharge({ conn, ctx, trigger, installation });
+  if (outcome.release) {
+    await releaseClaim(conn, estimateId, claimToken, restore);
+    return { status: 'deferred', reason: outcome.reason || 'consent_record_failed', deliverPayLink: false };
+  }
+  const { belled, ...recorded } = outcome;
+  await resolveClaim(conn, estimateId, claimToken, recorded);
+  if (outcome.status === 'declined') await ringBell('charge_declined', { ...ctx, reason: outcome.reason });
+  if (outcome.status === 'ambiguous') await ringBell('charge_unresolved', { ...ctx, reason: outcome.reason });
+  if (outcome.status === 'deferred' && !belled) await ringBell('charge_deferred', { ...ctx, reason: outcome.reason });
+  logger.info(`[termite-annual-charge] estimate ${estimateId} invoice ${invoiceId}: ${outcome.status}${outcome.reason ? ` (${outcome.reason})` : ''}`);
+  return { status: outcome.status, reason: outcome.reason || null, deliverPayLink: PAY_LINK_OUTCOMES.has(outcome.status) };
+}
+
+// The sign-time decision for an agreement that charges after installation:
+// record 'awaiting_installation' in place of a claim. Returns null when this
+// agreement is charged at signing (the caller carries on), else the result
+// to hand back. A payer-billed invoice is never deferred — it keeps today's
+// payer path.
+async function deferToInstallationIfAgreed({ conn, ctx, trigger }) {
+  const { estimateId, invoiceId } = ctx;
+  let contract;
+  let invoice;
+  try {
+    contract = await signedAnnualContractFor(conn, estimateId, ctx.contractId);
+    if (!contract?.contract_text_snapshot) throw new Error('signed annual agreement not found');
+    invoice = await conn('invoices').where({ id: invoiceId }).first('id', 'payer_id', 'payer_statement_id');
+  } catch (err) {
+    // Which wording was signed is unknown, so neither a charge nor a pay
+    // link is safe. Nothing is recorded; the daily sweep asks again.
+    logger.warn(`[termite-annual-charge] signed agreement read failed for estimate ${estimateId} — nothing collected yet: ${err.message}`);
+    await ringBell('charge_deferred', { ...ctx, reason: 'the signed agreement could not be read yet; the daily sweep will retry' });
+    return { status: 'deferred', reason: 'agreement_unreadable', deliverPayLink: false };
+  }
+  try {
+    if (!(await recordInstallationWait({ conn, estimateId, contract, invoiceId, invoice, trigger })).agreed) return null;
+  } catch (err) {
+    logger.error(`[termite-annual-charge] deferral stamp failed for estimate ${estimateId}: ${err.message}`);
+    return { status: 'deferred', reason: 'claim_failed', deliverPayLink: false };
+  }
+  // Whatever stands now decides — ours, or an earlier entry's outcome.
+  return followExistingOutcome(await readChargeState(conn, estimateId), ctx);
+}
+
+// Record 'awaiting_installation' for an agreement that charges after
+// installation (compare-and-swap from NULL; an existing record stands).
+// Returns { agreed } — whether this agreement is the after-installation kind
+// at all. Throws on a failed write. Called by the activation transaction, so
+// the wait exists before the term is visible to any closeout, and again by
+// the sign-time entry (a no-op then; it covers an estimate activated before
+// this code).
+async function recordInstallationWait({ conn, estimateId, contract, invoiceId, invoice = null, trigger = 'signature' }) {
+  const { agreementAuthorizesAfterInstallCharge } = require('./termite-program-agreement');
+  if (!agreementAuthorizesAfterInstallCharge(contract?.contract_text_snapshot)) return { agreed: false };
+  const inv = invoice || await conn('invoices').where({ id: invoiceId }).first('id', 'payer_id', 'payer_statement_id');
+  // A payer-billed invoice never enters the wait: it keeps the payer path.
+  if (!inv || inv.payer_id || inv.payer_statement_id) return { agreed: false };
+  await conn('estimates')
+    .where({ id: estimateId })
+    .whereNull('annual_plan_signature_charge')
+    .update({
+      annual_plan_signature_charge: JSON.stringify({
+        status: AWAITING_INSTALLATION,
+        invoice_id: invoiceId,
+        contract_id: contract.id,
+        trigger,
+        deferred_at: new Date().toISOString(),
+        // The never-installed clock runs from the SIGNATURE, not from this
+        // (possibly retried, days-later) activation.
+        signed_at: contract.signed_at ? new Date(contract.signed_at).toISOString() : null,
+      }),
+    });
+  return { agreed: true };
+}
+
+/**
+ * Charge an 'awaiting_installation' plan once its installation visit is
+ * completed. At most one automatic charge: the claim is a compare-and-swap
+ * FROM 'awaiting_installation'. Never throws.
+ *
+ * @returns {Promise<{status: string, reason: string|null, deliverPayLink: boolean}>}
+ */
+async function chargeAnnualInvoiceAfterInstallation({ estimateId, invoiceId, conn = db }) {
+  let ctx = { estimateId, contractId: null, invoiceId, afterInstall: true };
+  const claimToken = crypto.randomUUID();
+  let waiting;
+  let claimed = 0;
+  try {
+    waiting = await readChargeState(conn, estimateId);
+    // Never recorded as waiting (an at-signing agreement, or nothing decided
+    // yet): this entry has nothing to collect and rings nothing.
+    if (!waiting) return { status: 'not_awaiting_installation', reason: null, deliverPayLink: false };
+    if (waiting.status !== AWAITING_INSTALLATION) return await followExistingOutcome(waiting, ctx);
+    ctx = { ...ctx, contractId: waiting.contract_id || null };
+    claimed = await conn('estimates')
+      .where({ id: estimateId })
+      .whereRaw("annual_plan_signature_charge ->> 'status' = ?", [AWAITING_INSTALLATION])
+      .update({
+        annual_plan_signature_charge: conn.raw('annual_plan_signature_charge || ?::jsonb', [JSON.stringify({
+          status: 'claimed', claim_token: claimToken, invoice_id: invoiceId, trigger: INSTALLATION_TRIGGER, claimed_at: new Date().toISOString(),
+        })]),
+      });
+  } catch (err) {
+    logger.error(`[termite-annual-charge] after-installation claim failed for estimate ${estimateId}: ${err.message}`);
+    return { status: 'deferred', reason: 'claim_failed', deliverPayLink: false };
+  }
+
+  try {
+    if (claimed !== 1) return await followExistingOutcome(await readChargeState(conn, estimateId), ctx);
+    // Re-read under our claim: still an unpaid original term with a
+    // COMPLETED installation. A plan cancelled, or a visit un-completed,
+    // since the sweep's scan goes back to waiting uncharged.
+    const installation = await installedAndOwed({ conn, estimateId, invoiceId });
+    if (!installation) {
+      await releaseClaim(conn, estimateId, claimToken, waiting);
+      return { status: AWAITING_INSTALLATION, reason: 'not_installed_or_not_owed', deliverPayLink: false };
+    }
+    return await settleClaimedCharge({
+      conn, ctx, claimToken, trigger: INSTALLATION_TRIGGER, restore: waiting, installation,
+    });
+  } catch (err) {
+    logger.error(`[termite-annual-charge] unexpected after-installation failure for estimate ${estimateId}: ${err.message}`);
+    await ringBell('charge_unresolved', { ...ctx, reason: err.message });
+    return { status: 'ambiguous', reason: err.message, deliverPayLink: false };
+  }
+}
+
+// The plan behind `estimateId` still owes `invoiceId` and its installation
+// visit was PERFORMED (termite-annual-activation.js's one installation rule
+// plus its performed-closeout rule).
+async function installedAndOwed({ conn, estimateId, invoiceId }) {
+  const term = await conn('annual_prepay_terms')
+    .where({ source_estimate_id: estimateId, prepay_invoice_id: invoiceId, status: 'payment_pending' })
+    .whereNull('renewed_from_term_id')
+    .first('id', 'customer_id', 'source_estimate_id', 'term_start', 'created_at');
+  if (!term) return null;
+  const { earliestPerformedInstallation } = require('./termite-annual-activation');
+  const visit = await earliestPerformedInstallation(term, conn);
+  return visit ? { visitId: visit.id, termId: term.id } : null;
+}
+
+// For the installation visit's completion text (paf-prepay-release.js
+// isFirstHeldVisitOfUnpaidYear): the plan behind `term` still waits to be
+// charged — its record reads 'awaiting_installation' and its invoice is
+// still owed. Then the visit says the plan payment is processed after it,
+// never "nothing is due".
+async function installationStillAwaitsCharge(term, conn = db) {
+  if (!term?.source_estimate_id || String(term.status || '') !== 'payment_pending') return false;
+  const state = await readChargeState(conn, term.source_estimate_id);
+  if (state?.status !== AWAITING_INSTALLATION || !state.invoice_id) return false;
+  const invoice = await conn('invoices').where({ id: state.invoice_id }).first('status');
+  const status = String(invoice?.status || '').toLowerCase();
+  return !!invoice && !['processing', 'paid', 'prepaid', 'void', 'voided', 'canceled', 'cancelled', 'refunded'].includes(status);
+}
+
+// One office alert for a plan signed NEVER_INSTALLED_ALERT_DAYS ago whose
+// installation is still not completed. The alert lands FIRST and the stamp
+// is written only after it did: a failed or interrupted alert leaves the
+// plan unstamped, so the next sweep rings again. Two sweeps racing both
+// reach the bell, and its dedupeKey keeps that to one alert.
+async function alertNeverInstalled({ estimateId, invoiceId, conn = db }) {
+  // Revalidated HERE, at the alert boundary: the sweep's scan can be
+  // outrun by the installation's closeout (then a stamped, performed
+  // installation exists and the charge is on its way) or by another sweep's
+  // claim. Either way the alert would be false (GitHub Codex #5816 r4).
+  const state = await readChargeState(conn, estimateId);
+  if (state?.status !== AWAITING_INSTALLATION || state.never_installed_alerted_at) return false;
+  if (await installedAndOwed({ conn, estimateId, invoiceId })) return false;
+  if (!(await ringBell('never_installed', { estimateId, invoiceId, afterInstall: true }))) return false;
+  await conn('estimates')
+    .where({ id: estimateId })
+    .whereRaw("annual_plan_signature_charge ->> 'status' = ?", [AWAITING_INSTALLATION])
+    .update({
+      annual_plan_signature_charge: conn.raw('annual_plan_signature_charge || ?::jsonb', [
+        JSON.stringify({ never_installed_alerted_at: new Date().toISOString() }),
+      ]),
+    });
+  return true;
+}
+
 module.exports = {
   chargeAnnualInvoiceAtSignature,
+  chargeAnnualInvoiceAfterInstallation,
+  alertNeverInstalled,
+  installationStillAwaitsCharge,
+  recordInstallationWait,
+  AWAITING_INSTALLATION,
+  NEVER_INSTALLED_ALERT_DAYS,
   _private: {
     classifyChargeError, classifyVerifiedCharge, invoiceBaseDrift, signatureConsentVersion,
   },

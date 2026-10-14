@@ -6,7 +6,7 @@
 // .post_application_watering and frozen into the completion product facts:
 //
 //   { mode: 'hold' | 'water_in' | 'none',
-//     hold_hours, water_in_inches, water_in_by_hours,
+//     hold_hours, water_in_inches, water_in_by_hours, water_in_same_day,
 //     source: 'label' | 'owner' | 'default',
 //     label_note, verified_at, verified_by }
 //
@@ -18,7 +18,7 @@
 const MODES = ['hold', 'water_in', 'none'];
 const SOURCES = ['label', 'owner', 'default'];
 const RULE_KEYS = [
-  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours',
+  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day',
   'source', 'label_note', 'verified_at', 'verified_by',
 ];
 
@@ -26,6 +26,13 @@ const DEFAULT_HOLD_HOURS = 24;
 const DEFAULT_WATER_IN_INCHES = 0.25;
 const DEFAULT_WATER_IN_BY_HOURS = 24;
 const MAX_HOURS = 168;
+// A pre-emergent label allows 14 days to get its water ("at least 0.5 inch of
+// rainfall or irrigation within 14 days"), so a water-in window may be longer
+// than a hold.
+const MAX_WATER_IN_HOURS = 336;
+// A water-in window longer than this is met by rain and the regular schedule,
+// never by a one-off run (lawn-watering-instruction.js rule D).
+const LONG_WINDOW_HOURS = 168;
 const MAX_INCHES = 2;
 const MAX_TEXT = 500;
 
@@ -69,10 +76,21 @@ function validateHoldFields(value, errors) {
 
 function validateWaterInFields(value, errors) {
   const inches = value.water_in_inches == null ? DEFAULT_WATER_IN_INCHES : positiveNumber(value.water_in_inches, MAX_INCHES);
-  const byHours = value.water_in_by_hours == null ? DEFAULT_WATER_IN_BY_HOURS : positiveNumber(value.water_in_by_hours, MAX_HOURS);
+  const byHours = value.water_in_by_hours == null ? DEFAULT_WATER_IN_BY_HOURS : positiveNumber(value.water_in_by_hours, MAX_WATER_IN_HOURS);
   if (inches == null) errors.push(`water_in_inches must be a number greater than 0 and at most ${MAX_INCHES}`);
-  if (byHours == null) errors.push(`water_in_by_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
-  return { water_in_inches: inches, water_in_by_hours: byHours };
+  if (byHours == null) errors.push(`water_in_by_hours must be a number greater than 0 and at most ${MAX_WATER_IN_HOURS}`);
+  // A label that says water in "the same day" (Dylox): the deadline is also
+  // capped at the end of the application's ET day. Present only when true.
+  if (value.water_in_same_day != null && typeof value.water_in_same_day !== 'boolean') {
+    errors.push('water_in_same_day must be true or false when present');
+  }
+  // "The same day" and a window of more than a week contradict each other: the
+  // long-window line (rule D) has no same-day cutoff, so the pair would print a
+  // 14-day deadline for a same-day label.
+  if (value.water_in_same_day === true && byHours != null && byHours > LONG_WINDOW_HOURS) {
+    errors.push(`water_in_same_day cannot be true when water_in_by_hours is more than ${LONG_WINDOW_HOURS}`);
+  }
+  return { water_in_inches: inches, water_in_by_hours: byHours, ...(value.water_in_same_day === true ? { water_in_same_day: true } : {}) };
 }
 
 function validateVerifiedAt(value, errors) {
@@ -203,9 +221,13 @@ function resolveWateringRule(row) {
 }
 
 module.exports = {
+  MAX_HOURS,
+  LONG_WINDOW_HOURS,
+  MAX_INCHES,
   MODES,
   SOURCES,
   validateRule,
   deriveDefaultRule,
   resolveWateringRule,
+  isPreEmergent,
 };

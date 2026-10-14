@@ -40,7 +40,7 @@ vi.mock('./ProjectsPage', () => ({ ProjectDetail: ({ projectId }) => <div>Existi
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service, onCompleteService }) => <button
   onClick={() => onCompleteService(service)}
 >Complete details {service.linkedProject?.id || 'unlinked'}</button> }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true, known: true }) }));
 vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout {visitId}</div> }));
 beforeEach(() => {
   projectModalState.props = null;
@@ -319,4 +319,84 @@ it('preserves a consumed missing-appointment message during background refresh',
   await screen.findByText(/That appointment is no longer on this date/);
   await act(async () => lateRefresh({}, { background: true }));
   expect(screen.getByText(/That appointment is no longer on this date/)).toBeInTheDocument();
+});
+
+it('shows a held visit above the stops and Book it opens the new-appointment modal on its day, time and customer', async () => {
+  const held = {
+    call_log_id: 'call-held', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM',
+    caller_name: 'Pat Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' },
+    service: 'General Pest Control', call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-1', notes: null,
+  };
+  const offHour = { ...held, call_log_id: 'call-off-hour', minutes: 870, time_label: '2:30 PM', customer_id: null };
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [held, offHour] };
+    if (url === '/admin/customers/cust-1') return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' } } };
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  expect(await screen.findByText('From calls, not on the calendar')).toBeInTheDocument();
+  expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-14');
+  // An off-hour slot is not prefilled: the form must make the person pick a time, and the agreed time rides in the notes.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[1]);
+  await screen.findByRole('dialog');
+  expect(appointmentModalState.props).toMatchObject({
+    defaultDate: '2026-10-14', requireTimeChoice: true,
+    defaultInternalNotes: 'Booked from a phone call. Call ID: call-off-hour. Time agreed on the call: 2:30 PM. Visits start on the hour: agree a whole-hour time with the caller. Address stated on the call: 12 Test Lane, Bradenton, 34205.',
+  });
+  expect(appointmentModalState.props.defaultWindowStart).toBeUndefined();
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[0]);
+  await screen.findByRole('dialog');
+  expect(appointmentModalState.props).toMatchObject({
+    defaultDate: '2026-10-14', defaultWindowStart: '11:00', defaultCustomer: expect.objectContaining({ id: 'cust-1', firstName: 'Pat', lastName: 'Sample' }),
+    // The call marker rides into the visit's internal notes, so the booked visit carries the call.
+    defaultInternalNotes: 'Booked from a phone call. Call ID: call-held. Address stated on the call: 12 Test Lane, Bradenton, 34205.', requireTimeChoice: false,
+  });
+});
+
+it('only the newest Book it click opens the form when an earlier customer lookup is slow', async () => {
+  const row = (id, customerId) => ({
+    call_log_id: id, kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: `Caller ${id}`,
+    phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: customerId, notes: null,
+  });
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [row('first', 'cust-slow'), row('second', 'cust-fast')] };
+    if (url === '/admin/customers/cust-slow') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
+    if (url === '/admin/customers/cust-fast') return { customer: { id: 'cust-fast', firstName: 'Fast', lastName: 'Sample' } };
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  const buttons = await screen.findAllByRole('button', { name: 'Book it' });
+  fireEvent.click(buttons[0]);
+  fireEvent.click(buttons[1]);
+  await screen.findByRole('dialog');
+  expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
+  await act(async () => { releaseSlow(); await slow; });
+  expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
+  expect(appointmentModalState.props.defaultInternalNotes).toContain('Call ID: second.');
+});
+
+it('a Book it lookup still pending when the day changes does not open the form', async () => {
+  const held = {
+    call_log_id: 'call-late', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: 'Pat Sample',
+    phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-slow', notes: null,
+  };
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url === '/admin/schedule/held-visits?date=2026-10-14') return { heldVisits: [held] };
+    if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [] };
+    if (url === '/admin/customers/cust-slow') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Book it' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-15'));
+  await act(async () => { releaseSlow(); await slow; });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });

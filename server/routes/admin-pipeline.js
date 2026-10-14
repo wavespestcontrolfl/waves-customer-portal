@@ -790,14 +790,29 @@ async function linkOpportunityRecords({
   }
 
   return database.transaction(async (trx) => {
-    const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').first();
+    // The estimate is held FOR SHARE until this link commits, so an archive
+    // of it (staff, or the draft-retire sweep) either lands first and is seen
+    // here, or waits and then finds this lead linked. NOWAIT: writers disagree
+    // on order (acceptance locks estimate then lead; an estimate save locks
+    // lead then estimate), so this never waits on the estimate while holding
+    // the lead. A busy estimate answers 409; the admin retries.
+    const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').forUpdate().first();
     if (!lead) {
       const err = new Error('Lead not found');
       err.status = 404;
       throw err;
     }
 
-    const estimate = await trx('estimates').where('id', cleanEstimateId).first();
+    let estimate;
+    try {
+      estimate = await trx('estimates').where('id', cleanEstimateId).forShare().noWait().first();
+    } catch (lockErr) {
+      if (lockErr?.code !== '55P03') throw lockErr;
+      const err = new Error('This estimate is being updated. Try the link again in a moment.');
+      err.status = 409;
+      err.code = 'estimate_busy';
+      throw err;
+    }
     if (!estimate || estimate.archived_at) {
       const err = new Error('Estimate not found');
       err.status = 404;

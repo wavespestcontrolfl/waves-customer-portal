@@ -125,6 +125,9 @@ describe('llm call ledger', () => {
       expect(metrics.extractUsage('anthropic', { usage: 'nope' })).toEqual(empty);
       expect(metrics.extractUsage('gemini', { usageMetadata: { promptTokenCount: 'x' } })).toEqual(empty);
       expect(metrics.extractUsage('unknown', { usage: { input_tokens: 1 } })).toEqual(empty);
+      // the total wins when the API gives both; neither = unknown, not zero
+      expect(metrics.extractUsage('anthropic', { usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 25, cache_creation: { ephemeral_5m_input_tokens: 99 } } }).cache_write_tokens).toBe(25);
+      expect(metrics.extractUsage('anthropic', { usage: { input_tokens: 1, output_tokens: 1 } }).cache_write_tokens).toBeNull();
     });
   });
 
@@ -336,6 +339,73 @@ describe('llm call ledger', () => {
       expect(await call.callAnthropic({ model: 'a', text: 't', timeoutMs: 50 })).toEqual({ ok: false, reason: 'anthropic_timeout' });
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_timeout', error_class: 'timeout' });
+    });
+  });
+
+  // A streamed voice round is recorded after the fact from its final Message,
+  // which has the Anthropic usage shape for both providers.
+  describe('recordStreamedMessage', () => {
+    it('records an Anthropic round as it is, under its lane', async () => {
+      const { metrics } = load();
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'voice-model', message: ANTHROPIC_MESSAGE, latencyMs: 812, laneId: 'voice_relay' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({
+        ok: true, provider: 'anthropic', lane_id: 'voice_relay', policy: 'voice_relay', requested_model: 'voice-model', served_model: 'anthropic-served',
+        provider_ref: 'msg_1', latency_ms: 812, input_tokens: 200, cached_input_tokens: 150, cache_write_tokens: 25, output_tokens: 40,
+      });
+    });
+
+    it('stores an OpenAI round the way OpenAI rows are priced: cached reads inside input, no cache-write count', async () => {
+      const { metrics } = load();
+      // what relay-openai-client's mapUsage returns for input 900 with 600 cached
+      const message = { id: 'resp_1', model: 'gpt-served', usage: { input_tokens: 300, cache_read_input_tokens: 600, cache_creation_input_tokens: 0, output_tokens: 70, reasoning_tokens: 32 } };
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message, laneId: 'voice_relay' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: true, provider: 'openai', input_tokens: 900, cached_input_tokens: 600, cache_write_tokens: null, output_tokens: 70, reasoning_tokens: 32 });
+    });
+
+    it('a round that resolved but declined, was cut off, or said nothing is a failed call, as ledgerCall files it', async () => {
+      const { metrics } = load();
+      const round = (over) => ({ id: 'm', model: 'served', content: [{ type: 'text', text: 'partial' }], usage: { input_tokens: 10, output_tokens: 5 }, ...over });
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: round({ stop_reason: 'refusal' }), laneId: 'voice_relay' });
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'm', message: round({ stop_reason: 'max_tokens' }), laneId: 'voice_relay' });
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: round({ stop_reason: 'end_turn', content: [] }), laneId: 'voice_relay' });
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: round({ stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't', name: 'x', input: {} }] }), laneId: 'voice_relay' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code])).toEqual([
+        [false, 'anthropic_refusal'], [false, 'openai_incomplete'], [false, 'empty_text'], [true, null],
+      ]);
+    });
+
+    it('a request that failed outright is a failed call with no usage', async () => {
+      const { metrics } = load();
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message: null, latencyMs: 30000, laneId: 'voice_relay', errorCode: 'openai_timeout' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'openai_timeout', error_class: 'timeout', input_tokens: null, output_tokens: null });
+    });
+
+    it('a round the provider billed but the caller could not use is a failed call with its usage', async () => {
+      const { metrics } = load();
+      const billed = { id: 'resp_3', model: 'gpt-served', usage: { input_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 256, reasoning_tokens: 256 } };
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message: billed, laneId: 'voice_relay', errorCode: 'openai_unusable_response' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'openai_unusable_response', input_tokens: 500, output_tokens: 256, reasoning_tokens: 256 });
+    });
+
+    it('a round with unreadable usage is recorded with null counts, not as free', async () => {
+      const { metrics } = load();
+      const message = { id: 'resp_2', model: 'gpt-served', usage: { input_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null, output_tokens: null } };
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message, laneId: 'voice_relay' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ input_tokens: null, cached_input_tokens: null, output_tokens: null });
+    });
+
+    it('a replayed call is filed under the :replay policy, and a missing message never throws', async () => {
+      const { metrics } = load();
+      await metrics.runAsReplay(async () => { metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: ANTHROPIC_MESSAGE, laneId: 'voice_relay' }); });
+      expect(() => metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: undefined, laneId: 'voice_relay' })).not.toThrow();
+      await flush();
+      expect(callRows()[0].policy).toBe('voice_relay:replay');
     });
   });
 
@@ -634,6 +704,15 @@ describe('llm call ledger', () => {
   });
 
   describe('recordSessionUsage', () => {
+    it('reads the model and the cache writes where a live session reports them (agent.model.id, cache_creation per TTL)', async () => {
+      // the shape GET /v1/sessions/<id> returned on 2026-10-08: no top-level model, no cache_creation_input_tokens
+      global.fetch = fetchJson({ id: 'sess_live', status: 'idle', agent: { name: 'waves-content-writer', model: { id: 'claude-opus-4-8', effort: { type: 'xhigh' }, speed: 'standard' } },
+        usage: { input_tokens: 6, output_tokens: 43397, cache_read_input_tokens: 64858, cache_creation: { ephemeral_5m_input_tokens: 54141, ephemeral_1h_input_tokens: 100 }, list_cost: { amount: '150', currency: 'USD' } } });
+      const { metrics } = load();
+      await metrics.recordSessionUsage({ laneId: 'agent_content', sessionId: 'sess_live', model: null, startedAt: Date.now() - 1000 });
+      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', lane_id: 'agent_content', served_model: 'claude-opus-4-8', input_tokens: 6, output_tokens: 43397, cached_input_tokens: 64858, cache_write_tokens: 54241 });
+    });
+
     it('writes one session row from the session usage block and never throws', async () => {
       global.fetch = fetchJson({ id: 'sess_1', status: 'idle', model: 'served-agent-model', usage: { input_tokens: 5000, output_tokens: 700, cache_read_input_tokens: 4000 } });
       const { metrics } = load();

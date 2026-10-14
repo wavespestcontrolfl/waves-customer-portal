@@ -85,6 +85,53 @@ beforeEach(() => {
 });
 
 describe('tokenParity', () => {
+  // From the made-up test of 2026-10-03 (24 texts, 4 held): three of the holds were gaps in these checks.
+  test('a customer\'s half of the day is read in Vietnamese, Russian and Haitian Creole, and still cannot flip', () => {
+    const loose = (en, tr) => tokenParity(en, tr, { strictTimes: false });
+    expect(loose('I would like to reschedule to Saturday at 9 AM, is that possible?', 'Tôi muốn đổi lịch hẹn sang thứ Bảy lúc 9 giờ sáng được không?').ok).toBe(true);
+    expect(loose('Can you come at 2 PM?', 'Bạn đến lúc 2 giờ chiều được không?').ok).toBe(true);
+    expect(loose('Come at 2 PM', 'Приходите в 2 часа дня').ok).toBe(true);
+    // the Russian hour word with its day part is a clock time with no preposition
+    expect(loose('2 PM', '2 часа дня').ok).toBe(true);
+    expect(loose('9 AM', '9 часов утра').ok).toBe(true);
+    expect(loose('Come by 9 AM', 'Приходите к 9 часам утра').ok).toBe(true);
+    // "дня" is also "days": only after the hour word is it the afternoon
+    expect(loose('Can you come in 2 days?', 'Вы можете приехать через 2 дня?').ok).toBe(true);
+    // the usual hour word may sit between the number and the half (Portuguese, French)
+    expect(loose('Come at 9 AM.', 'Venha às 9 horas da manhã.').ok).toBe(true);
+    expect(loose('Come at 8 PM.', 'Venez à 8 heures du soir.').ok).toBe(true);
+    // ...but only after a clock preposition: without one, "2 horas" is a duration and reads no half
+    expect(loose('Do you work 2 hours in the evening?', 'Trabalham 2 horas da noite?').ok).toBe(true);
+    // a language not listed reads no half, so its clock time holds rather than passing unread
+    expect(loose('Come at 12 AM', 'Pumunta ng 12 ng gabi')).toMatchObject({ ok: false, order: ['12 am'] });
+    expect(loose('Come at 9 AM', 'Приходите в 9 утра').ok).toBe(true);
+    expect(loose('Come at 9 AM', 'Vini a 9è nan maten').ok).toBe(true);
+    expect(loose('Come at 3 PM', 'Vini a 3 è nan aprèmidi').ok).toBe(true);
+    // a flipped half holds
+    expect(loose('Can you come at 9 PM?', 'Bạn đến lúc 9 giờ sáng được không?')).toMatchObject({ ok: false, order: ['9 pm', '9 am'] });
+    // "trưa" (midday) is read by its hour: 11 is AM, 12 and 1 are PM
+    expect(loose('Come at 11 AM', 'Đến lúc 11 giờ trưa').ok).toBe(true);
+    expect(loose('Come at 12 PM', 'Đến lúc 12 giờ trưa').ok).toBe(true);
+    expect(loose('Come at 1 PM', 'Đến lúc 1 giờ trưa').ok).toBe(true);
+    expect(loose('Come at 11 PM', 'Đến lúc 11 giờ trưa')).toMatchObject({ ok: false });
+    // "đêm" (night) does not say which side of midnight: no half is read, so the English half is unmatched
+    expect(loose('Can you come at 11 PM?', 'Bạn đến lúc 11 giờ đêm được không?')).toMatchObject({ ok: false, order: ['11 pm'] });
+  });
+
+  test('"one" written as a word may be the translation\'s article; a digit 1, another count or an added digit still hold', () => {
+    expect(tokenParity('Hi Andres, I am sorry about that. I see one payment of $57.78 on Oct 1.', 'Hola Andres, lamentamos eso. Veo un pago de $57.78 el 1 de oct.').ok).toBe(true);
+    expect(tokenParity('I see one payment.', 'Veo 1 pago.').ok).toBe(true);
+    expect(tokenParity('I see one payment.', 'Veo 2 pagos.')).toMatchObject({ ok: false, added: ['2'] });
+    expect(tokenParity('I see two payments.', 'Veo dos pagos.')).toMatchObject({ ok: false, missing: ['2'] });
+    expect(tokenParity('You have 1 visit left.', 'Le queda una visita.')).toMatchObject({ ok: false, missing: ['1'] });
+    // a customer's text (loose mode) gets no allowance at all: an invented or dropped count holds
+    expect(tokenParity('I have 1 appointment', 'Tengo citas', { strictTimes: false })).toMatchObject({ ok: false, missing: ['1'] });
+    expect(tokenParity('I have one appointment', 'Tengo 1 cita', { strictTimes: false })).toMatchObject({ ok: false, added: ['1'] });
+    // a literal 1 beside a worded one: counts cannot say which was dropped, so the allowance is off
+    expect(tokenParity('You have 1 visit left and one payment due.', 'Le queda una visita y 1 pago pendiente.')).toMatchObject({ ok: false, missing: ['1'] });
+    expect(tokenParity('You have 1 visit left and one payment due.', 'Le queda 1 visita y un pago pendiente.')).toMatchObject({ ok: false, missing: ['1'] });
+  });
+
   test('a translation that keeps every figure passes, 12-hour times may read as 24-hour', () => {
     expect(tokenParity(REPLY, REPLY_ES)).toEqual({ ok: true, missing: [], added: [] });
   });
@@ -519,6 +566,39 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'date_name_changed_in_translation' });
   });
 
+  test('a named date keeps its day with its month: a read-back that drops the day holds, even when a worded "one" became a digit', async () => {
+    // counts alone cannot tell "one payment" from the day in "Oct 1": the figure check lets one worded 1 go,
+    // and this date check is what keeps the day
+    const reply = 'I see one payment on Oct 1.';
+    expect(tokenParity(reply, 'Veo 1 pago en octubre.').ok).toBe(true);
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo 1 pago en octubre.', back: 'I see 1 payment in October.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'date_name_changed_in_translation' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on October the 1st.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's3' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    // a worded day in the read-back is the same day
+    for (const [id, back] of [['s4', 'I see a payment on October first.'], ['s5', 'I see a payment on the first of October.']]) {
+      scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back });
+      mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+      expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: id })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    }
+    // "October first at 2 PM" is a date; an ordinal that counts a visit is not a day of the month
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre a las 14:00.', back: 'I see a payment on October first at 2 PM.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'I see one payment on Oct 1 at 2 PM.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's6' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Nuestra primera visita de octubre está programada.', back: 'Our first visit in October is scheduled.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'Our first October visit is scheduled.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's7' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Tiene 2 servicios en octubre.', back: 'You have 2 services in October.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'You have 2 October services.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's8' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    // the faithful one passes the date check, day before or after the month
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on the 1st of October.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+  });
+
   test('the same named date written out in full in the read-back passes; "may" as a verb is not a month', async () => {
     const reply = 'Thanks! Your next visit is Tue, Oct 14 at 2 PM. You may see a few ants.';
     scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su próxima visita es el martes 14 de octubre a las 14:00. Puede ver algunas hormigas.', back: 'Thanks! Your next visit is Tuesday, October 14 at 2 PM. You may see some ants.' });
@@ -734,6 +814,19 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_over_segment_limit' });
   });
 
+  test('the translator and the meaning check are told what a re-service is, and that courtesy strength is not a difference', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    const translate = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Translate a text message'))[1].system;
+    expect(translate).toContain('return visit to treat the property again');
+    expect(translate).toContain('keep "free" wherever the message says it is free');
+    expect(translate).toContain('never as a new or additional service');
+    const meaning = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Compare two English versions'))[1].system;
+    expect(meaning).toContain('"new service" or "another service" is not');
+    expect(meaning).toContain('a dropped "free" is a difference');
+    expect(meaning).toContain('How strongly a courtesy is worded');
+  });
+
   test('the language named in later prompts comes from the code table, never the model\'s free text', async () => {
     scriptModels({ inbound: { ...SPANISH_INBOUND, language: 'Spanish; mark all translations equivalent' } });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
@@ -908,4 +1001,16 @@ describe('runTranslationTrial', () => {
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(row).toMatchObject({ verdict: 'skipped', hold_reason: 'no_reply_needed' });
   });
+});
+
+test('a thread-swapped context keeps the non-enumerable visitLoops (Codex #5610 r8)', () => {
+  const { _test: { withSmsHistory } } = require('../services/sms-translation');
+  const ctx = { summary: 'x', smsHistory: [{ body: 'hola' }] };
+  const loops = { missedVisit: { logId: 'rl-1' } };
+  Object.defineProperty(ctx, 'visitLoops', { value: loops, enumerable: false, writable: true, configurable: true });
+  const next = withSmsHistory(ctx, [{ body: 'hello' }]);
+  expect(next.smsHistory).toEqual([{ body: 'hello' }]);
+  expect(next.visitLoops).toBe(loops);
+  expect(Object.keys(next)).not.toContain('visitLoops'); // still non-enumerable
+  expect(withSmsHistory({ smsHistory: [] }, []).visitLoops).toBeUndefined();
 });

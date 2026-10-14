@@ -686,8 +686,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
     // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).
     const pub = src('../routes/estimate-public.js');
-    // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences) + the extension auto-grant claim (r7) + the notify-only claim (r10).
-    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(8);
+    // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences) + the extension auto-grant claim (r7) + the notify-only claim (r10)
+    // + the accept-card phone save (PUT /:token/contact-phone, owner 2026-10-04): it writes the estimate's phone, so a held row refuses it too.
+    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(9);
     // A zero-row notify-only claim re-reads and answers the generic 404 for a held row — never a 201 that pages the office (codex r10 P0).
     // The claim itself now rides the group lock + fixed-hold recheck in
     // claimNotifyOnlyExtensionRequest (GH codex P1 r5 on #4309); the held-row

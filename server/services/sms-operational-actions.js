@@ -15,7 +15,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode, statesClock } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference, matchesAccessCode, statesClock } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
@@ -44,10 +44,12 @@ const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
   JSON.stringify([item.quote, item.property_id, item.description]),
 ).slice(0, 20)}`;
 
-function eligibleMessage(message = {}, { captured = false } = {}) {
+// `unlinked`: an inbound text from a number with no customer record (the
+// access codes net files it for the office to link); every other rule holds.
+function eligibleMessage(message = {}, { captured = false, unlinked = false } = {}) {
   const statuses = captured ? ['sent', 'delivered', 'failed', 'undelivered'] : ['sent', 'delivered'];
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
-  return !!message.customer_id && !!message.message_body
+  return (!!message.customer_id || (unlinked && message.direction === 'inbound')) && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
     && tail(ourNumber) !== tail(numbers.tollFree.number)
     && !!numbers.findByNumber(ourNumber)
@@ -247,7 +249,7 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   if (fact.duration !== 'durable' || TEMPORARY_INSTRUCTION.test(`${messageBody} ${fact.quote}`)) return 'temporary_instruction';
   if (fact.field === 'contact_preference'
     && explicitContactPreference(fact.quote) !== fact.value) return 'preference_uncertain';
-  if (fact.field.endsWith('_code') && !matchesExplicitAccessCode(fact)) return 'code_uncertain';
+  if (fact.field.endsWith('_code') && !matchesAccessCode(fact, { messageBody, properties })) return 'code_uncertain';
   const maxLength = { neighborhood_gate_code: 100, property_gate_code: 100, lockbox_code: 100,
     garage_code: 100, irrigation_controller_location: 200 }[fact.field] ?? 600;
   if (fact.value.length > maxLength) return 'value_too_long';
@@ -552,7 +554,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
       replayAppliedFields = await appliedSmsProfileFields(trx, live);
     } else if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
-    const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
+    // The address fields feed the house-number and ZIP check of a natural-wording code at write time.
+    const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id', 'address_line1', 'zip');
     const [current = {}] = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().limit(1).select('*');
     const sender = { inbound: message.from_phone, outbound: message.to_phone }[message.direction];
     const matches = await trx('customers').whereNull('deleted_at')
@@ -968,6 +971,60 @@ function obligationWords(row, message) {
   return quoted || row.description || message.message_body || '';
 }
 
+// The words the bell's headline quotes. One message can hold several
+// obligations, each with the same evidence quote (prod 2026-10-06: two promises
+// in one staff text rang two bells with the same first sentence). When the
+// obligation's own description appears in the ORIGINAL quote as whole words,
+// that slice of the quote is redacted and quoted, so each bell names its own
+// promise and every word shown is the sender's. Matching runs before
+// redaction, so two promises that differ only in a contact detail still find
+// their own slices. Anything the slice cannot carry alone (sentence
+// punctuation, any token the alert composer forbids) keeps today's headline:
+// the quote's first sentence.
+// Unicode-aware (any script; combining marks belong to their word). Scripts
+// written without spaces between words (Han, kana, Hangul stems + endings,
+// Thai, ...) get no edge check. Script_Extensions, not Script: shared marks
+// such as the kana prolonged-sound mark ー are Common by Script.
+const LETTER = /[\p{L}\p{N}\p{M}]/u;
+const UNSPACED_SRC = '[\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Hangul}\\p{scx=Thai}\\p{scx=Lao}\\p{scx=Khmer}\\p{scx=Myanmar}]';
+const UNSPACED = new RegExp(UNSPACED_SRC, 'u');
+// The edge's base character: the first one, or the last one before any
+// trailing combining marks.
+function needsEdge(chars) {
+  const base = chars.find((ch) => !/\p{M}/u.test(ch));
+  return base !== undefined && LETTER.test(base) && !UNSPACED.test(base);
+}
+function matchedSlice(rawQuote, description) {
+  const part = typeof description === 'string' ? description.trim().replace(/[.!?。！？]+$/u, '') : '';
+  if (!LETTER.test(part)) return null;
+  const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  const chars = [...part];
+  // An edge only rejects a neighbour from a SPACED script: a Japanese or
+  // Korean ending attached to a Latin word (PDFを) is still a word break.
+  const lead = needsEdge(chars) ? `(?<!(?!${UNSPACED_SRC})[\\p{L}\\p{N}\\p{M}_])` : '';
+  const tail = needsEdge([...chars].reverse()) ? `(?!(?!${UNSPACED_SRC})[\\p{L}\\p{N}\\p{M}_])` : '';
+  const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(rawQuote);
+  return found ? found[0] : null;
+}
+// Is the matched text one plain phrase? Judged on the ORIGINAL words, before
+// redaction rewrites them. Only two periods are allowed: inside an email
+// address (lowercase domain, so "a@b.com.Then" still ends a sentence) and
+// between two digits (2.5). Every other period, including a bare domain
+// (example.com is a URL the alert rules mean to keep out), and any ! ? or
+// CJK sentence ender, is a break.
+const EMAIL_TOKEN = /[\p{L}\p{N}._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gu;
+function isPlainPhrase(raw) {
+  const rest = raw.replace(/[.!?。！？]+$/u, '').replace(EMAIL_TOKEN, '').replace(/(?<=\p{N})\.(?=\p{N})/gu, '');
+  return !/[.!?。！？]/u.test(rest);
+}
+function headlineWords(quote, rawQuote, description, redact) {
+  const compose = require('./admin-alert-compose');
+  const raw = matchedSlice(rawQuote, description);
+  const slice = raw && isPlainPhrase(raw) && redact(raw).replace(/\s+/g, ' ').trim().replace(/[.!?。！？]+$/u, '');
+  if (slice && !compose.breaksAlertRules(slice)) return slice;
+  return compose.firstSentence(quote).replace(/[.!?]+$/, '');
+}
+
 // Owner ruling 2026-09-28: a staff promise kept late rings the bell, then
 // clears. The deadline tick normally rings before the late record lands; when
 // verification runs only after both (Codex #5248 r3), the late record rings
@@ -981,14 +1038,14 @@ function keptLate(row, verdict) {
 // headline, their quoted words in the why, the whole story in `detail`.
 function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
   const names = require('./admin-alert-names');
-  const compose = require('./admin-alert-compose');
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
   const state = verdict.late ? 'late' : verdict.verdict;
   const alert = KIND_ALERT[row.kind] || KIND_ALERT.other;
   const promised = row.sms_context?.basis === 'promise';
-  const quote = names.redactedWords(obligationWords(row, message));
+  const rawQuote = obligationWords(row, message);
+  const quote = names.redactedWords(rawQuote);
   const status = state === 'late' ? 'done only after the promised time'
     : (state === 'uncertain' ? "can't tell if it was done" : alert.open);
   const day = names.shortDateET(message.created_at);
@@ -1002,7 +1059,7 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
     spec: {
       area: alert.area,
       action: names.fitAction(alert.area, customerName || 'the customer', [alert.action]),
-      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && compose.firstSentence(quote).replace(/[.!?]+$/, ''),
+      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && headlineWords(quote, rawQuote, row.description, names.redactedWords),
         tail: `${day ? ` (${day})` : ''} — ${status}.` }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
@@ -1031,6 +1088,21 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  // The 24h window rolls from created_at, so a promise still overdue after a
+  // day gets a NEW row and the old one stayed open: one promise piled up four
+  // to six unread rows (prod 2026-10-05). The daily re-ring stays; only the
+  // newest row for this key may stay open. Runs for a deduped result too, so
+  // rows an older build left behind close on the next ring. openToCloser: a
+  // row a person marked done is taken over too (their Reopen would bring an
+  // obsolete duplicate back); a row a system component closed is left alone.
+  if (notification.id) {
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    await openToCloser(trx('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .whereNot({ id: notification.id }), 'supersede')
+      .update(doneColumns({ by: 'supersede', resolution: 'Replaced by a newer reminder for the same promise', keepExisting: true, conn: trx }));
+  }
   return notification;
 }
 

@@ -19,7 +19,8 @@ const db = require('../../models/db');
 const { executeContentTool } = require('./content-agent-tools');
 const { CONTENT_AGENT_CONFIG } = require('./content-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
-const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
+const { isSessionTerminal, streamFailureOf } = require('../agent-control/session-events');
+const { sessionBudget } = require('../agent-control/session-guard');
 const { readSessionFrames } = require('../agent-control/session-stream');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -106,6 +107,7 @@ const ContentAgent = {
     // Create session
     const session = await apiCall('POST', '/sessions', {
       agent_id: CONTENT_AGENT_ID,
+      ...sessionBudget('agent_content'),
     });
 
     const sessionId = session.id;
@@ -205,10 +207,13 @@ const ContentAgent = {
           break;
         }
 
-        // ── Error ──
-        if (isSessionError(event)) {
-          logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
-          failure = 'session_error_event';
+        // ── Error, or the session's spend cap (budget_exhausted) ──
+        // A local, so an event that is neither never clears a failure an
+        // earlier event set (max_tool_calls / max_events).
+        const streamFailure = streamFailureOf(event, data);
+        if (streamFailure) {
+          logger.error(`[content-agent] Agent ${streamFailure}: ${JSON.stringify(data)}`);
+          failure = streamFailure;
           break;
         }
       }

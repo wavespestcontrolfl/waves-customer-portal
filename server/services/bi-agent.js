@@ -22,6 +22,7 @@ const { BI_AGENT_CONFIG } = require('./bi-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
 const { readSessionFrames } = require('./agent-control/session-stream');
+const { sessionBudget } = require('./agent-control/session-guard');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BI_AGENT_ID = process.env.BI_AGENT_ID;
@@ -291,6 +292,7 @@ const BIAgent = {
         tools: BI_AGENT_CONFIG.tools,
       },
       environment_id: BI_AGENT_ENVIRONMENT_ID,
+      ...sessionBudget('agent_bi'),
     }, 'new session', deadline);
     const sessionId = session.id;
     logger.info(`[bi-agent] Session ${sessionId}`);

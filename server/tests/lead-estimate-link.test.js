@@ -39,6 +39,7 @@ const {
   linkLeadEstimatesToCustomer,
   attributeSelfBooking,
   markLeadContactedFromEvidence,
+  resolveLinkedLeadWon,
 } = require('../services/lead-estimate-link');
 
 function makeDb(lead, estimate = null) {
@@ -314,6 +315,33 @@ describe('lead-estimate link service', () => {
       customerId: 'customer-1', monthlyValue: 125, initialServiceValue: 99, waveguardTier: 'Gold', estimateId: 'estimate-1',
     });
     expect(database._updates).toHaveLength(0); // already linked → no estimate_id re-stamp
+  });
+
+  describe('round 7: the lead the card pinned (resolveLinkedLeadWon, onlyLeadIds)', () => {
+    const withSavepoint = (database) => {
+      database.transaction = async (fn) => fn(database);
+      return database;
+    };
+
+    test('resolveLinkedLeadWon names the lead the accept would mark won, and writes nothing', async () => {
+      const database = withSavepoint(makeAcceptDb({
+        linked: [
+          { id: 'lead-open', status: 'estimate_viewed', estimate_id: 'estimate-1' },
+          { id: 'lead-lost', status: 'lost', estimate_id: 'estimate-1' },
+        ],
+      }));
+      expect(await resolveLinkedLeadWon({ estimateId: 'estimate-1', customerId: 'customer-1', database })).toEqual(['lead-open']);
+      expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    });
+
+    test('with onlyLeadIds, a lead the pin does not name is not marked won; the pinned lead still is', async () => {
+      const database = makeAcceptDb({ linked: [{ id: 'lead-open', status: 'estimate_viewed', estimate_id: 'estimate-1' }] });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database, onlyLeadIds: ['lead-other'] });
+      expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database, onlyLeadIds: ['lead-open'] });
+      expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
+      expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-open', expect.objectContaining({ estimateId: 'estimate-1' }));
+    });
   });
 
   test('does NOT run the contact fallback when the only linked lead is closed', async () => {

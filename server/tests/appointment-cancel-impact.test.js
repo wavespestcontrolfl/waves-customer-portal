@@ -15,6 +15,7 @@ let mockAppointmentRow = null;
 let mockCustomerRow = null;
 let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
 let mockOpenOverdueAlerts = 0;
+let mockLinkedFollowUps = [];
 jest.mock('../models/db', () => {
   const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
   const railQb = (table) => ({ where: () => ({ select: async () => mockCardRailRows[table] }) });
@@ -27,6 +28,9 @@ jest.mock('../models/db', () => {
   db.__qb = {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
+    // linkedFollowUpRows: .where().whereRaw().select('id')
+    whereRaw: () => db.__qb,
+    select: async () => mockLinkedFollowUps,
     first: async () => mockAppointmentRow,
   };
   return db;
@@ -86,6 +90,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockLinkedFollowUps = [];
   mockAppointmentRow = {
     id: 'svc-synthetic-1',
     status: 'confirmed',
@@ -678,6 +683,14 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels bare vi
     mockAppointmentRow = { ...mockAppointmentRow, followup_source_service_id: 'svc-source-1' };
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual(['followup_child']);
+  });
+
+  // Owner ruling 2026-10-04: a package visit 1 carries its visit 2 on cancel.
+  test('a visit with a live linked follow-up is refused: its cancel would also cancel that visit', async () => {
+    noCard();
+    mockLinkedFollowUps = [{ id: 'svc-visit-2' }];
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['linked_followup']);
   });
 
   test('not a follow-up child (followup_source_service_id null) has no followup_child refusal', async () => {

@@ -90,10 +90,22 @@ export default function useStaffSession() {
           // The token stays for that flow, but the offline pass and route
           // snapshot go: a reopen with no signal before the rotation must not
           // unlock Today from a pass that predates it (Codex #5573 r22).
-          if (isFieldPath(locationRef.current.pathname)) {
+          // A two-step session (GATE_ADMIN_MFA; /me only answers an enrolled
+          // account's session that passed the code) also keeps its token for
+          // the signed-in change page: the email reset would revoke it and,
+          // after the last recovery code, leave no way back in.
+          if (isFieldPath(locationRef.current.pathname) || profile.twoStep?.enabled) {
             clearStaffDeviceData();
             navigate("/admin/change-password", { replace: true });
           } else endSession("/admin/forgot-password", { email: profile.email, resetRequired: true });
+          return;
+        }
+        if (profile.twoStep?.enrollmentRequired) {
+          // GATE_ADMIN_MFA_ENFORCE: the server answers only /me and the setup
+          // routes until an authenticator is set up. The token stays for that
+          // page; the offline pass goes so Today cannot open around it.
+          clearStaffDeviceData();
+          navigate("/admin/two-step", { replace: true });
           return;
         }
         patch({ user: profile, offline: false, status: "ready" });
@@ -163,6 +175,15 @@ export default function useStaffSession() {
     if (session.offline && !onField) restart({ user: null, offline: false, status: "checking" });
   }, [session.offline, onField]);
 
+  // GATE_ADMIN_MFA_ENFORCE switched on under an open session answers staff
+  // calls 403 MFA_ENROLLMENT_REQUIRED: the token stays for the setup page;
+  // the offline pass and saved route go. Both guards below carry it, and only
+  // one of them is installed at a time, so their fetch wrappers never stack.
+  const toTwoStep = () => {
+    clearStaffDeviceData();
+    navigate("/admin/two-step", { replace: true });
+  };
+
   // Field workspace only: a 401 from ANY staff API call for the current token
   // ends the session here, so an offline reopen cannot unlock from a session
   // the server already refused. A layout effect, so it is installed before
@@ -173,6 +194,17 @@ export default function useStaffSession() {
     return installStaffSessionGuard({
       getToken: getAdminAuthToken,
       onRejected: () => endSession(adminLoginUrl(locationRef.current)),
+      onEnrollmentRequired: toTwoStep,
+    });
+  }, [navigate, onField]);
+
+  // Every other admin page: only the enrollment hold.
+  useLayoutEffect(() => {
+    if (onField) return undefined;
+    return installStaffSessionGuard({
+      getToken: getAdminAuthToken,
+      onRejected: () => {},
+      onEnrollmentRequired: toTwoStep,
     });
   }, [navigate, onField]);
 

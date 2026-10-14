@@ -1,6 +1,7 @@
 // Real PostgreSQL races against the managed worktree QA database only.
 // S3 transport is captured; row locks, dedupe, hashing and rollback are real.
-const { randomUUID } = require('node:crypto');
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+const { createHash, randomUUID } = require('node:crypto');
 const mockObjects = new Map();
 let mockExpectedUploads = 1;
 let mockUploadCount = 0;
@@ -22,7 +23,10 @@ jest.mock('@aws-sdk/client-s3', () => {
   }
   return { S3Client, PutObjectCommand, DeleteObjectCommand };
 });
-jest.mock('../config', () => ({ s3: { bucket: 'waves-qa-fixture', region: 'us-east-1' } }));
+jest.mock('../config', () => ({
+  s3: { bucket: 'waves-qa-fixture', region: 'us-east-1' },
+  jwt: { secret: process.env.JWT_SECRET },
+}));
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 
 (process.env.DATABASE_URL ? describe : describe.skip)('completed service photo integrity (PostgreSQL)', () => {
@@ -30,7 +34,13 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   let upload;
   let validatePhotoChain;
   const customerId = randomUUID();
+  const adminId = randomUUID();
+  const technicianId = randomUUID();
+  const replacementTechnicianId = randomUUID();
   const recordId = randomUUID();
+  const completedVisitId = randomUUID();
+  const stagedVisitId = randomUUID();
+  let visitDate;
   beforeAll(async () => {
     const expected = `/waves_qa_${(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (process.env.WAVES_LOCAL_DEV !== '1' || !process.env.WAVES_WORKTREE_ID || new URL(process.env.DATABASE_URL).pathname !== expected) {
@@ -39,14 +49,32 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     db = require('../models/db');
     upload = require('../services/service-photos').uploadServicePhotoBuffer;
     validatePhotoChain = require('../services/service-report/photo-chain').validatePhotoChain;
+    visitDate = require('../utils/datetime-et').etDateString();
     await db.transaction(async trx => {
+      await trx('technicians').insert([
+        { id: adminId, name: 'QA photo recovery admin', email: `qa-photo-admin-${adminId}@example.invalid`, role: 'admin', active: true,
+          employment_status: 'active', auth_token_version: 1, must_change_password: false },
+        { id: technicianId, name: 'QA original photo technician', email: `qa-photo-tech-${technicianId}@example.invalid`, role: 'technician', active: true,
+          employment_status: 'active', auth_token_version: 1, must_change_password: false },
+        { id: replacementTechnicianId, name: 'QA replacement photo technician', email: `qa-photo-tech-${replacementTechnicianId}@example.invalid`, role: 'technician', active: true,
+          employment_status: 'active', auth_token_version: 1, must_change_password: false },
+      ]);
       await trx('customers').insert({ id: customerId, first_name: 'QA', phone: '+19415550100', email: `qa-photo-${customerId}@example.invalid` });
+      await trx('scheduled_services').insert([
+        { id: completedVisitId, customer_id: customerId, technician_id: technicianId, scheduled_date: visitDate, service_type: 'QA completed photo guard', status: 'on_site' },
+        { id: stagedVisitId, customer_id: customerId, technician_id: technicianId, scheduled_date: visitDate, service_type: 'QA staged photo guard', status: 'on_site' },
+      ]);
       await trx('service_records').insert({ id: recordId, customer_id: customerId,
-        service_date: require('../utils/datetime-et').etDateString(), service_type: 'QA photo integrity' });
+        scheduled_service_id: completedVisitId, technician_id: technicianId,
+        service_date: visitDate, service_type: 'QA photo integrity' });
     });
   }, 30000);
   beforeEach(async () => {
     await db('service_photos').where({ service_record_id: recordId }).del();
+    await db('dispatch_alerts').where({ job_id: completedVisitId }).del();
+    await db('scheduled_service_photo_staging').whereIn('scheduled_service_id', [completedVisitId, stagedVisitId]).del();
+    await db('scheduled_services').where({ id: completedVisitId }).update({ technician_id: technicianId, scheduled_date: visitDate, status: 'on_site' });
+    await db('scheduled_services').where({ id: stagedVisitId }).update({ technician_id: technicianId, scheduled_date: visitDate, status: 'on_site' });
     mockObjects.clear();
     mockExpectedUploads = 1;
     mockUploadCount = 0;
@@ -55,13 +83,40 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   afterAll(async () => {
     if (!db) return;
     try {
+      await db('dispatch_alerts').where({ job_id: completedVisitId }).del();
       await db('service_records').where({ id: recordId, customer_id: customerId }).del();
+      await db('scheduled_services').whereIn('id', [completedVisitId, stagedVisitId]).del();
       await db('customers').where({ id: customerId, email: `qa-photo-${customerId}@example.invalid` }).del();
+      await db('technicians').whereIn('id', [adminId, technicianId, replacementTechnicianId]).del();
       expect(await db('service_records').where({ id: recordId })).toHaveLength(0);
       expect(await db('customers').where({ id: customerId })).toHaveLength(0);
     } finally { await db.destroy(); }
   }, 30000);
   const input = { serviceRecordId: recordId, buffer: Buffer.from('synthetic photo bytes'), mimeType: 'image/png', originalName: 'qa.png', photoType: 'after' };
+  async function reconcileUploadReceipt(uploadResult) {
+    const express = require('express');
+    const jwt = require('jsonwebtoken');
+    const config = require('../config');
+    const router = require('../routes/tech-track');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/services', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0);
+    const token = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: adminId }, config.jwt.secret);
+    try {
+      return await fetch(`http://127.0.0.1:${server.address().port}/api/tech/services/${completedVisitId}/photos/reconcile`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expectedVisit: uploadResult.visit,
+          expectedServiceRecordId: uploadResult.serviceRecordId,
+        }),
+      });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
 
   test('six uploads that all miss the first dedupe read commit one photo and retain one object', async () => {
     mockExpectedUploads = 6;
@@ -92,6 +147,164 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     expect(retried.id).toBeTruthy();
     expect(mockObjects.size).toBe(1);
     expect((await validatePhotoChain(recordId, db)).valid).toBe(true);
+  }, 30000);
+
+  test('a reschedule holding the visit lock wins before upload and rejects the old snapshot without sending bytes', async () => {
+    const photos = require('../services/service-photos');
+    const before = await db('scheduled_services').where({ id: stagedVisitId }).first();
+    const expectedVisit = photos.servicePhotoVisitSnapshot(before);
+    let releaseReschedule;
+    let locked;
+    const hasLock = new Promise(resolve => { locked = resolve; });
+    const release = new Promise(resolve => { releaseReschedule = resolve; });
+    const movedDate = require('../utils/datetime-et').etDateString(require('../utils/datetime-et').addETDays(new Date(), 1));
+    const reschedule = db.transaction(async trx => {
+      await trx('scheduled_services').where({ id: stagedVisitId }).forUpdate().first('id');
+      await trx('scheduled_services').where({ id: stagedVisitId }).update({ scheduled_date: movedDate });
+      locked();
+      await release;
+    });
+    await hasLock;
+
+    let settled = false;
+    const attempt = photos.uploadServicePhotoForVisit({
+      scheduledServiceId: stagedVisitId,
+      actor: { techRole: 'admin', technicianId: null },
+      expectedVisit,
+      ...input,
+      knex: db,
+    }).finally(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseReschedule();
+    await reschedule;
+    await expect(attempt).rejects.toMatchObject({ statusCode: 409, code: 'visit_identity_changed' });
+    expect(mockUploadCount).toBe(0);
+    expect(await db('scheduled_service_photo_staging').where({ scheduled_service_id: stagedVisitId })).toHaveLength(0);
+  }, 30000);
+
+  test.each([
+    ['modern record stored while on site', true],
+    ['legacy record without a stored snapshot', false],
+  ])('the actual completed upload receipt reconciles its exact %s', async (_label, storesSnapshot) => {
+    const photos = require('../services/service-photos');
+    const before = await db('scheduled_services').where({ id: completedVisitId }).first();
+    const expectedVisit = photos.servicePhotoVisitSnapshot(before);
+    await db('service_records').where({ id: recordId }).update({
+      structured_notes: JSON.stringify(storesSnapshot ? { servicePhotoVisit: expectedVisit } : {}),
+    });
+    await db('scheduled_services').where({ id: completedVisitId }).update({ status: 'completed' });
+
+    const result = await photos.uploadServicePhotoForVisit({
+      scheduledServiceId: completedVisitId,
+      actor: { techRole: 'admin', technicianId: null },
+      expectedVisit,
+      expectedServiceRecordId: recordId,
+      ...input,
+      knex: db,
+    });
+    expect(result).toMatchObject({ staged: false, reconcileRequired: true, serviceRecordId: recordId });
+    expect(result.visit.status).toBe('completed');
+    expect(result.visit.revision).toBe(expectedVisit.revision);
+    const reconciled = await reconcileUploadReceipt(result);
+    expect(reconciled.status).toBe(200);
+    expect(await reconciled.json()).toMatchObject({ ok: true, serviceRecordId: recordId });
+    expect(await db('service_photos').where({ service_record_id: recordId })).toHaveLength(1);
+  }, 30000);
+
+  test('abandoning missing device copies preserves committed bytes and suppresses their incomplete summary', async () => {
+    const committed = await upload(input);
+    const committedHash = createHash('sha256').update(input.buffer).digest('hex');
+    const missingHash = createHash('sha256').update('missing device photo').digest('hex');
+    const scheduled = await db('scheduled_services').where({ id: completedVisitId }).first();
+    const expectedVisit = require('../services/service-photos').servicePhotoVisitSnapshot(scheduled);
+    await db('service_records').where({ id: recordId }).update({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: {
+        photoSummary: null,
+        photoSummaryPendingRecovery: 'Summary described both submitted photos.',
+      } }),
+      structured_notes: JSON.stringify({
+        servicePhotoVisit: expectedVisit,
+        completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: [committedHash, missingHash] },
+      }),
+      pdf_storage_key: 'reports/stale-before-recovery.pdf',
+    });
+
+    const express = require('express');
+    const jwt = require('jsonwebtoken');
+    const config = require('../config');
+    const router = require('../routes/tech-track');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/services', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const adminToken = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: adminId }, config.jwt.secret);
+    const technicianToken = jwt.sign({ type: 'access', tokenVersion: 1, technicianId }, config.jwt.secret);
+    const reconcile = (token, abandonMissingPhotos) => fetch(`${base}/api/tech/services/${completedVisitId}/photos/reconcile`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ abandonMissingPhotos, expectedVisit, expectedServiceRecordId: recordId }),
+    });
+    try {
+      expect((await reconcile(technicianToken, false)).status).toBe(409);
+      await db('scheduled_services').where({ id: completedVisitId }).update({ technician_id: replacementTechnicianId });
+      const handedOff = await reconcile(technicianToken, false);
+      expect(handedOff.status).toBe(409);
+      expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
+      const concurrentRetries = await Promise.all(
+        Array.from({ length: 6 }, () => reconcile(technicianToken, false)),
+      );
+      expect(concurrentRetries.map((response) => response.status)).toEqual(Array(6).fill(409));
+      expect(await Promise.all(concurrentRetries.map((response) => response.json())))
+        .toEqual(Array(6).fill(expect.objectContaining({ code: 'photo_reconciliation_handed_off' })));
+      expect(await db('dispatch_alerts').where({
+        type: 'service_photo_reconciliation_required', job_id: completedVisitId, resolved_at: null,
+      })).toHaveLength(1);
+
+      const otherRecordId = randomUUID();
+      const createOtherHandoff = () => require('../services/dispatch-alerts').createAlertOnce({
+        type: 'service_photo_reconciliation_required',
+        severity: 'warn',
+        techId: technicianId,
+        jobId: completedVisitId,
+        payload: {
+          source: 'photo_recovery_access_lost',
+          serviceRecordId: otherRecordId,
+          message: 'Synthetic second completion record still needs office repair.',
+        },
+        existingPayloadSource: 'photo_recovery_access_lost',
+        existingPayloadServiceRecordId: otherRecordId,
+      });
+      const otherHandoff = await createOtherHandoff();
+      const otherRetry = await createOtherHandoff();
+      expect(otherHandoff.created).toBe(true);
+      expect(otherRetry).toMatchObject({ created: false, row: { id: otherHandoff.row.id } });
+
+      const discarded = await reconcile(adminToken, true);
+      expect(discarded.status).toBe(200);
+      expect((await discarded.json()).photoSummary).toMatchObject({ abandoned: true, restored: false });
+      const remainingHandoffs = await db('dispatch_alerts').where({
+        type: 'service_photo_reconciliation_required', job_id: completedVisitId, resolved_at: null,
+      }).select('payload');
+      expect(remainingHandoffs).toHaveLength(1);
+      expect(remainingHandoffs[0].payload).toMatchObject({ serviceRecordId: otherRecordId });
+      // A reopen after a lost response is idempotent and still reconciles the
+      // already committed gallery without reviving the discarded narrative.
+      expect((await reconcile(adminToken, true)).status).toBe(200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+
+    const reopened = await db('service_records').where({ id: recordId }).first('service_data', 'pdf_storage_key');
+    const serviceData = typeof reopened.service_data === 'string' ? JSON.parse(reopened.service_data) : reopened.service_data;
+    expect(serviceData.typedReportSnapshot).toEqual({ photoSummary: null });
+    expect(reopened.pdf_storage_key).toBeNull();
+    expect(await db('service_photos').where({ service_record_id: recordId }).select('id', 's3_key'))
+      .toEqual([expect.objectContaining({ id: committed.id })]);
+    expect(mockObjects.size).toBe(1);
   }, 30000);
 
   test('promotion leaves a photo staged after its locked selection available for the next pass', async () => {

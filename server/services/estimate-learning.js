@@ -81,24 +81,105 @@ function baselineFieldsFrom(row) {
 }
 
 // Service keys across the persisted shapes: engine + ai_agent drafts store
-// pricing inputs at engineInputs.services (object keyed by service); the
-// admin builder's save persists the raw /calculate-estimate payload, whose
-// engineRequest.selectedServices is an ARRAY of service-key strings (see
-// serverRecomputeFromEstimateData). Absent all of them the side is not
-// comparable, and the diff omits the service arrays rather than reporting
-// a false empty set.
+// pricing inputs at engineInputs.services (object keyed by ENGINE service
+// key: pest, lawn, oneTimePest); the admin builder's save persists the raw
+// /calculate-estimate payload, whose engineRequest.selectedServices is an
+// ARRAY of BUILDER codes (PEST, LAWN, OT_PEST). The two vocabularies are
+// different names for the same services, so a code array is run through the
+// builder's own translator (translateV2CallToV1Input, the same one the save
+// path reprices with) before the diff. Comparing them raw reported a remove
+// plus an add on every send (60-day read 2026-10-03: 37 of 49 "service
+// changes" were pest vs PEST). Absent a readable shape, or when the codes
+// cannot be translated, the side is not comparable and the diff omits the
+// service arrays rather than reporting a false change or a false empty set.
+function translateBuilderCodes(engineRequest, codes) {
+  if (!codes.length) return [];
+  let translate;
+  try {
+    // Lazy: the route adapter requires services that require this module.
+    translate = require('../routes/property-lookup-v2').translateV2CallToV1Input;
+  } catch {
+    return null;
+  }
+  if (typeof translate !== 'function') return null;
+  try {
+    const input = translate(engineRequest.profile || {}, codes, engineRequest.options || {});
+    const keys = Object.keys(input?.services || {});
+    // Codes the translator does not know yield nothing: unknown, not "none".
+    return keys.length ? canonicalEngineKeys(keys) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Engine keys the pricing engine reads as one service (estimate-engine.js:
+// `services.termite || services.termiteBait || services.termite_bait`, and
+// the same for palm, BoraCare, pre-slab, flea and recurring foam). Both
+// sides are reduced to one spelling so an alias is never an add plus a remove.
+const ENGINE_KEY_ALIASES = Object.freeze({
+  termiteBait: 'termite',
+  termite_bait: 'termite',
+  palm: 'palmInjection',
+  bora_care: 'boraCare',
+  pre_slab_termiticide: 'preSlabTermiticide',
+  preSlab: 'preSlabTermiticide',
+  // The builder's PRESLAB emits preSlabTermiticide; the Termidor keys are
+  // the legacy spelling of the same treatment.
+  preSlabTermidor: 'preSlabTermiticide',
+  pre_slab_termidor: 'preSlabTermiticide',
+  fleaExterior: 'flea',
+  foam_recurring: 'foamRecurring',
+});
+const canonicalEngineKeys = (keys) => [...new Set(keys.map((k) => ENGINE_KEY_ALIASES[k] || k))].sort();
+
 function serviceKeysFrom(data) {
   const services = data?.engineInputs?.services
     || data?.engineRequest?.services
     || data?.inputs?.services;
   if (services && typeof services === 'object' && !Array.isArray(services)) {
-    return Object.keys(services).sort();
+    return canonicalEngineKeys(Object.keys(services));
   }
   const selected = data?.engineRequest?.selectedServices;
   if (Array.isArray(selected)) {
-    return [...new Set(selected.filter((key) => typeof key === 'string'))].sort();
+    const codes = [...new Set(selected.filter((key) => typeof key === 'string'))];
+    return translateBuilderCodes(data.engineRequest, codes);
   }
   return null;
+}
+
+// The same address in another FORMAT is not an edit. The engine draft holds
+// the address as the caller gave it; the builder's save replaces it with the
+// autocomplete form. Sameness is the estimator engine's own comparator
+// (address-compare.js sameStreetAddress: whole street line with suffix,
+// direction, route and unit forms canonicalized; city and ZIP must agree
+// when both sides carry one), with the unit required to match exactly, so an
+// added, dropped or changed unit is a change. Its limits are the shared
+// parser's (a unit written after the ZIP is not read as a unit); they are
+// kept in that one module rather than re-decided here.
+function sameProperty(a, b) {
+  if (norm(a) === norm(b)) return true;
+  // Lazy: the engine module tree is not needed by the write paths here.
+  const { sameStreetAddress } = require('./estimator-engine/address-compare');
+  if (!sameStreetAddress(a, b, { requireExactUnit: true })) return false;
+  // The comparator checks street, unit, city and ZIP; a different state with
+  // neither ZIP given is a different place too.
+  const { parseRawAddress } = require('../utils/address-normalizer');
+  const [stateA, stateB] = [a, b].map((raw) => norm(parseRawAddress(raw)?.state));
+  return !(stateA && stateB && stateA !== stateB);
+}
+
+// The builder's save folds the WaveGuard setup fee into the stored one-time
+// total (result.oneTime.membershipFee); the engine draft's stored total
+// leaves it out (60-day read 2026-10-03: 34 of 36 one-time changes were
+// exactly this fee). Whether a given draft already owed that fee depends on
+// its recurring service mix and waivers, which this diff does not decide.
+// So the totals are compared exactly as stored, and the fee the sent row
+// carries is recorded beside them (sentSetupFee) for the reader to weigh.
+function builderSetupFee(data) {
+  if (!Array.isArray(data?.engineRequest?.selectedServices)) return 0;
+  const root = data.result && typeof data.result === 'object' ? data.result : data;
+  const fee = parseFloat(root?.oneTime?.membershipFee);
+  return Number.isFinite(fee) && fee > 0 ? money(fee) : 0;
 }
 
 /**
@@ -110,6 +191,8 @@ function computeEditSummary({ baseline, sentRow }) {
     return { reviseCount: 0, baselineCapture: null, sentUnedited: true };
   }
   const fields = parseData(baseline.baseline_fields);
+  const baselineData = parseData(baseline.baseline_estimate_data);
+  const sentData = parseData(sentRow.estimate_data);
   const summary = {
     reviseCount: baseline.revise_count || 0,
     baselineCapture: baseline.capture_point || 'first_revise',
@@ -122,19 +205,20 @@ function computeEditSummary({ baseline, sentRow }) {
     if (from !== to) totals[key] = { from, to };
   }
   if (Object.keys(totals).length) summary.totalsChanged = totals;
+  const sentSetupFee = builderSetupFee(sentData);
+  if (sentSetupFee && !builderSetupFee(baselineData)) summary.sentSetupFee = sentSetupFee;
 
-  if (norm(fields.address) !== norm(sentRow.address)) summary.addressChanged = true;
+  if (!sameProperty(fields.address, sentRow.address)) summary.addressChanged = true;
   if (
     norm(fields.customer_name) !== norm(sentRow.customer_name)
     || norm(fields.customer_phone) !== norm(sentRow.customer_phone)
     || norm(fields.customer_email) !== norm(sentRow.customer_email)
   ) summary.contactChanged = true;
   if (norm(fields.waveguard_tier) !== norm(sentRow.waveguard_tier)) summary.tierChanged = true;
-  if (norm(fields.service_interest) !== norm(sentRow.service_interest)) summary.serviceInterestChanged = true;
   if (norm(fields.category) !== norm(sentRow.category)) summary.categoryChanged = true;
 
-  const baseKeys = serviceKeysFrom(parseData(baseline.baseline_estimate_data));
-  const sentKeys = serviceKeysFrom(parseData(sentRow.estimate_data));
+  const baseKeys = serviceKeysFrom(baselineData);
+  const sentKeys = serviceKeysFrom(sentData);
   if (baseKeys && sentKeys) {
     const added = sentKeys.filter((k) => !baseKeys.includes(k));
     const removed = baseKeys.filter((k) => !sentKeys.includes(k));
@@ -143,6 +227,13 @@ function computeEditSummary({ baseline, sentRow }) {
     summary.servicesComparable = true;
   } else {
     summary.servicesComparable = false;
+  }
+  // service_interest is a display label: the engine writes the caller's
+  // words ("Quarterly Pest Control Service"), the builder its own category
+  // name ("Pest Control"). When the service keys are comparable they are the
+  // record of what changed; the label counts only when they are not.
+  if (!summary.servicesComparable && norm(fields.service_interest) !== norm(sentRow.service_interest)) {
+    summary.serviceInterestChanged = true;
   }
 
   summary.sentUnedited = summary.reviseCount === 0
@@ -341,6 +432,8 @@ module.exports = {
   _private: {
     baselineFieldsFrom,
     serviceKeysFrom,
+    sameProperty,
+    builderSetupFee,
     money,
     norm,
     // Test-only: the cutover is cached for the process lifetime.

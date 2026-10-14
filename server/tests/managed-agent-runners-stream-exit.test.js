@@ -103,6 +103,24 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
     expect(recorded()).toMatchObject({ failure: null });
   });
 
+  it('an idle at the spend cap is a failed run (budget_exhausted), not a wait for the deadline', async () => {
+    global.fetch = fetchFor([text('partial'), { event: 'session.status_idle', data: { stop_reason: { type: 'budget_reached' } } }, text('never read')]);
+    await settleFailedRun(name, run(load(path)), 'budget_exhausted');
+    expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'budget_exhausted' });
+  });
+
+  it('the session is created with its spend cap only when GATE_AGENT_SESSION_GUARD is on', async () => {
+    const createBody = () => JSON.parse(global.fetch.mock.calls.find(([url, opts]) => opts?.method === 'POST' && String(url).endsWith('/sessions'))[1].body);
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await run(load(path));
+    expect(createBody()).not.toHaveProperty('budget');
+
+    process.env.GATE_AGENT_SESSION_GUARD = 'true';
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await run(load(path));
+    expect(createBody().budget).toEqual({ type: 'limit', max_list_cost: { amount: expect.stringMatching(/^[1-9]\d*$/), currency: 'USD' } });
+  });
+
   it('a session.error event is the same failed run as an error event (session_error_event)', async () => {
     global.fetch = fetchFor([text('partial'), { event: 'session.error', data: { type: 'overloaded_error' } }, text('never read')]);
     await settleFailedRun(name, run(load(path)), 'session_error_event');

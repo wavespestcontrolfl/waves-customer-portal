@@ -246,8 +246,13 @@ async function executeLeadTool(toolName, input, context) {
     // ── Availability & pest context ─────────────────────────────
 
     case 'check_next_availability': {
-      const Availability = require('./availability');
-      const result = await Availability.getAvailableSlots(input.city);
+      // GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): the website booking
+      // engine (per technician, route-aware) placed at the middle of the lead's
+      // city — a hint for the reply, never a booking. Off = the old by-city
+      // engine, unchanged.
+      const result = require('../config/feature-gates').multiTechTextTimesLive()
+        ? (await require('./scheduling/text-offer-times').textOfferDays({ city: input.city })) || { days: [] }
+        : await require('./availability').getAvailableSlots(input.city);
 
       // Return just the first 3 days with slots
       const days = (result.days || []).slice(0, 3).map(d => ({

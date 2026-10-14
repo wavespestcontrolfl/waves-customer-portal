@@ -157,7 +157,7 @@ describe('property preferences — Weekly Inches eligibility', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
     expect(src).toMatch(/if \('irrigation_inches_per_week' in updates\) \{[\s\S]{0,400}eligible = await customerQualifiesForLawnInches\(req\.customer\);[\s\S]{0,600}res\.status\(503\)[\s\S]{0,300}if \(!eligible\) delete updates\.irrigation_inches_per_week;/);
     expect(src).toMatch(/customerQualifiesForLawnInches\(req\.customer\)\.catch\(/); // GET
-    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, irrigationSuppressed \}\)/);
+    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, irrigationSuppressed, \.\.\.irrigationRatesPayload\(\) \}\)/);
     expect(src).toMatch(/const irrigationSuppressed = fields\.irrigation_system === false;/);
   });
 });

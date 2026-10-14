@@ -102,6 +102,31 @@ test('a read failure never throws and still offers the Completed visits page', a
   expect(actions).toEqual([OPEN_COMPLETED]);
 });
 
+test.each([
+  ['cancelled read', 'read'],
+  ['deadline after the read', 'assert'],
+])('a %s preserves the completed visit card and actions', async (_label, phase) => {
+  const cancelled = Object.assign(new Error('cancelled'), phase === 'read' ? { code: '57014' } : { code: 'PORTAL_CHAT_DEADLINE' });
+  if (phase === 'read') listPortalServiceHistory.mockRejectedValue(cancelled);
+  else listPortalServiceHistory.mockResolvedValue({ services: VISITS, total: VISITS.length });
+
+  const prior = { type: 'visits', title: 'Completed visit card', rows: [{ id: 'old' }] };
+  const actions = [{ type: 'tab', label: 'Open plan', tab: 'plan' }];
+  const cards = [prior];
+  const turn = {
+    transaction: jest.fn((_stage, read) => read({ bounded: true })),
+    assertActive: jest.fn(() => {
+      if (phase === 'assert') throw cancelled;
+    }),
+  };
+
+  await expect(executeToolCall('get_recent_visits', {}, 'cust-1', actions, cards, {}, turn)).rejects.toBe(cancelled);
+  expect(cards).toEqual([prior]);
+  expect(actions).toEqual([{ type: 'tab', label: 'Open plan', tab: 'plan' }]);
+  if (phase === 'assert') expect(turn.assertActive).toHaveBeenCalledWith('visit card');
+  else expect(turn.assertActive).not.toHaveBeenCalled();
+});
+
 test('refuses a model-supplied customer id and a channel without buttons', async () => {
   expect(await executeToolCall('get_recent_visits', { customer_id: 'other' }, 'cust-1', [], [])).toEqual({ error: 'Customer scope mismatch' });
   expect((await executeToolCall('get_recent_visits', {}, 'cust-1', [])).visits).toBeNull();

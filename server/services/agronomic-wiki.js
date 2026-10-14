@@ -360,7 +360,7 @@ async function callClaude(systemPrompt, userPrompt) {
       // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
       // exactly (avg output 7515) with thinking eating the whole cap —
       // paid-for output was being discarded as anthropic_incomplete.
-      // knowledge/wiki-compiler.js is already 12000 — leave it.
+      // knowledge/wiki-compiler.js uses the same effort + 16000.
       max_tokens: 16000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],

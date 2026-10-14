@@ -5,7 +5,9 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SearchConsole = require('../services/seo/search-console-v2');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, validCalendarDate } = require('../utils/datetime-et');
+
+const PIN_COORDINATE_RE = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?(,\s*\d+(\.\d+)?)?$/;
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -733,6 +735,24 @@ router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) =
     if (typeof req.body?.query === 'string' && req.body.query.trim()) patch.query = req.body.query.trim();
     if ('city' in (req.body || {})) patch.city = req.body.city || null;
     if ('service' in (req.body || {})) patch.service = req.body.service || null;
+    // AI Overview pinned captures (aio-pinned-capture.js): twice-daily full capture.
+    const body = req.body || {};
+    if ('pin_daily' in body) {
+      if (typeof body.pin_daily !== 'boolean') return res.status(400).json({ error: 'pin_daily must be true or false' });
+      patch.pin_daily = body.pin_daily;
+    }
+    if ('pin_until' in body) {
+      if (body.pin_until == null || body.pin_until === '') patch.pin_until = null;
+      else if (validCalendarDate(body.pin_until)) patch.pin_until = body.pin_until;
+      else return res.status(400).json({ error: 'pin_until must be a YYYY-MM-DD date or null' });
+    }
+    if ('pin_location' in body) {
+      const loc = typeof body.pin_location === 'string' ? body.pin_location.trim() : body.pin_location;
+      if (loc == null || loc === '') patch.pin_location = null;
+      // A place name, or "lat,lng[,radius_km]" (see serpLocation in dataforseo.js).
+      else if (typeof loc === 'string' && loc.length <= 120 && (PIN_COORDINATE_RE.test(loc) || /[A-Za-z]/.test(loc))) patch.pin_location = loc;
+      else return res.status(400).json({ error: 'pin_location must be a place name or "lat,lng[,radius_km]"' });
+    }
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'nothing to update' });
     // Entity-cohort and benchmark rows are keyed by their exact prompt: the
     // text is frozen (toggle `active` instead; a new prompt is a new cohort
@@ -748,6 +768,94 @@ router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) =
     const [row] = await db('seo_llm_mention_queries').where('id', req.params.id).update(patch).returning('*');
     if (!row) return res.status(404).json({ error: 'not found' });
     res.json({ query: row });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/seo/llm-mentions/captures?query_id=&days=&raw=1 — pinned AI
+// Overview captures, newest first. raw_item (the full overview) only with raw=1.
+const AIO_CAPTURE_COLUMNS = ['id', 'query_id', 'query', 'captured_at', 'pass', 'device', 'location', 'status',
+  'answer_markdown', 'elements', 'aio_references', 'organic_top', 'paa', 'local_pack', 'check_url', 'se_datetime',
+  'cost_usd', 'waves_cited'];
+router.get('/llm-mentions/captures', async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 90);
+    let q = db('seo_aio_captures')
+      .select(req.query.raw === '1' ? [...AIO_CAPTURE_COLUMNS, 'raw_item'] : AIO_CAPTURE_COLUMNS)
+      .where('captured_at', '>=', db.raw("now() - (? * interval '1 day')", [days]));
+    if (req.query.query_id) {
+      const queryId = String(req.query.query_id);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(queryId)) return res.status(400).json({ error: 'query_id must be a uuid' });
+      q = q.where('query_id', queryId);
+    }
+    res.json({ captures: await q.orderBy('captured_at', 'desc').limit(500) });
+  } catch (err) { next(err); }
+});
+
+// AI Overview gap sweep (services/seo/aio-gap-sweep.js): one mobile SERP check
+// per candidate search; the 10-minute scheduler job works the open run.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const AIO_SWEEP_MAX_COST_USD = 25;
+const AIO_SWEEP_MAX_CANDIDATES = 5000;
+
+// POST /api/admin/seo/aio-sweep { maxCostUsd (<=25, default 10), minImpressions (default 20), max (<=5000, default 2500) }
+// Each body field: the text it must match and its range. maxCostUsd is whole
+// cents (max_cost_usd is stored to the cent); minImpressions has a floor of 10
+// because one-off searches are the ones most likely to hold a name.
+const AIO_SWEEP_FIELDS = [
+  { key: 'maxCostUsd', re: /^\d+(\.\d{1,2})?$/, min: 1, max: AIO_SWEEP_MAX_COST_USD, error: `maxCostUsd must be whole cents from 1 to ${AIO_SWEEP_MAX_COST_USD}` },
+  { key: 'minImpressions', re: /^\d+$/, min: 10, max: 1000000, error: 'minImpressions must be a whole number, 10 or more' },
+  { key: 'max', re: /^\d+$/, min: 1, max: AIO_SWEEP_MAX_CANDIDATES, error: `max must be a whole number from 1 to ${AIO_SWEEP_MAX_CANDIDATES}` },
+];
+router.post('/aio-sweep', requireAdmin, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const opts = {};
+    for (const f of AIO_SWEEP_FIELDS) {
+      if (body[f.key] === undefined) continue;
+      const raw = typeof body[f.key] === 'boolean' ? '' : String(body[f.key]).trim();
+      const n = Number(raw);
+      if (!f.re.test(raw) || n < f.min || n > f.max) return res.status(400).json({ error: f.error });
+      opts[f.key] = n;
+    }
+    // The 10-minute processor runs only with both gates on; a run started
+    // without it would sit open and block every later start.
+    if (!isEnabled('seoIntelligence') || !isEnabled('cronJobs')) return res.status(409).json({ error: 'The sweep processor is off (seoIntelligence and cronJobs must both be on).' });
+    const { startSweep } = require('../services/seo/aio-gap-sweep');
+    try {
+      res.status(201).json(await startSweep({ ...opts, trigger: 'manual' }));
+    } catch (err) {
+      if (err.code === 'AIO_SWEEP_OPEN') return res.status(409).json({ error: err.message });
+      throw err;
+    }
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/seo/aio-sweep/runs — last 20 runs with row counts by status.
+router.get('/aio-sweep/runs', async (req, res, next) => {
+  try {
+    const { listRuns } = require('../services/seo/aio-gap-sweep');
+    res.json({ runs: await listRuns({ limit: 20 }) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/seo/aio-sweep/:runId/gaps?limit= — shown overviews that do not cite Waves.
+router.get('/aio-sweep/:runId/gaps', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.runId)) return res.status(400).json({ error: 'runId must be a uuid' });
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 1000);
+    const { rankGaps } = require('../services/seo/aio-gap-sweep');
+    res.json(await rankGaps(req.params.runId, { limit }));
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/seo/aio-sweep/:runId/cancel — stops an open run; rows already checked stay.
+router.post('/aio-sweep/:runId/cancel', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.runId)) return res.status(400).json({ error: 'runId must be a uuid' });
+    const { cancelSweep } = require('../services/seo/aio-gap-sweep');
+    const run = await cancelSweep(req.params.runId);
+    if (!run) return res.status(404).json({ error: 'No open run with that id' });
+    res.json({ run });
   } catch (err) { next(err); }
 });
 

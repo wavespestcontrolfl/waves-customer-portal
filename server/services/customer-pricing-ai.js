@@ -1193,7 +1193,10 @@ async function buildCustomerPricingResponse({
   let lookupFn = propertyLookup;
   if (!lookupFn && servicesToPrice.length) {
     try {
-      ({ performPropertyLookup: lookupFn } = require('../routes/property-lookup-v2'));
+      // Scope decision: lookup-callers.js (customer_pricing_ai: customer self-quote, never suite sizing).
+      const { performPropertyLookup } = require('../routes/property-lookup-v2');
+      const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
+      lookupFn = (address, extra) => performPropertyLookup(address, lookupOptionsFor('customer_pricing_ai', extra || {}));
     } catch {
       lookupFn = null;
     }

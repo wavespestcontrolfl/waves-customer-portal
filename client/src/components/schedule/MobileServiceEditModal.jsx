@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
+import AutoDispatchLockBox, { autoDispatchLockSeed } from './AutoDispatchLockBox';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -24,7 +25,7 @@ function adminFetch(path, options = {}) {
       ...(options.headers || {}),
     },
   }).then(async (r) => {
-    if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
+    if (!r.ok) throw Object.assign(new Error(await r.text().catch(() => `${r.status}`)), { status: r.status });
     return r.json().catch(() => ({}));
   });
 }
@@ -78,7 +79,12 @@ export default function MobileServiceEditModal({
   const [notes, setNotes] = useState(() => service?.notes || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [sharedStopAsk, setSharedStopAsk] = useState(false);
   const [showStaffPicker, setShowStaffPicker] = useState(false);
+  // Auto-dispatch lock: recurring occurrences only. Sent with the save as the
+  // box's value and the value it opened with; the server acts only on a flip.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
 
   const baseName = useMemo(() => baseServiceName(service?.serviceType), [service?.serviceType]);
   const headerTitle = service?.serviceType || 'Service';
@@ -98,10 +104,12 @@ export default function MobileServiceEditModal({
     ? `Tech #${technicianId}`
     : 'Unassigned';
 
-  async function handleSave() {
+  // `comboMove`: the answer to the shared-stop question below, when asked.
+  async function handleSave(comboMove) {
     if (saving) return;
     setSaving(true);
     setError(null);
+    setSharedStopAsk(false);
     const tierOpt = TIER_OPTIONS.find((o) => o.key === tier);
     // A plain price/notes/staff edit used to re-label the visit as
     // "<base> — Billed Monthly" (the default tier) on every save. The stored
@@ -119,21 +127,55 @@ export default function MobileServiceEditModal({
             : undefined,
           windowStart: service.windowStart,
           windowEnd: service.windowEnd,
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           serviceType: nextServiceType,
           estimatedDuration: Number(duration) || 30,
           technicianId: technicianId || null,
           notes,
           estimatedPrice: parsedPrice,
           price: parsedPrice != null ? String(parsedPrice) : undefined,
+          comboMove: comboMove || undefined,
         }),
       });
+      // The whole stop could not be reassigned after the rest saved.
+      // The same three outcomes the Edit appointment form reports: partly
+      // done, not confirmed, or refused. Never "not changed" for the first two.
+      const stopMove = result?.comboMove;
+      if (stopMove && stopMove.moved !== true) {
+        const reason = stopMove.needsAttention?.message || stopMove.error || 'Check the schedule.';
+        showScheduleSaveNotice(stopMove.needsAttention
+          ? `The other changes were saved. ${reason}`
+          : stopMove.moved === null
+            ? `The other changes were saved. The technician change did not confirm, so the stop may or may not have changed: check the schedule. (${reason})`
+            : `The other changes were saved, but the stop's technician was not changed: ${reason}`);
+      }
       // Advisory schedule-overlap notes — the save committed (conflicts no
       // longer block admin edits); say what now stacks before closing.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        showScheduleSaveNotice(`Saved.\n\n${result.warnings.join('\n\n')}`);
+      // ...including the ones a whole-stop change returns on its own answer.
+      const savedWarnings = [
+        ...(Array.isArray(result?.warnings) ? result.warnings : []),
+        ...(result?.comboMove?.moved === true && Array.isArray(result.comboMove.warnings) ? result.comboMove.warnings : []),
+      ];
+      if (savedWarnings.length) {
+        showScheduleSaveNotice(`Saved.\n\n${savedWarnings.join('\n\n')}`);
       }
       onSaved?.();
     } catch (e) {
+      // A technician change on a stop shared by two or more services is
+      // refused until someone chooses (nothing separates unchosen): ask here.
+      if (!comboMove && /"code"\s*:\s*"VISIT_EDIT_SCHEDULE_UNSUPPORTED"/.test(String(e?.message || ''))) {
+        setSharedStopAsk(true);
+        setSaving(false);
+        return;
+      }
+      // A whole-stop or separate save that got no answer at all may still
+      // have gone through (split, reassignment, customer text).
+      if (comboMove && e?.status == null) {
+        setError('The save did not confirm, so it may or may not have gone through. Close this and check the schedule before you save again.');
+        setSaving(false);
+        return;
+      }
       // The inline helper throws the raw JSON body as the message — show the
       // server's own sentence (a refused collective move names what it needs).
       setError(apiErrorMessage(e, 'Failed to save'));
@@ -166,7 +208,7 @@ export default function MobileServiceEditModal({
         </div>
         <button
           type="button"
-          onClick={handleSave}
+          onClick={() => handleSave()}
           disabled={saving}
           className="bg-zinc-900 text-white font-medium u-focus-ring"
           style={{
@@ -373,6 +415,16 @@ export default function MobileServiceEditModal({
           </span>
         </div>
 
+        <AutoDispatchLockBox
+          service={service}
+          checked={autoDispatchLocked}
+          onChange={setAutoDispatchLocked}
+          disabled={saving}
+          boxSize={22}
+          helperColor="#71717A"
+          rowProps={{ className: 'bg-white border-b border-hairline border-zinc-200 text-zinc-900', style: { padding: '14px 16px' } }}
+        />
+
         {/* Notes */}
         <div
           className="bg-white"
@@ -402,6 +454,19 @@ export default function MobileServiceEditModal({
           />
         </div>
 
+        {sharedStopAsk && (
+          <div role="group" aria-label="This stop has more than one service" style={{ padding: '12px 16px', fontSize: 14 }} className="text-zinc-900">
+            <div className="font-medium">This stop has more than one service. Nothing was changed.</div>
+            <div className="flex gap-2" style={{ marginTop: 10 }}>
+              <button type="button" disabled={saving} onClick={() => handleSave('together')} className="bg-zinc-900 text-white font-medium u-focus-ring" style={{ minHeight: 44, padding: '0 14px', fontSize: 14, borderRadius: 6 }}>
+                Change the whole stop
+              </button>
+              <button type="button" disabled={saving} onClick={() => handleSave('separate')} className="bg-white text-zinc-900 font-medium u-focus-ring border border-zinc-300" style={{ minHeight: 44, padding: '0 14px', fontSize: 14, borderRadius: 6 }}>
+                Separate this service
+              </button>
+            </div>
+          </div>
+        )}
         {error && (
           <div
             className="text-alert-fg"

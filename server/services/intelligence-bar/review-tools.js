@@ -442,8 +442,10 @@ async function triggerReviewRequest(input) {
   // (service contact when consented, else the account holder) — validate
   // THAT, not the bare primary phone, so a service-contact-only account is
   // neither refused here nor promised a card that cannot execute.
-  const { getServiceContactSmsRecipient } = require('../customer-contact');
-  const target = getServiceContactSmsRecipient(customer);
+  // Opt-in aware, like the sender: a contact who has not replied YES yet
+  // resolves to the account holder.
+  const { resolveServiceContactSmsRecipient } = require('../recipient-optin');
+  const target = await resolveServiceContactSmsRecipient(customer);
   if (!target.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
   // W0B pinned recipient: the operator approved THIS phone on the card —
   // enforced here before ReviewService.create.

@@ -204,3 +204,21 @@ test('with a category on the allowlist a routed path loads under the category fi
     kbRows.pop();
   }
 });
+
+// Owner 2026-10-04: only staff callers ride the ROUTINE tier. Every
+// customer-facing or unknown source keeps highStakes on both model calls.
+test.each([
+  ['tech_field', 'routineAnswer', 'wiki_qa_staff'],
+  ['admin_manual', 'routineAnswer', 'wiki_qa_staff'],
+  ['ai_assistant', 'highStakes', 'wiki_qa'],
+  ['lead_agent', 'highStakes', 'wiki_qa'],
+  [undefined, 'highStakes', 'wiki_qa'],
+])('source %s routes and answers on %s as lane %s', async (source, policy, laneId) => {
+  routeTo(['wiki/pricing.md']);
+  await WikiQA.query('what does it cost', source ? { source } : {});
+  expect(dispatchWithFallback.mock.calls.length).toBeGreaterThan(0);
+  for (const [usedPolicy, payload] of dispatchWithFallback.mock.calls) {
+    expect(usedPolicy.name).toBe(policy);
+    expect(payload.laneId).toBe(laneId);
+  }
+});

@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const WATERING_COPY = require('../../shared/watering-copy.json');
 
 // `lastObservation/summary/` is not a real FAWN endpoint (confirmed live
 // 2026-09-26: it 400s). The documented, working "all stations" feed is
@@ -341,7 +342,7 @@ const FawnWeather = {
     }
 
     if (rain != null && rain < 0.1 && m >= 3 && m <= 10) {
-      explanation += ' Rainfall has been low — if you have irrigation, ensure it\'s running 2-3 times per week.';
+      explanation += ` Rainfall has been low. If you have irrigation, watch for ${WATERING_COPY.wiltSigns}, and water on an allowed watering day when you see them.`;
     }
 
     return {

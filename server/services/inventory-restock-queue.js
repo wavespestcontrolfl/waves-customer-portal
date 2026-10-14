@@ -7,7 +7,11 @@ function restockMeta(raw) {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
-async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, requestId, productId } = {}) {
+// officeDetail (owner 2026-10-03, "narrow"): the vendor, its SKU and order
+// link, and the customer a job-card request came from are the office's. A
+// technician's list (officeDetail false) carries the product, the stock and
+// the request state only.
+async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, officeDetail = true, requestId, productId } = {}) {
     if (requestId && require('joi').string().guid().validate(requestId).error) throw Object.assign(new Error('Invalid restock request id'), { statusCode: 400, isOperational: true });
     if (productId && require('joi').string().guid().validate(productId).error) throw Object.assign(new Error('Invalid product id'), { statusCode: 400, isOperational: true });
     if (!(await db.schema.hasTable('product_restock_requests'))) {
@@ -67,36 +71,38 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         liveStock: row.inventory_on_hand != null ? Number(row.inventory_on_hand) : null,
         inventoryUnit: row.inventory_unit,
         targetStock: row.target_stock != null ? Number(row.target_stock) : null,
-        vendor: row.vendor || row.best_vendor || null,
+        vendor: officeDetail ? (row.vendor || row.best_vendor || null) : null,
         // Auto-reorder requests carry the vendor SKU + product URL in
         // metadata; the tab renders them as the order link (Codex r3 P2).
-        vendorSku: restockMeta(row.metadata).vendorSku || null,
-        vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
+        vendorSku: officeDetail ? (restockMeta(row.metadata).vendorSku || null) : null,
+        vendorProductUrl: officeDetail ? (restockMeta(row.metadata).vendorProductUrl || null) : null,
         // Automatic order outcome (null = never dispatched): placing | placed
         // | failed | needs_review, with the vendor number, total and the
         // parked reason so the tab explains why a request still needs a hand.
-        order: hasOrders ? restockOrderView(row, showSpend) : null,
+        order: hasOrders ? restockOrderView(row, showSpend, officeDetail) : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,
         scheduledServiceId: row.scheduled_service_id,
         scheduledDate: row.scheduled_date,
         serviceType: row.service_type,
-        customerName: `${row.first_name || ''} ${row.last_name || ''}`.trim() || null,
-        address: row.address_line1,
-        city: row.city,
+        customerName: officeDetail ? (`${row.first_name || ''} ${row.last_name || ''}`.trim() || null) : null,
+        address: officeDetail ? row.address_line1 : null,
+        city: officeDetail ? row.city : null,
         createdByName: row.created_by_name,
         createdAt: row.created_at,
       })),
     };
 }
 
-function restockOrderView(row, showSpend) {
+function restockOrderView(row, showSpend, officeDetail = true) {
   if (!row.order_status) return null;
   return {
     status: row.order_status,
-    adapter: row.order_adapter,
-    externalOrderNumber: row.order_number || null,
+    // The adapter key names the vendor (siteone, …) and the order number is
+    // the vendor's: both are office detail (Codex #5847 r1).
+    adapter: officeDetail ? row.order_adapter : null,
+    externalOrderNumber: officeDetail ? (row.order_number || null) : null,
     amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
     // The parked message can quote the total (cap wording): techs get the
     // reason code only.

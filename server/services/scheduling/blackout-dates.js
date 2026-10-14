@@ -24,6 +24,12 @@
  * All helpers FAIL OPEN (empty set / false) — an availability or commit
  * outage is worse than an offered day off; the office alert + dispatch board
  * still surface anything that slips through.
+ *
+ * One exception, by option: `{ strict: true }` makes getWeeklyDaysOff,
+ * getBlackoutDates and isBlackoutDate THROW on a read failure instead. The
+ * nightly auto-dispatch path passes it (owner 2026-10-09): an unreadable
+ * closed-day list there must stop a move, never let one onto a closed day.
+ * Customer-facing callers keep the fail-open default.
  */
 
 const db = require('../../models/db');
@@ -70,11 +76,12 @@ const readOptional = (conn, fn) => (conn && conn.isTransaction && typeof conn.tr
   ? conn.transaction((sp) => fn(sp))
   : fn(conn));
 
-async function getWeeklyDaysOff(conn = db) {
+async function getWeeklyDaysOff(conn = db, { strict = false } = {}) {
   try {
     const row = await readOptional(conn, (dbh) => dbh('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value'));
     return parseWeeklyDaysOff(row && row.value);
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[blackout-dates] weekly days-off lookup failed (failing open): ${err.message}`);
     return new Set();
   }
@@ -95,7 +102,7 @@ function expandWeeklyDaysOff(fromStr, toStr, dowSet) {
 
 // Set of YYYY-MM-DD blackout dates within [fromStr, toStr] (inclusive) —
 // one-off dates plus every weekly-day-off occurrence in the range.
-async function getBlackoutDates(fromStr, toStr, conn = db) {
+async function getBlackoutDates(fromStr, toStr, conn = db, { strict = false } = {}) {
   let dates = new Set();
   try {
     const rows = await readOptional(conn, (dbh) => dbh('schedule_blackout_dates')
@@ -103,9 +110,10 @@ async function getBlackoutDates(fromStr, toStr, conn = db) {
       .select('date'));
     dates = new Set(rows.map((r) => toDateStr(r.date)));
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[blackout-dates] range lookup failed (failing open): ${err.message}`);
   }
-  const weekly = await getWeeklyDaysOff(conn);
+  const weekly = await getWeeklyDaysOff(conn, { strict });
   for (const d of expandWeeklyDaysOff(fromStr, toStr, weekly)) dates.add(d);
   return dates;
 }
@@ -141,10 +149,10 @@ async function getBlackoutLayers(fromStr, toStr, conn = db) {
 // concurrent callers wait on connections each other holds until acquisition
 // times out and this lookup fails open. getWeeklyDaysOff has always taken a
 // conn; this is the other half.
-async function isBlackoutDate(dateVal, conn = db) {
+async function isBlackoutDate(dateVal, conn = db, { strict = false } = {}) {
   const dateStr = toDateStr(dateVal);
   if (!dateStr) return false;
-  const weekly = await getWeeklyDaysOff(conn);
+  const weekly = await getWeeklyDaysOff(conn, { strict });
   if (weekly.has(dowOfDateStr(dateStr))) return true;
   try {
     // Through readOptional's savepoint, like its siblings (codex r12 P2): a
@@ -156,6 +164,7 @@ async function isBlackoutDate(dateVal, conn = db) {
       .first('id'));
     return !!row;
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[blackout-dates] date lookup failed (failing open): ${err.message}`);
     return false;
   }

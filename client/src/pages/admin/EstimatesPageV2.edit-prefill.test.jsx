@@ -95,6 +95,9 @@ describe("edit-estimate prefill survives the legacy redirect's injected tab para
     expect(
       await screen.findByText(/Editing existing estimate/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Jane Veteran/)).toBeInTheDocument();
+    // The name shows twice by design: the edit banner, and the "Estimate
+    // goes to" line that stands in for the closed contact boxes.
+    expect(screen.getAllByText(/Jane Veteran/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId("estimate-contact-summary")).toHaveTextContent("Jane Veteran");
   });
 });

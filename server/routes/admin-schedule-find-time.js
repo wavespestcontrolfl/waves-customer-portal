@@ -19,17 +19,25 @@
  *                             // the range with every hour that fits (GATE_RESCHEDULE_AVAILABILITY;
  *                             // gate off = the flag is ignored and the answer is the plain hint)
  *     pickedDate?,            // summary mode: the date `pickedStart` is on (default dateFrom)
+ *     compareTechs?,          // hint mode, all techs, gap mode: answer `pickedByTech` — the
+ *                             // picked hour on every technician's route that fits it,
+ *                             // least added drive first — instead of `picked`
+ *     serviceKeys?,           // bestRows: the catalog key of each serviceTypes entry
+ *                             // (same order, '' when none), for the rain ranking
+ *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
+ *                             // cannot perform one is left out of `pickedByTech`
  *   }
  */
 
 const express = require('express');
 const router = express.Router();
+const { bookingRainPlan } = require('../services/scheduling/rain-fit');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
-  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
@@ -208,8 +216,11 @@ router.post('/', async (req, res) => {
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
-      summary, pickedDate,
+      summary, pickedDate, moveScope, compareTechs, serviceTypes, bestRows,
     } = req.body || {};
+    // Edit appointment's choice on a shared stop: 'separate' = the save
+    // splits this service off and moves only it.
+    const moveAlone = moveScope === 'separate';
     let { technicianId } = req.body || {};
 
     const isTech = isTechnicianRequest(req);
@@ -350,7 +361,10 @@ router.post('/', async (req, res) => {
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
+      // unit: the staff screens this hint feeds move a shared stop as a
+      // whole, unless the operator chose to separate this service (alone).
+      // GATE_COMBO_ROUTE_CHECK decides; for a visit alone, neither matters.
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -373,13 +387,38 @@ router.post('/', async (req, res) => {
         today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, every: plan.summary,
       })
       : { ranked: rawSlots };
-    const picked = hint && pickedStart
+    // A compareTechs request asks for the hour on every route instead of the
+    // single-route verdict (a cost for a route the booking may not use).
+    const picked = hint && pickedStart && compareTechs !== true
       ? await scorePickedHour({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
-        withReason: plan.summary,
+        withReason: plan.summary, moveAlone,
       })
       : undefined;
+
+    // New appointment's "who adds the least drive at this hour" list: the
+    // picked hour on every technician's route. Only for a search across all
+    // technicians in gap mode (the arrival checker prices one route).
+    // Every service in the booking must be one the technician performs: a
+    // row picks the tech explicitly, past the auto matcher's capability
+    // check, so an unqualified tech is never listed (either finder path).
+    let pickedByTech = hint && compareTechs === true && pickedStart && !technicianId && !useArrivalWindows
+      ? await scorePickedHourByTech({
+        rawSlots, from: plan.verdictDate, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,
+      })
+      : undefined;
+    if (pickedByTech?.length) {
+      const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
+        .filter((t) => typeof t === 'string' && t.trim()))];
+      if (wanted.length) {
+        const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
+          db, pickedByTech.map((v) => v.technician.id), wanted.map((service_type) => ({ service_type })),
+        );
+        const unqualified = new Set(inactive.map((row) => String(row.technician_id)));
+        pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
+      }
+    }
 
     // The engine's per-date refusal counts feed the summary's day status
     // only; they are not part of any response contract.
@@ -388,12 +427,34 @@ router.post('/', async (req, res) => {
     // Calendar labels for the strip's day pills (closed day, technician off).
     const dayFacts = await loadSummaryDayFacts(plan, technicianId || null);
 
+    // A summary also answers the best-times rows (find-time-hints.js
+    // buildBestRows), with the picked verdict's drive numbers priced the
+    // same way as the chips.
+    const rainPlan = await bookingRainPlan({
+      bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
+    }, db);
+    const built = await buildHintSummary(plan, every, {
+      rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,
+      // Only a strip that shows the rows asks for them; any other skips the
+      // rain and road-time work (Codex #6045 r2).
+      bestRows: bestRows === true,
+      // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
+      // Each name carries its catalog key when the catalog holds it, so the
+      // ranking reads the service's identity, not the words in its name.
+      // An existing visit's own rows say what moves, and how far a shared
+      // stop reaches around this service (rain-fit.js bookingRainPlan).
+      serviceTypes: rainPlan.services,
+      rainSpan: rainPlan.rainSpan,
+    });
+    const pickedOut = built.picked;
+
     res.json({
       ...engineResult,
       slots,
-      ...(picked ? { picked } : {}),
+      ...(pickedOut ? { picked: pickedOut } : {}),
+      ...(pickedByTech ? { pickedByTech } : {}),
       // undefined (dropped from the JSON) for everything but a summary plan.
-      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt, ...dayFacts }),
+      summary: built.summary,
       target,
       range: { dateFrom: plan.from, dateTo: plan.to },
     });

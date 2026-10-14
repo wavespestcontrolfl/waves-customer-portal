@@ -1,0 +1,14 @@
+{
+  "_note": "Fixed customer sentences for the lawn report layout (GATE_LAWN_REPORT_LAYOUT). Read by the web report (client/src/components/report/lawnV2/lawnLayoutRules.js) and screened by server/tests/lawn-report-layout.test.js with the same customer-copy rules every report sentence passes. {phone} {grass} {min} {max} are filled from the report's own office number and the mowing table.",
+  "yourPartTitle": "Your part",
+  "walkOnLabel": "Walking on the lawn",
+  "alsoLabel": "Other steps",
+  "nothingToDo": "Nothing for you to do after this visit.",
+  "scoreToggle": "Score details",
+  "whenToCallTitle": "When to call us",
+  "whenToCall": [
+    "Call or text us at {phone} if the area we treated gets worse.",
+    "Call or text us if you see new damage in your lawn."
+  ],
+  "mowing": "Mowing height for your {grass} lawn: {min} to {max} inches."
+}

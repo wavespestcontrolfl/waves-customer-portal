@@ -348,7 +348,13 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
     }
     if (impact.nextCharge?.amount != null) rows.push(['Next charge', `${fmtMoney(impact.nextCharge.amount)}${impact.nextCharge.date ? ` on ${fmtDate(impact.nextCharge.date)}` : ''}`]);
     if (impact.visitsCancelled != null) rows.push(['Visits cancelled', `${impact.visitsCancelled}${impact.nextVisitCancelled ? ` (next: ${fmtDate(impact.nextVisitCancelled)})` : ''}`]);
-    if (Number(impact.lateCancelFee) > 0) rows.push(['Scheduled-visit fee', `${fmtMoney(impact.lateCancelFee)} (a visit already inside its late-cancellation window)`]);
+    if (Number(impact.lateCancelFee) > 0) {
+      rows.push(['Scheduled-visit fee', Number(impact.lateCancelFeeVisits) > 1
+        ? `${fmtMoney(impact.lateCancelFee)} in total for ${impact.lateCancelFeeVisits} visits already inside their late-cancellation window, each charged to that visit's card on file`
+        : `${fmtMoney(impact.lateCancelFee)}, charged to the card on file (a visit already inside its late-cancellation window)`]);
+    } else if (impact.lateCancelFeeMayApply === true) {
+      rows.push(['Scheduled-visit fee', 'May apply. We could not confirm it for an upcoming visit right now.']);
+    }
     if (Number(impact.openBalance) > 0) rows.push(['Outstanding balance', fmtMoney(impact.openBalance), impact.payUrl ? { href: impact.payUrl, label: 'Pay now' } : null]);
     if (impact.prepay) {
       const p = impact.prepay;
@@ -613,7 +619,15 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
       <div style={{ marginTop: 14 }}>
         {backButton(preview?.kind === 'card' ? 'card' : 'reason')}
         <h3 ref={headingRef} tabIndex={-1} style={heading}>Confirm cancelling {scopeLabel}</h3>
-        <div style={body}>This takes effect right away. There is no cancellation fee; charges for visits already completed stay payable.</div>
+        <div style={body}>
+          {Number(impact?.lateCancelFee) > 0
+            ? (Number(impact.lateCancelFeeVisits) > 1
+              ? `This takes effect right away. There is no cancellation fee, but ${impact.lateCancelFeeVisits} visits already inside their late-cancellation window keep their scheduled-visit fees: ${fmtMoney(impact.lateCancelFee)} in total, each charged to the card on file for that visit. Charges for visits already completed stay payable.`
+              : `This takes effect right away. There is no cancellation fee, but a visit already inside its late-cancellation window keeps its ${fmtMoney(impact.lateCancelFee)} scheduled-visit fee, charged to the card on file for that visit. Charges for visits already completed stay payable.`)
+            : impact?.lateCancelFeeMayApply === true
+              ? 'This takes effect right away. There is no cancellation fee. A scheduled-visit fee may apply to an upcoming visit: we could not confirm it right now. Charges for visits already completed stay payable.'
+              : 'This takes effect right away. There is no cancellation fee; charges for visits already completed stay payable.'}
+        </div>
         {preview?.kind === 'hard_stop' && (
           <div style={{ ...body, marginTop: 8 }}>We'll review this on our side; your cancellation still completes.</div>
         )}

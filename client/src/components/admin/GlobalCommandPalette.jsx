@@ -25,6 +25,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import DictationButton from "../tech/DictationButton";
+import useDictationPending from "../../hooks/dictationPending";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
@@ -43,6 +44,20 @@ const RECENTS_KEY = "admin_ib_recents";
 // auto-resumed conversation). Keyed per admin account so staff sharing a
 // browser can't clear or resurrect each other's dismissal.
 const DISMISSED_THREAD_KEY = "admin_ib_dismissed_thread";
+// A task the palette loads and shows is a conversation the operator chose,
+// like a History open: its first follow-up keeps its thread (thread_reopened).
+// Rule: the flag is set when the load attaches a thread, changes the held one,
+// or loads a task other than the one on screen. A status-only refresh of the
+// task already on screen (the Refresh button, the reload after a card is
+// decided) leaves the flag as it was, so a normal thread never becomes
+// permanently "reopened". A task operation (Continue, a target choice) is an
+// exchange the server appended, so it consumes the flag exactly as a query
+// does. Whether a thread is idle is the server's call alone.
+function taskLoadReopens(loaded, held, operation) {
+  if (!loaded.threadId || operation) return false;
+  return loaded.threadId !== held.threadId || loaded.taskId !== held.activeTask?.taskId || held.reopened;
+}
+
 function dismissedThreadKey() {
   let uid = "";
   try {
@@ -92,6 +107,7 @@ function adminFetch(path, options = {}) {
       const body = await r.json().catch(() => ({}));
       const err = new Error(body.message || body.error || `HTTP ${r.status}`);
       err.status = r.status;
+      err.details = body; // the parsed error body (a flagged query error carries threadRolledOver)
       throw err;
     }
     return r.json();
@@ -332,6 +348,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
+  // Tap-to-answer buttons from the live reply (payload `choices`, server
+  // offer_choices): plain strings, each both the button text and the text a
+  // tap sends. They belong to that one reply: any newer request, a
+  // recalled task or thread, New chat or a page change drops them, so an old
+  // question can never be answered by a tap.
+  const [choices, setChoices] = useState(null);
   const [activeTask, setActiveTask] = useState(null);
   const [savedTasks, setSavedTasks] = useState([]);
   const [tasksAvailable, setTasksAvailable] = useState(false);
@@ -342,6 +364,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const identityRef = useRef(null);
   if (!identityRef.current) identityRef.current = createRequestIdentity(sessionIdRef.current);
   const submittingRef = useRef(false);
+  // A mic still recording or transcribing (server dictation): its words are on
+  // the way, so Ask waits for them instead of sending what was typed so far.
+  const dictationPending = useDictationPending();
+  const dictationPendingRef = useRef(false);
+  dictationPendingRef.current = dictationPending;
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
   // Knowledge searches that came back empty (payload knowledgeMisses):
@@ -357,6 +384,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // server rejects an append that would interleave with another tab's.
   const threadSeqRef = useRef(null);
   const resumeAttemptedRef = useRef(false);
+  // True from a deliberate History open (or a restored saved task) until the
+  // first exchange lands: the first question tells the server the operator
+  // chose this conversation, so the server's idle rule does not start a new one.
+  // The server is the only authority on starting a new conversation: this palette
+  // sends the thread it holds and obeys threadRolledOver on the reply.
+  const threadReopenedRef = useRef(false);
   // Bumped by submit/"New chat" so a still-inflight resume or query response
   // can't clobber newer state (it only applies if the epoch is unchanged).
   const threadEpochRef = useRef(0);
@@ -480,6 +513,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     submittingRef.current = false;
     setLoading(false);
     setActiveTask(null);
+    setChoices(null);
     // With threads on, the visible reply stays with the thread it belongs to:
     // clearing it would look like a new conversation while the next prompt
     // silently carried the previous exchange. It is cleared below only when
@@ -520,13 +554,24 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // looks like a new chat while silently sending the old history with the
   // next prompt. Server-side taint markers are presentation noise here;
   // they stay on the stored turns.
-  const hydrateThread = useCallback((thread) => {
+  // Holds a thread (or none, id null): its id, tail seq and reopened flag.
+  // History open, the automatic resume, a loaded saved task and every query
+  // reply set the held thread through here.
+  const holdThread = useCallback((id, seq, reopened = false) => {
+    setThreadId(id);
+    threadSeqRef.current = Number.isInteger(seq) ? seq : null;
+    threadReopenedRef.current = reopened;
+  }, []);
+
+  // deliberate: the operator picked this conversation (History); otherwise it
+  // is the automatic resume.
+  const hydrateThread = useCallback((thread, { deliberate = false } = {}) => {
     const hist = thread?.conversationHistory;
     if (!hist?.length) return false;
     setConversationHistory(hist);
-    setThreadId(thread.id);
-    threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
+    holdThread(thread.id, thread.lastSeq, deliberate);
     setPendingActions([]);
+    setChoices(null);
     setToolActivity([]);
     knowledgeGaps.reset();
     // A thread from History is not the open task: its card (and Confirm
@@ -542,7 +587,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         : null,
     );
     return true;
-  }, []);
+  }, [holdThread]);
 
   // Picker: fetch the actor's recent threads (server-side actor-bound).
   const loadThreads = useCallback(() => {
@@ -571,11 +616,48 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     adminFetch(`/admin/intelligence-bar/threads/${encodeURIComponent(id)}`)
       .then((data) => {
         if (threadEpochRef.current !== epoch) return;
-        if (hydrateThread(data?.thread)) setShowThreads(false);
+        if (hydrateThread(data?.thread, { deliberate: true })) setShowThreads(false);
       })
       .catch(() => { /* thread gone or not ours — stay where we are */ })
       .finally(() => setThreadsLoading(false));
   };
+
+  // THE one place that starts a new conversation locally: New chat and a reply
+  // the server flagged threadRolledOver both call it, so they cannot drift. It
+  // is two named parts. clearConversationView: what is ON SCREEN from the old
+  // conversation (cards, the open task, answer buttons, tool activity,
+  // knowledge-gap prompts). releaseThread: what a request SERIALIZES (held
+  // thread id and tail seq, the reopened flag, the history). Neither touches the
+  // typed prompt or the answer on screen (callers decide), and neither cancels
+  // anything on the server: a still-valid card stays in History.
+  const clearConversationView = useCallback(() => {
+    setPendingActions([]);
+    setActiveTask(null);
+    setChoices(null);
+    setToolActivity([]);
+    knowledgeGaps.reset();
+  }, []);
+  const releaseThread = useCallback(() => {
+    setThreadId(null);
+    threadSeqRef.current = null;
+    threadReopenedRef.current = false;
+    setConversationHistory([]);
+  }, []);
+  const startNewConversation = useCallback(() => {
+    releaseThread();
+    clearConversationView();
+  }, [releaseThread, clearConversationView]);
+
+  // A failed query shows its error. When the server rolled the request over (the
+  // error body carries threadRolledOver, which this file's adminFetch keeps on err.details)
+  // the old conversation's cards and task go too, but NOTHING a retry serializes
+  // changes (thread, seq, history, reopened flag, prompt, request key), so the
+  // retry is byte for byte the failed request. A successful retry then replays
+  // the flag and the full reset runs.
+  const showQueryError = useCallback((err) => {
+    if (err.details?.threadRolledOver) clearConversationView();
+    setResponse(`Error: ${err.message}`);
+  }, [clearConversationView]);
 
   // Resume the latest server-persisted thread when the palette first opens
   // with no local history. 404 = threads not enabled — quietly stay
@@ -604,37 +686,64 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       });
   }, [open, conversationHistory.length]);
 
+  // The query request for the thread this palette holds. thread_reopened marks a
+  // History open or a restored saved task, so the server's idle rule keeps it.
+  const queryPayloadFor = useCallback((q, selectedTarget) => ({
+    prompt: q,
+    conversationHistory,
+    context,
+    ...(selectedTarget ? { selected_target: selectedTarget } : {}),
+    ...(threadId ? {
+      thread_id: threadId,
+      ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
+      ...(threadReopenedRef.current ? { thread_reopened: true } : {}),
+    } : {}),
+    pageData: { ...ibPageData, route: location.pathname, search: location.search },
+    ...(attachments.length
+      ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+      : {}),
+  }), [conversationHistory, context, threadId, ibPageData, location.pathname, location.search, attachments]);
+
+  // Applies a server reply to the conversation: the answer, its cards (added to
+  // any card already on screen, deduplicated), the open task, tool activity,
+  // knowledge-gap prompts and history. Shared by a query reply and a loaded
+  // saved task. A reply the server flagged threadRolledOver started a new
+  // conversation (its idle rule), with or without a new thread id, so the old
+  // conversation's state goes first.
+  const applyServerReply = useCallback((data, { fallbackTaskId = null } = {}) => {
+    if (data.threadRolledOver) startNewConversation();
+    const taskId = data.taskId || fallbackTaskId;
+    setResponse(data.response);
+    setPendingActions(previous => [...previous, ...(data.pendingActions || [])
+      .filter(action => !previous.some(old => old.id === action.id))
+      .map(action => ({ ...action, taskId, receivedAt: Date.now() }))]);
+    setActiveTask(data.taskId ? data : null);
+    setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
+    knowledgeGaps.load(data.knowledgeMisses, taskId);
+    setConversationHistory(data.conversationHistory || []);
+  }, [startNewConversation]);
+
   const submit = useCallback(
     async (text, selectedTarget) => {
       const q = (text || prompt).trim();
-      if (!q || loading || submittingRef.current || attachmentsLoadingRef.current) return;
+      const busy = [loading, submittingRef.current, attachmentsLoadingRef.current, dictationPendingRef.current].some(Boolean);
+      if (!q || busy) return;
       submittingRef.current = true;
+      // Always the thread this palette holds: the server alone decides whether
+      // an idle thread starts a new conversation (threadRolledOver on the reply),
+      // so a retry goes out byte for byte as first sent.
+      const request = queryPayloadFor(q, selectedTarget);
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
       setLoading(true);
       setResponse(null);
+      setChoices(null);
       setToolActivity([]);
       knowledgeGaps.reset();
       saveRecent(q);
       setRecents(loadRecents());
 
-      const request = {
-        prompt: q,
-        conversationHistory,
-        context,
-        ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-        ...(threadId
-          ? {
-              thread_id: threadId,
-              ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
-            }
-          : {}),
-        pageData: { ...ibPageData, route: location.pathname, search: location.search },
-        ...(attachments.length
-          ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
-          : {}),
-      };
       // The request key outlives a dropped response: the same request
       // resubmitted replays the saved task instead of running it again.
       let answered = false;
@@ -649,35 +758,19 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
-          setResponse(data.response);
-          setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
-          setActiveTask(data.taskId ? data : null);
-          setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
-          knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
-          setConversationHistory(data.conversationHistory || []);
-          if (data.threadId) {
-            setThreadId(data.threadId);
-            threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-          } else if (data.threadsEnabled === true && threadId) {
-            // Threads are on but this exchange wasn't appended — the server
-            // rejected it (another tab appended first, or the thread is
-            // gone) or the best-effort write failed. Detach so the next
-            // exchange starts a fresh thread instead of interleaving.
-            setThreadId(null);
-            threadSeqRef.current = null;
-          }
+          applyServerReply(data);
+          setChoices(Array.isArray(data.choices) ? data.choices.filter(choice => typeof choice === "string" && choice.trim()) : null);
           // The server states thread availability on every query, so a
           // RUNTIME gate change is reflected: off → detach and return to
           // ephemeral mode (the kill switch's promise); on → thread mode
-          // even if the availability probe failed earlier or this
-          // exchange's best-effort append didn't return an id.
-          if (data.threadsEnabled === true) {
-            markThreadsAvailable(true);
-          } else if (data.threadsEnabled === false) {
-            markThreadsAvailable(false);
-            setThreadId(null);
-            threadSeqRef.current = null;
-          }
+          // even if the availability probe failed earlier. A reply with a
+          // thread id attaches it; a reply that states availability but has
+          // none means this exchange wasn't appended (another tab appended
+          // first, the thread is gone, the best-effort write failed): detach
+          // so the next exchange starts a fresh thread, not an interleaved one.
+          if (data.threadId && data.threadsEnabled !== false) holdThread(data.threadId, data.threadSeq);
+          else if (data.threadsEnabled !== undefined) holdThread(null);
+          if (typeof data.threadsEnabled === "boolean") markThreadsAvailable(data.threadsEnabled);
         }
       } catch (err) {
         // Only a definitive 4xx answer settles the identity; a server failure
@@ -686,7 +779,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           identityRef.current.settle(identity);
           answered = true;
         }
-        if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
+        if (threadEpochRef.current === epoch) showQueryError(err);
       }
       if (threadEpochRef.current === epoch) {
         submittingRef.current = false;
@@ -699,7 +792,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments, ibPageData],
+    [prompt, loading, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -707,20 +800,20 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     const epoch = ++threadEpochRef.current;
     submittingRef.current = true;
     setLoading(true);
+    const held = { threadId, activeTask, reopened: threadReopenedRef.current };
+    // Cleared when the refresh starts, like submit: a failed refresh must not
+    // bring the old buttons back under its error.
+    setChoices(null);
     try {
       const data = await adminFetch(operation ? `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}/${operation}`
         : `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionIdRef.current)}`,
       operation ? { method: 'POST', body: JSON.stringify({ session_id: sessionIdRef.current,
         ...(candidate ? { customer_id: candidate.customer_id } : {}) }) } : {});
       if (threadEpochRef.current !== epoch) return;
-      setActiveTask(data);
-      setResponse(data.response);
-      setConversationHistory(data.conversationHistory || []);
-      setThreadId(data.threadId || null);
-      threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-      setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
-      setToolActivity(data.toolActivity || []);
-      knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);
+      // A loaded task replaces what is on screen, so its cards replace too.
+      setPendingActions([]);
+      applyServerReply(data, { fallbackTaskId: id });
+      holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data, held, operation));
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);
@@ -749,6 +842,15 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setActiveTask(task => retainTaskReceipt(task, action, decision, body));
     if (activeTask) void refreshTask();
   };
+  // A tap is the operator's next message: the same submit a typed prompt
+  // takes (same thread, task and request key). The text also goes into the
+  // composer, so a failed request keeps it for a retry like typed text.
+  const chooseAnswer = (label) => { setPrompt(label); submit(label); };
+  const choicesDisabled = loading || attachmentsLoading || dictationPending;
+  // Never beside a confirmation card or a receipt, whichever request made it:
+  // a legacy card retained across requests (pendingActions) or the open
+  // task's cards and receipts. The server only knows this turn's cards.
+  const shownChoices = pendingActions.length || activeTask?.pendingActions?.length || activeTask?.receipts?.length ? null : choices;
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
     onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;
@@ -815,15 +917,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     threadEpochRef.current += 1; // invalidate any inflight thread resume
     submittingRef.current = false;
     setLoading(false);
-    setActiveTask(null);
-    setConversationHistory([]);
+    startNewConversation();
     setResponse(null);
-    setPendingActions([]);
-    setToolActivity([]);
-    knowledgeGaps.reset();
     setPrompt("");
-    setThreadId(null);
-    threadSeqRef.current = null;
     setShowThreads(false);
     resetAttachments();
   };
@@ -877,6 +973,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         loading={loading}
         response={response}
         pendingActions={pendingActions}
+        choices={shownChoices}
+        chooseAnswer={chooseAnswer}
+        choicesDisabled={choicesDisabled}
         taskCard={taskCard}
         activeTask={activeTask}
         onActionResolved={onActionResolved}
@@ -1176,6 +1275,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             {taskCard}
             {" "}
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
+            <ChoiceButtons choices={shownChoices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
           </div>
@@ -1316,6 +1416,9 @@ function MobileSheet({
   loading,
   response,
   pendingActions,
+  choices,
+  chooseAnswer,
+  choicesDisabled,
   taskCard,
   activeTask,
   onActionResolved,
@@ -1342,6 +1445,7 @@ function MobileSheet({
 }) {
   const fileInputRef = useRef(null);
   useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.mobile);
+  const dictationPending = useDictationPending();
   return (
     <>
       {/* Backdrop */}
@@ -1537,18 +1641,18 @@ function MobileSheet({
             {" "}
             <button
               onClick={() => submit()}
-              disabled={!prompt.trim() || loading || attachmentsLoading}
+              disabled={!prompt.trim() || loading || attachmentsLoading || dictationPending}
               style={{
                 flex: 1,
                 padding: "12px 16px",
                 minHeight: 44,
                 borderRadius: 10,
                 border: "none",
-                background: prompt.trim() && !loading && !attachmentsLoading ? "#18181B" : "#E4E4E7",
-                color: prompt.trim() && !loading && !attachmentsLoading ? "#FFFFFF" : "#A1A1AA",
+                background: prompt.trim() && !loading && !attachmentsLoading && !dictationPending ? "#18181B" : "#E4E4E7",
+                color: prompt.trim() && !loading && !attachmentsLoading && !dictationPending ? "#FFFFFF" : "#A1A1AA",
                 fontSize: 14,
                 fontWeight: 500,
-                cursor: prompt.trim() && !loading && !attachmentsLoading ? "pointer" : "not-allowed",
+                cursor: prompt.trim() && !loading && !attachmentsLoading && !dictationPending ? "pointer" : "not-allowed",
                 fontFamily: "Roboto, Arial, sans-serif",
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",
@@ -1593,6 +1697,9 @@ function MobileSheet({
           )}
           {response && !loading && !showThreads && (
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
+          )}
+          {response && !loading && !showThreads && (
+            <ChoiceButtons choices={choices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="light" />
           )}
           {response && !loading && !showThreads && (
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="light" />
@@ -1687,6 +1794,43 @@ function IntelligenceResponse({ response, activity, task, variant }) {
       {hasActions && prose}
     </details>}
   </>;
+}
+
+// Tap-to-answer buttons under the reply that asked "which value?". A tap
+// sends exactly the text on the button as the operator's next message (there
+// is no other text behind a button); it confirms
+// nothing (a write is confirmed on its card). One tap answers: submit takes
+// one request at a time, and starting it removes this set.
+function ChoiceButtons({ choices, onChoose, disabled: locked, variant }) {
+  if (!choices?.length) return null;
+  const light = variant === "light";
+  return (
+    <div role="group" aria-label="Answer choices" style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "12px 0" }}>
+      {choices.map((label) => (
+        <button
+          key={label}
+          type="button"
+          disabled={locked}
+          onClick={() => onChoose(label)}
+          style={{
+            minHeight: 44,
+            padding: "8px 16px",
+            borderRadius: light ? 6 : 8,
+            background: "#FFFFFF",
+            border: `1px solid ${light ? "#D4D4D8" : D.border}`,
+            color: light ? "#18181B" : "#000",
+            fontSize: 14,
+            fontWeight: 500,
+            fontFamily: "'Roboto', system-ui, sans-serif",
+            cursor: locked ? "default" : "pointer",
+            opacity: locked ? 0.6 : 1,
+          }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function AttachButton({ onClick, color, size = 30, disabled = false }) {

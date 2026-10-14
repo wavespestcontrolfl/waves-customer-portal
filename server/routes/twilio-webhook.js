@@ -162,9 +162,39 @@ async function findSingleCustomerByPhone(phone) {
 
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
+    if (require('../services/shared-phone-link').sharedPhoneLinkEnabled()) {
+      return pickSharedPhoneCustomer(key, phone);
+    }
     logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
   }
   return null;
+}
+
+// GATE_SMS_SHARED_PHONE_LINK: the rule lives in services/shared-phone-link.js
+// (one matcher for this route and the contact-correction queue). Here only
+// the logging; a failed lookup returns null, the same outcome as the gate off.
+async function pickSharedPhoneCustomer(key, phone) {
+  let picked;
+  try {
+    picked = await require('../services/shared-phone-link').pickMarkedCustomerForPhone(db, key);
+  } catch (err) {
+    logger.warn(`[sms] shared-phone lookup failed for ${maskPhone(phone)}; not auto-linking inbound SMS`, { code: err.code || 'unknown' });
+    return null;
+  }
+  if (picked.reason === 'none') {
+    logger.warn(`[sms] shared-phone: no primary mark for sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
+    return null;
+  }
+  if (picked.reason === 'ambiguous') {
+    logger.warn(`[sms] shared-phone: more than one customer marked primary for sender phone ${maskPhone(phone)}; ambiguous, not auto-linking inbound SMS`);
+    return null;
+  }
+  logger.info(`[sms] shared-phone: primary mark; sender phone ${maskPhone(phone)} linked to ${picked.customer.id}`);
+  // Non-enumerable: never spread into a write or a JSON body. The inbox
+  // persist reads it to leave the number's earlier unknown thread alone
+  // (codex #6268 r14).
+  Object.defineProperty(picked.customer, 'sharedPhoneLinked', { value: true, enumerable: false });
+  return picked.customer;
 }
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
@@ -419,6 +449,10 @@ router.post('/sms', async (req, res) => {
     // wait for a durable message so redelivery can safely resume processing.
     const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
+      // A mark-linked shared-phone sender joins the customer's thread with
+      // THIS message only; the number's earlier unknown thread is kept
+      // (codex #6268 r14, GATE_SMS_SHARED_PHONE_LINK).
+      preserveUnknownThread: customer?.sharedPhoneLinked === true,
       channel: 'sms',
       ourEndpointId: To,
       contactPhone: From,
@@ -1079,8 +1113,7 @@ router.post('/sms', async (req, res) => {
         const rescheduleResult = await RescheduleSMS.handleRescheduleReply(customer.id, Body);
         if (rescheduleResult?.handled) {
           logger.info(`Reschedule reply handled for customer ${customer.id}: ${rescheduleResult.action}`);
-          await db('sms_log').where({ id: smsLogEntry.id }).update({ message_type: 'reschedule_reply' })
-            .catch(() => logger.warn('[sms-ingestion] reschedule source classification deferred'));
+          await retypeConsumedInbound(smsLogEntry.id, 'reschedule_reply', 'reschedule');
           // A handled reschedule reply can still CONTAIN an explicit contact
           // correction ("1. Also, my email is wrong; use …") — the
           // correction block further down is unreachable past this return,
@@ -1122,8 +1155,7 @@ router.post('/sms', async (req, res) => {
           // The machine ANSWERED the customer (asked for the address, or
           // drafted and alerted the owner) — it owns this reply end to end.
           logger.info(`[lead-intake] Handled for customer ${customer.id}: ${customer.lead_intake_status} → ${intakeResult.next}`);
-          await db('sms_log').where({ id: smsLogEntry.id }).update({ message_type: 'lead_intake' })
-            .catch(() => logger.warn('[sms-ingestion] lead-intake source classification deferred'));
+          await retypeConsumedInbound(smsLogEntry.id, 'lead_intake', 'lead-intake');
           // A consumed intake reply can still CONTAIN an explicit contact
           // correction (an awaiting_address customer correcting their email,
           // say) — the correction block further down is unreachable past
@@ -1597,6 +1629,28 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
+    // SMS SCHEDULING DECIDE, SHADOW (GATE_SMS_SCHEDULING_DECIDE, dark): when
+    // this phone holds an open offer of picker times (sms_offers), record what
+    // the decide step concludes about this reply and what it WOULD have done.
+    // Moves, books and sends nothing unless GATE_SMS_SCHEDULING_ACT_MOVE (dark)
+    // is on, when a would-move is carried out by sms-scheduling-act.js.
+    // Runs after the reminder reply-1/2 handler
+    // and the lead-intake veto (both return above when they consume the text),
+    // and regardless of the scheduling regex: "Tuesday works" may not match it.
+    // `customer` may be null: a reply from another number on the customer's
+    // file resolves through the offer's own customer, then the on-file check.
+    // Any customer-facing Waves line (an offer can go out from the main line
+    // or a tracking line too; a text with no open offer on its line is a no-op).
+    if (Body && !smsReaction && !isAiNumber
+      && require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_DECIDE')) {
+      void require('../services/sms-scheduling-decide').runShadowDecision({
+        customer: customer || null,
+        inboundBody: Body,
+        inboundSmsLogId: smsLogEntry?.id || null,
+        fromPhone: From,
+      }).catch((err) => logger.warn(`[sms-scheduling-decide] async decide failed: ${err.message}`));
+    }
+
 
      } catch (sideErr) {
        logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);
@@ -1645,6 +1699,7 @@ router.post('/sms', async (req, res) => {
 
 // POST /api/webhooks/twilio/status — delivery status callback
 router.post('/status', async (req, res) => {
+  let rateReviewReconcileFailed = false;
   try {
     const { MessageSid, MessageStatus, ErrorCode, ErrorMessage, From, To } = req.body;
     if (MessageSid && MessageStatus) {
@@ -1671,6 +1726,18 @@ router.post('/status', async (req, res) => {
           to: To,
           link: '/admin/communications',
         });
+
+        // A rate review letter's text pointer that failed: reconcile its notice
+        // (the same undelivered handling as a bounced email). No-op for any
+        // other message; best-effort, off the response path.
+        // Awaited and answered non-2xx on failure: a lost reconciliation would leave
+        // an undelivered notice looking delivered (the apply also re-reads sms_log).
+        try {
+          await require('../services/rate-review-comms').handleSmsDeliveryFailure({ sid: MessageSid, status: MessageStatus, errorCode: ErrorCode }, { strict: true });
+        } catch (e) {
+          rateReviewReconcileFailed = true;
+          logger.error(`[twilio-status] rate review reconciliation failed: ${e.message}`);
+        }
 
         // Error 21610 — the RECIPIENT's carrier-level opt-out verdict for a
         // STOP we never saw inbound (sent to a different number on the
@@ -2072,7 +2139,7 @@ router.post('/status', async (req, res) => {
       link: '/admin/communications',
     });
   }
-  res.sendStatus(200);
+  res.sendStatus(rateReviewReconcileFailed ? 500 : 200);
 });
 
 // Gate check FIRST (codex #3413 r55): with GATE_CONTACT_CORRECTION off —
@@ -2092,6 +2159,23 @@ router.post('/status', async (req, res) => {
  */
 // Why the legacy AI draft does NOT run for an inbound, or null when it does.
 // Skip reasons that were logged before keep their log line.
+// A consumer that took an inbound text retypes its sms_log row: that type is
+// what later readers (the scheduling decide sweep, the response policy) use
+// to leave the text alone. Three tries, since for lead intake it is the only
+// record that this text was consumed; never throws.
+async function retypeConsumedInbound(smsLogId, messageType, label) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await db('sms_log').where({ id: smsLogId }).update({ message_type: messageType });
+      return true;
+    } catch {
+      if (attempt < 3) await new Promise((resolve) => { setTimeout(resolve, 150 * attempt); });
+    }
+  }
+  logger.warn(`[sms-ingestion] ${label} source classification deferred`);
+  return false;
+}
+
 function legacyAiDraftSkip({ customer, numberConfig, Body, enabled, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly }) {
   if (!customer || numberConfig.type !== 'location' || !Body) return 'not_applicable';
   if (!enabled) return 'gate_disabled';
@@ -2116,13 +2200,16 @@ async function runLegacyAiDraft(ctx) {
     return;
   }
   const {
-    customer, Body, From, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
+    customer, Body, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
   } = ctx;
   try {
     const ContextAggregator = require('../services/context-aggregator');
     const ResponseDrafter = require('../services/response-drafter');
 
-    const context = await ContextAggregator.getFullCustomerContext(From);
+    // Context from the customer THIS route resolved (single active match, or
+    // the gated shared-phone mark), never a fresh unordered phone lookup
+    // that could load the other account on a shared number (codex #6268 r10).
+    const context = await ContextAggregator.getContextForCustomer(customer);
 
     // Simple intent classification
     const intentMap = [
@@ -2236,6 +2323,7 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 }
 
 router._internals = {
+  findSingleCustomerByPhone,
   hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,

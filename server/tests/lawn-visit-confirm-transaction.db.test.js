@@ -24,15 +24,13 @@ const SCORING = {
   }, 60000);
   afterAll(async () => { if (db) await db.dispose(); });
 
-  // The run's immutable scores_adjusted snapshot IS the AI's read (owner
-  // ruling 2026-09-24: lawn scores are read-only from photos) — it mirrors
-  // `scores` by default, exactly like the real /assess writer, which inserts
-  // the assessment row and the run's snapshot from the SAME AI output in the
-  // SAME transaction. A test that wants a genuinely AI-blank key (fillable /
-  // overridable) passes it as `null` in `scores`; a test that wants an
-  // AI-known key fixed passes its real value. `runFields.scores_adjusted`
-  // overrides this mirroring outright for a test that wants the two to
-  // diverge on purpose (a stale/incomplete-snapshot scenario).
+  // The run's immutable scores_adjusted snapshot IS the AI's read — it
+  // mirrors `scores` by default, exactly like the real /assess writer, which
+  // inserts the assessment row and the run's snapshot from the SAME AI output
+  // in the SAME transaction. A test that wants an AI-blank key passes it as
+  // `null` in `scores`. `runFields.scores_adjusted` overrides this mirroring
+  // outright for a test that wants the two to diverge on purpose (a
+  // stale/incomplete-snapshot scenario).
   async function seed(scores = {}, runFields = {}, customer = null) {
     const f = customer || await fixture(db.knex);
     const visit = await f.visit();
@@ -63,10 +61,9 @@ const SCORING = {
   });
 
   test('the completing save freezes the adjusted AI comparison and final scores', async () => {
-    // Owner ruling 2026-09-24: only an AI-blank key is fillable. turf_density
-    // and color_health are the run's two genuinely AI-blank keys here, so the
-    // technician's fill of them is what completes the row across two saves;
-    // the rest of COMPLETE is already AI-known from the immutable snapshot.
+    // turf_density and color_health are the run's two AI-blank keys here, so
+    // the technician's fill of them is what completes the row across two
+    // saves; the rest of COMPLETE is the AI's read from the immutable snapshot.
     const AI_PARTIAL = { ...COMPLETE, turf_density: null, color_health: null };
     const { assessment } = await seed({}, { scores_adjusted: JSON.stringify(AI_PARTIAL) });
     await save(assessment.id, { adjustedScores: { turf_density: 68 } });
@@ -74,7 +71,7 @@ const SCORING = {
     expect(result).toMatchObject({ confirmed: true, missingScores: [] });
     expect(result.assessment).toMatchObject({ confirmed_by_tech: true, is_baseline: true, turf_density: 68 });
     expect(result.run.reviewed_at).toBeInstanceOf(Date);
-    expect(result.run.reconciliation.confirmation).toEqual({ final_scores: { ...COMPLETE, turf_density: 68 }, ai_scores: AI_PARTIAL, calibration_eligible: true, technician_id: null });
+    expect(result.run.reconciliation.confirmation).toEqual({ final_scores: { ...COMPLETE, turf_density: 68 }, ai_scores: AI_PARTIAL, calibration_eligible: true, synthetic_sub_scores: [], technician_id: null });
     expect(result.run.scores_adjusted).toEqual(AI_PARTIAL);
   });
 
@@ -124,19 +121,31 @@ const SCORING = {
     expect(result.run.reconciliation.published_observations).toBeNull();
   });
 
-  // Owner ruling 2026-09-24: fungus_control/thatch_level are AI-known here
-  // (60/80), so they're fixed — a technician can't move them, and so can't
-  // use them to re-derive a fixed or already-filled stress_damage either.
-  // stress_damage itself is the run's one AI-blank key, so a direct fill of
-  // it is honored and then sticks across later partial saves that don't
-  // repeat it, even one that (harmlessly) attempts to edit fungus_control.
-  test('a technician can fill an AI-blank stress_damage, and it sticks; an AI-known component can\'t be moved to re-derive it', async () => {
+  // A direct Condition entry sticks across later partial saves that don't
+  // repeat it, including one that changes fungus_control: a component edit
+  // never re-derives a Condition the technician entered.
+  test('a technician\'s stress_damage entry sticks across later saves, including a component edit', async () => {
     const { assessment } = await seed({ fungus_control: 60, thatch_level: 80 });
     await save(assessment.id, { adjustedScores: { stress_damage: 73 } });
     const second = await save(assessment.id, { adjustedScores: { turf_density: 66 } });
     expect(second.assessment).toMatchObject({ fungus_control: 60, thatch_level: 80, stress_damage: 73, turf_density: 66 });
     const third = await save(assessment.id, { adjustedScores: { fungus_control: 88 } });
-    expect(third.assessment).toMatchObject({ fungus_control: 60, stress_damage: 73 });
+    expect(third.assessment).toMatchObject({ fungus_control: 88, stress_damage: 73 });
+  });
+
+  // Owner ruling 2026-10-04: any score the AI read can be changed before
+  // confirming, and a blank Fungus/Thatch takes its no-finding score.
+  test('a changed AI score is saved, the AI read is kept for comparison, and blank sub-scores take their no-finding score', async () => {
+    const AI = { ...COMPLETE, fungus_control: null, thatch_level: null };
+    const { assessment } = await seed(AI);
+    const result = await save(assessment.id, { adjustedScores: { turf_density: 41 }, review: { reviewedFindings: [] } });
+    expect(result).toMatchObject({ confirmed: true, missingScores: [] });
+    expect(result.assessment).toMatchObject({ turf_density: 41, fungus_control: 95, thatch_level: 85, stress_damage: COMPLETE.stress_damage });
+    expect(result.run.scores_adjusted).toEqual(AI);
+    expect(result.run.reconciliation.confirmation).toMatchObject({
+      ai_scores: AI, final_scores: { turf_density: 41 }, calibration_eligible: true,
+      synthetic_sub_scores: ['fungus_control', 'thatch_level'],
+    });
   });
 
   test('an auto-derived (never explicit) stress_damage re-derives after a component correction, instead of freezing stale (Codex P1 2026-09-24)', async () => {

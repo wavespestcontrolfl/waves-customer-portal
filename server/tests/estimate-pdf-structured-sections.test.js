@@ -24,7 +24,13 @@ const {
 function extractPdfText(buffer) {
   const raw = buffer.toString('latin1');
   const streams = [];
-  const re = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  // pdfkit writes `stream\n<bytes>\nendstream`. Do NOT swallow an optional \r
+  // before the closing `\nendstream`: when the deflate stream's last byte (the
+  // Adler-32 low byte) is 0x0D, that would drop it, inflateSync would throw
+  // "unexpected end of file", and the helper would return no text at all. Which
+  // fixtures hit that depends on the rendered bytes (e.g. the printed date), so
+  // it failed on one calendar day only.
+  const re = /stream\r?\n([\s\S]*?)\nendstream/g;
   let match;
   while ((match = re.exec(raw)) !== null) {
     try {
@@ -210,6 +216,40 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('Retained inspection scope');
     expect(text).not.toContain('callback guarantee between scheduled visits');
     expect(text).not.toContain('Rate reviewed yearly');
+  });
+
+  test('text extraction survives a content stream whose last deflate byte is 0x0D (clock pinned to the date that hit it)', async () => {
+    // With this fixture id and the printed date October 13, 2026 the deflate
+    // stream ends in 0x0D; the old extractor dropped that byte and read no text.
+    jest.useFakeTimers({
+      now: new Date('2026-10-13T16:00:00Z'),
+      doNotFake: ['setTimeout', 'setImmediate', 'nextTick', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask'],
+    });
+    try {
+      const text = extractPdfText(await buildEstimateProposalPDFBuffer({
+        id: 'disabled-termite-beside-current-pest',
+        customer_name: 'Pat Example',
+        address: '123 Palm Way',
+        monthly_total: 55,
+        annual_total: 660,
+        onetime_total: 0,
+        estimate_data: {
+          result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+          proposal: {
+            enabled: false,
+            buildings: [{
+              name: 'Service location',
+              note: 'Retained inspection scope',
+              lineItems: [{ description: 'Termite trenching', unitPrice: 1200, frequency: 'one_time', taxable: false }],
+            }],
+          },
+        },
+      }, { billsPerApplication: false }));
+      expect(text).toContain('October 13, 2026');
+      expect(text).toContain('Termite trenching');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('billing.withholdRateReviewTerms forces the rate review line off (the /pdf route could not prove its evidence durable)', async () => {
@@ -478,7 +518,8 @@ describe('pdfkit fallback — recorded acceptance block', () => {
   function extractPdfPages(buffer) {
     const raw = buffer.toString('latin1');
     const pages = [];
-    const re = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    // Same stream slicing as extractPdfText: never swallow a \r before \nendstream.
+    const re = /stream\r?\n([\s\S]*?)\nendstream/g;
     let match;
     while ((match = re.exec(raw)) !== null) {
       let inflated;

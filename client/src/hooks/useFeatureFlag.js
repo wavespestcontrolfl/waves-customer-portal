@@ -126,12 +126,13 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
     refreshKey,
     enabled: cache ? flagValue(cache, key, defaultValue) : defaultValue,
     ready: cache !== null,
+    known: cache !== null && !lastLoadFailed,
   }));
   useEffect(() => {
     let mounted = true;
     const apply = (flags) => {
       if (!mounted) return;
-      setState({ key, refreshKey, enabled: flagValue(flags, key, defaultValue), ready: true });
+      setState({ key, refreshKey, enabled: flagValue(flags, key, defaultValue), ready: true, known: !lastLoadFailed });
     };
     const unsubscribe = subscribe(apply);
     if (cache !== null) apply(cache);
@@ -144,9 +145,11 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
   // Derived in render, like useFeatureFlag: never another key/account's value,
   // never a value while the cache is unloaded (Codex #5573 r12).
   if (state.key !== key || state.refreshKey !== refreshKey || cache === null) {
-    return { enabled: false, ready: false };
+    return { enabled: false, ready: false, known: false };
   }
-  return { enabled: state.enabled, ready: state.ready };
+  // `known`: the flags were read from the server. A failed load is ready and
+  // off (fail closed), which is not the server saying the flag is off.
+  return { enabled: state.enabled, ready: state.ready, known: state.known === true };
 }
 
 // Call after a toggle UI mutation so the operator's own view reflects

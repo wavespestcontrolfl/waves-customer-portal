@@ -22,6 +22,13 @@
  * — Codex round 3 on #5224, P2). Omitted (undefined), the admin-inbox
  * route's original unconditional-on-status behavior is preserved exactly.
  *
+ * `keepRow` (W7-dev-04): cancel in place (status 'canceled', row kept) instead
+ * of deleting an ordinary row. Only the Intelligence Bar's tool sets it; the
+ * inbox route keeps its physical delete. A kept row is never claimed by the
+ * send cron (it claims status = 'scheduled' only), never listed as queued, and
+ * is excluded from the voice-corpus miner; every other reader of outbound
+ * sms_log rows already whitelists sent-like statuses.
+ *
  * `refuseWorkflowOwned` (found during #5224, pre-push audit on the inbox
  * delete route): this writer reconciles recruiting texts, review-ask
  * reservations and parked Agent Review decisions, but it does NOT run any
@@ -239,7 +246,7 @@ function pinned(query, {
  */
 async function cancelScheduledSmsRow({
   id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId,
-  simpleOnly = false, refuseWorkflowOwned = false,
+  simpleOnly = false, refuseWorkflowOwned = false, keepRow = false,
 } = {}) {
   const pins = { expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly, refuseWorkflowOwned };
   const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone', 'metadata');
@@ -286,7 +293,12 @@ async function cancelScheduledSmsRow({
     // excluded (still status = 'scheduled', so the marker must be why) —
     // no instant where either statement acts on a snapshot the other could
     // have invalidated.
-    let row = (await pinned(
+    //
+    // `keepRow` (the Intelligence Bar's cancel_queued_message): skip the DELETE
+    // and always take the in-place 'canceled' UPDATE below, so the customer's
+    // record still shows a text was scheduled and then cancelled. Same
+    // statement shape and CAS pins as the fallback — only the DELETE is skipped.
+    let row = keepRow ? undefined : (await pinned(
       trx('sms_log').where({ id, status: 'scheduled' }),
       pins,
     )

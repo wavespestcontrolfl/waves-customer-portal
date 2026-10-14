@@ -135,6 +135,9 @@ export default function RescheduleConfirmModal({
     pickedStart: toStart || undefined,
     pickedEnd: toEnd || undefined,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    // The server reads what the visit books from its own rows (serviceId).
+    bestRows: true,
   });
 
   // The modal stays mounted between drags (open just flips), so a previous
@@ -279,7 +282,7 @@ export default function RescheduleConfirmModal({
           />
           {/* Display-only like the hint: the drop fixes the window, so the
               chips carry no onPick (cancel and re-drop to take one). */}
-          <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} />
+          <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} bestRows />
           <BestTimeHint bestTimes={bestTimes} picked={picked} bestInRange={bestInRange} currentStart={toStart} currentDate={toDate} />
         </div>
 

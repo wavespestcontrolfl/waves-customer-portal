@@ -11,10 +11,11 @@
  * enforcer).
  */
 
+const { bookingRainFit, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
-const { DAY_START_HOUR, DAY_END_HOUR } = require('./find-time');
+const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
 const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
 const { etParts } = require('../../utils/datetime-et');
 
@@ -208,7 +209,7 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // the picked window joins it so the checker's context is the row the save
 // would write — the save probe passes `changes: updates` the same way, and
 // derives the work span from THAT window, not the stored one (r7 P2).
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason }) {
+async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone }) {
   // Summary mode names WHY there is no verdict, so the strip can say
   // "can't check this day" instead of going silent; the three-line hint
   // keeps its no-verdict contract (undefined).
@@ -217,9 +218,21 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
   try {
     const fit = await checkArrivalPlacement({
       serviceId, date: from, technicianId, excludeServiceIds,
+      // The staff screens this verdict feeds move a shared stop as a whole,
+      // unless the operator chose to separate this service first
+      // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+      unit: !moveAlone, alone: !!moveAlone,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
     });
+    // A whole visit (unit): the technician must be able to do every service
+    // on it, as the offered hours require. One switched off = no verdict at
+    // all — not a certified fit, and not "doesn't fit the route" either (no
+    // hour would).
+    if (fit.target?.memberServices && (await require('../technician-capabilities')
+      .inactiveCapabilitiesForServices(require('../../models/db'), [technicianId], fit.target.memberServices)).length) {
+      return noVerdict('route_unverified');
+    }
     if (fit.feasible) {
       return {
         start: pickedWindow.start, fits: true, detour_minutes: fit.detourMinutes ?? null,
@@ -242,7 +255,7 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
 // ceiling. No gap = the hour doesn't fit that day's route; a gap the
 // tech-blind occupancy snapshot vetoes = same answer (fail-open on a
 // snapshot error, like the chips guard).
-async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason }) {
+async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason, technicianId = null, occupancy = null }) {
   const miss = (reason) => ({ start: pickedWindow.start, fits: false, ...(withReason ? { reason } : {}) });
   const gap = rawSlots.find((s) => {
     if (s.date !== from) return false;
@@ -254,7 +267,8 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
   let clear = true;
   try {
     clear = conflictsForTarget(
-      await loadOccupancy({ dateFrom: from, dateTo: from }), null, from, pickedWindow, { excludeServiceIds: excluded },
+      occupancy || await loadOccupancy({ dateFrom: from, dateTo: from }), null, from, pickedWindow,
+      { excludeServiceIds: excluded, technicianId },
     ).length === 0;
   } catch (guardErr) {
     logger.warn('[find-time] picked-hour occupancy guard failed (fail-open):', guardErr.message);
@@ -265,9 +279,12 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
     fits: true,
     detour_minutes: gap.detour_minutes ?? null,
     drive_in_minutes: gap.drive_in_minutes ?? null,
-    from_home_base: !gap.insertion?.after_stop_id,
-    from_name: gap.insertion?.after_name || null,
+    // A capacity slot has no insertion; it carries its own origin labels.
+    from_home_base: gap.insertion ? !gap.insertion.after_stop_id : (gap.from_home_base ?? null),
+    from_name: gap.insertion?.after_name || gap.from_name || null,
     technician: gap.technician || null,
+    // Not serialized: lets the route re-price this verdict on real roads.
+    [GAP_LEGS]: gap[GAP_LEGS],
   };
 }
 
@@ -282,7 +299,7 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false,
+  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false,
 }) {
   const pickedMin = toMin(pickedStart);
   // `withReason` (summary mode): an hour no verdict can cover still gets a
@@ -293,8 +310,47 @@ async function scorePickedHour({
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return uncheckable;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason })
+    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
+}
+
+/**
+ * The picked hour on every technician's route (owner 2026-10-05, the
+ * New appointment "who adds the least drive at this hour" list): the
+ * gap-mode verdict once per technician with a gap on `from`, each against
+ * that tech's own slots. The occupancy check passes the technician, so it
+ * is tech-scoped only where the save is (GATE_MULTI_TECH_CONFIRM); with
+ * that gate off an hour any visit holds fits nobody, as the save refuses
+ * it. Returns the fits only, least added drive first; unknown detours last.
+ */
+async function scorePickedHourByTech({
+  rawSlots, from, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,
+}) {
+  const pickedMin = toMin(pickedStart);
+  if (pickedEnd !== undefined && toMin(pickedEnd) <= pickedMin) return [];
+  const pickedEndMin = Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
+  if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows: false })) return [];
+  const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
+  const byTech = new Map();
+  for (const slot of rawSlots) {
+    const id = slot.technician?.id;
+    if (slot.date !== from || id == null) continue;
+    if (!byTech.has(String(id))) byTech.set(String(id), []);
+    byTech.get(String(id)).push(slot);
+  }
+  if (!byTech.size) return [];
+  let occupancy = null;
+  try {
+    occupancy = await loadOccupancy({ dateFrom: from, dateTo: from });
+  } catch (err) {
+    logger.warn('[find-time] per-tech occupancy load failed (fail-open):', err.message);
+  }
+  const verdicts = await Promise.all([...byTech].map(([id, slots]) => pickedByGap({
+    rawSlots: slots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded,
+    withReason: false, technicianId: id, occupancy,
+  })));
+  const rank = (v) => (Number.isFinite(v.detour_minutes) ? v.detour_minutes : Infinity);
+  return verdicts.filter((v) => v.fits).sort((a, b) => rank(a) - rank(b));
 }
 
 // Summary mode (GATE_RESCHEDULE_AVAILABILITY): the availability strip shows
@@ -388,9 +444,16 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       start_time: slot.start_time,
       end_time: slot.end_time,
       detour_minutes: slot.detour_minutes ?? null,
+      // The drive INTO this stop and where it comes from, so a chip can show
+      // it beside what the stop adds to the day (owner 2026-10-06). null =
+      // no single insertion leg (arrival-window mode) or an unpinned stop.
+      drive_in_minutes: slot.drive_in_minutes ?? null,
+      from_home_base: slot.insertion ? !slot.insertion.after_stop_id : (slot.from_home_base ?? null),
+      from_name: slot.insertion?.after_name || slot.from_name || null,
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
+      [GAP_LEGS]: slot[GAP_LEGS],
     });
   }
   return [...byDate].map(([date, hours]) => ({
@@ -404,6 +467,134 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
     ...(closedDates?.has(date) ? { closed: true } : {}),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
+}
+
+// The best-times rows (owner 2026-10-06): four hours on the picked date and
+// four date + hour pairs in the next 7 days from today, the picked date,
+// closed days and days off left out of the second row. Best = least added
+// to the day's driving, then the shortest drive in, then the sooner day,
+// then the earlier hour. An unpriced hour sorts last.
+const BEST_ROW_SIZE = 4;
+const WEEK_DAYS = 7;
+
+const finiteOr = (v) => (Number.isFinite(v) ? v : Infinity);
+function byBest(a, b) {
+  return finiteOr(a.detour_minutes) - finiteOr(b.detour_minutes)
+    || finiteOr(a.drive_in_minutes) - finiteOr(b.drive_in_minutes)
+    || a.date.localeCompare(b.date)
+    || a.start_time.localeCompare(b.start_time);
+}
+
+// `tierOf` (GATE_BOOKING_RAIN_RANK) ranks by rain fit BEFORE drive: an
+// outdoor booking's wet hours sort after its dry ones, a rain-OK booking's
+// wet hours before. Absent = the drive-only order, unchanged.
+function pickBestRows(days, { pickedDate, today, tierOf = null }) {
+  let weekEnd = today;
+  for (let i = 1; i < WEEK_DAYS; i++) weekEnd = nextYmd(weekEnd);
+  const withDate = (day) => day.hours.map((h) => ({ ...h, date: day.date }));
+  const order = tierOf ? (a, b) => tierOf(a) - tierOf(b) || byBest(a, b) : byBest;
+  const dayRow = days.filter((day) => day.date === pickedDate).flatMap(withDate).sort(order).slice(0, BEST_ROW_SIZE);
+  const weekRow = days
+    .filter((day) => day.date >= today && day.date <= weekEnd && day.date !== pickedDate
+      && !day.closed && day.status !== 'off')
+    .flatMap(withDate).sort(order).slice(0, BEST_ROW_SIZE);
+  // A picked date more than two weeks out searches only the days around it,
+  // so the week row has nothing to say rather than "nothing fits".
+  const weekCovered = days.some((day) => day.date === today);
+  return { day: dayRow, week: weekRow, week_from: today, week_to: weekEnd, week_covered: weekCovered, order };
+}
+
+// Highest NWS hourly rain chance across a chip's window, or null.
+function rainForWindow(hourly, date, startTime, endTime) {
+  if (!Array.isArray(hourly)) return null;
+  const startH = toMin(startTime);
+  const endMin = toMin(endTime);
+  if (startH == null) return null;
+  let best = null;
+  for (let m = Math.floor(startH / 60) * 60; m < Math.max(startH + 1, endMin ?? startH + 60); m += 60) {
+    const key = `${date}T${String(Math.floor(m / 60)).padStart(2, '0')}`;
+    const hour = hourly.find((h) => String(h.startTime).slice(0, 13) === key);
+    if (hour && Number.isFinite(hour.rainChance)) best = best == null ? hour.rainChance : Math.max(best, hour.rainChance);
+  }
+  return best;
+}
+
+function publicChip(chip) {
+  return {
+    date: chip.date,
+    start_time: chip.start_time,
+    end_time: chip.end_time,
+    detour_minutes: chip.detour_minutes ?? null,
+    drive_in_minutes: chip.drive_in_minutes ?? null,
+    from_home_base: chip.from_home_base ?? null,
+    from_name: chip.from_name || null,
+    drive_source: chip.drive_source || 'estimate',
+    rain_chance: chip.rain_chance ?? null,
+    stops_that_day: chip.stops_that_day ?? null,
+    technician: chip.technician || null,
+  };
+}
+
+/**
+ * The summary's `best` rows: chosen on the model's numbers, then re-priced
+ * on real roads (GATE_BEST_TIMES_ROAD_TIMES) and decorated with the NWS
+ * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
+ * the model's numbers, or shows no rain.
+ */
+async function buildBestRows(days, {
+  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, rainSpan = null, deps = {},
+}) {
+  const rainLookup = deps.hourlyRain || boundedHourlyRain;
+  // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
+  // the ranking. No hour on screen: no lookup (Codex #6045 r1).
+  const fit = bookingRainFit(serviceTypes);
+  const ranking = rankingNeedsForecast(fit, days, today, pickedDate);
+  const forecast = days.some((day) => day.hours.length) || picked?.fits === true
+    ? rainLookup(lat, lng, ranking).catch(() => null) : Promise.resolve(null);
+  const tierOf = rainTierOf(fit, ranking ? await forecast : null, today, rainSpan);
+  const rows = pickBestRows(days, { pickedDate, today, tierOf });
+  const { order } = rows;
+  // The picked hour's verdict gets the same treatment, so its sentence and
+  // its own chip never disagree. Its window is the one scorePickedHour
+  // scored: max(the form's end, start + duration) (Codex #6045 r1).
+  const pickedStartMin = picked ? toMin(picked.start) : null;
+  const pickedEndMin = pickedStartMin == null ? null
+    : Math.max(pickedStartMin + spanMin, toMin(pickedEnd) ?? 0);
+  // Every fitting verdict gets rain; only one with GAP_LEGS can be re-priced
+  // (a capacity verdict stays an estimate) (Codex #6045 r11).
+  const pickedChip = picked?.fits === true && pickedStartMin != null ? {
+    ...picked,
+    date: pickedDate,
+    start_time: picked.start,
+    end_time: toHHMM(pickedEndMin),
+    ...(picked[GAP_LEGS] ? { [GAP_LEGS]: { ...picked[GAP_LEGS], durationMinutes: pickedEndMin - pickedStartMin } } : {}),
+  } : null;
+  const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
+  const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
+  const [priced, hourly] = await Promise.all([priceChips(chips), forecast]);
+  const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
+  const nDay = rows.day.length;
+  const nWeek = rows.week.length;
+  const pricedPicked = pickedChip ? decorate(priced[nDay + nWeek]) : null;
+  return {
+    // The forecast, so every listed hour gets its rain, not only the chips.
+    hourly,
+    rows: {
+      day: priced.slice(0, nDay).sort(order).map(decorate),
+      week: priced.slice(nDay, nDay + nWeek).sort(order).map(decorate),
+      week_from: rows.week_from,
+      week_to: rows.week_to,
+      week_covered: rows.week_covered,
+    },
+    // Only the drive numbers and rain change; the verdict itself stands.
+    picked: pricedPicked ? {
+      ...picked,
+      drive_in_minutes: pricedPicked.drive_in_minutes,
+      detour_minutes: pricedPicked.detour_minutes,
+      drive_source: pricedPicked.drive_source,
+      rain_chance: pricedPicked.rain_chance,
+    } : picked,
+  };
 }
 
 /**
@@ -445,19 +636,47 @@ async function loadSummaryDayFacts(plan, technicianId) {
 const SUMMARY_SLOW_MS = 1500;
 
 /** The response's `summary` for a summary plan; undefined for any other. */
-function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt, closedDates, offDates }) {
-  if (!plan.summary) return undefined;
+// The day list shows the same hours as the chips: give each hour that is
+// also a chip the chip's road-priced numbers and rain, so one hour never
+// shows two drive times (Codex #6045 r7).
+// Every other hour gets its rain from the same forecast (Codex #6045 r10).
+function withChipValues(days, rows, hourly) {
+  const chipKey = (date, h) => `${date}|${h.start_time}|${h.technician?.id ?? ''}`;
+  const chips = new Map([...rows.day, ...rows.week].map((c) => [chipKey(c.date, c), c]));
+  return days.map((day) => ({
+    ...day,
+    hours: day.hours.map((h) => {
+      const c = chips.get(chipKey(day.date, h));
+      return c ? {
+        ...h, drive_in_minutes: c.drive_in_minutes, detour_minutes: c.detour_minutes, drive_source: c.drive_source, rain_chance: c.rain_chance,
+      } : { ...h, rain_chance: rainForWindow(hourly, day.date, h.start_time, h.end_time) };
+    }),
+  }));
+}
+
+// Returns { summary, picked }: the summary (undefined for any other plan)
+// and the picked verdict with its drive numbers re-priced like the chips.
+async function buildHintSummary(plan, everyStart, {
+  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
+  serviceTypes = [], rainSpan = null,
+}) {
+  if (!plan.summary) return { summary: undefined, picked };
+  const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
+  // Only a strip that shows the best-times rows asks for them; any other skips the
+  // rain and road-time work (Codex #6045 r2).
+  const best = bestRows ? await buildBestRows(days, {
+    pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes, rainSpan,
+  }) : null;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
-  return {
-    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates }),
-    elapsed_ms: elapsedMs,
-  };
+  if (!best) return { summary: { days, elapsed_ms: elapsedMs }, picked };
+  return { summary: { days: withChipValues(days, best.rows, best.hourly), best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
 }
 
 module.exports = {
-  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour,
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
   hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
+  pickBestRows, buildBestRows, rainForWindow,
 };

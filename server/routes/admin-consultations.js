@@ -52,6 +52,25 @@ async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
   return visit;
 }
 
+// The same canonical current-assignment predicate as loadOwnedVisitOr403, as
+// SQL on the visit table aliased `ss` (own row, not a dead status, inside the
+// window), so a read is coupled to the CURRENT assignment in its own query. An
+// admin reads any visit. One definition for every guarded read in this router;
+// each caller aliases its visit table as `ss`. The three predicates travel
+// together and their text is pinned (technician-scope-r8-sweep.test.js).
+// The one "is this an admin request" for this router: an admin skips the
+// assignment scope below and is the only role given an estimate's identity.
+const isAdminRequest = (req) => req.techRole === 'admin';
+
+function scopeToCurrentAssignment(q, req) {
+  if (!isAdminRequest(req)) {
+    q.where('ss.technician_id', req.technicianId)
+      .whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      .where('ss.scheduled_date', '>=', techAccessCutoff());
+  }
+  return q;
+}
+
 // POST /api/admin/consultations/:scheduledServiceId/outcome
 router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
@@ -74,7 +93,7 @@ router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmi
       followUpAt,
       recordedBy: req.technician?.name || req.technicianId || null,
       actingTechnicianId: req.technicianId || null,
-      actingIsAdmin: req.techRole === 'admin',
+      actingIsAdmin: isAdminRequest(req),
     }, { trx: db });
 
     res.json({ outcome: saved });
@@ -98,13 +117,7 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
     const q = db('consultation_outcomes as co')
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .where('co.scheduled_service_id', scheduledServiceId);
-    // The same canonical current-assignment predicate as loadOwnedVisitOr403,
-    // inlined on the `ss` alias (own row, not a dead status, inside the window).
-    if (req.techRole !== 'admin') {
-      q.where('ss.technician_id', req.technicianId)
-        .whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
-        .where('ss.scheduled_date', '>=', techAccessCutoff());
-    }
+    scopeToCurrentAssignment(q, req);
     const row = await q.first('co.*');
     if (!row) {
       // Reassigned in between → the same 403 the check gives; else 404.
@@ -112,6 +125,43 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
       return res.status(404).json({ error: 'No outcome recorded for that visit' });
     }
     res.json({ outcome: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/consultations/:scheduledServiceId/estimate
+// The estimate that belongs to this assessment, read-only, for the Fast
+// Complete sheet (GATE_ASSESSMENT_FAST_COMPLETE): { estimate: { state, ... } }
+// (services/assessment-estimate-summary.js). Same ownership rule as the
+// outcome read. No estimate token is returned, and the route does not exist
+// while the gate is off.
+router.get('/:scheduledServiceId/estimate', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').assessmentFastCompleteLive()) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const { scheduledServiceId } = req.params;
+    if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+    // The visit row the summary is built from is read under the current
+    // assignment (the outcome read's own guard): a technician reassigned after
+    // the check above gets no estimate.
+    const visit = await scopeToCurrentAssignment(
+      db('scheduled_services as ss').where('ss.id', scheduledServiceId), req,
+    ).first('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.service_id');
+    if (!visit) {
+      // Reassigned in between → the same 403 the check gives; else 404.
+      if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
+    // The assessment's estimate, not a general estimate read: an ordinary job
+    // booked from an estimate would otherwise hand its totals to a technician,
+    // past the 360's technician projection. Admins too.
+    if (!(await require('../services/assessment-booking').isAssessmentBooking(visit))) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const estimate = await require('../services/assessment-estimate-summary').assessmentEstimateSummary(visit, { identify: isAdminRequest(req) });
+    res.json({ estimate });
   } catch (err) {
     next(err);
   }

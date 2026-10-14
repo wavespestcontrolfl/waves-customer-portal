@@ -2030,6 +2030,48 @@ describe('rain-out service', () => {
       expect(options.extraReasonsEnabled).toBe(false);
     });
 
+    test('each option carries the hourly rain chance for its own window; the day number is only the fallback', async () => {
+      // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.
+      jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([
+          { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+          { date: '2026-06-13', displayDate: 'Sat, Jun 13', suggestedWindow: { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' }, score: 100 },
+        ]);
+        getDailyRainOutlook.mockResolvedValue({
+          '2026-06-11': { rainChance: 90, shortForecast: 'Thunderstorms' },
+          '2026-06-12': { rainChance: 74, shortForecast: 'Thunderstorms' },
+          '2026-06-13': { rainChance: 20, shortForecast: 'Mostly Sunny' },
+        });
+        getHourlyRainOutlook.mockResolvedValue([
+          { startTime: '2026-06-11T11:00:00-04:00', rainChance: 85 },
+          // No reading for today 13:00: that preset shows no number.
+          { startTime: '2026-06-12T08:00:00-04:00', rainChance: 15 },
+          // The 9 AM hour is outside the booked 8-9 AM block.
+          { startTime: '2026-06-12T09:00:00-04:00', rainChance: 70 },
+        ]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+
+        expect(getHourlyRainOutlook).toHaveBeenCalledWith(SERVICE.customer_latitude, SERVICE.customer_longitude);
+        expect(options.sameDay.map((o) => [o.window.start, o.rainChance])).toEqual([['11:00', 85], ['13:00', null]]);
+        expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 15, rainScope: 'hour' });
+        // The hourly feed has nothing for Jun 13: the whole-day chance, marked as such.
+        expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20, rainScope: 'day' });
+        expect(options.today.rainChance).toBe(90);
+      } finally {
+        jest.useRealTimers();
+        getDailyRainOutlook.mockResolvedValue(null);
+        getHourlyRainOutlook.mockResolvedValue(null);
+      }
+    });
+
     test('annotates same-day presets with overlap conflicts (name + window), day options skipped', async () => {
       const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.
@@ -2080,6 +2122,57 @@ describe('rain-out service', () => {
         listOccupiedWindows.mockReset();
         listOccupiedWindows.mockResolvedValue([]);
       }
+    });
+
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark; owner
+    // 2026-10-03 "Moves"): commit keeps the visit's technician and the
+    // rebooker's probe counts only that route plus unassigned rows, so the
+    // sheet's warning must not name the OTHER technician's stop. Gate off:
+    // every technician's stop warns, byte for byte.
+    describe.each([
+      ['gate + capacity on', true, [[], ['svc-8']]],
+      ['gate off', false, [['svc-9'], ['svc-8']]],
+    ])('same-day overlap advisory, second technician: %s', (_label, gateOn, expected) => {
+      const keys = ['GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY'];
+      const saved = {};
+      beforeEach(() => {
+        keys.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+        if (gateOn) { process.env.GATE_MULTI_TECH_CONFIRM = 'true'; process.env.GATE_SCHEDULING_CAPACITY = 'true'; }
+      });
+      afterEach(() => {
+        keys.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
+      });
+
+      test('another technician\'s stop does not warn; an unassigned one still does', async () => {
+        const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+        jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+        try {
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+          listOccupiedWindows.mockResolvedValue(occ('2026-06-11', [
+            { id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-2', status: 'confirmed', service_type: 'Mosquito Treatment',
+              window_start: '11:00:00', window_end: '12:00:00', estimated_duration_minutes: 60, reservation_expires_at: null },
+            { id: 'svc-8', customer_id: 'cust-8', technician_id: null, status: 'confirmed', service_type: 'Mosquito Treatment',
+              window_start: '13:00:00', window_end: '14:00:00', estimated_duration_minutes: 60, reservation_expires_at: null },
+          ]));
+          wireDb({
+            scheduled_services: [
+              chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, technician_id: 'tech-1' }) }),
+              chain({ rows: [] }),
+            ],
+            customers: [chain({ rows: [] })],
+          });
+
+          const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: true } });
+
+          expect(options.ok).toBe(true);
+          expect(options.sameDay.map((o) => o.window.start)).toEqual(['11:00', '13:00']);
+          expect(options.sameDay.map((o) => o.conflicts.map((c) => c.id))).toEqual(expected);
+        } finally {
+          jest.useRealTimers();
+          listOccupiedWindows.mockReset();
+          listOccupiedWindows.mockResolvedValue([]);
+        }
+      });
     });
 
     test('another technician\'s stop is never named on the tech-reachable payload', async () => {

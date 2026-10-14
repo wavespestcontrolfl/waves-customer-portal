@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { refetchFlags } from '../hooks/useFeatureFlag';
+import { clearStaffDeviceData } from '../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = {
@@ -46,6 +47,7 @@ export default function AdminResetPasswordPage() {
     }
 
     setLoading(true);
+    const sessionAtSubmit = localStorage.getItem('waves_admin_token');
     try {
       const response = await fetch(`${API_BASE}/admin/auth/reset-password`, {
         method: 'POST',
@@ -54,6 +56,19 @@ export default function AdminResetPasswordPage() {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'Password reset failed');
+      if (data.signInRequired) {
+        // Two-step sign-in is on for this account: the reset link proves the
+        // inbox only, so sign in with the new password and the app code. The
+        // reset revoked the session this device held when it started, so that
+        // one goes too, but never a newer sign-in another tab made meanwhile.
+        if (localStorage.getItem('waves_admin_token') === sessionAtSubmit) {
+          localStorage.removeItem('waves_admin_token');
+          localStorage.removeItem('waves_admin_user');
+          clearStaffDeviceData();
+        }
+        navigate('/admin/login', { replace: true, state: { passwordReset: true } });
+        return;
+      }
 
       localStorage.setItem('waves_admin_token', data.token);
       localStorage.setItem('waves_admin_user', JSON.stringify(data.user));

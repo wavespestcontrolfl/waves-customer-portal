@@ -96,15 +96,17 @@ completed through an emailed reset link.
    or by voice — not SMS/email that persists next to the address).
 2. First login forces them to set their own password before anything else
    works (the middleware 403s every API call until they do). Both entry
-   points lead to the same flow: `/tech` bounces unauthenticated visitors
-   to the shared `/admin/login`, and logging in there with the temporary
+   points lead to the same flow: `/admin/today` (and `/tech`, which now
+   redirects there) bounces unauthenticated visitors to the shared
+   `/admin/login`, and logging in there with the temporary
    password discards the session and routes to the reset screen, which
    emails a reset link to their registered address. They set their own
    password from that link and log in again. This is the deliberate
    forced-reset flow — do not hand-edit it.
-3. Have them open the tech portal at `/tech` and add it to their home screen
-   (the install hint shows on first visit). Push notifications are opt-in
-   from the portal once logged in.
+3. Have them open `/admin/today` (the field home inside the admin app; the
+   old `/tech` address redirects there) and add it to their home screen from
+   that page (the install hint shows on first visit). Push notifications are
+   opt-in from the app once logged in.
 
 ## Tech line (their own Twilio number)
 
@@ -137,7 +139,7 @@ to it is lost.
    it assigned but inert — an inactive holder never rings). Reassign it to
    the next hire from the same picker.
 
-6. **From the tech portal**: once the line is assigned, the visit brief's
+6. **From the field app (`/admin/today`)**: once the line is assigned, the visit brief's
    *Call* rings the tech's own phone first (press 1) and then the customer
    with the line as caller ID; *Text* opens a compose that sends from the
    line. Both reach only the customer of a visit on the tech's route, and
@@ -153,12 +155,19 @@ the location lines).
 
 ## What the account can do
 
-The technician role activates the role-lockdown boundaries shipped in
-PR #3501: day-to-day surfaces (schedule, dispatch, customers, projects,
-knowledge/protocols, equipment, inventory stock ops, communications,
-time tracking) work; owner surfaces (pricing, revenue, invoices, marketing,
-settings config, estimates pipeline) are hidden and deny deep links.
-Technicians land on `/admin/schedule`; the field app is `/tech`.
+A technician logs in to the admin app and lands on `/admin/today`; `/tech`
+is retired and redirects there. What the role may reach is an allow-list in
+`server/middleware/technician-scope.js`: their own schedule and visits,
+timesheet and mileage, texts with customers on their own visits, promises,
+protocols, the knowledge base, equipment and inventory stock reads, and the
+job-card restock request. Vendor prices, job costs, invoices (beyond the
+pay-at-the-visit calls), pricing, revenue, marketing, settings and the
+estimates pipeline are admin-only. The allow-list is enforced when
+`GATE_STAFF_DEFAULT_DENY` is on (a technician gets a 403 off the list); with
+it off the same list only drives a "would-deny" log. The full rendered list
+is `docs/technician-reachable-routes.md`, regenerated with
+`node scripts/staff-route-census.js` (`npm run check:technician-routes`
+checks it is current).
 
 ## Deactivate / offboard
 

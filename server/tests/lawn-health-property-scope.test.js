@@ -12,7 +12,7 @@ jest.mock('../services/fawn-weather', () => ({
 }));
 jest.mock('../services/turf-height-service', () => ({ getLatestTurfHeight: jest.fn(async () => null), getTurfHeightTrend: jest.fn(async () => []) }));
 jest.mock('../services/service-report/turf-height', () => ({ buildMowingHeightContext: jest.fn(() => null) }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn((k) => k === 'GATE_LAWN_PROPERTY_HISTORY' && global.__LAWN_GATE__ === true), isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn((k) => k === 'GATE_LAWN_PROPERTY_HISTORY' && global.__LAWN_GATE__ === true), isEnabled: jest.fn(() => false), lawnPhotoLabelPickLive: jest.fn(() => false) }));
 jest.mock('../services/lawn-assessment-history', () => ({
   visitEligibility: jest.fn(async ({ customerId, propertyId }) => ({ customerId, propertyId: propertyId || null })),
   eligibleVisitIds: jest.fn(async () => []),

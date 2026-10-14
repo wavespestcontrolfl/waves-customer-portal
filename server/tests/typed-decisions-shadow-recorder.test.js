@@ -122,6 +122,26 @@ describe('recordDecisions', () => {
     expect(calls.where).toEqual(['decision_reviews.label_status', 'unreviewed']);
   });
 
+  test('a social post photo records one row per question; a yes against the publish path queues, a no does not', async () => {
+    const { conn, calls } = stubConn();
+    const photo = packageFor('photo_privacy.v1');
+    const ids = Object.keys(photo.questions);
+    const answers = Object.fromEntries(ids.map((id) => [id, noul(id === 'shows_face' ? 0.9 : 0.02)]));
+    const baselines = Object.fromEntries(ids.map((id) => [id, { production: false }]));
+    const out = await recordDecisions({ provider: 'cloudflare', capability: 'photo_privacy', pkg: photo, subjectType: 'social_post', subjectId: 'p1', result: { ok: true, packageHash: packageHash(photo), servedModel: 'clef-flash', answers }, baselines, random: () => 0.5, conn });
+    expect(out.recorded).toBe(6);
+    expect(calls.inserted.every((row) => row.subject_type === 'social_post' && row.provider === 'cloudflare')).toBe(true);
+    expect(Object.fromEntries(calls.inserted.map((row) => [row.question_id, cohort(row)]))).toEqual({ shows_face: 'disagreement', shows_person: null, shows_address_text: null, shows_license_plate: null, shows_child: null, shows_pet: null });
+  });
+
+  test('a subject type the table allows but no code reads back yet is refused before any write', async () => {
+    const { conn, calls } = stubConn();
+    const photo = packageFor('photo_privacy.v1');
+    const out = await recordDecisions({ provider: 'cloudflare', capability: 'photo_privacy', pkg: photo, subjectType: 'service_photo', subjectId: 'p1', result: { ok: true, answers: { shows_face: noul(0.9) } }, conn });
+    expect(out).toEqual({ recorded: 0, skipped: 'bad_subject' });
+    expect(calls.inserted).toBeNull();
+  });
+
   test('a single-question sms package records its question with the rules baseline', async () => {
     const { conn, calls } = stubConn();
     const sms = packageFor('sms_courtesy.v1');

@@ -13,7 +13,8 @@
  * subtotal plus tax is the total — and its invoice number is the one the
  * email itself names (the store email's subject, the billing email's body).
  * Any other invoice holds each line that would move stock as 'unverified'.
- * A line also moves stock only when its unit of measure is EA (each): the
+ * A line also moves stock only when its unit of measure is EA (each), or BG
+ * (bag) on a title that names one bag (sweep.js's siteOneHold): the
  * pipeline extracts it (`uom`), or the description carries it ("UOM:EA").
  * A quantity of cases would reconcile just as well and still read as one
  * container per case, so a missing or other unit is held 'unverified' too.

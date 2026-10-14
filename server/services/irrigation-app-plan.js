@@ -4,6 +4,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { dateOnlyString } = require('../utils/date-only');
 const { findEligibleCustomers, replayWeekPlanForCustomer } = require('./irrigation-weekly-email');
 const { loadCurrentWeekPlan, planBindsToService, renderWeekPlanReport } = require('./irrigation-week-plan');
+const { storedRateTable } = require('./irrigation-rates');
 
 const GUIDES = [
   { label: 'Find your sprinkler timer and its guide', url: 'https://www.wavespestcontrol.com/sprinkler-timers/' },
@@ -28,7 +29,7 @@ async function loadCustomerWateringPlan(customerId, { now = new Date(), customer
   const replay = replayWeekPlanForCustomer(snapshot, current);
   if (!replay) return null;
   const inputs = snapshot.decisionInputs;
-  const reportCopy = renderWeekPlanReport(snapshot.plan, { runMinutes: inputs.runMinutes, restriction: snapshot.restriction });
+  const reportCopy = renderWeekPlanReport(snapshot.plan, { runMinutes: inputs.runMinutes, restriction: snapshot.restriction, rateTable: storedRateTable(inputs) });
   if (!reportCopy) return null;
   const copy = replay.payload;
   return {

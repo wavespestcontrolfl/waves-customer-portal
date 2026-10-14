@@ -43,7 +43,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
-const { etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDayOf, formatETTime } = require('../../utils/datetime-et');
 const { invoiceAmountDue, assertInvoiceCollectible, invoiceWithdrawnFromCustomer } = require('../invoice-helpers');
 
 const DEFAULT_LIMIT = 20;
@@ -65,8 +65,9 @@ const BALANCE_RULE = 'Read only. A balance is stated ONLY when the invoice passe
 const BILLING_READER_TOOLS = [
   {
     name: 'get_customer_invoices',
-    description: `List ONE customer's invoices with an account summary. Each invoice has status, title, issued and due dates, total, applied credit, collectible (true or false), balance_due, the reason when it is not collectible, whether it needs reconciliation, payment plan, dispute hold, annual-prepay linkage, payer-billed and archived flags. Newest first; follow next_offset when has_more is true.
+    description: `List ONE customer's invoices with an account summary. Each invoice has status, title, issued and due dates, receipt_sent_at (the ET time a receipt email or text went out, or null when none is recorded as sent — state it from this field, never guess), total, applied credit, collectible (true or false), balance_due, the reason when it is not collectible, whether it needs reconciliation, payment plan, dispute hold, annual-prepay linkage, payer-billed and archived flags. Newest first; follow next_offset when has_more is true.
 ${BALANCE_RULE} account_summary.total_due adds up ONLY the invoices that are collectible and counts the invoices that need reconciliation separately. A field the portal cannot establish comes back null with the reason in "unknown": say it is unknown. Use get_invoice_detail for one invoice's lines and recorded payments. Admin-only; never changes anything and never charges, refunds, credits or sends.
+To send or re-send a paid receipt, use resend_receipt (it shows a card; do not send the operator to the Invoices page).
 Use for: "what does this customer owe?", "list their invoices", "do they have anything overdue?", "how much credit do they have?"
 Select the customer with customer_id or customer_name.`,
     input_schema: {
@@ -85,6 +86,7 @@ Select the customer with customer_id or customer_name.`,
     name: 'get_invoice_detail',
     description: `Read ONE invoice by invoice_id: line items, discounts, amounts, and whether it is collectible (collectible true: balance_due is stated; false: balance_due is null with the reason, and "needs reconciliation — check the Invoices page" when a charge state is unresolved). Also recorded_payments (the payments-table rows tied to the invoice: amount, status, date, method, refund amounts, and the payer when a third party funded it), dispute hold, payment plan and annual-prepay linkage.
 ${BALANCE_RULE} Admin-only; never changes anything and never charges, refunds, credits or sends.
+receipt_sent_at is the ET time a receipt email or text went out, or null when none is recorded as sent: state whether a receipt went out from it, never guess. To send or re-send a paid receipt, use resend_receipt (it shows a card; do not send the operator to the Invoices page).
 Takes the invoice_id from get_customer_invoices; there is no invoice-number lookup.
 Use for: "what is on this invoice?" (after listing the customer's invoices), "why does this invoice still show a balance?", "what payments are recorded on it?"`,
     input_schema: {
@@ -219,6 +221,14 @@ function dateOnly(value) {
   // The canonical reader of a DATE column (datetime-et.js): a 'YYYY-MM-DD' string or a Date a pg DATE came back as is
   // read as its calendar day, never shifted by the process time zone.
   try { return etCalendarDayOf(value); } catch { return null; }
+}
+
+// The receipt fact (invoices.receipt_sent_at, stamped when a receipt email or text went out): an ET date and time, or
+// null when no receipt is recorded as sent. Stated from this field, never guessed.
+function receiptSentAt(value) {
+  if (!value) return null;
+  const at = new Date(value);
+  return Number.isNaN(at.getTime()) ? null : `${etDateString(at)} ${formatETTime(at)} ET`;
 }
 
 const phoneLast4 = (phone) => String(phone || '').replace(/\D/g, '').slice(-4) || null;
@@ -699,6 +709,7 @@ function invoiceItem(listedRow, today, fence, heldIds) {
     service_date: dateOnly(row.service_date),
     due_date: dateOnly(row.due_date),
     paid_at: iso(row.paid_at),
+    receipt_sent_at: receiptSentAt(row.receipt_sent_at),
     total: money(row.total),
     credit_applied: money(row.credit_applied) || 0,
     ...projectDue(row, fence, today),
@@ -1003,6 +1014,7 @@ function invoiceDocument(facts, fence, today) {
     viewed_at: iso(facts.viewed_at),
     due_date: dateOnly(facts.due_date),
     paid_at: iso(facts.paid_at),
+    receipt_sent_at: receiptSentAt(facts.receipt_sent_at),
     subtotal: money(facts.subtotal),
     discount_amount: money(facts.discount_amount) || 0,
     discount_label: scrub(facts.discount_label, 120),

@@ -306,6 +306,7 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   cockroach_control: ['cockroach', 'cockroach'],
   german_roach: ['cockroach', 'cockroach'],
   german_roach_initial: ['cockroach', 'cockroach'],
+  vehicle_german_roach: ['cockroach', 'cockroach'],
   pest_initial_german_knockdown: ['cockroach', 'german_roach_knockdown'],
   pest_initial_palmetto_knockdown: ['cockroach', 'palmetto_roach_knockdown'],
   flea_tick: ['flea', 'flea'],
@@ -314,6 +315,12 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   bee_wasp_removal: ['stinging_insects', null],
   mud_dauber_removal: ['stinging_insects', null],
   fire_ant: ['targeted_ant', null],
+  // Area add-ons (20261008200000): the fire-ant broadcast keeps the fire-ant
+  // module; the web sweep is physical removal of webs, which the targeted-pest
+  // module keeps apart from pesticide work. The four lawn add-ons use the lawn
+  // writer (DEDICATED_SERVICE_PROFILES in lawn-report-copy-prompt.js).
+  area_addon_fire_ant_yard: ['targeted_ant', null],
+  area_addon_web_sweep: ['other_targeted_pest', null],
   pest_inspection: ['assessment', 'pest_inspection'],
   new_customer_inspection: ['assessment', 'pest_inspection'],
   termite_inspection: ['assessment', 'termite_inspection'],

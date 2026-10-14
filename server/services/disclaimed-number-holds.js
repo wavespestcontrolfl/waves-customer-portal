@@ -22,6 +22,19 @@ const logger = require('./logger');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 
 const TABLE = 'disclaimed_number_holds';
+const NO_TEXT_LINE_LOCK_PREFIX = 'no_text_line:';
+
+// Marks a no-text hold leaves on an OPEN callback_number_needed card an earlier pass filed:
+// no_text_hold (its Resolve must not release this hold) and, when the card did not already carry
+// no_text_hold, ownership_disclaimed — that card was filed because the caller said the number is
+// not theirs, and "Line can get texts" (which proves only that the line takes SMS) must not clear
+// it (codex #6112 r8 P1). The routing-gates stamp writes the same two keys on a dual-signal card.
+const NO_TEXT_MARK_SQL = `COALESCE(payload, '{}'::jsonb) || jsonb_build_object(
+  'no_text_hold', true,
+  'ownership_disclaimed', COALESCE((payload->>'ownership_disclaimed')::boolean, COALESCE(payload->>'no_text_hold', '') <> 'true'))`;
+// An open callback_number_needed card that still stands for "that is not my number": filed without
+// the no-text mark, or marked while carrying the ownership disclaimer. Only its own Resolve clears it.
+const OWNERSHIP_DISCLAIMER_CARD_SQL = `(COALESCE(payload->>'no_text_hold', '') <> 'true' OR COALESCE(payload->>'ownership_disclaimed', '') = 'true')`;
 
 // Canonical key for a hold row / a send's `to`. null for anything that is
 // not a dialable number (the send can't reach a disclaimed number with it,
@@ -52,12 +65,14 @@ function isMissingTable(err) {
  * processor reaches it through armDisclaimedNumberHold below (serialized
  * with the card resolve under the per-call triage lock). Every LATER write
  * in the same pass uses ensureDisclaimedNumberHold, which never re-arms.
- * Throws on DB error.
+ * Returns { recorded, phoneE164, heldAt } (heldAt = the row's held_at as text, full precision: the arming).
+ * Call it under the per-call triage lock AND the line's no-text lock (lockNoTextLines); armDisclaimedNumberHold
+ * does. Throws on DB error.
  */
 async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId, conn = db }) {
   const phoneE164 = holdPhoneKey(phone);
   if (!phoneE164 || !callLogId) return { recorded: false, reason: phoneE164 ? 'no_call' : 'no_phone' };
-  await conn.raw(
+  const result = await conn.raw(
     `INSERT INTO ${TABLE} (phone_e164, customer_id, source_call_log_id, held_at)
      VALUES (?, ?, ?, now())
      ON CONFLICT (phone_e164, source_call_log_id) DO UPDATE SET
@@ -66,10 +81,11 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
        cleared_at = NULL,
        cleared_by = NULL,
        clear_reason = NULL,
-       updated_at = now()`,
+       updated_at = now()
+     RETURNING held_at::text AS held_at`,
     [phoneE164, customerId || null, callLogId],
   );
-  return { recorded: true, phoneE164 };
+  return { recorded: true, phoneE164, heldAt: result?.rows?.[0]?.held_at ?? null };
 }
 
 /**
@@ -97,17 +113,27 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * Holding the call_log row lock through the insert means a reclaim's token
  * rotation queues behind this write instead of racing it.
  *
- * LOCK ORDER (same as mintEmailReviewCardsFenced): per-call triage advisory
- * lock → call_log row (FOR UPDATE) → disclaimed_number_holds row. /resolve
+ * LOCK ORDER (same as mintEmailReviewCardsFenced, plus the line lock): per-call triage advisory
+ * lock → the line's no-text advisory lock (lockNoTextLines, the one a "Line can get texts" release takes)
+ * → call_log row (FOR UPDATE) → disclaimed_number_holds row. /resolve
  * and /verdict take the same advisory lock FIRST, so whatever rows they
  * touch after it (triage_items, scheduled_services, disclaimed_number_holds)
  * are only ever reached by one of the two at a time — no deadlock cycle.
  */
-async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, conn = db }) {
-  if (!holdPhoneKey(phone) || !callLogId) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
+async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, noTextHold = false, afterArm = null, conn = db }) {
+  if (!callLogId || (!holdPhoneKey(phone) && !afterArm)) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
+  // No dialable number (anonymous, restricted or masked ANI) but a companion card write: no hold row,
+  // yet the card still goes through the same lock and claim fence below, so a worker that lost its
+  // claim during extraction cannot file a stale card after the replacement pass finalized the call
+  // (codex #6112 r8 P2).
+  const holdable = !!holdPhoneKey(phone);
   const { lockTriageCall } = require('../utils/triage-locks');
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
+    // Lock order step 2, shared with every line release (lockNoTextLines): arming or re-arming a line takes the
+    // same phone-wide lock a release holds, so a release of line L that began before this arming cannot clear
+    // the hold (and bind a card on) this call writes after it. No row is read or written before it.
+    if (holdable) await lockNoTextLines(trx, [holdPhoneKey(phone)]);
     if (procToken) {
       const claim = trx('call_log')
         .where({ id: callLogId })
@@ -116,8 +142,321 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
       const owned = await claim.forUpdate().first('id');
       if (!owned) return { recorded: false, claimLost: true };
     }
-    return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
+    if (!holdable) {
+      if (afterArm) await afterArm(trx, { heldAt: null });
+      return { recorded: false, reason: 'no_phone' };
+    }
+    const recorded = await recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
+    if (noTextHold) {
+      // A hold armed because the VALID extraction said the line cannot get texts: mark any callback_number_needed
+      // card an earlier pass left open, in this same transaction under the per-call lock, so its Resolve can
+      // never release the hold we just armed (it would otherwise carry no marker).
+      await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ payload: trx.raw(NO_TEXT_MARK_SQL) });
+      // Re-arming invalidates the version of every text_number_differs card this call already has: an
+      // older (closed) card on screen can no longer release what this pass just armed.
+      await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: 'text_number_differs' })
+        .update({ updated_at: new Date() });
+    }
+    // afterArm(trx): the caller's companion write (the text_number_differs release card) in THIS
+    // transaction, after the hold row and under the same lock and claim fence, so the hold and the
+    // only card that can release it commit or roll back together (codex #6112 r7 P2).
+    if (afterArm) await afterArm(trx, { heldAt: recorded.heldAt });
+    return recorded;
   });
+}
+
+/**
+ * Phone-wide lock for a "Line can get texts" release (codex #6112 r15 follow-up). A shared line holds
+ * one row per call that said it cannot get texts; a release clears its own call's rows and then every
+ * other call's rows on the line. Two staff releasing the same line from cards on different calls took
+ * those row locks in opposite orders (A then B, B then A) and could deadlock.
+ * Lock order for every line release: 1) the per-call triage lock (lockTriageCall), 2) this phone-wide
+ * transaction advisory lock, one per line being released, in sorted E.164 order, 3) hold rows,
+ * visit rows. Whoever holds a line's lock is the only releaser of that line, so row locks never cross.
+ * Call INSIDE the transaction, before any hold row is written.
+ */
+async function lockNoTextLines(conn, phoneKeys) {
+  for (const key of [...new Set(phoneKeys || [])].sort()) {
+    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${NO_TEXT_LINE_LOCK_PREFIX}${key}`]);
+  }
+}
+
+/**
+ * The lines a call has a hold row on, newest first, one entry per line: [{ key, active }] (active = a row
+ * with cleared_at NULL). A plain read; the caller takes the phone locks next and the writes are idempotent.
+ */
+async function callLineRows(conn, callLogId) {
+  if (!callLogId) return [];
+  const rows = await conn(TABLE).where({ source_call_log_id: callLogId }).orderBy('held_at', 'desc').select('phone_e164', 'cleared_at');
+  const byKey = new Map();
+  for (const row of rows || []) {
+    const key = holdPhoneKey(row.phone_e164);
+    if (!key) continue;
+    const seen = byKey.get(key);
+    if (!seen) byKey.set(key, { key, active: row.cleared_at == null });
+    else if (row.cleared_at == null) seen.active = true;
+  }
+  return [...byKey.values()];
+}
+
+// ── Card <-> hold binding: exact per (line, arming) ────────────────────────────────────────────────────────
+// A hold row is one (line, call) with a held_at that changes each time the hold is re-armed after a release.
+// A text_number_differs card releases a hold only if it was filed for THAT line in THAT arming. A call can hold
+// several lines but has at most ONE open text card (partial unique index), so the card carries a list:
+//   payload.hold_bindings = [{ line_e164, held_at }, ...]
+// line_e164 is the hold row's own canonical phone_e164 and held_at its full-precision timestamp as text. The list
+// is only ever appended to (stampOpenNoTextCards), one binding per card write: the arming the write is for, and a card
+// refresh keeps it (refreshedCardPayload). The card is built BEFORE the hold row gets held_at = now(), so no
+// created_at comparison can bind them. A hold released and re-armed has a new held_at, so an older closed card
+// stops binding to it.
+// A card with no list predates this (filed by #6112). It binds to a hold only when the match is UNAMBIGUOUS:
+// the hold is of the same call, on the card's line by the hold writer's own rule (holdPhoneKeySql), armed within
+// LEGACY_BINDING_WINDOW of the card's created_at and not after the card closed, and no other unstamped card of
+// that call fits the same arming. Anything less stays unbound: it binds to nothing and releases nothing.
+// A hold row keeps only its LATEST held_at (a re-arm overwrites it), so armings cannot be counted from the row.
+// Two facts survive and rule out a later re-arm: a card cannot belong to an arming that happened after the card
+// closed (resolved_at), and two cards cannot both own one arming. scripts/backfill-no-text-card-bindings.js stamps
+// the unambiguous cards with exactly this rule and lists the ambiguous ones.
+const LEGACY_BINDING_WINDOW = "interval '5 minutes'";
+
+// utils/phone.js holdPhoneKey (toE164 accepted only when isLikelyE164) in SQL, so a legacy card's ani_phone and a
+// hold row's phone_e164 compare under the SAME rule the hold writer used. A '+' number keeps its country code and
+// needs 10..15 digits; any other input is read as NANP and becomes +1 plus its last ten digits when it has at
+// least ten digits; everything else is NULL (not a dialable number, so it can never match a hold). Pinned to the JS
+// function over a fixture list by server/tests/no-text-held-lines-postgres.test.js.
+const holdPhoneKeySql = (expr) => `(CASE
+    WHEN ${expr} IS NULL THEN NULL
+    WHEN ${expr} ~ '^\\s*\\+' THEN
+      CASE WHEN length(regexp_replace(${expr}, '\\D', '', 'g')) BETWEEN 10 AND 15
+           THEN '+' || regexp_replace(${expr}, '\\D', '', 'g') END
+    WHEN length(regexp_replace(${expr}, '\\D', '', 'g')) >= 10
+      THEN '+1' || right(regexp_replace(${expr}, '\\D', '', 'g'), 10)
+    END)`;
+
+// Could unstamped card `c` have been filed for the arming of hold `h`? Time only (same call, window, not closed
+// before the arming): the base of both the binding and the ambiguity check.
+const legacyCardFitsArmingSql = (c, h) => `${c}.payload->'hold_bindings' IS NULL AND ${c}.reason_code = 'text_number_differs'
+  AND ${c}.call_log_id = ${h}.source_call_log_id
+  AND ${h}.held_at BETWEEN ${c}.created_at - ${LEGACY_BINDING_WINDOW} AND ${c}.created_at + ${LEGACY_BINDING_WINDOW}
+  AND (${c}.resolved_at IS NULL OR ${h}.held_at <= ${c}.resolved_at)`;
+
+// Card `t` (unstamped) is bound to hold `h`: it fits the arming, is on the hold's line, and is the only card ON THAT
+// LINE that fits (a card for another line of the same call does not compete: one call can file an X card and a Y card).
+const legacyCardBoundSql = (t, h) => `${legacyCardFitsArmingSql(t, h)}
+  AND ${holdPhoneKeySql(`${t}.payload->>'ani_phone'`)} = ${h}.phone_e164
+  AND NOT EXISTS (SELECT 1 FROM triage_items t2 WHERE t2.id <> ${t}.id AND ${legacyCardFitsArmingSql('t2', h)}
+                     AND ${holdPhoneKeySql("t2.payload->>'ani_phone'")} = ${h}.phone_e164)`;
+
+const LEGACY_CARD_FOR_HOLD_SQL = legacyCardBoundSql('t', 'h');
+
+const NO_TEXT_CARD_FOR_HOLD_SQL = `t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs'
+  AND (CASE WHEN t.payload->'hold_bindings' IS NULL THEN (${LEGACY_CARD_FOR_HOLD_SQL})
+       ELSE EXISTS (SELECT 1 FROM jsonb_array_elements(t.payload->'hold_bindings') b
+                     WHERE b->>'line_e164' = h.phone_e164 AND (b->>'held_at')::timestamptz = h.held_at) END)`;
+
+/**
+ * Every (active hold of the call, text card bound to it) pair, newest card first within a line:
+ * [{ phone_e164, card_id }]. The one read behind "is this card the current release surface for that line":
+ * the held-lines list, the closed-card version check and the lines a release may touch all use the same
+ * binding (NO_TEXT_CARD_FOR_HOLD_SQL).
+ */
+async function boundCardsForActiveHolds(conn, callLogId) {
+  const result = await conn.raw(
+    `SELECT h.phone_e164, t.id AS card_id FROM ${TABLE} h
+       JOIN triage_items t ON ${NO_TEXT_CARD_FOR_HOLD_SQL}
+      WHERE h.source_call_log_id = ? AND h.cleared_at IS NULL
+      ORDER BY h.phone_e164, t.created_at DESC`,
+    [callLogId],
+  );
+  return result?.rows || [];
+}
+
+/**
+ * Appends to the call's OPEN text_number_differs card the binding for ONE hold: the arming this card write is
+ * for. `phone` is the line the card is filed for; `heldAt` is that arming's held_at (what recordDisclaimedNumberHold
+ * returned). Without heldAt the line's current active hold of the call is used. Other active holds of the call
+ * (an ownership-only hold on another line) are NOT bound: a card releases only the line it was filed for. A refresh
+ * for the same arming appends nothing. Call in the transaction that files or refreshes the card, after the hold row
+ * exists, under the per-call lock. Idempotent; never removes or replaces a binding.
+ */
+async function stampOpenNoTextCards(conn, callLogId, { phone = null, heldAt = null } = {}) {
+  const line = holdPhoneKey(phone);
+  if (!callLogId || !line) return;
+  const armingSql = heldAt ? 'AND h.held_at = ?::timestamptz' : '';
+  const params = [line, ...(heldAt ? [heldAt] : []), callLogId];
+  await conn.raw(
+    `WITH fresh AS (
+       SELECT t.id, jsonb_build_array(jsonb_build_object('line_e164', h.phone_e164, 'held_at', h.held_at::text)) AS elems
+         FROM triage_items t
+         JOIN ${TABLE} h ON h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL AND h.phone_e164 = ? ${armingSql}
+        WHERE t.call_log_id = ? AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
+          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(t.payload->'hold_bindings', '[]'::jsonb)) b
+                           WHERE b->>'line_e164' = h.phone_e164 AND (b->>'held_at')::timestamptz = h.held_at))
+     UPDATE triage_items t
+        SET payload = COALESCE(t.payload, '{}'::jsonb)
+          || jsonb_build_object('hold_bindings', COALESCE(t.payload->'hold_bindings', '[]'::jsonb) || fresh.elems)
+       FROM fresh WHERE t.id = fresh.id`,
+    params,
+  );
+}
+
+/**
+ * The payload SQL for refreshing an OPEN card from a newly built one: the new payload, with the card's existing
+ * hold_bindings kept (the new payload never carries them). Use as `.update({ payload: refreshedCardPayload(trx, json) })`.
+ */
+function refreshedCardPayload(conn, payloadJson) {
+  return conn.raw(
+    `?::jsonb || CASE WHEN payload->'hold_bindings' IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('hold_bindings', payload->'hold_bindings') END`,
+    [typeof payloadJson === 'string' ? payloadJson : JSON.stringify(payloadJson)],
+  );
+}
+
+// True when some ACTIVE hold on the line (alias `x` = the line's phone_e164 expression) belongs to a call with an
+// unresolved "not my number" card: a no-text hold, or a call that only disclaimed the number. One predicate for
+// the release check and the held-lines list.
+const lineOwnershipBlockSql = (lineExpr) => `EXISTS (SELECT 1 FROM ${TABLE} oh
+      JOIN triage_items d ON d.call_log_id = oh.source_call_log_id
+     WHERE oh.phone_e164 = ${lineExpr} AND oh.cleared_at IS NULL
+       AND d.reason_code = 'callback_number_needed' AND d.status <> 'resolved'
+       AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})`;
+
+/**
+ * Which of these lines are blocked by an unresolved "not my number" card on ANY active hold of the line
+ * (#6292 r4/r5). "Line can get texts" proves the line takes SMS, never who owns it, so a call with an open
+ * ownership card keeps its row and the line as a whole stays blocked. The release asks this of the LINE, never
+ * only of the call whose card was clicked.
+ */
+async function linesBlockedByOwnershipCard(conn, phoneKeys) {
+  if (!phoneKeys?.length) return new Set();
+  const result = await conn.raw(
+    `SELECT DISTINCT h.phone_e164 FROM ${TABLE} h
+      WHERE h.phone_e164 IN (${phoneKeys.map(() => '?').join(', ')}) AND h.cleared_at IS NULL
+        AND ${lineOwnershipBlockSql('h.phone_e164')}`,
+    phoneKeys,
+  );
+  return new Set((result?.rows || []).map((r) => r.phone_e164));
+}
+
+/**
+ * "Line can get texts" (admin-triage releaseNoTextHold): the office verified the LINE, so every
+ * active hold a no-text statement placed on that number lifts, whichever call placed it (codex
+ * #6112 r7 P2: a shared office or relay line gets one hold row per call, and the send boundary
+ * blocks on ANY active row for the number). A hold whose source call carries a plain
+ * disclaimed-number card (callback_number_needed WITHOUT the no_text_hold marker, or marked
+ * ownership_disclaimed) that is still open, in progress or dismissed is an independent "that is not my
+ * number" statement and is NOT touched: that card's own Resolve verifies the number. A RESOLVED
+ * ownership card already verified it, so that call's no-text hold joins the release (codex r9 P2). Returns the
+ * source call ids whose holds cleared, so the caller can lift those calls' visit-level holds too.
+ */
+async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, clearedBy = null, reason, conn = db }) {
+  const key = holdPhoneKey(phoneE164);
+  if (!key) return [];
+  // The exclusion is built only when a call id is given: a bare `? IS NULL` binding has no type
+  // Postgres can infer (42P18 rolled the whole release back; codex r9 P1).
+  const exceptSql = exceptCallLogId ? 'AND h.source_call_log_id <> ?' : '';
+  const params = [clearedBy ? String(clearedBy).slice(0, 100) : null, reason ? String(reason).slice(0, 100) : null, key];
+  if (exceptCallLogId) params.push(exceptCallLogId);
+  const result = await conn.raw(
+    `UPDATE ${TABLE} h
+        SET cleared_at = now(),
+            cleared_by = ?,
+            clear_reason = ?,
+            updated_at = now()
+      WHERE h.phone_e164 = ?
+        AND h.cleared_at IS NULL
+        ${exceptSql}
+        AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})
+        AND NOT EXISTS (SELECT 1 FROM triage_items d
+                         WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
+                           AND d.status <> 'resolved'
+                           AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})
+      RETURNING h.source_call_log_id`,
+    params,
+  );
+  const clearedCalls = (result?.rows || []).map((r) => r.source_call_log_id);
+  if (clearedCalls.length) await settleSiblingTextCards(conn, { callLogIds: clearedCalls, lineKey: key, releasedFromCallLogId: exceptCallLogId, clearedBy });
+  return clearedCalls;
+}
+
+/**
+ * Recompute call_log.review_status from the call's cards, safely against a concurrent card write on the same call
+ * (#6292 r10). Two resolutions of different cards on one call each count the OTHER card as still open if they count
+ * before the other commits, and both write 'open'. A single UPDATE with a correlated subquery does not fix that
+ * under READ COMMITTED: the subquery uses the snapshot taken when the statement STARTED, so a statement that then
+ * waits on the call_log row lock still counts the committed-meanwhile card as open. So: lock the call_log rows first
+ * (sorted ids, one statement), then run the UPDATE as a NEW statement. Its snapshot is taken after the lock was
+ * granted, so it sees whatever the previous holder committed, and the last writer always writes the committed truth.
+ * Lock order: line lock (if any) -> call_log row; nothing takes a line lock while holding a call_log row.
+ */
+async function recomputeCallReviewStatus(conn, callLogIds) {
+  const ids = [...new Set(callLogIds || [])].filter(Boolean).sort();
+  if (!ids.length) return;
+  const marks = ids.map(() => '?').join(', ');
+  await conn.raw(`SELECT id FROM call_log WHERE id IN (${marks}) ORDER BY id FOR UPDATE`, ids);
+  await conn.raw(
+    `UPDATE call_log c
+        SET review_status = CASE WHEN EXISTS (SELECT 1 FROM triage_items o WHERE o.call_log_id = c.id AND o.status IN ('open', 'in_progress'))
+                                 THEN 'open' ELSE 'resolved' END,
+            updated_at = now()
+      WHERE c.id IN (${marks})`,
+    ids,
+  );
+}
+
+/**
+ * The calls whose hold on `lineKey` a cross-call release just cleared (#6292 r8): their text_number_differs card
+ * for that line is settled in the same transaction, under the line lock the caller holds.
+ *   1. BIND first: a card with no hold_bindings (a legacy card) gets { line_e164, held_at } of the hold being
+ *      cleared, so its provenance can never again be re-read from a created_at window (a later ownership-only
+ *      re-arm of that call within 5 minutes would otherwise still bind to it).
+ *   2. CLOSE the call's open card (resolved, human, note "line released from <masked> via call <id>", resolved_at)
+ *      unless the card is still bound to another ACTIVE hold of its call: one card can carry several lines, and
+ *      closing it would take the release surface of a line that is still held.
+ *   3. Keep call_log.review_status in step with the cards that closed.
+ * Cards whose row is locked are skipped (SKIP LOCKED): see the comment in the function body.
+ * No per-call lock is taken here (the order is call lock, then line lock; taking a second call's lock under a line
+ * lock could cross an arm waiting on that line): every write is a single atomic statement.
+ */
+async function settleSiblingTextCards(conn, { callLogIds, lineKey, releasedFromCallLogId = null, clearedBy = null }) {
+  const ids = callLogIds.map(() => '?').join(', ');
+  // Both writes pick their rows with FOR UPDATE SKIP LOCKED (#6292 r9). A transition locks its OWN card row first
+  // and takes the line lock after; this function runs under the line lock. Waiting here on a card row that a
+  // sibling's transition holds, while that transition waits on the line lock we hold, would deadlock. A card whose
+  // row is locked is being transitioned by its owner right now, so it is left alone: the owner's own release then
+  // finds the hold already cleared (nothing bound and active, lines_released []) and resolves its own card normally.
+  await conn.raw(
+    `UPDATE triage_items u
+        SET payload = COALESCE(u.payload, '{}'::jsonb)
+          || jsonb_build_object('hold_bindings', jsonb_build_array(jsonb_build_object('line_e164', c.line_e164, 'held_at', c.held_at)))
+       FROM (SELECT t.id, h.phone_e164 AS line_e164, h.held_at::text AS held_at
+               FROM triage_items t JOIN ${TABLE} h ON h.phone_e164 = ? AND h.source_call_log_id IN (${ids})
+              WHERE t.payload->'hold_bindings' IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL})
+                FOR UPDATE OF t SKIP LOCKED) c
+      WHERE u.id = c.id`,
+    [lineKey, ...callLogIds],
+  );
+  const masked = `***${lineKey.slice(-4)}`;
+  const note = `line released from ${masked} via call ${releasedFromCallLogId || 'another call'}`.slice(0, 500);
+  const closed = await conn.raw(
+    `UPDATE triage_items u
+        SET status = 'resolved', resolution_source = 'human', resolution_note = ?, assigned_to = ?,
+            resolved_at = now(), updated_at = now()
+      WHERE u.id IN (
+        SELECT t.id FROM triage_items t
+         WHERE t.call_log_id IN (${ids}) AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
+           AND EXISTS (SELECT 1 FROM ${TABLE} h
+                        WHERE h.phone_e164 = ? AND h.source_call_log_id = t.call_log_id AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
+           AND NOT EXISTS (SELECT 1 FROM ${TABLE} h
+                            WHERE h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
+           FOR UPDATE SKIP LOCKED)
+      RETURNING u.call_log_id`,
+    [note, clearedBy ? String(clearedBy).slice(0, 100) : null, ...callLogIds, lineKey],
+  );
+  await recomputeCallReviewStatus(conn, [...new Set((closed?.rows || []).map((r) => r.call_log_id).filter(Boolean))]);
 }
 
 /**
@@ -162,12 +501,14 @@ async function ensureDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * here: that verified the replacement, not this number (round 7 P1). A
  * customer phone edit clears nothing either.
  */
-async function clearDisclaimedNumberHoldsForCall({ callLogId, clearedBy = null, reason, conn = db }) {
+async function clearDisclaimedNumberHoldsForCall({ callLogId, clearedBy = null, reason, phoneKeys = null, conn = db }) {
   if (!callLogId) return 0;
   const now = new Date();
+  // phoneKeys: release only these lines of the call (the held-lines panel's selected line); null = every line.
   return conn(TABLE)
     .where({ source_call_log_id: callLogId })
     .whereNull('cleared_at')
+    .modify((q) => { if (phoneKeys) q.whereIn('phone_e164', phoneKeys); })
     .update({
       cleared_at: now,
       cleared_by: clearedBy ? String(clearedBy).slice(0, 100) : null,
@@ -307,6 +648,24 @@ module.exports = {
   armDisclaimedNumberHold,
   ensureDisclaimedNumberHold,
   clearDisclaimedNumberHoldsForCall,
+  clearNoTextHoldsForPhone,
+  lockNoTextLines,
+  linesBlockedByOwnershipCard,
+  lineOwnershipBlockSql,
+  stampOpenNoTextCards,
+  recomputeCallReviewStatus,
+  boundCardsForActiveHolds,
+  refreshedCardPayload,
+  holdPhoneKeySql,
+  legacyCardFitsArmingSql,
+  legacyCardBoundSql,
+  LEGACY_CARD_FOR_HOLD_SQL,
+  LEGACY_BINDING_WINDOW,
+  NO_TEXT_CARD_FOR_HOLD_SQL,
+  callLineRows,
+  NO_TEXT_LINE_LOCK_PREFIX,
+  NO_TEXT_MARK_SQL,
+  OWNERSHIP_DISCLAIMER_CARD_SQL,
   disclaimedNumberHeld,
   disclaimedNumberBlocksSend,
   disclaimedNumberHeldForVisit,

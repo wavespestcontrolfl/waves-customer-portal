@@ -8,14 +8,39 @@
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
+ *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
+ *   GATE_SMS_SHARED_PHONE_LINK=true (owner 2026-10-10, "link text": when two or more customer rows share the sender's phone, an inbound text attaches to ONE account instead of being filed as an unknown sender. Only when staff marked exactly one of them customers.sms_primary_for_shared_phone (admin PUT smsPrimaryForSharedPhone); no mark or two marks = left unlinked, no guessing (a guessed link would let one person on a shared phone reply for the other account). Strict opt-in via gateEnvValue, read at call time by server/routes/twilio-webhook.js findSingleCustomerByPhone(); SMS only (the voice webhook is unchanged); dark by default; off = a shared phone is not auto-linked, as before. Links a text to an account; sends nothing.)
+ *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
+ *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
+ *   GATE_IB_BILLING_MODE_EDIT=true (the Intelligence Bar's update_customer may change one customer's billing type (billing_mode) and per-application fee on its own confirm card, owner ruling D5 2026-10-06; the same billing-type rules as the customer page (services/billing-mode-rules.js), annual prepay and clearing the type refused, never owner-direct, no customer message; read at call time via ibBillingModeEditLive(), strict === 'true', dark by default; off = both fields are refused exactly as before)
+ *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
+ *   GATE_IB_REPRICE_VISITS=true (the Intelligence Bar's reprice_future_visits write tool, owner ruling 2026-10-07: one confirm card changes the per-visit price of one customer's future visits for one service, listing each visit's old -> new price; each visit is saved through the Schedule screen's own visit edit (updateVisitDetails over PUT /admin/schedule/:id/update-details), so the re-price block, validation and CAS are the screen's. Never a completed, in-progress, invoiced, prepaid, annual-prepay-covered or otherwise money-committed visit; a monthly-membership customer is refused (their price is the monthly rate). No customer message is sent. Read at call time via ibRepriceVisitsLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
+ *   GATE_IB_GENERAL_READ=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_reads and read_admin_data read tools, owner ruling 2026-10-12: on the owner login only, the bar may read what an admin screen reads. read_admin_data calls one reviewed admin GET endpoint from the generated catalog (server/services/intelligence-bar/admin-read-catalog.json) on this server as the logged-in owner and returns the JSON, capped. No write, no outside call, no file or stream. Read at call time via ibGeneralReadLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
+ *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
+ *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
+ *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
+ *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer. Auto clock-in's vehicle-agreement rule does NOT depend on this gate. Flip order: this gate, issue the vehicle agreement, technicians sign, then GATE_GEOFENCE_AUTO_CLOCK_IN.)
+ *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
+ *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
+ *   GATE_GEOFENCE_AUTO_CLOCK_IN=true (owner 2026-10-06: in automatic geofence mode, a technician with no shift today who arrives at their own scheduled visit for today is clocked in automatically (source geofence_auto) and the job timer starts, so the first stop starts the paid day; never on an unscheduled, multi-stop, other-tech, other-day, stale, inactive-tech or already-clocked-in arrival. Read at call time via geofenceAutoClockInLive(), dark by default; off = today's behavior; rollback = unset)
+ *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
+ *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
+ *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
+ *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
- *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. Series EXTENSION riding the lawn ships in a follow-up PR — do not flip this gate until it lands, or riders drift off the lawn after their first seeded year. Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
+ *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
+ *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
+ *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
+ *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
+ *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. A rider's series extension keeps riding the lawn (admin-schedule.js#rideLawnExtension, same gate). Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
+ *   GATE_RIDER_PAIRS_MONTHLY_LAWN=true (second batch of ride pairs, owner ruling 2026-10-01: a MONTHLY lawn series also carries bi-monthly pest or tree & shrub (every 2nd lawn visit), monthly pest (every visit), semiannual pest (every 6th) and seasonal Feb-Oct mosquito (every in-season visit); each pairing has its own day gaps in RIDER_PAIRINGS, rider-series-preview.js. Needs GATE_PEST_RIDES_LAWN_AT_ACCEPT and GATE_VISIT_GROUPS on. 6-week lawn hosts are unchanged (quarterly riders only). Off = byte-identical: those series walk their own cadence, and a series linked while it was on stops riding at its next extension. Canonical CALL-TIME reader riderPairsMonthlyLawnLive(), strict 'true', dark by default. Kill switch: unset.)
  *   GATE_SHORTLINK_LEGACY_EXPIRE=true (retire the legacy 1-7 char short-link code space: /l/<legacy code> answers 410 and resolveShortCode returns null for it, so ~2k guessable codes that front never-expiring bearer-token URLs stop working; read at call time via shortlinkLegacyExpireLive(), dark by default; ungated either way, a re-send never reuses a legacy code)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
  *   GATE_KB_CUSTOMER_AUDIENCE=true (knowledge Q&A — customer-facing callers such as the portal AI assistant and the lead agent — read only knowledge_base categories on the customer-safe allowlist, currently empty, instead of every active row; staff callers (tech_field, admin_manual) are unchanged; strict opt-in, read at call time via kbCustomerAudienceLive(), dark by default)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
+ *   GATE_AGENT_SESSION_GUARD=true (Managed Agents cost guards, strict opt-in, read at call time via agentSessionGuardLive(): each blog, backlink, briefing and lead agent session is created with a hard spend cap, and a session its runner gave up on gets a user.interrupt. Off = sessions are created and left as before. Sends nothing to a customer.)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
@@ -25,7 +50,8 @@
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
- *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 25s+, no answer, no voicemail — texts them back from the line they called)
+ *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 15s+, no answer, no voicemail — texts them back from the line they called)
+ *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -105,17 +131,27 @@
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_WRITER_RULES=true (owner rules for the AI service report, owner "go" 2026-09-30, four-section report owner "ok go" 2026-10-01: WHAT WE FOUND / WHAT WE DID AND WHY / WHAT TO EXPECT / WHAT'S NEXT, length by the record, timeframes only from approved expectation wording, the reach-out date on one-time services and re-services, no booking state in the text (the report shows the next visit live); four-section notes are read only while this switch is on; one OWNER RULES block, no product/active names, amounts, footage, "safe", "per visit" or other company names in the copy, the technician note sorted by provenance, customer messages labeled and scrubbed, and output screens that reject what slips through. Every writer EXCEPT lawn and tree/shrub/palm, which stay byte-identical (owner: another lane owns them). Also the promise check at completion (owner "ok yes add these" 2026-10-01): the completion form lists the customer's open technician promises (GET /admin/dispatch/:id/promises), the report says only what the tech marked, Done closes the promise and Partly adds a still-left note (visit-promises.js). Off unless exactly 'true', read at call time via reportWriterRulesLive(); off = byte-identical prompts, inputs and screens, and no promise check)
  *   GATE_REPORT_BLOG_POST=true (Waves blog post on the service report, owner "ok go" 2026-10-01: the completion forms search the live Waves blog (GET /admin/dispatch/:id/blog-posts), the picked post is frozen on the record at completion (structured_notes.blogPost: title and live URL on the site's own host) and the customer's report shows it at the bottom as "From the Waves blog". Strict opt-in: exactly 'true' in every environment, read at call time via reportBlogPostLive(). Ships DARK; off = the search answers {available:false}, a picked post is ignored at completion and the report shows none, frozen ones included.)
+ *   GATE_REPORT_ASK_AI=true (service report "Ask Waves" answers written by AI, owner 2026-10-05, "use sonnet 5.5": POST /api/reports/:token/ask builds a short fact sheet from the report (service, date, technician first name, weather, pest pressure label, the customer's concern and the reviewed report sections, each applied product's approved plain wording, label precaution and re-entry text with inside or outside from the recorded area, the re-entry status; never the appointment, amounts, rates, totals, EPA numbers, prices or the per-product target pests) and has Claude Sonnet 5.5 (TEXT_POLICIES.reportAsk, OpenAI backup, MODEL_REPORT_ASK) answer the question in one to four plain sentences, screened by the report copy guards (no "safe", guarantees, prices, amounts). Pest, lawn and tree & shrub reports only (ruleAnswerReason): termite, rodent, mosquito and specialty reports, typed reports and reports with a visible companion section keep the fixed-rule answer. The recorded instructions the fixed-rule answer states are sent as required lines; a system-written line (watering aftercare, pet precaution, rinse caution) must stand as its own whole sentence of the AI answer word for word, and an answer that carries required lines may hold no dismissal anywhere (ignore, disregard, not true, no longer, outdated, you can skip; before or after the line), else the fixed-rule answer is used; next-visit and schedule questions keep the fixed-rule answer; any technician-sourced required line (recommendations, primary next step, finding recommendations) skips the model and keeps the fixed-rule answer. A miss, a timeout (about 8 s), an empty or rejected answer returns the old fixed-rule answer. The stored event stays question_length and topic; the question text is never stored or logged. Strict opt-in: exactly 'true', read at call time via reportAskAiLive(). Ships DARK; off = the fixed-rule answer alone, byte-identical, no model call.)
  *   GATE_STANDARD_WORDING_PREVIEW=true (owner mockup approval 2026-10-03: when a typed visit's record says nothing was found, the office Complete Service form, which greys out Generate AI report for it, shows the exact standard sentences the customer's report will use: POST /admin/dispatch/:id/standard-wording { values, activityScore } builds the report's own Today's Result as /complete builds it (the visit's own form, the score the completion keeps, the visit number and trend from the customer's earlier scores) and answers them only when the report would keep its standard wording (service-report/standard-wording-preview.js). Read-only, display-only. Strict opt-in: exactly 'true', read at call time via standardWordingPreviewLive(). Ships DARK; off = the route answers { available: false } and the form shows no card.)
+ *   GATE_BLOG_SEARCH_SUGGEST=true (Suggest a post from the completion forms' blog search, owner mockup approval 2026-10-03; owner ruling 2026-10-02: straight into the autonomous blog queue, written and published automatically, no approval step. With GATE_REPORT_BLOG_POST on, a search no live post holds every word of says so, shows the closest posts and offers "Suggest a post about …" to the office (an admin login only): POST /admin/dispatch/:id/blog-suggestions writes one operator-pinned new_supporting_blog row into opportunity_queue (bucket operator_intercept, score 79, no city, service and specialty topic inferred from the phrase, signal_metadata.source tech_blog_search; unlike a manifest intercept it is SERP-profiled, the router's public-health, navigational and do_not_publish demotions apply to it, and the quality gate waives only GSC evidence), refusing a near-me, out-of-area or personal-data phrase (a customer's name in our records included), one with a letter outside a-z, a search a live post now covers, a topic the chain tried and skipped (declined), or more than 10 a person a day; the same phrase from any source answers already_queued. The phrase is never logged. Strict opt-in: exactly 'true', read at call time via blogSearchSuggestLive(). Ships DARK; off = the search answers suggest:false, the forms show no button, the route answers 404 { enabled: false }, and suggestions already queued are not claimed (opportunity-queue fences source tech_blog_search; they wait, and expire unclaimed after 45 days).)
  *   GATE_PORTAL_CHAT_FACTS=true (portal Waves Assistant payment card: a charge / payment / receipt question shows the customer a server-rendered card of their last three payments from the Billing tab's own read, plus an Open Billing button; the model is told only that it was shown and the status words. Off unless exactly 'true', read at call time via portalChatFactsLive(); needs PORTAL_CHAT_SELF_SERVE live (default on). Off = the self-serve chat alone, byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_CHAT_VISIT_FACTS=true (portal Waves Assistant past-visit answers: a question about what was done at a visit, when the last visit was, or where the report is reads the customer's last three completed visits from the Completed tab's own read; the model answers from the structured facts — date, service, technician first name, kinds of product applied — and the customer sees a server-rendered card with each visit's reviewed summary and report link; the owner-approved company facts join the portal prompt. The summary text, prices, product brands and addresses never reach the model. Off unless exactly 'true', read at call time via portalChatVisitFactsLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of GATE_PORTAL_CHAT_FACTS. Off = byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_CHAT_RESERVICE=true (portal Waves Assistant free re-service offer, PEST ONLY unless GATE_PORTAL_CHAT_RESERVICE_LAWN is also on (the next entry adds the lawn line; with it off, lawn problems hand off with topic pest_problem): a customer whose message this turn is an active pest report (the SMS flow's isActivePestReport, no separately priced specialty) gets a server-built button to the /reservice booking page when that page's own verdict says the pest lane is bookable and no address hold applies, a button to move an already booked pest re-service when the reschedule page would move it, and a hand-off otherwise; never under a secondary saved-property selection (the page books at the primary address). The model never decides a visit is free. Also needs GATE_RESERVICE_SELF_SERVE and GATE_RESERVICE_STREAMLINE. Off unless exactly 'true', read at call time via portalChatReserviceLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of the other portal chat gates. Off = byte-identical apart from portal chat's newest-first history read. Sends nothing to a customer.)
  *   GATE_PORTAL_CHAT_RESERVICE_LAWN=true (the LAWN line of the portal assistant's free re-service offer, owner ruling 2026-10-03: the chat model judges whether the customer is reporting a lawn problem happening now and quotes them; the server verifies the quote is word for word in that turn's message and names a lawn subject, refuses a separately priced specialty, then applies the same /reservice page verdict as the pest line. No lawn word list. Honoured only while GATE_PORTAL_CHAT_RESERVICE is live. Off unless exactly 'true', read at call time via portalChatReserviceLawnLive(). Off = the pest-only offer, byte-identical. Sends nothing to a customer.)
+ *   GATE_PORTAL_CHAT_EMAIL_CHANGE=true (portal Waves Assistant confirmed email-change hand-off, owner ruling 2026-10-02: a customer who asks to change their email types the new address, the chat reads it back, and once they confirm it the office gets ONE bell with the address on file and the new one; staff make the change. The chat model judges whether the customer confirmed; the server verifies the address is one the customer typed in that chat, and sends only the exact address its own read-back instruction carried in the previous turn and the assistant's reply showed. Nothing writes the customer row and no self-serve email edit exists. Off unless exactly 'true', read at call time via portalChatEmailChangeLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of the other portal chat gates. Off = byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
  *   GATE_PERMIT_DETAIL_SYNC=true (Manatee permit detail collection, address-match round 2 / R2-A: after the weekly report sync, a slow sequential pass reads each new-home permit's public ACA record page for conditioned and under-roof square footage, stories, bedrooms and bathrooms into construction_permit_records. Off unless exactly 'true', read at call time via permitDetailSyncLive(); independent of GATE_PERMIT_SYNC. Collects only: nothing reads it for a lookup or a price yet, nothing is sent to a customer. Kill switch: unset.)
+ *   GATE_LOOKUP_LISTING_SIZE=true (address-match PR 5b, owner 2026-10-02: a commercial suite with no caller-stated size is priced off a size a public listing publishes for THAT suite. Plain code reads Google result snippets (DataForSEO; LoopNet and Crexi refuse every server fetch) and fetchable broker pages for a figure next to the typed street number and suite; a range or two different figures never count; no model reaches the number. Ranks below a caller/tech-stated size, above the DBPR license seats and the type default; draft stays yellow with the link. Off unless exactly 'true', read at call time via lookupListingSizeLive(); off = no search, no fetch, byte-identical ladder. Kill switch: unset.)
+ *   GATE_LOOKUP_ADDRESS_STATUS=true (address-match PR 4: the admin estimate tool's property lookup shows one address status line from Google Address Validation, apart from the county roll's own answer: Address confirmed / Building confirmed, unit missing / Address needs confirmation / Outside the service area / Validation unavailable, with Google's business or residential classification. No scope effect: no measurement, flag, cache row or price changes. One validation call per address per 24 h, 4 s cap, fail-open to unavailable; needs ADDRESS_VALIDATION_ENABLED. Off unless exactly 'true', read at call time via lookupAddressStatusLive(); off = no call and a byte-identical response. Kill switch: unset.)
+ *   GATE_LOOKUP_BUSINESS_IDENTITY=true (address-match PR 5: the admin estimate lookup and the estimator engine ask Google Places which operating business sits at the street number and read its type and tenant count, so a storefront with its own street number inside a plaza parcel is no longer priced off the whole building or a satellite guess. Needs GATE_COMMERCIAL_SUITE_SIZING and only runs for the opted-in admin lookup and engine, never a public route. A matched business with part-building evidence is one suite; one with none of that is scope_unresolved, no price until the CSR answers "just your space or the whole building?". Deterministic, no AI reaches a size or price. Off unless exactly 'true', read at call time via lookupBusinessIdentityLive(); off = no Places call and byte-identical output. Kill switch: unset.)
+ *   GATE_LOOKUP_PERMIT_FACTS=true (address-match round 2 / R2-B: the property lookup reads the home's own Manatee building permit facts (conditioned and under-roof square footage, stories; collected by GATE_PERMIT_DETAIL_SYNC into construction_permit_records) when the county roll has no building for the address, and the admin estimate tool and the estimator engine prefill home sq ft from them as a sourced estimate above the plat median, always flagged for confirmation and never as a measurement. Off unless exactly 'true', read at call time via lookupPermitFactsLive(); off = no permit read, byte-identical lookup, profile and draft. Kill switch: unset.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
+ *   GATE_VISIT_ACCESS_FLAGS=shadow (visit access and safety flags, shadow leg: the hourly :34 sweep 05:34 to 19:34 ET puts visit_access.v1, six yes/no reads, to the typed-decision providers for today's and tomorrow's open visits and records the answers in decision_reviews under subject_type scheduled_services; services/typed-decisions/visit-access-shadow.js; codes never leave: the state says only whether codes are on file and every text is redacted; nothing is shown to a technician, written to a visit or sent; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via visitAccessShadowLive(); unset or any other value = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
+ *   GATE_PREPAY_MINT_PRICE_HOLD=shadow|true (stamp-time price check for every annual prepay, not only a /secure pick: a new term records each covered visit's price when it is created (activity_log annual_prepay_mint_visit_prices); `true` = a visit whose price changed since then is not stamped as covered, bills normally and raises the existing 'repriced visit left uncovered' office alert; `shadow` = the price is recorded and a would-hold is only logged. Termite annual plans are left out. Off = byte-identical to today: nothing recorded, nothing read. Canonical CALL-TIME reader prepayMintPriceHoldMode(). Kill switch: unset.)
+ *   GATE_PHOTO_PRIVACY=shadow (photo privacy check, Clef second wave idea 3: each technician social post's photo is put to Cloudflare Clef as photo_privacy.v1 (face, person, readable address text, license plate, child, pet) AFTER the post is published and logged, and the answers land in decision_reviews for labeling; services/typed-decisions/photo-privacy-shadow.js. SHADOW ONLY: nothing is held, changed or shown to the technician; `shadow` is the only value honoured (anything else = off) and only while GATE_TYPED_DECISIONS_CLEF is live; ships DARK, read at call time via photoPrivacyMode(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
@@ -127,11 +163,13 @@
  *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
+ *   GATE_IB_DELETE_CUSTOMER=true (Intelligence Bar delete_duplicate_customer, owner ruling 2026-10-07: an admin can ARCHIVE ONLY (soft-delete, nothing merged or moved, the other record untouched) ONE empty duplicate customer record - one that holds only the fields the unknown-caller stub creator writes, no linked rows, and that the duplicate queue lists as a confirmed same-identity duplicate of a record sharing its phone (a possible match, such as a different name, goes to merge_customers) - from a confirm card, through the customer page's own DELETE /api/admin/customers/:id handler; restorable via PATCH /api/admin/customers/:id/restore; never owner-direct; sends nothing to a customer. Strict opt-in: exactly 'true', read at call time via ibDeleteCustomerLive(). Ships DARK; off = the tool is not offered on either path and a forced call refuses; kill = unset)
  *   GATE_IB_OWNER_DIRECT=true (Intelligence Bar owner-direct mode, owner ruling 2026-10-01: for the owner login only (ibFullAccess) the bar takes the record it picks as the target with no target refusals, runs internal edits — lead/customer/property fields, statuses, notes, tech assignment, reschedule, stock — without a confirmation card, and answers in 1–3 lines; customer messages, money and bulk changes keep their one-tap card; every other login is unchanged; off = byte-identical to today; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
  *   GATE_CALL_WHOLE_STRUCTURE_NO_UNIT=true (call booker: a WDO inspection or termite pre-treat on a unit-less duplex/building address is not held for the missing unit; condo/apartment interior work still is)
+ *   GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT=true (call booker: a business address (Google addressUse.business) given with no unit is not held for the missing unit when the caller says they own/lease/occupy the WHOLE building; the extraction judges it and the code verifies the pinned caller quote; suite/unit/strip-mall wording keeps the hold)
  *   GATE_CALL_FIRST_NAME_ADVISORY=true (call booker: a new caller who gave a last name but no first name still becomes a customer and books; the missing first name files an advisory office card instead of holding the booking; strict opt-in, read at call time)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
@@ -156,21 +194,57 @@
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   GATE_LAWN_WATERING_RULE=true (lawn report watering instruction: frozen per-product watering rules drive the aftercare writer, the top-of-report banner payload and the weekly-plan "not before" overlay; sets evidenceSource product_instruction so the existing verdict table finally resolves hold / credit; ships DARK, read at call time via lawnWateringRuleLive(); off = byte-identical report payload)
- *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
- *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the program focuses on this month, built from server/config/protocols.json months (lawn-program-line.js), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
+ *   GATE_LAWN_WATERING_FORECAST=true (lawn watering banner forecast + rain close-out, needs GATE_LAWN_WATERING_RULE: at completion a water-in instruction whose property forecast says at least the water-in amount of rain falls inside its window freezes ONE conditional sentence (instruction.forecast, in INCHES, never a probability) that the LIVE web banner shows beside the unchanged lines; on the live view only, radar-measured (MRMS) rain on whole days inside the window that reaches the water-in amount closes the banner with a measured-inches line. Holds never get either. The PDF, email, watering text, hero and assistant never change; ships DARK, read at call time via lawnWateringForecastLive(); off = byte-identical payload)
+ *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the lawn program v13 focuses on this month (lawn-program-line.js PROGRAM_LINES_V13, claims proven against server/config/lawn-protocol-v13.json), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note), and only a visit whose plan resolved the staged v13 version with GATE_LAWN_V13 on: a visit with no recorded version or an older one keeps the old note (the retired per-grass sentences were removed, so no past report is rewritten); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
+ *   GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES=true (lawn report: no Lawn Coverage section when the visit's coverage zones were only the schematic defaults (no technician-marked zone) AT COMPLETION; owner 2026-10-06; the verdict is frozen once at completion by the lawn write gate into service_records.structured_notes.lawnCoverageVerdict { v: 1, defaultsOnly, frozenAt }, first writer wins, only while the gate is live and the zone / geometry reads succeeded; a render and the PDF key (':covhide=1' only for a frozen defaultsOnly true) read that frozen value and never the live zone rows; a visit with no frozen verdict, such as an older visit, renders exactly as with the gate off; ships DARK, read at call time via lawnCoverageHideDefaultZonesLive(); off = byte-identical payload)
+ *   GATE_LAWN_PROGRAM_DETAIL=true (lawn report: under the v13 month sentence, the month's "Why now" line from lawn-program-line.js PROGRAM_DETAIL_V13: seasonal facts and the step by category, no product names, rates, watering advice or outcome timing; needs GATE_LAWN_EXPECTATIONS; strict 'true' only; owner 2026-10-06; ships DARK, read at call time via lawnProgramDetailLive(); off = byte-identical payload)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
- *   GATE_LAWN_REPORT_COPY_V6=true (lawn report v6 copy: FIXED sentences from the visit's facts, no model (owner 2026-10-02): the lead's headline is the snapshot status sentence, "what we applied" the deterministic treatment summary (never the AI narrative), "watching" names the other watched issues, and "what to expect" prints owner-approved expectation rows word for word; the fields freeze into service_records.structured_notes.lawnCopyV6[assessmentId], first writer wins; while live, model-written lawn copy states no result timing (P15): the lawn technician report writer gets a RESULT TIMING rule and generate-report rejects forward timing, and the lawn "What we applied today" paragraph (treatment_narrative_v6_lawn_no_timing) and its fallback carry none; timing reaches the customer only through "What to expect"; while live the lawn report's next-visit line and the copy's by-next-visit sentence both read the next lawn booking at the report's own property (lawnNextVisitAtProperty), never another of the customer's homes; REQUIRES GATE_LAWN_REPORT_LEAD to be live too (the fields only render through reportV2.lead); lawn only; supersedes env LAWN_REPORT_V2_NARRATIVE while live; ships DARK, read at call time via lawnReportCopyV6Live(); off = byte-identical report payload, render and PDF)
+ *   GATE_LAWN_RAINFAST_WATCH=true (lawn rainfast breach watch, P31, needs GATE_LAWN_VISIT_MEMORY: on the LIVE web view only, once a product's stated rainfast interval (products_catalog.rainfast_minutes; no interval = never judged) has ended plus an hour, the property's hourly weather-model rain (Open-Meteo, past hours; not a gauge) is read for the whole hours inside [completion, completion + interval]; a total of at least 0.25 inch records ONE retreatCheck item on the frozen visit memory (first writer wins, compare-and-set, never creates an entry) and adds ONE fixed sentence to the lead's Watching line; any missing hour, failed fetch or missing completion time = no item and no sentence; the PDF, static builds, SMS and email never change; sends nothing to a customer; ships DARK, read at call time via lawnRainfastWatchLive(); off = byte-identical payload, no fetch, no write)
  *   GATE_LAWN_DIAGNOSTIC_EVIDENCE=true (prospect lawn report "why we think so": GET /api/public/lawn-diagnostic/:token adds a `basis` line ("Based on 4 photos.", plus a fixed note when photo quality limited the read) and, per finding, `evidence` { why, certainty, confirm }: what the condition looks like, how sure the read is, and the on-site check that would settle it. Every string is fixed copy in lawn-diagnostic-evidence.js selected by the finding's allowlisted condition label and clamped confidence; the stored observed_evidence / inferred_context / confirmation_step free text is still never published. One extra read (a photo count) per report view while live. The lawn-assessment teaser is unchanged. Ships DARK, read at call time via lawnDiagnosticEvidenceLive(); off = byte-identical payload and page)
- *   GATE_LAWN_SINCE_LAST=true (lawn report "Since your last visit" block: the lead (GATE_LAWN_REPORT_LEAD) gains reportV2.lead.sinceLast { priorDate, lines } and the web report prints it above "What we applied today": what the last visit applied, the overall direction and at most two per-treatment states from the progress engine, and which watched topics are still on today's list. Every sentence is a fixed string selected by key in lawn-since-last-copy.js (no model, no number, no timing word), and a state is spoken only for an owner-approved expectation row; photos that cannot support a comparison say nothing. Needs GATE_LAWN_VISIT_MEMORY (the memory it reads) and GATE_LAWN_REPORT_LEAD (the block it renders in); with either off it does nothing. Live web view only (mode 'live'): PDF and static builds never carry the key, so the PDF and its cache key are unchanged. Ships DARK, read at call time via lawnSinceLastLive(); off = byte-identical report payload and render)
+ *   GATE_LAWN_SINCE_LAST=true (lawn report "Since your last visit" block: the lead gains reportV2.lead.sinceLast { priorDate, lines } and the web report prints it above "What we applied today": what the last visit applied, the overall direction and at most two per-treatment states from the progress engine, and which watched topics are still on today's list. Every sentence is a fixed string selected by key in lawn-since-last-copy.js (no model, no number, no timing word), and a state is spoken only for an owner-approved expectation row; photos that cannot support a comparison say nothing. Needs GATE_LAWN_VISIT_MEMORY (the memory it reads); with it off it does nothing. Live web view only (mode 'live'): PDF and static builds never carry the key, so the PDF and its cache key are unchanged. Ships DARK, read at call time via lawnSinceLastLive(); off = byte-identical report payload and render)
+ *   GATE_LAWN_SHOT_LIST=true (lawn visit photo shot list, lawn report rebuild P18: the admin Schedule lawn photo step shows eight named shots (front, back, side, canopy close-up, blade and crown, hot edge, shadiest turf, problem area) each with a one-line instruction, accepts up to 8 photos instead of 3, tags every photo with its shot key as the recorded zone, and shows a soft hint when the 4-photo minimum (front, back or side, close-up, blade and crown) is not covered yet; NOTHING blocks the technician (owner: lawn visits are quick jobs). Server side: POST /admin/lawn-assessment/assess accepts the eight shot keys and up to 8 photos (one per shot, two problem-area photos), the legacy per-photo merge weights area scores by shot (detail shots count for nothing), the report's lead photo prefers the front shot, the report payload carries up to 8 photos with a zoneLabel each and its cache signature moves with the gate. The client learns the state from GET /admin/lawn-assessment/service/:id (`shotListEnabled`). Needs no migration. Ships DARK, read at call time via gateEnvValue('GATE_LAWN_SHOT_LIST'); off = byte-identical request contract, UI, report payload and PDF)
+ *   GATE_LAWN_REPORT_PHOTO_SET=true (lawn report rebuild P23: for a lawn visit captured under the photo shot list (the `photoVocabulary: 'shot_list_v1'` marker stored beside the assessment photos), the customer report shows the visit's photos as a labeled set in shot order (Front yard, Back yard, Close-up and so on, fixed customer labels from shared/lawn-photo-shots.json) in place of the swipe-one-at-a-time strip (web) and the quality-ordered gallery (PDF); each photo URL is signed fresh on every view and never frozen. A visit with no marker keeps the strip it always had. Needs no migration. Ships DARK, read at call time via lawnReportPhotoSetLive(); off = byte-identical report payload and PDF)
+ *   GATE_LAWN_REPORT_PHOTO_FINDINGS=true (lawn report rebuild P23b: a short "What the photos showed" block on the lawn report, built only from the technician-reviewed, kept findings of the visit's current confirmed assessment run (lawn_assessment_runs.reviewed_findings), symptom labels only, each with the thumbnails it cites and, where the technician marked it undeterminable from the photos, one fixed sentence naming the shot that would confirm it; it prints only while the report's own category card for that topic shows a concern. Exists only when BOTH this gate and GATE_LAWN_REPORT_PHOTO_SET are on and the visit has a photo set. Needs no migration. Ships DARK, read at call time via lawnReportPhotoFindingsLive(); off = no run read, and byte-identical report payload, PDF cache key and PDF)
+ *   GATE_LAWN_LIGHTING=true (lawn lighting-aware color, owner 2026-10-04: sun, shade and cloud change a lawn's color in a photo, so (1) the lawn visit assessment reads each photo's light (full sun, overcast, open shade, mixed sun and shade, low light, unknown; hard shadows yes/no/unknown) under its own prompt version (lawn-visit-v1-lighting, or lawn-visit-v1-shot-list-lighting for a shot-list capture), tells the model to judge color from turf in even light and never to read shadowed turf as thinner or darker, and stores the read beside each photo's quality in the run's photo_quality (never shown to the technician, no new technician step, no new weather call); (2) the paired-photo recheck reads under lawn-paired-recheck-v3, which is told each pair's light and drops color from any pair whose two photos are not in compatible light; (3) the report's "Since your last visit" lines (live web view only) say nothing about color unless BOTH visits have a known, compatible light read (full sun with full sun, or overcast and open shade with each other), a color move under 8 points is no change (a "behind" resting on it is withheld), and the overall line is kept only when thickness, weeds and stress damage agree with it, so color alone never produces up or down (the gate only ever removes a gate-off sentence, never prints a different one); (4) the report writer's prior-visit score line drops the color delta unless the light is compatible. A visit with no light read (every visit before this gate) is unknown, so its color is never compared. (5) the report's "Color & Vigor" trend, and the portal's Color / Nutrients since-first-visit comparison, are left out unless the latest visit and the one before are in known, compatible light. Needs GATE_LAWN_VISIT_ASSESSMENT also on (the light read comes only from that assessment; the reader reports off without it). Needs no migration. Ships DARK, read at call time via lawnLightingLive(); off = byte-identical prompt, schema, stored run, since-last lines, trends and recheck prompt)
+ *   GATE_LAWN_TECH_PARAGRAPH=true (lawn report "From your technician" paragraph, owner 2026-10-05; FIXED SENTENCES since 2026-10-06: every word comes from the owner-approved LAWN_SENTENCES in lawn-tech-paragraph.js ("Our technician saw {condition} in the {place}.", "There may be early signs of {label}; we will keep an eye on it.", "Today we applied {products}."); at most ONE model call per lawn visit extracts closed-list conditions and places with the technician's exact words and a seenToday judgment, and code keeps an item only when the quote is word for word in one note sentence naming the condition (the model judges, the code verifies, no word lists); the entry { text, slots, v: 2 } freezes first-writer-wins in structured_notes.lawnTechParagraph[assessmentId], is re-checked against its slots at read time and rides reportV2.lead.techParagraph on the web report and the PDF; lane lawn_tech_paragraph on TEXT_POLICIES.report; lawn only; read at call time via lawnTechParagraphLive(); off = no model call, byte-identical payload, PDF and PDF cache key)
+ *   GATE_LAWN_COST_PLUS_LIST=true (residential recurring lawn care list price = annual cost / (1 - 0.45), never below the market table, at least $55 a visit, from the v13 program product cost plus 10 more labor minutes a visit; WaveGuard and manual discounts on the lawn line stop at a 35% margin; owner 2026-10-09; strict opt-in via gateEnvValue, read at CALL time in priceLawnCare and generateEstimate; a saved estimate replays as it was priced (pricingMetadata.lawnCostPlusList); the one-time lawn anchor and commercial lawn stay on the market table; ships DARK, off = byte-identical prices)
+ *   GATE_LAWN_VISIT_SUMMARY_V2=true (PROTOTYPE ONLY: lawn report Visit Summary, FIXED SENTENCES, NO MODEL (owner 2026-10-07). The gate controls ONLY the freeze at completion: at completion code writes up to 5 sentences from the visit's structured facts, every word from closed phrase tables (the product CATEGORIES applied, never names or rates; the report's area reads with strong and healthy kept distinct; technician-kept PHOTO findings (the report's photo-finding selector; added details never count) by their own symptom label, hedged when the read is low or unknown confidence or undeterminable from the photos, and only while the report's own card for that topic shows a concern; one fixed results sentence and the next-visit topics, for a recurring plan visit with a scheduled next visit at this property only). There is NO watering sentence (the report's watering banner owns it). The technician note, the v13 program line, the headline and rain are not inputs. The frozen entry is { text, slots } in structured_notes.lawnVisitSummary[assessmentId], first writer wins. A RENDER shows any whole frozen summary whatever the gate says (it depends only on the record, so every pod and browser agrees during a rollout): the text must equal what the current tables render from the slots and pass the screens, else the report keeps the generic customerRecap. It replaces the lawn report's Visit Summary text (summarySource 'lawn_visit_summary'); the completion SMS keeps the short customerRecap; lawn only; customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via lawnVisitSummaryV2Live(). Ships DARK; off = no new summaries are frozen and nothing else changes (rollback = unset the variable: summaries already frozen stay, because they are true statements))
+ *   GATE_LAWN_REPORT_COPY_FIXES=true (lawn report copy fixes, owner 2026-10-08/09, six customer-copy defects: (1) no active-ingredient or catalog product name in any lawn sentence: the "What we applied today" sentence (buildCategoryTreatmentSummary) and the "From your technician" products sentence name the product CATEGORY in the Visit Summary phrase table (lawn-visit-summary.js APPLIED_PHRASES: a feeding, weed control, insect control, disease protection, a pre-emergent weed barrier), the AI treatment narrative (which writes actives) is not used for a lawn report, names stay on the product cards; the tech paragraph and the v6 "what we applied" field FREEZE the category form only for visits frozen while this is live, and every older frozen entry still renders word for word; (2) the seasonal color lines (cross-season note under the before/after slider, the trend footnote and the shoulder/dormant season note) print only when the visit month is in the cool season the report's own seasonality module defines (lawn-seasonality.js getSeason: shoulder and dormant) AND the overall score did not rise against the prior visit or the comparison base; no known score = no line; (3) the score card "Weed Pressure" reads "Weed Cleanliness" (same Strong / Healthy / Watch / Needs attention words, same scale, so "Strong" cannot read as strong weeds); (4) a lawn report never prints the pest program's re-service footer sentence, its "Book a free re-service" link or the legacy pest re-service header; (5) the Water Gap and Mowing Height charts are not rendered (web and PDF, no heading left) when their newest point is more than 45 days before the visit date; (6) one fixed sentence under the water Target range names the source of the figure (the weather in your area for the week ending on the visit, the grass type when known, the time of year; or the usual seasonal need when no weather figure existed); no line when the target came from the area snapshot. The target NUMBER never changes. Lawn only (tree & shrub and pest payloads, renders and PDFs unchanged). No model call. Customer copy, so strict opt-in: exactly 'true', read at call time via lawnReportCopyFixesLive(). Ships DARK; off = byte-identical payload, render, PDF and PDF cache key)
+ *   GATE_LAWN_REPORT_LAYOUT=true (lawn report layout, owner 2026-10-08/09, LIVE WEB VIEW only: the lawn report is ordered for a phone and trimmed, from data the report already carries. Order: done and the next lawn visit, one "Your part" card (the re-entry sentence the re-entry builder returns, timed or condition; the watering banner with its label mow hold, printed once; the lead's own homeowner step; or one fixed "nothing for you to do" sentence), what we did and why now, photos and findings, the score (collapsed), what to expect and when to call, water this week (with one fixed mowing-height sentence from the Mowing Height table's row for the lawn's grass; no row = no sentence), rate us, products (collapsed). Each fact prints once, and only when the block that carries it is on the page and says the same thing: a finding's next step loses only the sentences that are the watering banner's own, an applied sentence is left out of the technician paragraph or Visit Summary only when the lead's applied sentence says all of it, a Watching line that only repeats the findings is dropped, the lead's next-visit date is dropped only when Your plan prints that lawn visit. Hidden, not deleted: the Visit Timeline, the re-entry card (its sentence and pet advisory are in Your part), the Weather call block, Your documents, the standard lead card (split into the sections above). Fixed sentences only (shared/lawn-report-layout-copy.json), no model. A report with no lead is the standard page. The server adds payload key lawnLayout while live; the PDF, static and SMS renders, and the PDF cache key never change. Lawn only (tree & shrub and pest untouched). Customer copy, so strict opt-in: exactly 'true', read at call time via lawnReportLayoutLive(). Ships DARK; off = byte-identical payload, render, PDF and PDF cache key)
+ *   GATE_LAWN_REPORT_POLISH=true (lawn report polish, owner 2026-10-09, three changes to the customer lawn report: (1) the Water card's THIRD state: a sprinkler schedule is on file (run minutes and/or watering days) but weekly inches are not and cannot honestly be derived (mixed head types, drip only, a missing piece, an implausible total): the Irrigation row prints what is on file in plain words ("45 min, Mondays"), the confidence line says weekly inches are not on file, no Total prints, and the call to action asks for the weekly inches; never "Not on file" when a schedule is on file. profileMissing stays true for every calculation (balance, status, weekly plan, Ask Waves, weekly email): only the card's presentation changes. A number is derived ONLY for exactly one turf head type (drip ignored) and then prints the portal's basis line; the derivation reads ONE rate table, the watering banner's (spray 15 min, rotor 40 min per quarter inch), from a constant the package exports. Consumers outside the lawn report (portal preview, weekly irrigation email, schedule-move guard, weekly plan) keep the package's own table and rules. (2) One label line per product card: at completion the decision is frozen with the lawn report facts (lawnReportFacts.labelLines, first writer wins; it freezes only while GATE_LAWN_REPORT_FACTS is also live, one helper lawnReportPolishFreezeLive(); the Water card and status card parts need no facts gate). (3) The longer-cycles line on the Water card: one fixed sentence advising fewer, longer runs on the allowed watering days, printed only for a schedule of 3 or more watering days on file (frozen at completion in lawnReportFacts.waterAdvice, same freeze condition), no new sod still establishing, no watering banner, weekly plan or after-visit watering note on the visit: a catalog precaution sentence whose parsed kind (until dry, or watered in and dry) is no stricter than the re-entry line's kind is dropped; a sentence the parser cannot read is kept; a record with no frozen decision renders as before. The status card's keep-off line no longer prints under a result that is not the condition sentence, and the layout's hero prints the lead's status headline instead of the walk-on rule that Your part states. Lawn only. Customer copy, so strict opt-in: exactly 'true', read at call time via lawnReportPolishLive(). The server adds payload key lawnPolish while live and the PDF key part ':polish=1'. Ships DARK; off = byte-identical payload, render, PDF and PDF cache key)
+ *   GATE_LAWN_REPORT_STAGE1_FIXES=true (lawn report stage 1 fixes, owner 2026-10-09, five small fixes found on a real lawn report: (1) a spot insecticide row whose recorded target is a known pest (chinch bugs; armyworms and sod webworms read as caterpillars) changes the damage finding (a product target is not a sighting: only with a frozen technician or sure photo tie for the pest does it read "<Pest> damage in one area - treated today" with the Visit Summary's "Your technician found <pest> and treated that spot today."; with the target alone it reads "<Pest> spot treated today" with the product card's purpose sentence) and, when the spot area is recorded, "Applied <product> to about N sq ft." (the product category phrase instead of the name while GATE_LAWN_REPORT_COPY_FIXES is live); (2) "What to expect" prints a second line after the weed line, from sentences that already exist: the curative insecticide row when a spot insecticide was applied (none for a spot insecticide with no target or a preventive-locked product), else the fertilizer row, kept inside the existing word caps, for a visit whose copy freezes while this is live; (3) a frozen technician tip that asks the customer to add irrigation settings is left off the report when a sprinkler schedule is on file (needs GATE_LAWN_REPORT_POLISH for the runtime-only state); (4) the web page leaves out the "What we applied today" card only when it IS the Today's result sentence or that sentence plus the known targeting / surfactant clause; the PDF and the Visit Summary are unchanged; (5) the web hero leaves out the customer's email and phone; the PDF keeps every contact field. Lawn only. Customer copy, so strict opt-in: exactly 'true', read at call time via lawnReportStage1FixesLive(). The server adds payload key lawnStage1Fixes while live and the PDF key part ':s1=1'. Ships DARK; unsetting it is NOT fully byte-identical: a second "What to expect" line already frozen into a record's v6 copy keeps replaying, and its marker keeps PDF key part ':s1f=1' on that record; every other change reverts at once)
+ *   GATE_LAWN_WATER_RAIN=true (lawn report "rain card", owner 2026-10-09: the Water This Week card is honest after rain. (1) The card STATUS counts each day's rain at most EVENT_DEPTH_MAX_INCHES (0.75 in, the package's per-event depth), summed over the card's 7 days; the Rain row still shows the measured total, the capped number is never shown, and with only a weekly total (no 7-day daily series) nothing is capped. No look-back beyond the 7 days; the Monday plan's carry is untouched. (2) New status "rain covered" (pill "Rain covered it"): the week's measured rain alone is at least the week's target, with or without a sprinkler schedule on file; one fixed sentence says to leave the sprinklers off until the grass shows the wilt signs, then run one full cycle on an allowed watering day. (3) The deficit and surplus card sentences are replaced (no result promise, no "add a few minutes to each run"; the amount per run stays fixed). (4) Once per rain-covered week, only when the property's rain sensor field is not true, one line about the Florida rain shutoff law. All of it is suppressed (today's card) when the visit carries a post-treatment hold or water-in instruction, new sod is still establishing, or the schedule is withheld after a move. Eligibility is decided once at completion and frozen with the report facts (lawnReportFacts.waterAdvice, version 2, first writer wins; it freezes only while GATE_LAWN_REPORT_FACTS is also live, one helper lawnWaterRainFreezeLive()); a record without it renders as today. Lawn only. Strict opt-in: exactly 'true', read at call time via lawnWaterRainLive(). Ships DARK; off = byte-identical payload, render, PDF and PDF cache key)
+ *   GATE_LAWN_WATER_IN_RAIN=true (lawn report water-in after rain, owner 2026-10-09: a granular water-in banner counts the rain that fell since the visit. READ TIME ONLY, never frozen: on a replay of the frozen watering instruction (web /data and the PDF), when measured rain from completion to now (capped at the water-in deadline; Open-Meteo hourly, whole hours, a lower bound, the reader the rainfast watch uses) reaches the water-in amount, the banner state becomes "water_in_by_rain" and its lines become "Rain since your visit has watered today's treatment in." and "No extra sprinkler run is needed for it." (a hold line, if the visit had one, stays above them). The amount is parsed from the product's catalog precaution ("about 1/2 inch"), 0.5 inch when none is parseable. Before that, a pre-amount-only instruction that printed generic spray AND rotor minutes reads "...by Sat 9 AM: about 1/2 inch - around 30 minutes on spray heads or 80 on rotors." from the same rate table. The completion text is built from the frozen instruction and never changes. The PDF key gains ':wir=' only while the gate is live and the visit has a frozen water-in instruction. Strict opt-in: exactly 'true', read at call time via lawnWaterInRainLive(). Ships DARK; off = byte-identical payload, render, PDF and PDF cache key)
+ *   GATE_IRRIGATION_OWNER_RATES=true (one sprinkler head rate table for every reader, owner 2026-10-09 "build it": the owner's table, spray 15 and rotor 40 minutes per quarter inch (1.0 and 0.375 in/hr), replaces the package's UF/IFAS-typical table (spray 1.5, rotor 0.5 in/hr) in the Monday week plan (default-rate minutes per run), the weekly irrigation email (derived weekly inches and its provenance sentence), the schedule-move guard, the lawn report's derived irrigation figure and the portal's "About N inches a week" line, so the lawn report banner and the Monday email stop disagreeing (30 versus 20 minutes on spray for half an inch). The generic "½ to ¾ inch - about N minutes on spray zones, M on rotor zones" sentences in the Monday email and report card are computed from the same table (20 and 60 off, 30 and 80 on). With the gate on the portal line and the email's provenance sentence say "typical head rates" without the University of Florida attribution. A customer's MEASURED rate (typed weekly inches with a runtime) still outranks any table. The packages/irrigation-runtime package never reads the environment: the server picks the table in server/services/irrigation-rates.js and the portal receives the choice as irrigationOwnerRates in GET /api/property/preferences (key present only while the gate is live). Lawn report banner and water card output is unchanged (they already use the owner table). No migration, no template change, sends nothing. Customer copy, so strict opt-in: exactly 'true', read at call time via irrigationOwnerRatesLive() in server/services/irrigation-rates.js. Freeze rule: the gate is read only when a NEW week-plan decision is made; the snapshot records decisionInputs.rateTable ('owner' only, so a gate-off snapshot is unchanged) and replay plus every renderer of a stored plan read that key, a row without it being the package table. The schedule-move guard takes the same table as a required argument: a new decision reads the gate once for guard and decision together, replay passes the stored table. Ships DARK; off = byte-identical emails, week plan, portal response and lawn report)
+ *   GATE_TS_TECH_PARAGRAPH=true (tree & shrub report "From your technician" paragraph, owner 2026-10-05, go-ahead; FIXED SENTENCES: the AI picks facts and code writes every word. At completion at most ONE model call (lane ts_tech_paragraph on TEXT_POLICIES.report, only when the technician left a note) extracts up to 3 closed-list { condition, plant } ids from the note; code verifies each against the note (the model's seenToday judgment must be true and its quote must be the technician's exact words naming the condition; plant only when the quote names it) and renders only the sentences in the TS_SENTENCES constant, plus deterministic lines from the products applied, low-confidence and confirmed kept photo findings, and the technician's own Excellent/Good rating; none of the model's text is printed. The watch list, the last visit, the report headline and product ingredients are not inputs; palm-banned terms (Ganoderma, conk, lethal bronzing, fusarium, crown, spear leaf, newest fronds) can never render. The survivor freezes first-writer-wins in structured_notes.treeShrubTechParagraph[assessmentId] as { text, slots } (never regenerated at render; at read time the text must equal render(slots) under the current templates; a failed or slow call freezes the deterministic lines only) and rides reportV2.techParagraph on the web report and the PDF; REQUIRES GATE_TS_TECH_FINDINGS_COPY (the technician's hide / confirm / edit decisions must govern the report the paragraph sits in); tree & shrub only; customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via tsTechParagraphLive(). Ships DARK; off = no model call, byte-identical payload, PDF and PDF cache key)
+ *   GATE_LAWN_SPOT_RULES=true (lawn Fast Complete sheet weed-spot rules, owner 2026-10-08: the context's plannedProducts.weedMix groups the weed-spray add-ons the protocol rows tie together (the lead others name in gates.tankMixWith, its tank-mix members, and the replacement whose gates.trigger is celsius_annual_cap_reached) into ONE "Weed spots" entry; the lead is offered while the plan's own limit reader (v13VisitLimits) shows it under its yearly cap, the replacement in its place once it is at the cap, and neither once both are at the cap; the surfactant member is left out when the property's current air temperature (FAWN, 2.5 s bound, any failure = unknown) is 90 F or hotter, added with a note when the temperature is unknown; the context also carries spotRules: true so the sheet asks the technician for the area treated on every spot-treatment row (quick sizes or a typed number, one shared area for the weed mix) and holds Complete until a spot row has an area or a typed amount; the area rides the /complete product row as areaValue/areaUnit sqft; technician sheet only, no customer message, no public payload; ships DARK, read at call time via lawnSpotRulesLive(); off = byte-identical context and sheet)
+ *   GATE_LAWN_REPORT_FACTS=true (lawn report facts frozen at completion, owner 2026-10-08: three changes to the customer lawn report, each DECIDED ONCE at completion by the lawn write gate into service_records.structured_notes.lawnReportFacts { v: 1, reentry, productUse, ties, frozenAt } (first writer wins, before the first report build) and rendered only from the record. (1) Ready to re-enter is a CONDITION from the products applied, not a 30 minute clock: the visit's rule is the strictest of its products (dry < watered_in_and_dry; a product with no approved frozen facts, a label that is not plain 'until dry' (a stored hours figure, unreadable or no text), or no usable method marks the visit 'default' and keeps today's clock, so the condition is never weaker than the report's label floor); a lawn record carrying a real rule prints fixed sentences with no clock time and no countdown. (2) A spot product card says where it was used ('Spot treatment, about 250 sq ft' / 'Spot treatment'); whole-lawn cards unchanged. (3) A photo finding is tied to what was applied in fixed sentences: the Visit Summary freezes version 4 with the tie facts (v3 entries still render as they were frozen), the technician's chinch / caterpillar / fungus tap is a finding, and the tied product's 'What to expect' line reads curative. The tie part freezes only while GATE_LAWN_VISIT_SUMMARY_V2 is also live (lawnReportTiesLive()); the re-entry condition and the spot text need neither. The gate controls ONLY the freeze; a render and the PDF key (':rf=') read what the record carries, whatever the gate says, so a record without the block renders exactly as before. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReportFactsLive(). Ships DARK; off = identical frozen notes and payload)
+ *   GATE_LAWN_TREATMENT_GUIDE=true (lawn Fast Complete "Suggested from this lawn" cards, owner 2026-10-08, "build the guide": once the technician has confirmed the lawn assessment, the sheet shows one card per photo finding from a FIXED rule table in lawn-treatment-guide.js (no model call): weeds (10% coverage or more), fungus, chinch bugs and caterpillars (moderate or severe insect damage; the chinch card April through September) and dry spots, each with its check to do first and a one-tap product from the month's own add-ons; the technician taps every product, nothing is added by itself. A standing "Chinch bugs found" entry is in the optional list every month; Arena 50 WDG, then Atticus Talak 7.9 F at the Arena yearly cap, both resolved from the v13 program's staged rows. The context carries `treatmentGuide`, GET /:serviceId/lawn-fast/treatment-guide answers the cards, and the completion freezes which cards showed and what the technician did in structured_notes.lawnTreatmentGuide (never read by a customer or public path). Technician sheet only: no customer text, no report or public payload change. Strict opt-in: exactly 'true' in every environment, read at call time via lawnTreatmentGuideLive(), and live only while GATE_LAWN_SPOT_RULES and GATE_LAWN_V13 are also live (the weed card is the spot-rules Weed spots entry, and every product is read from the staged v13 rows). Ships DARK; off = the context, the routes and the sheet are byte-identical to before.)
+ *   GATE_LAWN_TROUBLE_AREAS=true (lawn Fast Complete places and trouble areas, owner 2026-10-09, "start building these"; server/services/lawn-trouble-areas.js: every spot-treatment row on the sheet also asks WHERE on the lawn in one tap from a fixed closed list (Front, Back, Left side, Right side); the place rides the /complete product row as areaPlace and is stored with the completion's product record (service_products.treated_place and the application ledger's treated_place); a per-property store of trouble areas (lawn_trouble_areas: place, type, first and last seen, active or cleared) is written at completion from spot rows that carry a place and read by the context, which shows the technician a compact "Known trouble areas" line, offers a known area as the default place for the matching row and lets the technician clear one (POST /:serviceId/lawn-fast/trouble-areas/:areaId/clear); the v13 yearly count and amount caps and the Arena 56-day interval are judged per (property, place) for spot rows that carry a place, the weed mix and the chinch ladder carry a decision per place (weedMix.byPlace, chinch.byPlace, troubleAreas.blocked), and the /complete preflight refuses a spot row whose place the cap forbids (400 lawn_place_limit) or that has no place (400 lawn_place_required); a ledger row with no place counts against every place of that lawn; whole-lawn rows keep the per-lawn logic; no limit value is added or changed; a guided pick (fungicide, caterpillar, dry spot) is held back only when no place permits it, and the weeds and chinch cards add a place's own set with one tap on the place; known limit: one place per product per visit; technician and office surfaces only: no customer text, no report or public payload change. Strict opt-in: exactly 'true' in every environment, read at call time via lawnTroubleAreasLive(), and live only while GATE_LAWN_SPOT_RULES, GATE_LAWN_V13 and GATE_LAWN_TREATMENT_GUIDE are also live (the guide is live in production; without it the sheet has no take-all or chinch ids). Ships DARK; off = the context, the routes, the sheet, the limits and the completion are byte-identical to before.)
+ *   GATE_LAWN_NOV_LARGE_PATCH_N=true (lawn v13 November visit, owner 2026-10-09; UF/IFAS Large Patch SS-PLP-5: reduce nitrogen, slow-release, November to May; server/services/waveguard-plan-engine.js visitNutrientTargets: when the lawn has an ACTIVE mapped trouble area of type fungus (lawn_trouble_areas; take-all does not count), the plan sizes the November nitrogen bag for 0.5 lb N per 1,000 sq ft instead of the visit's 0.75 lb N (LESCO 24-0-11: 2.1 lb per 1,000 instead of 3.1) and the line carries the note "Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it."; the one reduced target reaches the plan, the tank sheet, the completion defaults, the yearly limit check and the Fast Complete planned amount; never raises a target; November only (December's 10-0-22 bag is already 0.45 lb N); nitrogen only, potassium untouched; the rule is code config (server/config/lawn-v13-nitrogen-targets.js), no migration. Strict opt-in: exactly 'true', read at call time via lawnNovLargePatchNLive(), and live only while GATE_LAWN_TROUBLE_AREAS (which needs the v13 program) is live, so a failed or empty trouble-area read keeps the normal target. Ships DARK; off = the plan, the tank sheet and the Fast Complete planned amounts are byte-identical to before.)
+ *   GATE_LAWN_NEW_SOD_NOTE=true (lawn Fast Complete sheet applies the new-sod holds, owner 2026-10-09: for a visit at the home that has a sod record (property_preferences sod_laid_on), the context carries newSod: a banner (day N, whole lawn or the named part, the held classes, a large patch watch note), the product lines the holds cover (fertilizer bag, weed killer, pre-emergent, Tetrino, Dylox, Gravex) marked held with a plain reason and left off the sheet (the technician can still add one by hand, with a warning), a part-of-lawn record keeps the lines on with a skip-the-sod note (and a keep-fertilizer-off note through day 30), the LESCO 24-0-11 bag (2.5 lb per 1,000 in October, 2.1 lb in April) in place of the pre-emergent fertilizer bag while the pre-emergent hold is on, and a Sod mowed twice tick (POST /:serviceId/lawn-fast/sod-rooted) that saves sod_rooted_on once 30 days have passed (never for a visit dated after today), the hold-adjusted context goes only to a sheet that sends sodAware=1, and, when the holds take EVERY planned product off a whole-lawn visit, the sheet may be completed with no product (the context flags noProductAllowed with the one-sentence note; /complete re-judges an empty list that carries that note by rebuilding the context: 409 lawn_sod_no_product_stale when it disagrees); rules come from lawn-sod-holds.js; technician sheet only, no customer message; ships DARK, read at call time via lawnNewSodNoteLive(); off = byte-identical context and sheet)
+ *   GATE_LAWN_NEW_SOD_REPORT_CARD=true (lawn web report "New sod" card, owner 2026-10-09: when a lawn Fast Complete completion at a home with an active sod hold kept a PLANNED product off the visit (fertilizer, weed killer, pre-emergent or Dylox), the completion transaction freezes structured_notes.lawnNewSod { v: 1, visitDay, sodLaidOn, covers, planRan, held: [{ kind, until, rootedCheck }], swap } (first writer wins, read on the transaction; a failed read freezes nothing and never fails the visit), and the web report adds payload key lawnNewSod, a card built from the frozen block alone by lawn-sod-report-card.js (title, what was held and when each resumes, the bag swap sentence, a fixed close); the page never re-reads the live sod record. Needs GATE_LAWN_NEW_SOD_NOTE as well (fails closed). Web report only: no PDF, SMS or email change, no model call, no migration. Strict opt-in: exactly 'true', read at call time via lawnNewSodReportCardLive(). Ships DARK; off = no freeze, byte-identical payload and page)
+ *   GATE_LAWN_SPOT_TARGET=true (lawn Fast Complete target on a spot fungicide or insecticide row, owner 2026-10-09; server/services/lawn-spot-target.js: the context carries spotTargets (the closed lists of the expectations engine's own target table), the sheet shows one optional "Treating (optional)" choice on a spot fungicide or insecticide row and a "Recorded for:" line, with no tap, on a row a chinch find opened, and /complete stores service_products.targets for those rows from the SERVER's verdict (the trouble-area type confirmed by the staged sets decides; a tag is kept only when it stands for that same type). A stored target changes live customer text with existing sentences: the product's "What to expect" row reads curative and the product card's purpose line names the recorded target. Strict opt-in: exactly 'true' in every environment, read at call time via lawnSpotTargetLive(), and live only while GATE_LAWN_TREATMENT_GUIDE is also live. Ships DARK; off = no spotTargets key, no control, the sheet sends targets: [] and /complete stores exactly what it stored before.)
+ *   GATE_LAWN_PHOTO_LABEL_PICK=true (lawn Fast Complete photo label, owner 2026-10-09; server/services/lawn-photo-shots.js: each filled photo slot on the lawn sheet gets a small chooser, "Shown to the customer as", over the shot list's customer wording, so a close-up the technician put in the Shaded area slot can read Close-up on the report. The chosen shot key rides with the photo to POST /admin/lawn-assessment/assess, is stored beside the photo in lawn_assessments.photos (no migration), and the report (web strip, photo set and PDF) prints that label instead of the slot's. The slot key itself (the recorded zone, the model's shot guide, pairing, hero order) never changes. Strict opt-in: exactly 'true' in every environment, read at call time via lawnPhotoLabelPickLive(). Ships DARK; off = byte-identical sheet, /assess payload, report payload, PDF and PDF cache key.)
+ *   GATE_LAWN_MIX_HELP=true (lawn Fast Complete mix help, owner 2026-10-09; server/services/lawn-mix-help.js: the context's plannedProducts.mixHelp gives each spot-spray product of the visit's program (and the Weed spots entry) the amount for a full tank of 1, 2 or 4 gallons at the STAGED row's own rate, rate unit and carrier volume (gallons per 1,000 sq ft), in units a technician can measure (oz by weight to 2 decimals and grams for dry products, fl oz and mL for liquids), the surfactant's amount from its staged concentration, and the mixing order the catalog's mixing_order_category already states; a row with no carrier on file shows only its per-1,000 sq ft dose and says the carrier is not on file; the Celsius WG label's own tank-stability lines are shown on the Weed spots entry, matched by EPA registration number; a spray spot row can take GALLONS SPRAYED instead of an area: /complete converts them with the product's staged carrier (never the sheet's) to the recorded spot area, which then flows to the per-place limits, the ledger and the customer card exactly as a typed area does, and marks the row on structured_notes.lawnSprayedGallons { v: 1, rows: [{ productId, gallons, carrierGalPer1000, areaSqft }] } (a request cannot forge it); the derived area is CAPPED at the visit's lawn area, taken in this order: the visit area the sheet submitted as propertyServiceArea.treatedSqft once the server has validated it (the completion's own snapshot check), the lawn size on file (the plan's), and only when neither is known the largest non-spot row's area (a non-spot row can be sized to the sunny-turf share, so it never overrides a known area); when none is known there is no cap, but a submitted visit area that cannot be confirmed refuses the row (an unstructured failure as 400 lawn_gallons_unavailable_now: retry or enter the area; a structured 4xx such as the 409 property_service_area_changed passes through with its code so the sheet reads the areas again), never a fallback; a capped row's stated rate is recomputed from its typed amount over the capped area (to 3 decimals, the column's own; cleared when the units cannot be reconciled or it rounds to zero), and its mark also carries capped: true, uncappedAreaSqft, lawnAreaSqft, lawnAreaSource (visit_area, plan or whole_lawn_row) and uncappedRate; a yearly-amount per-place limit refusal (400 lawn_place_limit, limitType annual_max_rate) at a capped row adds one sentence saying what the gallons would cover and what the lawn is; the tank size is remembered on the technician's device. Technician sheet only: no customer text, no public payload. Strict opt-in: exactly 'true' in every environment, read at call time via lawnMixHelpLive(), and live only while GATE_LAWN_SPOT_RULES and GATE_LAWN_V13 are also live. Ships DARK; off = the context, the sheet and the completion are byte-identical to before.)
+ *   GATE_LAWN_FAST_COMPLETE=true (Lawn Fast Complete, server half, PR-C1: for a lawn visit of any type (recurring program, per-application or one-time), GET /:serviceId/lawn-fast/context answers what the one-screen completion sheet opens with (eligibility verdict with a reason, the visit's planned products each with its post-application watering rule, whether a confirmed lawn assessment exists, the soft photo status), POST /:serviceId/lawn-fast/watering-preview answers the per-product rules and the one watering sentence the report would print for the chosen products (the report's own builder, so they cannot differ), and a /complete body carrying a `lawnFast` block must pass a preflight: gate on, an eligible visit and a CONFIRMED lawn assessment. The photo minimum is advisory only, never a refusal. The schedule payload carries `lawnFastCompleteEnabled` per service. Customer-silent: sends no text or email and changes no completion messaging. Strict opt-in: exactly 'true' in every environment, read at call time via lawnFastCompleteLive(). Ships DARK; off = both routes answer 404 {enabled:false}, a `lawnFast` block on /complete is refused 409 lawn_fast_disabled, and the flag is false.)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
  *   GATE_FAST_COMPLETE_REPORT=true (Fast Complete report flow, owner "ok go" 2026-10-01: the tech portal opens the one-screen sheet for pest re-services AND regular untyped pest visits; the tech talks into a text box, taps customer home / pest activity 1-5 / one tip / the promise check, generates the AI report, reads it, traces the spray and completes through the full /complete path, billing and customer text as the full form. The schedule payload carries `fastCompleteReportEnabled`; POST /admin/dispatch/:id/voice-facts reads where the tech treated, the pests they named and how the sprays went down from the note, each quoted word for word. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteReportLive(). Ships DARK; off = the flag is false, the route answers 404 {enabled:false} and the tech portal routes pest visits exactly as before.)
  *   GATE_TS_TECH_FINDINGS_COPY=true (Tree & Shrub tech findings in customer copy, parity with the lawn rulings, owner 2026-10-02: the technician's keep/confirm/hide/edit decisions on the photo-read findings are FROZEN on the service record (structured_notes.treeShrubTechFindings) whether or not the signed preview is accepted, and the customer report + AI report prompt obey them (a hidden finding never appears, a confirmed one reads as the technician's finding, an edit uses the technician's text; the photo read stays stored for the office). Also the palm-crown rule (owner 2026-10-01: photos are ground level, so no customer copy may call a palm's crown, spear leaf or newest fronds healthy). Customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via tsTechFindingsCopyLive(). Ships DARK; off = nothing is stored and every report/prompt is byte-identical to before.)
+ *   GATE_TS_WATCH_LIST=true (Tree & Shrub seasonal watch list, owner DRAFT 2026-10-01, tech-facing and storage only: the photo read gains this month's watch list (server/config/tree-shrub-watch-list.js, month in America/New_York) and may name an item as a possible SIGNAL (an optional watch_signals field that never changes a score), GET /:serviceId/tree-shrub/fast-context adds `watchList`, the Fast Complete sheet shows a "This month's watch list" block (Seen / Not seen, Add from watch list, an extent) that never blocks Done, and the technician's choices are FROZEN on the service record (structured_notes.treeShrubWatchItems). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsWatchListLive(). Ships DARK; off = the prompt and every result are byte-identical to before, fast-context has no watchList key and nothing is stored.)
+ *   GATE_TS_PEST_CHECK=true (Tree & Shrub live-insect check, owner 2026-10-05, tech-facing and storage only: GET /:serviceId/tree-shrub/fast-context adds `pestCheck`, the Fast Complete sheet shows a "Live insects found?" Yes / No block with insect-type chips, blocks Merit when only armored scale is picked, notes a live-finds-only product on a No, and the answers are FROZEN on the service record (structured_notes.treeShrubPestCheck). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsPestCheckLive(). Ships DARK; off = fast-context has no pestCheck key and nothing is stored.)
+ *   GATE_ASSESSMENT_FAST_COMPLETE=true (Waves Assessment Fast Complete, owner 2026-10-09: the schedule payload carries `assessmentFastCompleteEnabled` for a visit whose completion profile is the assessment key, and admin Dispatch opens a one-screen sheet (talk note, photos, warm/cold/lost, recommended interests, the inspection credit toggle where the full form shows it) in place of the full form. Complete records the consultation outcome, then posts /complete with texts and the review ask off. Strict opt-in: exactly 'true', read at call time via assessmentFastCompleteLive(). Ships DARK; off = the full form as before.)
+ *   GATE_TS_NEONIC_CAP=true (Tree & Shrub yearly neonicotinoid cap per property, owner 2026-10-09, tech-facing; server/services/tree-shrub-neonic-ledger.js, server/config/tree-shrub-neonic-caps.js: Zylam and Safari share one dinotefuran cap, Merit has its own imidacloprid cap, each a label amount per acre per calendar year scaled to the property's bed area (customer_properties.bed_sqft); dinotefuran counts from any visit at the property, imidacloprid from tree & shrub visits only. GET /:serviceId/tree-shrub/fast-context adds `neonicCap`, the Fast Complete sheet shows how much of each capped product is left this year and holds Complete when an entered amount passes it. Like the live-insect check the hold is the sheet's; /complete does not refuse. No bed area = the yearly amount cannot be computed and the amount check blocks nothing; the application-count hold and the no-limit-on-file hold need no bed area and still apply. Nothing reaches the customer. Strict opt-in: exactly 'true' in every environment, read at call time via tsNeonicCapLive(). Ships DARK; off = fast-context has no neonicCap key and /complete never checks.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
- *   GATE_FAST_COMPLETE_VOICE_FILL=true (Fast Complete voice fill, server half: POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill maps what a technician said (a transcript the client already has, from the browser's speech recognition or the dictation upload) onto the pest re-service sheet's own product, pest, where, how and activity choices through one structured model call (services/fast-complete-voice-fill.js), validated server-side so anything off-list or unspoken, including any amount without a spoken number, comes back as an `unclear` item, and splits the note into a customer note and an office note. Nothing is stored; the audit line carries counts only, never the transcript or notes. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteVoiceFillLive(). Ships DARK; off = the route answers 404 {enabled:false}.)
+ *   GATE_FAST_COMPLETE_VOICE_FILL=true (Fast Complete voice fill, server half: POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip transcribes the sheet's recording with our own transcriber and maps what the technician said onto the pest re-service sheet's own product, pest, where, how and activity choices through one structured model call (services/fast-complete-voice-fill.js), validated server-side so anything off-list or unspoken, including any amount without a spoken number, comes back as an `unclear` item, and splits the note into a customer note and an office note. Nothing is stored; the audit line carries counts only, never the audio, the transcript or notes. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteVoiceFillLive(). The report flow (GATE_FAST_COMPLETE_REPORT: any untyped pest visit, and any specialty visit the sheet reads a lane or typed record for) has its own two reads under the same gate: .../voice-fill/dictation answers one clip as words for the note box, and .../voice-fill/products reads the products the note names when the report is written; the sheet lands them as rows the technician confirms. The lawn re-service sheet (GATE_LAWN_RESERVICE_FAST_COMPLETE also on) uses the same two reads against its own catalog and ways. Ships DARK; off = each route answers 404 {enabled:false}.)
+ *   GATE_FAST_COMPLETE_INVOICED_VISITS=true (Fast Complete for a visit already invoiced or returning from the payment flow, owner 2026-10-09: admin Dispatch opens the visit's one-screen sheet instead of the full form, and the sheet posts invoiceAlreadySent: true exactly when the full form does (the visit carries completionInvoiceAlreadySent), so /complete takes the same branch: no second pay-link text, the existing invoice reused, a paid invoice left paid. The schedule row's `invoicedVisitFastCompleteEnabled` carries the gate. Strict opt-in: exactly 'true', read at call time via fastCompleteInvoicedVisitsLive(). Ships DARK; off = the full form, as before.)
  *   GATE_NOTE_BOX_PHOTOS=true (Photos in the notes box, owner "ok go" 2026-10-02 on the Fast Complete mockup v8: the office Complete Service form puts the visit's photos inside the notes box, each with a short description typed or dictated that rides as the photo's caption to the report writer and the customer's report, and the separate photo section goes away. The schedule payload carries `noteBoxPhotosEnabled` per service, never for lawn or tree, shrub & palm. Strict opt-in: exactly 'true', read at call time via noteBoxPhotosLive(). Ships DARK; off = the form's photo section exactly as before.)
  *   GATE_LANE_VOICE_FILL=true (Fast Complete step 2, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/lane-facts reads a specialty visit's own record (bed bug, fire ant, tick, bee & wasp, mud dauber, mosquito) from the technician's note: the places from the lane's own list and at most one value per finding group, each with the note's own words, kept only when the lane's closeout offers it and the note holds the words, never a pair the completion refuses (services/visit-lane-facts.js, TEXT_POLICIES.fastStructured, lane visit_lane_facts). Writes nothing: the office form and the tech's sheet show each field with its words for a person to confirm. With GATE_FAST_COMPLETE_REPORT also on, the tech portal opens such a visit (one that completes without a project) in the Fast Complete sheet's report flow instead of the project editor: the sheet's record card fills from the note, and the report and the /complete body (areasServiced, structuredObservations) are written from it; the pest-recap context answers the visit's `lane`. Strict opt-in: exactly 'true', read at call time via laneVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, and the tech portal routes lane visits to the project editor as before.)
  *   GATE_TYPED_VOICE_FILL=true (Fast Complete steps 3 to 5, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/typed-facts reads a typed visit's own findings (cockroach, the German and palmetto knockdowns, flea, pest inspection, mosquito event, wildlife trapping, rodent exclusion, sanitation and inspection; step 4: rodent trap checks, rodent and termite bait stations; step 5: termite liquid, trenching, rodding, spot and foam treatments and termite inspections, never new-construction pre-treat) from the technician's note: each pick field's values from the typed form's own options (the form as served for the visit's service key), each count and the technician's own 0-5 rating where they set the score only when the quote states the number (digits or words), a termite treatment's solution strength only as the percent its quote states, each with the note's own words, kept only when the note holds the words and never a combination the completion's own validator (validateTypedFindings, requirements off) refuses, every side of a clash left for a person (services/visit-typed-facts.js, TEXT_POLICIES.fastStructured, lane visit_typed_facts). Free-text and product-filled (autoFilled) fields are never read, nor the state's notice questions (treatment notice posted, inspection notice affixed: always a tap); a rating already set (scoreSet) is never read over. The termite forms are read on the office form only: their visits keep the typed form on the tech portal (typedReportFlowEnabled stays off for them). Writes nothing: a person confirms every field. On, the schedule payload carries `typedVoiceFillEnabled` and Generate AI report on the office Complete Service form first posts the notes with the form's present values (judged only, never stored) and fills only the fields still empty, each shown with the words it came from; a field set is never filled over and a fill that clashes with one is left for a person. With GATE_FAST_COMPLETE_REPORT also on, the schedule payload carries `typedReportFlowEnabled` (never a combined visit) and the tech portal opens such a visit in the Fast Complete sheet's report flow in place of the typed form: Generate reads the record from the note the same way, its card shows each field with the words it came from (a Change for each pick, a box for a count or free text, the 0-5 score where the tech sets it), and the report and completion are written from the record (structuredFindings, the form's own treated areas, activityScore); a nothing-found record, a saved trace the report would show, or a product whose place only the full form records goes to the Full form. A typed inspection shows the office form's inspection-credit toggle (on unless the tech turns it off; sent as offerInspectionCredit), and, after sending, the sheet offers a one-tap "Book the follow-up" on the day a completion suggests (bed bug, flea, cockroach and the knockdowns; POST /admin/dispatch/:id/schedule-followup, a pending visit, as the office's Schedule follow-up books it; the sheet context's `followupBooking`). Strict opt-in: exactly 'true', read at call time via typedVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, Generate is unchanged and typed visits open the typed form as before.)
+ *   GATE_COMBO_FAST_COMPLETE=true (owner 2026-10-09, PR 1 of 2, no screen yet: lets the pest and lawn Fast Complete sheets be PARTS of one grouped stop. The schedule payload carries `comboFastCompleteEnabled` for a row that is a member of a grouped stop; the lawn context, treatment guide and trouble-area clear answer for a grouped lawn member when the request says it is part of a combined stop (header X-Combo-Stop: 1) AND the server confirms the stop is open with exactly two open members; the lawn Fast Complete preflight accepts a grouped member only inside its own visit-closeout packet. Customer-silent. Strict opt-in: exactly 'true', read at call time via comboFastCompleteLive(). Ships DARK; off = the flag is false and every route refuses a grouped lawn member exactly as before.)
+ *   GATE_FAST_COMPLETE_WRAP_UP=true (owner 2026-10-10: the lawn visit and Tree & Shrub Fast Complete sheets show a "Wrap-up" section, the bottom of the full Complete Service form: adjust time on site (admin), re-entry countdown, completion text, payment link, review request and timing, next scheduled visit note. Their /lawn-fast/context and /tree-shrub/fast-context answers carry `wrapUp: true`; the sheets post the section's choices on /complete, which already takes every one. Untouched, the section posts the four customer-text flags the sheets already posted. Off = no key, and both sheets render and post exactly what they did. Strict opt-in: exactly 'true', read at call time via fastCompleteWrapUpLive(). Ships DARK.)
+ *   GATE_STATION_FAST_COMPLETE=true (owner 2026-10-08: a termite or rodent bait station visit opens the one-screen Fast Complete sheet in admin Dispatch even while the station map (station-map-v1) is on. The sheet loads the property's station registry and shows "N stations, all OK"; the technician's note names exceptions by station number ("station 4 had activity, I replaced the bait in 7"), read by POST /admin/dispatch/:id/typed-facts when the request carries the sheet's stations (services/visit-station-facts.js: the number must be an active station of the visit's program, the status one of activity / serviced / no access, and the quoted words in the note, else dropped), each shown as a chip the technician taps to correct. The completion posts termiteStations exactly as the full form does (an entry per station, touched on exceptions) and the typed station counts from the shared rule (client/src/lib/station-checks.js). Adding, moving or retiring a station, a rodent trap check, a combined visit, an inspection-only outcome, a station with no pin and a registry that failed to load all stay on the full form. Needs GATE_FAST_COMPLETE_REPORT and GATE_TYPED_VOICE_FILL. The schedule payload carries `stationFastCompleteEnabled`. Strict opt-in: exactly 'true' in every environment, read at call time via stationFastCompleteLive(). Ships DARK; off = the flag is false, the typed-facts route reads no stations and station visits route exactly as before.)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   SELF_SERVE_MOVE_NOTICE_HOURS=24 (not a gate — the self-serve MOVE notice window, same module, split out 2026-09-28 so a book-only env change never touches it, no fallback to SELF_SERVE_NOTICE_HOURS: no SELF-SERVE reschedule of a visit that itself currently starts within this many hours of now, on public reschedule (reschedule-public.js) and the promised-reschedule-link worker (reschedule-link-promises.js); the DESTINATION slot of a move still uses the book window above; read at call time, default 24)
  *   SELF_SERVE_ARRIVAL_GRACE_MINUTES=0 (not a gate — the self-serve arrival grace, server/services/scheduling/policy.js#selfServeArrivalGraceMinutes, owner ruling 2026-09-28 "I'd rather be more lenient than strict": a self-serve (customer-picked) time is an ARRIVAL window, kept when the technician can arrive within this many minutes of the window's start. CAPACITY MODE ONLY (GATE_SCHEDULING_CAPACITY) — reads 0 with it off — and never for a same-day pick (today's route is already live). Unset/blank/garbage/negative all read as 0 (today's byte-identical strict behavior); clamped to 120, the existing arrival-promise ceiling (ARRIVAL_WINDOW_MINUTES, utils/sms-time-format.js) — grace can only narrow that promise, never widen it. **ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — until GATE_BOOK_ARRIVAL_GRACE, the next line, gave /book its own opt-in): /book and public reschedule both run a STRICT pre-verify travel probe ahead of their capacity commit, so a grace-kept slot there would 409 SLOT_TAKEN before ever reaching the capacity check — `estimate-slot-availability.js` is the ONLY caller that opts find-time.js's `packCapacityEnds` into grace (`arrivalGrace: true`, checked in ADDITION to the env value — the flag is the real gate; the env alone changes nothing for /book, voice, re-service, inspection, or any reschedule surface, even though several of them share the SAME `packEnds:true` admission). Offer side also checks EVERY live hold on the tech/date (Codex r2 P1), not just the single nearest anchor `capacityGapNeighbours` picks per side — a hold's window is a promise, not a fixed slot, so an earlier-starting hold can still end later than a later-starting committed stop chosen instead, and grace must never overlook it. **A hold is certified ONCE, at reserve** (Codex r2 P0): `slot-reservation.js`'s `reserveSlot` is the ONLY `verifyArrivalCapacity` caller that passes `arrivalGraceMinutes` (its own commit path has no pre-verify probe under capacity), and it reads the EXACT grace that justified the offer — carried as its own HMAC-bound + cleartext field on the signed estimate slot offer (`utils/slot-offer-token.js`) — never a fresh live env read. **The wire format is opt-in PER OFFER, not a blanket bump** (Codex round 3: the first cut bumped the canonical string/slotId shape for every offer unconditionally, breaking every in-flight estimate offer at deploy even with grace dark — "default 0 = byte-identical" has to cover the wire format too): an ungraced offer (grace 0 or omitted — every `/book` offer, every estimate offer with capacity/grace off or the date excluded) signs/appends the EXACT `<base>.<exp>.<sig>` shape origin/main always produced, verifying under both old and new code across a deploy; only a genuinely graced offer takes the new `<base>.<exp>.<arrivalGrace>.<sig>` shape (and only such an offer in flight at the exact deploy instant fails once, same accepted trade as the file's original v1→v2 bump). `signCustomerFacingSlots` signs a non-zero grace only for a slot marked `routeMode: 'arrival_windows'` (find-time's own stamp, proof it passed the grace-aware filter at all — anything else signs 0, so a future non-route-mode generator's slot can never inherit an unchecked leniency). `commitReservation` NEVER applies a grace bound at all (keeps only the pre-existing 120-minute promise, byte-identical to before this lane): a hold reserved at grace 90 with an 80-minute delay is accepted regardless of what this env reads by accept time, and a grace change between offer and reserve is likewise inert for that one signed offer (fixed at mint time; only a fresh availability fetch picks up a changed value). `extendReservation` never re-verifies capacity fitness at all under capacity mode (a pre-existing, unrelated gap — a live hold's certified route order is trusted as-is; re-running the whole-route simulation on every extend was judged not cheap enough to add here), so a hold's grace certification is fixed at reserve time and is not re-checked if grace or the route changes before an extend.)
@@ -187,9 +261,19 @@
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
+ *   GATE_CALL_PROC_SHUTDOWN_RELEASE=true (at SIGTERM — every production deploy — every call-processing pass this process holds a claim for is stamped metadata.shutdown_interrupted_at; the pass keeps its claim until the kill, so nothing overlaps it. On the replacing pod a stamped claim is reclaimable after 2 quiet heartbeat minutes instead of 10; a stamped pass that still beats is never taken; the claim that takes the row clears the stamp. Strict opt-in, read via isEnabled. Off = today's behavior, byte-identical. Rollback: unset.)
+ *   GATE_CALLBACK_SPAM_CLOSES_PARENT=true (an OUTBOUND call with metadata.relatedCallId (the admin Call back action on a voicemail) that lands a spam verdict also settles the parent inbound call: its open/in_progress triage_items whose reason a return call would have answered (the CALLBACK_SPAM_MOOT_CODES allowlist in call-triage-flags.js; other reasons stay open) resolve (resolution_source auto, resolution_rule callback_spam), its open Waves callback commitments are dismissed, review_status syncs to resolved when no card is left, metadata.callback_verdict is stamped. Nothing is sent. Strict opt-in, read via isEnabled. Off = today's behavior. Rollback: unset.)
+ *   GATE_CALL_EXTRACTION_SYSTEM_PROMPT=true (call extraction V2 sends its rules and output contract as a static system part and only the call's own facts and transcript as the user message, so the provider can cache the rules across calls. Same rules, different order and channel: its calls are their own prompt-version cohort (`s`, or `b` with the agent-proposed-slot block). Strict opt-in, read once per call via callExtractionSystemPromptLive(). Off = the one-message prompt, byte-identical. Rollback: unset.)
+ *   GATE_CALL_SPELLING_COLLAPSE_TRIGGER=true (call processing: the spelling-preserving second transcription pass and the contact decoder also run when the primary transcript shows what a collapsed spelling leaves behind: a name said twice in a row ("Serov, Serov"), a phrase that announces a spelling with no letters after it ("that's S", "with a C"), or, for the decoder, an extracted last name one or two letters from the stored one. Each match costs one extra transcription pass; the log line "[call-proc] spelling collapse trigger" names which signal fired. Strict opt-in, read at call time via callSpellingCollapseTriggerLive(). Off = the pass runs only on the signals it ran on before, byte-identical. Rollback: unset. See services/contact-dictation.js spellingCollapseSignals.)
+ *   GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING=true (owner ruling 2026-10-06: a commercial Waves Assessment that Waves staff book on the call with NO price discussed auto-books, on OUTBOUND callback calls (lead_auto_bridge) as well as inbound, instead of always going to the office. Only the Waves Assessment catalog row (every service view of the call must resolve to it) and only when no price came up at all; any price mentioned goes to the priced path (GATE_CALL_COMMERCIAL_DICTATED_BOOKING), unchanged. The staff commitment and the caller acceptance are grounded word for word in the right speaker's turns (call-reschedule-agreement.js), including the shape where STAFF proposes the day and time, the caller says yes and staff then commits ("How does noon on Thursday sound?" / "Perfect." / "I'll book you for that"), which has its own extraction instruction while this gate is on. On an OUTBOUND recording the speaker labels are LLM-inferred and have swapped, so staff identity is proven independent of the labels: an Agent-labeled turn says "this is <name> with|from|at Waves" and no Caller-labeled turn does; otherwise it holds. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. OUTBOUND calls qualify only as lead callback bridges (call metadata.type lead_auto_bridge) AND only when outbound booking creation itself is on: GATE_CALL_OUTBOUND_BOOKING plus V2 routing in enforce mode (CALL_EXTRACTION_V2_ENABLED=true and CALL_EXTRACTION_V2_DRIVES_ROUTING=true or CALL_TRIAGE_ENFORCE_V2_GATES=true); this gate never authorizes outbound creation by itself, and the routing lane and the creation path read one predicate (outboundAutoBookingEnabled). Only clears commercial_requires_quote and the advisory card still files; the on-the-hour rule, capacity, address validation and unit checks still apply. Strict opt-in, read at call time via callCommercialAssessmentBookingLive(). Off = byte-identical, outbound stays excluded. See services/call-commercial-dictated-booking.js.)
  *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
  *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. The ranking never writes a rate or sends a customer anything. The APPLY lane (services/rate-review-apply.js, step 3) rides the same gate: an admin POST creates draft notice rows for approved rows (nothing sent — the comms lane sends), and the nightly 3:10 AM ET job writes the noticed rate on its effective date for SENT notices (per-application visits + per_application_fee + ledger slice, monthly dues + slice, or the prepaid term's next_term_prepay_amount), one transaction per notice, holds belled. Off = the apply tick returns before any query and the schedule route answers 404; customers keep the lower, current rate. The notice-sending lane is a later PR.)
+ *   GATE_ADMIN_MFA=true (staff two-step sign-in: a staff member who has set up an authenticator app must enter its 6-digit code (or a single-use recovery code) after the password before a session is issued, and a session minted without that step is refused; the enrollment page /admin/two-step and its /api/admin/auth/mfa routes answer only while on. Read at call time via adminMfaLive() in server/services/staff-mfa.js; off = login, /me and every staff session are exactly as before, whatever was enrolled, so unset is the kill switch.)
+ *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
+ *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
+ *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
+ *   GATE_LAWN_REPORT_CLARITY=true (lawn service report, owner ruling 2026-10-08, one gated change left: "Your plan" on a LAWN report lists only the next upcoming lawn visit at the report's property (needs GATE_REPORT_UPCOMING_VISITS; merged or standalone); other service lines are unchanged. The ruling's other half is permanent and ungated since 2026-10-09: a water-in instruction frozen at completion for a customer with NO sprinkler head type or measured rate on file states the AMOUNT and no minutes ("Water in today's treatment with about ½ inch by Fri 8 PM"), and the LIVE banner adds one line inviting the customer to add their sprinkler setup (banner.setupLine, stripped from the PDF, static and text renders). Strict opt-in: exactly 'true' in every environment, read at call time via lawnReportClarityLive(). Ships DARK; off = byte-identical plan card. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -229,6 +313,7 @@ const gates = {
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   propertyServiceAreas: gateEnvValue('GATE_PROPERTY_SERVICE_AREAS'),
+  lawnCostPlusList: gateEnvValue('GATE_LAWN_COST_PLUS_LIST'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
   // Lawn delivery recovery sweep. Resuming a confirmed visit's delivery can put
@@ -274,8 +359,21 @@ const gates = {
   // Registered for logGateStatus only; consumers read portalActivityLive() at
   // call time below so a flip needs no redeploy.
   portalActivity: process.env.GATE_PORTAL_ACTIVITY === 'true',
+  // Managed Agents session spend cap + interrupt of abandoned sessions (dark).
+  // Registered for logGateStatus only; services/agent-control/session-guard.js
+  // reads agentSessionGuardLive() at call time below.
+  agentSessionGuard: process.env.GATE_AGENT_SESSION_GUARD === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer reschedule page names the next plan visit's new date beside Confirm (dark).
+  // Registered for logGateStatus only; routes/reschedule-public.js reads the env at call time.
+  rescheduleNextVisitDate: process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE === 'true',
+  // Customer-facing pickers stop at a 16:00 start (dark). Registered for logGateStatus only;
+  // scheduling/customer-windows.js reads the env at call time.
+  customerLastStart16: gateEnvValue('GATE_CUSTOMER_LAST_START_16'),
+  // Customer reschedule page move limits: late-move limit by plan + 2 online moves of a first visit (dark).
+  // Registered for logGateStatus only; scheduling/customer-move-limits.js reads the env at call time.
+  rescheduleMoveLimits: gateEnvValue('GATE_RESCHEDULE_MOVE_LIMITS'),
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
   customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
@@ -630,6 +728,10 @@ const gates = {
   // for logGateStatus only — the canonical CALL-TIME reader is
   // pestRidesLawnAtAcceptLive() below (strict 'true'). Off = byte-identical.
   pestRidesLawnAtAccept: process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true',
+  // Second batch of ride pairs on monthly lawn (owner ruling 2026-10-01). Map
+  // entry for logGateStatus only — the canonical CALL-TIME reader is
+  // riderPairsMonthlyLawnLive() below (strict 'true'). Off = byte-identical.
+  riderPairsMonthlyLawn: process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN === 'true',
   // Pay-after-first-visit wording on the estimate page for customers on the
   // card-on-file rail (owner ruling 2026-09-30). This map entry is for
   // logGateStatus only — the canonical CALL-TIME reader is
@@ -797,6 +899,18 @@ const gates = {
   // enforces: with GATE_TYPED_DECISIONS off the lane is dark whatever this
   // variable says, and the status must not read as enabled (Codex r1 on #5557).
   typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
+  // Visit access and safety flags, shadow leg (Clef second wave idea 5):
+  // ships DARK. CALL-TIME reader is visitAccessShadowLive() below; this entry
+  // is for logGateStatus only and carries the reader's prerequisite.
+  visitAccessFlags: gateEnvValue('GATE_TYPED_DECISIONS') && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow',
+  // Stamp-time price check for every annual prepay mint: ships DARK. CALL-TIME
+  // reader is prepayMintPriceHoldMode() below ('shadow' or 'true'); this entry
+  // is for logGateStatus only.
+  prepayMintPriceHold: ['shadow', 'true'].includes(String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase()),
+  // Photo privacy shadow: ships DARK. CALL-TIME reader is photoPrivacyMode()
+  // below; this entry is for logGateStatus only and carries the reader's
+  // prerequisites, so it never reads as enabled while the Clef leg is dark.
+  photoPrivacy: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF') && String(process.env.GATE_PHOTO_PRIVACY || '').toLowerCase() === 'shadow',
   // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
   // below; this entry is for logGateStatus only.
   llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',
@@ -1097,6 +1211,14 @@ const gates = {
   // 'true'); this entry is the status/log listing. Kill switch: unset.
   voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
 
+  // Sandy unbooked-call hand-off — a production relay call that closes
+  // ai_handled with caller speech, no booking, no lead and no transfer rings
+  // ONE office bell (relay_unbooked_call) and enters the lead pipeline
+  // (services/voice-agent/relay-unbooked-handoff.js). Off ⇒ the close is
+  // byte-identical to today. Read at CALL time via relayUnbookedHandoffLive();
+  // this entry is the status/log listing. Kill switch: unset.
+  relayUnbookedHandoff: process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -1137,6 +1259,19 @@ const gates = {
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
+  // Owner 2026-10-04: an access code saves from the client's own wording
+  // ("Gate code is 1234"), not only from the strict sentence form. Read at
+  // call time in sms-operational-extractor.js. Off = strict form only.
+  accessCodeCapture: gateEnvValue('GATE_ACCESS_CODE_CAPTURE'),
+
+  // Access codes section (server half): a text that states a gate, door,
+  // lockbox, garage, call-box or pass code is filed as a `found` row in
+  // customer_access_codes for the office to accept, dismiss or retire, and the
+  // admin API at /api/admin/access-codes serves them. Needs
+  // GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) for the sweep, so
+  // turning it on never reads history. Read at call time in
+  // services/access-code-capture.js; this entry is for logGateStatus only.
+  accessCodesSection: gateEnvValue('GATE_ACCESS_CODES_SECTION'),
 
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
@@ -1178,6 +1313,14 @@ const gates = {
   // Test answers in the customer's language (owner 2026-10-02). Read at call
   // time by server/services/sms-translation.js — this entry is for logGateStatus only.
   smsAnyLanguageTrial: gateEnvValue('GATE_SMS_ANY_LANGUAGE_TRIAL'),
+  // Inbox assist for those texts (owner 2026-10-03): staff see the translation and the checked reply in the
+  // Communications composer and send it themselves. Read at call time by
+  // server/services/sms-translation.js — this entry is for logGateStatus only.
+  smsAnyLanguageInbox: gateEnvValue('GATE_SMS_ANY_LANGUAGE_INBOX'),
+  // Shared-phone inbound link (owner 2026-10-10): a text from a phone that two or more
+  // customer rows share attaches to one account. Read at call time by
+  // server/routes/twilio-webhook.js findSingleCustomerByPhone() — this entry is for logGateStatus only.
+  smsSharedPhoneLink: gateEnvValue('GATE_SMS_SHARED_PHONE_LINK'),
   // SMS offer ledger (SMS booking completion, slice 1 of
   // sms-booking-complete-scope 2026-10-02): after the provider accepts a reply
   // that quoted appointment times, record in sms_offers which slots the SENT
@@ -1195,6 +1338,20 @@ const gates = {
   // at call time by sms-suggest-mode.js schedulingSuggestLive() — this entry
   // is for logGateStatus only.
   smsSchedulingSuggest: gateEnvValue('GATE_SMS_SCHEDULING_SUGGEST'),
+  // SMS scheduling decide step, SHADOW (slice 2 of sms-booking-complete-scope
+  // 2026-10-02): when a customer texts from a phone with an open sms_offers
+  // row, one model (ROUTES.smsSchedulingDecide) reads the reply and code checks
+  // its answer; the result is recorded in sms_offer_decisions as what it WOULD
+  // have done. Nothing moves, books or sends. Read at call time by
+  // sms-scheduling-decide.js decideLive() — this entry is for logGateStatus only.
+  smsSchedulingDecide: gateEnvValue('GATE_SMS_SCHEDULING_DECIDE'),
+  // SMS scheduling executor, MOVE (slice 3 of sms-booking-complete-scope
+  // 2026-10-02): a would-move the decide step recorded is carried out. The
+  // visit moves through the reschedule link's own checks and mover, and the
+  // customer gets the standard rescheduled text. Needs the decide gate on.
+  // Customer-visible when on. Read at call time by sms-scheduling-act.js
+  // actMoveLive() — this entry is for logGateStatus only.
+  smsSchedulingActMove: gateEnvValue('GATE_SMS_SCHEDULING_ACT_MOVE'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
@@ -1596,6 +1753,25 @@ const gates = {
   // real leads never break. Flip GATE_LEAD_TURNSTILE=true to begin blocking.
   leadTurnstile: process.env.GATE_LEAD_TURNSTILE === 'true',
 
+  // Unverified lead hold (owner 2026-10-04). While leadTurnstile enforces, a
+  // lead form that posts with NO token (the visitor's background check never
+  // finished) is saved as a customer-less lead with a bell for the office
+  // instead of answered 403 with nothing saved. No customer, estimate, text,
+  // email, agent run or bridge call is created for a held lead. Rejected,
+  // oversized and unmapped-host tokens still get the 403. Default on;
+  // GATE_LEAD_UNVERIFIED_HOLD=false restores the plain 403.
+  leadUnverifiedHold: process.env.GATE_LEAD_UNVERIFIED_HOLD !== 'false',
+
+  // Estimate accept-card phone (owner 2026-10-04). An estimate with no phone
+  // and no linked customer cannot become a customer, and the card step and
+  // the accept refuse it with "call the office". On, the estimate page asks
+  // for a mobile number in the "Confirm your details" card and
+  // PUT /api/estimates/:token/contact-phone saves it on the estimate before
+  // the card step. A typed number that already belongs to a customer is never
+  // saved or attached: the office gets a bell. Default on;
+  // GATE_ESTIMATE_ACCEPT_PHONE=false hides the field and 404s the route.
+  estimateAcceptPhone: process.env.GATE_ESTIMATE_ACCEPT_PHONE !== 'false',
+
   // AutoPay Customer SMS — customer-facing autopay/pre-charge/payment-retry
   // texts are opt-in everywhere until the WaveGuard autopay rollout is
   // verified. This does not affect internal admin alerts.
@@ -1806,6 +1982,14 @@ const gates = {
   // work keep today's hold). Explicit service allowlist in
   // call-triage-flags.js. Owner ruling 2026-09-30. Off → byte-identical.
   callWholeStructureNoUnit: process.env.GATE_CALL_WHOLE_STRUCTURE_NO_UNIT === 'true',
+  // A business address with no unit is not held for the "which unit?" ask when
+  // the caller says they own, bought, lease or occupy the WHOLE building and
+  // Google Address Validation says the address is a business. Same waiver
+  // marker as the whole-structure gate (reason 'business_whole_building'), so
+  // the audits rebuild it. Owner ruling 2026-10-06; the owner accepted the risk
+  // of a strip-mall caller who has a suite. Both directions. Off →
+  // byte-identical.
+  callBusinessWholeBuildingNoUnit: process.env.GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT === 'true',
   // Agent-commitment booking authorization: when OUR agent explicitly
   // committed to the confirmed slot on the call ("we'll confirm it for noon
   // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
@@ -1850,11 +2034,43 @@ const gates = {
   // callCommercialDictatedBookingLive() below. Creates real appointments —
   // owner-flip only.
   callCommercialDictatedBooking: process.env.GATE_CALL_COMMERCIAL_DICTATED_BOOKING === 'true',
+  // A commercial Waves Assessment that staff book on the call with no price
+  // discussed auto-books, outbound callback calls included (owner ruling
+  // 2026-10-06). Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only — the canonical CALL-TIME reader is
+  // callCommercialAssessmentBookingLive() below. Creates real appointments —
+  // owner-flip only.
+  callCommercialAssessmentBooking: process.env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING === 'true',
+  // Call extraction V2 sends its rules as a static, cacheable system part and the
+  // call's facts and transcript as the user message. Ships DARK: off unless
+  // exactly 'true'. This entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is callExtractionSystemPromptLive() below.
+  callExtractionSystemPrompt: process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT === 'true',
+  // The second transcription pass and the contact decoder also run when the primary
+  // transcript shows what a collapsed spelling leaves behind (a repeated name token, an
+  // announced spelling with no letters). Ships DARK: off unless exactly 'true'. This entry
+  // is for logGateStatus only — the canonical CALL-TIME reader is
+  // callSpellingCollapseTriggerLive() below.
+  callSpellingCollapseTrigger: process.env.GATE_CALL_SPELLING_COLLAPSE_TRIGGER === 'true',
   // A new caller who gave a last name but no first name still becomes a customer and
   // books; the missing first name files an advisory card (owner ruling 2026-10-02).
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
   // the canonical CALL-TIME reader is callFirstNameAdvisoryLive() below.
   callFirstNameAdvisory: process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true',
+  // Last-name suggestion for a phone caller who gave only a first name (owner
+  // ruling 2026-10-08). Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only — the canonical CALL-TIME reader is
+  // callLastNameLookupLive() below.
+  callLastNameLookup: process.env.GATE_CALL_LAST_NAME_LOOKUP === 'true',
+  // Bait station visits on the one-screen Fast Complete sheet (owner ruling
+  // 2026-10-08). Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only — the canonical CALL-TIME reader is
+  // stationFastCompleteLive() below.
+  stationFastComplete: process.env.GATE_STATION_FAST_COMPLETE === 'true',
+  // Pin check after a visit (owner "build guardrail" 2026-10-09). Ships DARK: off
+  // unless exactly 'true'. This entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is pinParkedCheckLive() below.
+  pinParkedCheck: process.env.GATE_PIN_PARKED_CHECK === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -1913,6 +2129,17 @@ const gates = {
   // outage) ring an admin bell instead of silently costing leads — the
   // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
   callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
+  // Call-processing shutdown release: on SIGTERM (every production deploy)
+  // a call pass still in flight is stamped so the next pod reclaims its row
+  // after 2 quiet heartbeat minutes instead of 10 (a 30-minute lead on
+  // 2026-10-09, three deploys in ten minutes). The pass keeps its claim until
+  // the kill, so nothing overlaps it. Off = today's behavior.
+  callProcShutdownRelease: process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE === 'true',
+  // Callback spam closes the parent voicemail: an admin callback
+  // (metadata.relatedCallId) that reaches a solicitor resolves the parent
+  // voicemail's open Needs Review cards and dismisses its open callback
+  // promise, so a settled voicemail stops asking for work (2026-10-09 audit).
+  callbackSpamClosesParent: process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT === 'true',
   // Call commitments: every processed call records what Waves promised and
   // what the caller agreed to as evidence-linked rows (call_commitments),
   // seeded from the V2 extraction plus one bounded model pass over the
@@ -1982,6 +2209,12 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Dispatch "Promised on a call, not booked" strip (owner 2026-10-12): a call
+  // where staff agreed a visit with the caller and nothing is on the calendar
+  // shows as a display-only HELD row on that day, with a Book it button.
+  // Reads call_log, scheduled_services, triage_items; writes nothing.
+  // Off -> the route returns an empty list and the strip never renders.
+  callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
@@ -1989,9 +2222,12 @@ const gates = {
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
   // Invoice issued ⇒ visit completed (owner ruling 2026-09-07): an invoice
-  // linked to an open visit that is SENT to the customer or PAID by hand
-  // closes the visit out quietly (no report / text / review ask / charge;
-  // the invoice is reused). Ships DARK; owner flips.
+  // linked to an open visit that is SENT to the customer or PAID (by hand,
+  // or by card / bank through the Stripe webhook) closes the visit out
+  // quietly (no report / text / review ask / charge; the invoice is reused).
+  // Owner ruling 2026-10-04: a past day closes an unstarted or an arrived
+  // (on_site) visit; today only an arrived visit closes, and only on a
+  // payment (issuedCloseoutVisitRefusal). Ships DARK; owner flips.
   invoiceIssuedClosesVisit: process.env.GATE_INVOICE_ISSUED_CLOSES_VISIT === 'true',
   // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
   // an accept's customers.monthly_rate becomes the SUM of the customer's
@@ -2117,7 +2353,7 @@ const gates = {
   callBookingLinkText: process.env.GATE_CALL_BOOKING_LINK_TEXT === 'true',
   // Missed-call text-back (services/missed-call-text-back.js): an UNKNOWN
   // caller (no customer record on file) calls a Waves line,
-  // nobody answers, they wait >= 25s (missed-call-bell's own floor) and
+  // nobody answers, they wait >= 15s (missed-call-bell's own floor) and
   // hang up with no voicemail — one text goes from the exact line they
   // called ("it's Waves... someone will follow up... text us here... or
   // call back anytime"), at any hour (owner ruling 2026-09-28: no 8 AM
@@ -2129,6 +2365,14 @@ const gates = {
   // no claim taken. The sweep still reconciles claims this lane left
   // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
+  // Widens the text-back lane ONLY (not the bell): a caller who waited 15s+
+  // at the voicemail greeting and hung up without speaking leaves a recording
+  // the processor rejects as no-speech; the voicemail lane does nothing with
+  // it, so the caller got no text. On → that call counts as "no message
+  // left" once the processor has finished with it (a recording still
+  // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
+  // Off → byte-identical to before.
+  missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -2441,8 +2685,6 @@ const gates = {
   //   as pending tier='high' for manual review instead.
   dataHygieneScanner:          isProd ? process.env.GATE_DATA_HYGIENE_SCANNER    === 'true' : true,
   dataHygieneReviewUi:         isProd ? process.env.GATE_DATA_HYGIENE_UI         === 'true' : true,
-  dataHygieneBootstrap:        isProd ? process.env.GATE_DATA_HYGIENE_BOOTSTRAP  === 'true' : true,
-  dataHygieneDedupeCandidates: isProd ? process.env.GATE_DATA_HYGIENE_DEDUPE     === 'true' : true,
   // One extraction gate covers both Phase 4 call and SMS extractors.
   dataHygieneExtraction:       isProd ? process.env.GATE_DATA_HYGIENE_EXTRACTION === 'true' : true,
   dataHygieneAutoApply:                 process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
@@ -2544,6 +2786,16 @@ const gates = {
   // rewrites monthly_total / annual_total / onetime_total.
   // Enable with GATE_ESTIMATE_SERVICE_ADD=true (with the opt-out gate on).
   estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
+
+  // Good / Better / Best on a pest + lawn estimate (owner 2026-10-05): a
+  // three-tile picker that is a VIEW over the service opt-out rail — Best is
+  // the estimate as quoted, Better is lawn removed through the rail's own
+  // canonical re-price, Good is the one-time choice on that pest-only row.
+  // The stored row is always an ordinary valid estimate. Needs the opt-out
+  // gate. Read at call time via estimateOfferTiersLive(); this map entry is
+  // for logGateStatus only. STRICT opt-in.
+  // Enable with GATE_ESTIMATE_OFFER_TIERS=true.
+  estimateOfferTiers: process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
 
   // Send-time "lead with one service": when a NEW residential customer's
   // estimate carries EXACTLY two recurring lines (the non-lead one removable),
@@ -3075,6 +3327,13 @@ const gates = {
   // sitting in an open status (pending/confirmed/en_route/on_site).
   // Detection-only: never mutates the rows, no customer contact.
   staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
+  // "Visit not closed out" Action Queue cards (owner 2026-10-03): the 6 PM
+  // missed-appointment check logs every visit still open at that hour; with
+  // this on, each one also raises a dispatch card where a person rebooks it,
+  // closes it out, dismisses it, or confirms it was a miss
+  // (services/not-closed-out.js). Admin-only; no customer contact. Off: the
+  // check logs as before and raises no card.
+  notClosedOutQueue: isProd ? process.env.GATE_NOT_CLOSED_OUT_QUEUE === 'true' : true,
   // Daily 6:55 ET lead-to-cash invariants sweep (services/lead-to-cash-
   // invariants.js): a read-only registry over existing detectors (churned
   // accounts with live plan state, WaveGuard field drift, recurring-schedule
@@ -3248,6 +3507,104 @@ const gates = {
   // the plain three-line hint, so pickers render exactly as today.
   rescheduleAvailability: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
 
+  // Best-times road times (owner 2026-10-06): the best-times chips in the
+  // availability strip (summary.best) and the picked hour's verdict get
+  // their drive-in and added-drive numbers from Google's traffic-aware route
+  // matrix instead of the straight-line model. Only the shown chips are
+  // priced, on the picker's own allowance (route-optimizer hintTravelBudget,
+  // never customer booking's), with a 6-hour cache per pin pair and hour.
+  // Which hours fit is still decided by the model. OFF in every environment;
+  // scheduling/hint-road-times.js reads it through gateEnvValue() at call
+  // time. Kill switch: unset — chips show the model's numbers.
+  bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
+
+  // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
+  // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
+  // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the
+  // visit or the 2 hours after it below dry hours; rain-OK bookings
+  // (assessments, estimates, WDO/termite inspections, rodent/trapping,
+  // interior-only) sort them first. Next 3 days only. OFF in every
+  // environment; scheduling/find-time-hints.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset — drive-only order.
+  bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
+
+  // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
+  // customer booking surfaces. buildBookingAvailability (routes/booking.js:
+  // /book, the inspection link, public reschedule) ranks its recommended
+  // slots and each day's best fit by rain fit before route score; the
+  // re-service profile keeps its own order. Order only: the hours offered,
+  // the day list, signed offers and commit checks do not change. OFF in every
+  // environment; scheduling/customer-rain-rank.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset — today's order.
+  customerRainRank: gateEnvValue('GATE_CUSTOMER_RAIN_RANK'),
+
+  // Call booking rain flag (owner 2026-10-08): the call pipeline books the
+  // time a person agreed with the caller, so there is nothing to rank. When
+  // that fresh visit is outdoor work in a rain window (rain-fit.js: 60%+
+  // from the start through 2 h after the end, next 3 dates), the office gets
+  // one admin notification on the 'schedule' channel. Nothing is moved, no
+  // customer is texted, no triage card is created. OFF in every environment;
+  // call-booking-rain-flag.js reads it through gateEnvValue() at call time.
+  // Kill switch: unset.
+  callBookingRainFlag: gateEnvValue('GATE_CALL_BOOKING_RAIN_FLAG'),
+
+  // Auto-dispatch rain pass (owner 2026-10-08): the 04:10 run never moves a
+  // visit inside 72 hours and the hourly rain forecast is good for 3 dates,
+  // so the run cannot see rain. This pass reads the booked visits on those 3
+  // dates every hour of the working day; an outdoor visit whose hourly chance reaches 70% from
+  // its start through 2 h after its end gets one admin notification on the
+  // 'schedule' channel, naming a dry open hour on the same date when there
+  // is one. Nothing is moved and no customer is texted. OFF in every
+  // environment; auto-dispatch/rain-pass.js reads it through gateEnvValue()
+  // at call time. Kill switch: unset.
+  autoDispatchRainPass: gateEnvValue('GATE_AUTO_DISPATCH_RAIN_PASS'),
+
+  // Auto-dispatch conflict moves (owner 2026-10-09, "it should be moving
+  // appointments that overlap"): a recurring visit whose arrival span
+  // overlaps another customer's stop on its date, or that sits on an owner
+  // blackout day, moves to the best legal slot in the 04:10 run without the
+  // score bar or the drive floor (a free hour on the same day first for an
+  // overlap). Every other guard still applies: the 73-hour and reminder
+  // freeze, person-placed, customer-confirmed, the flex window, preferences.
+  // OFF in every environment; auto-dispatch/config.js reads it through
+  // gateEnvValue() at call time (config.conflictMovesEnabled). Kill switch:
+  // unset.
+  autoDispatchConflictMoves: gateEnvValue('GATE_AUTO_DISPATCH_CONFLICT_MOVES'),
+
+  // Auto-dispatch road check (owner 2026-10-09, "drive time yes"): the 04:10
+  // run scores slots on a straight-line drive model. On, an ordinary move's
+  // drive saving is measured again on Google's traffic-aware route matrix
+  // (the three legs around the visit, on the day it has and the day it would
+  // take) and a move that saves under the drive floor on real roads does not
+  // happen. It can only stop a move; a leg Google does not answer keeps the
+  // model's number. OFF in every environment; auto-dispatch/config.js reads
+  // it through gateEnvValue() at call time (config.roadCheckEnabled). Kill
+  // switch: unset.
+  autoDispatchRoadCheck: gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK'),
+
+  // Auto-dispatch move proofreader (owner 2026-10-09 "proofreader yes";
+  // 2026-10-12 "go with the better agent, and for moves it is unsure of
+  // moving forward create admin notifications"). On, the 04:10 run in apply
+  // mode asks one model (ROUTES.autoDispatchProofreader) about each move
+  // right before it is written: the model reads the customer record and
+  // answers allow / hold / unknown. Only an allow moves the visit, on the
+  // slot the model read. An unknown raises one admin notice for the visit.
+  // It can only stop a move and it sends the customer nothing. OFF in every
+  // environment; auto-dispatch/config.js reads it through gateEnvValue() at
+  // call time (config.proofreaderEnabled). Kill switch: unset.
+  autoDispatchProofreader: gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER'),
+
+  // Combo route check (owner 2026-10-03): a visit shared by two or more
+  // services answers `route_unverified` on every arrival check, because
+  // certifying one half alone under-counts the work at the stop. On, a
+  // caller that moves the WHOLE visit (`unit: true` on
+  // loadArrivalRouteContext) gets it placed as one stop with the members'
+  // summed work. OFF in every environment; arrival-route.js reads it through
+  // gateEnvValue() at call time (comboRouteCheckLive). Kill switch: unset —
+  // `unit` is ignored and a combo is unverified exactly as today. This entry
+  // is for logGateStatus only.
+  comboRouteCheck: gateEnvValue('GATE_COMBO_ROUTE_CHECK'),
+
   // Staff existing-visit picker + save checks use complete-route arrival
   // simulation within the existing two-hour customer promises. Advisory;
   // never changes neighbours' promises or sends notifications. Call-time
@@ -3335,6 +3692,11 @@ const gates = {
   // (mergeCustomersEnabled) — tool lists on both paths and the executor
   // itself; this entry is the status/log listing.
   ibMergeCustomers: gateEnvValue('GATE_IB_MERGE_CUSTOMERS'),
+
+  // Intelligence Bar delete_duplicate_customer (owner ruling 2026-10-07).
+  // Ships DARK. Read at CALL time via ibDeleteCustomerLive() — tool lists on
+  // both paths and the executor; this entry is for logGateStatus only.
+  ibDeleteCustomer: process.env.GATE_IB_DELETE_CUSTOMER === 'true',
 
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /
@@ -3537,6 +3899,11 @@ const gates = {
   // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
   // EPA label weather review; request-time checks use gateEnvValue.
   labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
+  // EPA label application-rate review (Inventory → product). Default off;
+  // needs GATE_LABEL_PIPELINE too. Stores approved label directions in
+  // products_catalog.label_rate_review only; nothing reads them for a dose
+  // yet. Request-time checks use gateEnvValue. Kill switch: unset.
+  labelRateReview: gateEnvValue('GATE_LABEL_RATE_REVIEW'),
 
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
@@ -3714,10 +4081,31 @@ const gates = {
   // admin-dispatch.js, complete-scheduled-service.js and report-data.js
   // read GATE_REPORT_BLOG_POST at call time via reportBlogPostLive().
   reportBlogPost: process.env.GATE_REPORT_BLOG_POST === 'true',
+  // Service report Ask Waves AI answers (owner 2026-10-05). Ships DARK.
+  // report-ask-ai.js reads GATE_REPORT_ASK_AI at call time via
+  // reportAskAiLive(); this entry is for logGateStatus only.
+  reportAskAi: process.env.GATE_REPORT_ASK_AI === 'true',
+  // Service report plan + upcoming visits merged, per-visit Reschedule
+  // (owner 2026-10-06). Ships DARK. report-data.js reads
+  // GATE_REPORT_PLAN_RESCHEDULE at call time via reportPlanRescheduleLive();
+  // this entry is for logGateStatus only.
+  reportPlanReschedule: process.env.GATE_REPORT_PLAN_RESCHEDULE === 'true',
+  // Lawn report clarity (owner 2026-10-08): amount-only watering when no sprinkler
+  // setup is on file, and one lawn visit on a lawn report's plan card. Ships DARK.
+  // Read at call time via lawnReportClarityLive(); this entry is for logGateStatus only.
+  lawnReportClarity: process.env.GATE_LAWN_REPORT_CLARITY === 'true',
   // GATE_STANDARD_WORDING_PREVIEW — the office form shows the standard
   // wording a nothing-found report keeps; read at call time via
   // standardWordingPreviewLive().
   standardWordingPreview: process.env.GATE_STANDARD_WORDING_PREVIEW === 'true',
+  // GATE_TRACE_REUSE — "Same as last visit" on the Fast Complete report flow
+  // copies the customer's last saved spray trace whose outline holds this
+  // visit's location onto the open visit; read at call time via traceReuseLive().
+  traceReuse: process.env.GATE_TRACE_REUSE === 'true',
+  // GATE_BLOG_SEARCH_SUGGEST — a search no post covers suggested as a new
+  // post for the autonomous blog queue; read at call time via
+  // blogSearchSuggestLive().
+  blogSearchSuggest: process.env.GATE_BLOG_SEARCH_SUGGEST === 'true',
 
   // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
   // an LLM-backed resolver for a purchase-receipt line the deterministic
@@ -3864,12 +4252,42 @@ const gates = {
   // freeze, the T&S report builders and the report-writer prompt read
   // GATE_TS_TECH_FINDINGS_COPY at call time via tsTechFindingsCopyLive().
   tsTechFindingsCopy: process.env.GATE_TS_TECH_FINDINGS_COPY === 'true',
+
+  // Tree & Shrub seasonal watch list (owner DRAFT 2026-10-01). Ships DARK in
+  // every environment. This entry is for logGateStatus only: the photo read,
+  // the fast-context answer and the completion freeze read GATE_TS_WATCH_LIST
+  // at call time via tsWatchListLive().
+  tsWatchList: process.env.GATE_TS_WATCH_LIST === 'true',
+
+  // Tree & Shrub live-insect check (owner 2026-10-05). Ships DARK in every
+  // environment. This entry is for logGateStatus only: the fast-context answer
+  // and the completion freeze read GATE_TS_PEST_CHECK at call time via
+  // tsPestCheckLive().
+  tsPestCheck: process.env.GATE_TS_PEST_CHECK === 'true',
+
+  // Tree & Shrub yearly neonicotinoid cap per property (owner 2026-10-09). Ships DARK in every
+  // environment. This entry is for logGateStatus only: the fast-context answer reads
+  // GATE_TS_NEONIC_CAP at call time via tsNeonicCapLive().
+  tsNeonicCap: process.env.GATE_TS_NEONIC_CAP === 'true',
+
+  // Tree & Shrub report "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending): one
+  // model call at completion, frozen, printed on the T&S report. Ships DARK in
+  // every environment. This entry is for logGateStatus only: the completion
+  // step and the report build read GATE_TS_TECH_PARAGRAPH at call time via
+  // tsTechParagraphLive().
+  tsTechParagraph: process.env.GATE_TS_TECH_PARAGRAPH === 'true',
   // Lawn re-service Fast Complete (owner 2026-10-01): the one-screen completion
   // sheet for the free between-visit lawn callback (lawn_re_service). Ships DARK
   // in every environment. This entry is for logGateStatus only: admin-dispatch.js
   // and admin-schedule.js read GATE_LAWN_RESERVICE_FAST_COMPLETE at call time via
   // lawnReserviceFastCompleteLive().
   lawnReserviceFastComplete: process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE === 'true',
+  // Lawn Fast Complete (lawn report rebuild, PR-C1): the one-screen completion
+  // sheet for a regular recurring lawn program visit. Ships DARK in every
+  // environment. This entry is for logGateStatus only: admin-dispatch.js,
+  // admin-schedule.js and complete-scheduled-service.js read GATE_LAWN_FAST_COMPLETE
+  // at call time via lawnFastCompleteLive().
+  lawnFastComplete: process.env.GATE_LAWN_FAST_COMPLETE === 'true',
   // GATE_NOTE_BOX_PHOTOS — photos in the notes box; read through
   // noteBoxPhotosLive().
   noteBoxPhotos: process.env.GATE_NOTE_BOX_PHOTOS === 'true',
@@ -3886,6 +4304,11 @@ const gates = {
   // only: admin-dispatch.js reads GATE_FAST_COMPLETE_VOICE_FILL at call time via
   // fastCompleteVoiceFillLive().
   fastCompleteVoiceFill: process.env.GATE_FAST_COMPLETE_VOICE_FILL === 'true',
+  // GATE_FAST_COMPLETE_INVOICED_VISITS — admin Dispatch opens a visit already
+  // invoiced or returning from the payment flow in its Fast Complete sheet,
+  // which then posts the full form's own invoiceAlreadySent field. Read through
+  // fastCompleteInvoicedVisitsLive().
+  fastCompleteInvoicedVisits: process.env.GATE_FAST_COMPLETE_INVOICED_VISITS === 'true',
 
   // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): a
   // still-unsure scope after the Gemini -> OpenAI Sol escalation gets one
@@ -3918,6 +4341,18 @@ const gates = {
   // reads GATE_CALL_ADDRESS_ONFILE_ASSIST at call time via
   // callAddressOnFileAssistLive().
   callAddressOnFileAssist: process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true',
+  // Call-address route-spelling retry. A caller who says a numbered state, US
+  // or county route with the direction FIRST ("14360 East State Road 64")
+  // can get a Google verdict for a different premise, and street recovery
+  // then gives up on a long candidate list. On, recovery first asks Google
+  // once more with the route in its canonical order ("14360 SR 64 E") and
+  // adopts that single verdict when it confirms the spoken house number on
+  // the same route (read-back card, as for any recovered street). Ships
+  // DARK: off unless exactly 'true'. This entry is for logGateStatus only:
+  // services/address-validation/recovery.js reads
+  // GATE_CALL_ROUTE_SPELLING_RETRY at call time via
+  // callRouteSpellingRetryLive().
+  callRouteSpellingRetry: process.env.GATE_CALL_ROUTE_SPELLING_RETRY === 'true',
 
   // Lawn report watering instruction (lawn report rebuild P2): the frozen
   // per-product watering rules drive the aftercare writer, the banner payload
@@ -3926,18 +4361,27 @@ const gates = {
   // time via lawnWateringRuleLive().
   lawnWateringRule: gateEnvValue('GATE_LAWN_WATERING_RULE'),
 
-  // Lawn report lead (lawn report rebuild P7): a derived above-the-fold block
-  // (reportV2.lead) the web report renders instead of the snapshot hero and the
-  // follow-up card. Ships DARK. This entry is for logGateStatus only:
-  // report-consistency.js reads GATE_LAWN_REPORT_LEAD at call time via
-  // lawnReportLeadLive().
-  lawnReportLead: gateEnvValue('GATE_LAWN_REPORT_LEAD'),
+  // Lawn watering banner forecast + observed-rain close-out (lawn report
+  // rebuild P30). Ships DARK. This entry is for logGateStatus only: the write
+  // gate and report-data.js read GATE_LAWN_WATERING_FORECAST at call time via
+  // lawnWateringForecastLive().
+  lawnWateringForecast: gateEnvValue('GATE_LAWN_WATERING_FORECAST'),
 
   // Lawn report monthly program line (lawn report rebuild P9): snapshot.seasonalNote
-  // becomes the month's program sentence from protocols.json. Ships DARK. This
+  // becomes the month's lawn program v13 sentence (v13 visits only). Ships DARK. This
   // entry is for logGateStatus only: lawn-report-v2.js reads GATE_LAWN_EXPECTATIONS
   // at call time via lawnExpectationsLive().
   lawnExpectations: gateEnvValue('GATE_LAWN_EXPECTATIONS'),
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (owner 2026-10-06): a lawn report whose
+  // coverage zones were only the schematic defaults at completion (verdict frozen
+  // then, structured_notes.lawnCoverageVerdict) shows no Lawn Coverage section.
+  // Ships DARK. This entry is for logGateStatus only: report-data.js and the lawn
+  // write gate read it at call time via lawnCoverageHideDefaultZonesLive().
+  lawnCoverageHideDefaultZones: gateEnvValue('GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES'),
+  // GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06): under the v13 month sentence
+  // (GATE_LAWN_EXPECTATIONS), the month's "Why now" line. Ships DARK. This entry is for logGateStatus only:
+  // lawn-report-v2.js reads it at call time via lawnProgramDetailLive().
+  lawnProgramDetail: process.env.GATE_LAWN_PROGRAM_DETAIL === 'true',
 
   // Lawn report treatment memory (lawn report rebuild P12): the per-assessment
   // frozen "what we applied / what we said we would watch" entry in
@@ -3947,13 +4391,21 @@ const gates = {
   // lawnVisitMemoryLive().
   lawnVisitMemory: gateEnvValue('GATE_LAWN_VISIT_MEMORY'),
 
-  // Lawn report v6 copy (lawn report rebuild P14): fixed sentences from the
-  // visit's facts plus approved expectation sentences, no model, frozen per
-  // assessment in structured_notes.lawnCopyV6. Ships DARK; needs
-  // GATE_LAWN_REPORT_LEAD too. This entry is for logGateStatus only:
-  // report-data.js reads GATE_LAWN_REPORT_COPY_V6 at call time via
-  // lawnReportCopyV6Live().
-  lawnReportCopyV6: gateEnvValue('GATE_LAWN_REPORT_COPY_V6'),
+  // Lawn rainfast breach watch (lawn report rebuild P31): measured rain of at
+  // least 0.25 inch inside a product's stated rainfast interval records one
+  // retreat-check on the frozen visit memory and adds one fixed Watching
+  // sentence on the live view. Ships DARK. Needs GATE_LAWN_VISIT_MEMORY. This
+  // entry is for logGateStatus only: report-data.js reads GATE_LAWN_RAINFAST_WATCH
+  // at call time via lawnRainfastWatchLive().
+  lawnRainfastWatch: gateEnvValue('GATE_LAWN_RAINFAST_WATCH'),
+
+  // Lawn paired-photo recheck (lawn report rebuild P19b, owner ruling 2026-09-29
+  // round 3b): one model read of last visit's and today's SAME-SPOT overview
+  // photos as pairs, written once onto the frozen visit memory's watched topics
+  // (check.recheck, source 'photo_pair'). Ships DARK. Needs GATE_LAWN_VISIT_MEMORY
+  // AND GATE_LAWN_PROPERTY_HISTORY too. This entry is for logGateStatus only: the
+  // job reads GATE_LAWN_PAIRED_RECHECK at call time via lawnPairedRecheckLive().
+  lawnPairedRecheck: gateEnvValue('GATE_LAWN_PAIRED_RECHECK'),
 
   // Prospect lawn report "why we think so" (fixed evidence copy per finding and
   // a photo-basis line on the public lawn-diagnostic payload). Ships DARK. This
@@ -3965,6 +4417,113 @@ const gates = {
   // Ships DARK. This entry is for logGateStatus only: report-data.js reads
   // GATE_LAWN_SINCE_LAST at call time via lawnSinceLastLive().
   lawnSinceLast: gateEnvValue('GATE_LAWN_SINCE_LAST'),
+  // Lawn visit photo shot list (lawn report rebuild P18): eight named shots, cap
+  // 8, soft 4-photo minimum, zone-weighted legacy merge, front-first hero. Ships
+  // DARK. This entry is for logGateStatus only: the lawn assessment route and
+  // report-data.js read GATE_LAWN_SHOT_LIST at call time via gateEnvValue().
+  lawnShotList: gateEnvValue('GATE_LAWN_SHOT_LIST'),
+  // Lawn lighting-aware color (owner 2026-10-04): per-photo light read, no color
+  // claim across different light, color never alone drives the overall direction.
+  // Ships DARK. This entry is for logGateStatus only: the visit assessment, the
+  // paired recheck, the progress engine's callers and the report writer's
+  // prior-visit line read GATE_LAWN_LIGHTING at call time via lawnLightingLive().
+  lawnLighting: process.env.GATE_LAWN_LIGHTING === 'true',
+  // Lawn report "From your technician" paragraph (owner 2026-10-05): one model
+  // call at completion, frozen, rendered under "What we applied today". Ships
+  // DARK. This entry is for logGateStatus only: the completion gate and the
+  // report build read GATE_LAWN_TECH_PARAGRAPH at call time via
+  // lawnTechParagraphLive().
+  lawnTechParagraph: gateEnvValue('GATE_LAWN_TECH_PARAGRAPH'),
+  // Lawn report Visit Summary written from the visit's facts (PROTOTYPE ONLY,
+  // GATE_LAWN_VISIT_SUMMARY_V2). Ships DARK. This entry is for logGateStatus
+  // only: the completion gate and the report build read the variable at call
+  // time via lawnVisitSummaryV2Live().
+  lawnVisitSummaryV2: process.env.GATE_LAWN_VISIT_SUMMARY_V2 === 'true',
+  // Lawn report copy fixes (owner 2026-10-08/09): six customer-copy defects on the
+  // lawn report. Ships DARK. This entry is for logGateStatus only: the report
+  // build, the completion freeze and the PDF key read GATE_LAWN_REPORT_COPY_FIXES
+  // at call time via lawnReportCopyFixesLive().
+  lawnReportCopyFixes: process.env.GATE_LAWN_REPORT_COPY_FIXES === 'true',
+  // Lawn report layout (owner 2026-10-08/09): the web report reorder and trim. Ships
+  // DARK. This entry is for logGateStatus only: the report payload reads
+  // GATE_LAWN_REPORT_LAYOUT at call time via lawnReportLayoutLive().
+  lawnReportLayout: process.env.GATE_LAWN_REPORT_LAYOUT === 'true',
+  // Lawn report polish (owner 2026-10-09): the Water card's third state, one label line per
+  // product card, the status card's keep-off line. Ships DARK. This entry is for logGateStatus
+  // only: the report build and the completion freeze read GATE_LAWN_REPORT_POLISH at call time
+  // via lawnReportPolishLive().
+  lawnReportPolish: process.env.GATE_LAWN_REPORT_POLISH === 'true',
+  // Lawn report stage 1 fixes (owner 2026-10-09): five small fixes to one real lawn report (damage finding names the
+  // pest, a second "What to expect" line, no irrigation tip beside a schedule on file, the applied card not repeated,
+  // no email or phone in the web hero). Ships DARK. This entry is for logGateStatus only: the report build, the
+  // payload and the PDF key read GATE_LAWN_REPORT_STAGE1_FIXES at call time via lawnReportStage1FixesLive().
+  lawnReportStage1Fixes: process.env.GATE_LAWN_REPORT_STAGE1_FIXES === 'true',
+  // GATE_LAWN_WATER_RAIN (owner 2026-10-09): the lawn report's rain card. Ships DARK. This entry is for
+  // logGateStatus only: the freeze and the report read it at call time via lawnWaterRainLive().
+  lawnWaterRain: process.env.GATE_LAWN_WATER_RAIN === 'true',
+  // GATE_LAWN_WATER_IN_RAIN (owner 2026-10-09): rain since the visit counts toward a water-in banner. Ships DARK. This entry is
+  // for logGateStatus only: the report and the PDF key read it at call time via lawnWaterInRainLive().
+  lawnWaterInRain: process.env.GATE_LAWN_WATER_IN_RAIN === 'true',
+  // One sprinkler head rate table (owner 2026-10-09): the owner's 15 / 40 minutes per quarter inch for the Monday plan, the
+  // weekly email, the schedule guard, the report's derived figure and the portal line. Ships DARK. This entry is for
+  // logGateStatus only: every reader asks irrigationOwnerRatesLive() (server/services/irrigation-rates.js, which holds no heavy imports) at call time.
+  irrigationOwnerRates: process.env.GATE_IRRIGATION_OWNER_RATES === 'true',
+  // Lawn protocol v13 (owner 2026-10-05): one universal lawn program for every
+  // grass, loaded beside the old program. Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only: every lawn recipe reader
+  // (server/services/lawn-program.js) and the structured protocol lookup
+  // (lawn-protocol-operating-layer.js) read GATE_LAWN_V13 at call time via
+  // lawnV13Live(), so unsetting it is the kill switch (no redeploy).
+  lawnV13: process.env.GATE_LAWN_V13 === 'true',
+  // Bermuda removal add-on on lawn visits (owner 2026-10-06): a lawn the
+  // customer's accepted estimate or staff marked "bermuda removal" gets a
+  // Recognition + Fusilade II backpack spot step on the April and June visits
+  // (St. Augustine and Zoysia only). Ships DARK: off unless exactly 'true'
+  // (the 'on' / '1' spellings read off). Also counts the estimate add-on's
+  // spray cost in the lawn margin (the estimate add-on stays St. Augustine
+  // only). This entry is for
+  // logGateStatus only: every reader calls lawnBermudaRemovalLive() at call
+  // time, so unsetting the variable is the kill switch (no redeploy).
+  lawnBermudaRemoval: process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true',
+  // Lawn Fast Complete weed-spot rules (owner 2026-10-08): one cap-aware Weed spots
+  // entry, the surfactant left out at 90 F or hotter, and the technician's spot area.
+  // Ships DARK. This entry is for logGateStatus only: lawn-fast-complete.js reads
+  // GATE_LAWN_SPOT_RULES at call time via lawnSpotRulesLive().
+  lawnSpotRules: process.env.GATE_LAWN_SPOT_RULES === 'true',
+  // Lawn Fast Complete treatment guide (owner 2026-10-08): the "Suggested from this lawn" cards
+  // after the assessment is confirmed. Ships DARK. This entry is for logGateStatus only:
+  // lawn-fast-complete.js reads GATE_LAWN_TREATMENT_GUIDE at call time via
+  // lawnTreatmentGuideLive() (which also needs the spot rules and the v13 program).
+  lawnTreatmentGuide: process.env.GATE_LAWN_TREATMENT_GUIDE === 'true',
+  // Lawn Fast Complete places and trouble areas (owner 2026-10-09): a place on every spot row, a
+  // per-property trouble-area store, and the v13 yearly limits counted per place. Ships DARK. This
+  // entry is for logGateStatus only: lawn-fast-complete.js, application-limits.js and the completion
+  // read GATE_LAWN_TROUBLE_AREAS at call time via lawnTroubleAreasLive() (which also needs the spot
+  // rules, the v13 program and the treatment guide).
+  lawnTroubleAreas: process.env.GATE_LAWN_TROUBLE_AREAS === 'true',
+  // Lawn Fast Complete mix help (owner 2026-10-09): the amount for a full tank of a spot spray, and gallons sprayed
+  // in place of an area. Ships DARK. This entry is for logGateStatus only: lawn-mix-help.js reads
+  // GATE_LAWN_MIX_HELP at call time via lawnMixHelpLive() (which also needs the spot rules and the v13 program).
+  // Lawn Fast Complete spot target (owner 2026-10-09): a target on a spot fungicide / insecticide row. Ships DARK. This entry is for
+  // logGateStatus only: lawn-spot-target.js reads GATE_LAWN_SPOT_TARGET at call time via lawnSpotTargetLive() (which also needs the guide).
+  lawnSpotTarget: process.env.GATE_LAWN_SPOT_TARGET === 'true',
+  // Lawn Fast Complete photo label (owner 2026-10-09). Ships DARK. This entry is for logGateStatus only: lawn-photo-shots.js callers read
+  // GATE_LAWN_PHOTO_LABEL_PICK at call time via lawnPhotoLabelPickLive().
+  lawnPhotoLabelPick: process.env.GATE_LAWN_PHOTO_LABEL_PICK === 'true',
+  lawnMixHelp: process.env.GATE_LAWN_MIX_HELP === 'true',
+  // Lawn Fast Complete new-sod holds (owner 2026-10-09). This entry is for logGateStatus only: lawn-sod-sheet.js reads
+  // GATE_LAWN_NEW_SOD_NOTE at call time via lawnNewSodNoteLive().
+  lawnNewSodNote: process.env.GATE_LAWN_NEW_SOD_NOTE === 'true',
+  // Lawn v13 November large patch nitrogen (owner 2026-10-09). This entry is for logGateStatus only: waveguard-plan-engine.js reads
+  // GATE_LAWN_NOV_LARGE_PATCH_N at call time via lawnNovLargePatchNLive() (which also needs GATE_LAWN_TROUBLE_AREAS).
+  lawnNovLargePatchN: process.env.GATE_LAWN_NOV_LARGE_PATCH_N === 'true',
+  // Lawn web report New sod card (owner 2026-10-09). This entry is for logGateStatus only: lawn-sod-report-card.js reads
+  // GATE_LAWN_NEW_SOD_REPORT_CARD at call time via lawnNewSodReportCardLive() (which also needs GATE_LAWN_NEW_SOD_NOTE).
+  lawnNewSodReportCard: process.env.GATE_LAWN_NEW_SOD_REPORT_CARD === 'true',
+  // GATE_LAWN_REPORT_FACTS (owner 2026-10-08): the lawn report's re-entry condition, spot-use text and
+  // finding-to-product tie, frozen at completion. Ships DARK. This entry is for logGateStatus only:
+  // the lawn write gate reads it at call time via lawnReportFactsLive().
+  lawnReportFacts: process.env.GATE_LAWN_REPORT_FACTS === 'true',
 
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
@@ -4043,6 +4602,13 @@ const gates = {
 // and gates enforced inside the pricing engine, where a flip must not need
 // a client redeploy and tests mutate the env at runtime). One parser, one
 // truth: '1' / 'true' / 'on', case-insensitive.
+// GATE_IB_DELETE_CUSTOMER read at CALL time — strict `=== 'true'`, dark in
+// every environment. On, the Intelligence Bar offers delete_duplicate_customer
+// (archive-only soft-delete of one empty duplicate record, always a confirm card).
+function ibDeleteCustomerLive() {
+  return process.env.GATE_IB_DELETE_CUSTOMER === 'true';
+}
+
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
 }
@@ -4070,6 +4636,42 @@ function portalActivityLive() {
 // byte-identical to before. Read by rebooker.js and visit-groups.js.
 function seriesMoveCarriesVisitLive() {
   return process.env.GATE_SERIES_MOVE_CARRIES_VISIT === 'true';
+}
+
+// GATE_SERIES_MOVE_TEXT_COALESCE read at CALL time — strict `=== 'true'`, dark.
+// Owner ruling 2026-10-06: a customer got two series-move texts a minute
+// apart because staff moved the same series twice. On, a staff board or Edit
+// appointment series move holds its customer text 3 minutes and drops it when
+// a newer staff move covers the same visit (services/series-move-text-
+// coalesce.js, read by routes/admin-dispatch.js applySeriesMoveEffects).
+// Unset = the text goes out the moment the move commits, byte-identical to
+// before. A held text already waiting when the gate is turned off goes out at
+// the next pass (the 15-minute reconciler).
+// GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND read at CALL time — strict `=== 'true'`
+// (server/services/estimate-draft-retire.js via the scheduler). Owner
+// 2026-10-06: once a customer's estimate is sent, older untouched drafts for
+// that customer are archived. Unset = kill, no redeploy.
+function estimateDraftRetireOnSendLive() {
+  return process.env.GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND === 'true';
+}
+
+function seriesMoveTextCoalesceLive() {
+  return process.env.GATE_SERIES_MOVE_TEXT_COALESCE === 'true';
+}
+
+// GATE_MULTI_TECH_TEXT_TIMES read at CALL time — strict `=== 'true'`, dark.
+// Multi-technician booking PR 4 (owner "go PR 4" 2026-10-06). The callers that
+// only READ appointment times — the lead reply agent's check_next_availability
+// (lead-response-tools.js), the text drafter's city-based OPEN TIMES fallback and
+// its send-time recheck (sms-shadow-drafter.js) and the estimate converter's
+// first service day (estimate-converter.js) — ask the website booking engine
+// (routes/booking.js, per technician, route-aware) through
+// services/scheduling/text-offer-times.js instead of the old by-city engine
+// (services/availability.js getAvailableSlots: no technicians, no routes). A
+// lead known only by city is placed at that city's centre. Unset = the old
+// by-city engine, byte-identical; the old path is the rollback.
+function multiTechTextTimesLive() {
+  return process.env.GATE_MULTI_TECH_TEXT_TIMES === 'true';
 }
 
 // GATE_KB_SPECIES_QA read at CALL time (server/services/knowledge/wiki-qa.js).
@@ -4117,11 +4719,51 @@ function tsTechFindingsCopyLive() {
   return process.env.GATE_TS_TECH_FINDINGS_COPY === 'true';
 }
 
+// GATE_TS_WATCH_LIST read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the T&S photo read's watch-list block,
+// the fast-context `watchList` and the completion freeze of watch items.
+function tsWatchListLive() {
+  return process.env.GATE_TS_WATCH_LIST === 'true';
+}
+
+// GATE_TS_PEST_CHECK read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the T&S fast-context `pestCheck` and
+// the completion freeze of the live-insect answers.
+function tsPestCheckLive() {
+  return process.env.GATE_TS_PEST_CHECK === 'true';
+}
+
+// GATE_TS_NEONIC_CAP read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the T&S fast-context `neonicCap`.
+function tsNeonicCapLive() {
+  return process.env.GATE_TS_NEONIC_CAP === 'true';
+}
+
+// GATE_TS_TECH_PARAGRAPH read at CALL time — strict `=== 'true'`, dark in every
+// environment (customer copy). The one reader for the tree & shrub report's
+// "From your technician" paragraph (tree-shrub-tech-paragraph.js): the
+// completion step makes its one model call and freezes the text, and the report
+// build hands a frozen text to the report, only while this is live. It also
+// needs GATE_TS_TECH_FINDINGS_COPY: the technician's hide / confirm / edit
+// decisions must govern the report the paragraph sits in. Off = no model call,
+// no read, and the payload, the PDF and its cache key are byte-identical.
+function tsTechParagraphLive() {
+  return process.env.GATE_TS_TECH_PARAGRAPH === 'true' && tsTechFindingsCopyLive();
+}
+
 // GATE_LAWN_RESERVICE_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark
 // in every environment. The canonical reader for the lawn re-service
 // fast-context route and the schedule payload's `lawnReserviceFastCompleteEnabled`.
 function lawnReserviceFastCompleteLive() {
   return process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE === 'true';
+}
+
+// GATE_LAWN_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the lawn Fast Complete context and
+// watering-preview routes, the /complete `lawnFast` preflight and the schedule
+// payload's `lawnFastCompleteEnabled`.
+function lawnFastCompleteLive() {
+  return process.env.GATE_LAWN_FAST_COMPLETE === 'true';
 }
 
 // GATE_NOTE_BOX_PHOTOS read at CALL time — ships DARK, off unless exactly
@@ -4144,9 +4786,25 @@ function typedVoiceFillLive() {
 
 // GATE_FAST_COMPLETE_VOICE_FILL read at CALL time — strict `=== 'true'`, dark in
 // every environment. The canonical reader for the Fast Complete voice-fill route
-// (POST /:serviceId/fast-complete/voice-fill).
+// (POST /:serviceId/fast-complete/voice-fill/clip).
 function fastCompleteVoiceFillLive() {
   return process.env.GATE_FAST_COMPLETE_VOICE_FILL === 'true';
+}
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS read at CALL time — strict `=== 'true'`,
+// dark in every environment. The schedule row's `invoicedVisitFastCompleteEnabled`
+// lets admin Dispatch open a Fast Complete sheet for a visit that is already
+// invoiced or returning from payment (the sheet then sends invoiceAlreadySent
+// exactly as the full form does).
+function fastCompleteInvoicedVisitsLive() {
+  return process.env.GATE_FAST_COMPLETE_INVOICED_VISITS === 'true';
+}
+
+// GATE_SERVER_DICTATION read at CALL time — strict `=== 'true'`, dark in every
+// environment. Every staff mic (useSpeechDictation) records a clip and the
+// server transcribes it (routes/tech-dictation.js); off = browser speech.
+function serverDictationLive() {
+  return process.env.GATE_SERVER_DICTATION === 'true';
 }
 
 // GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
@@ -4157,10 +4815,25 @@ function llmCostTrackingLive() {
   return process.env.GATE_LLM_COST_TRACKING === 'true';
 }
 
+// GATE_PACKAGE_FOLLOWUP_AUTOBOOK read at CALL time — strict `=== 'true'`. Gates
+// package-followup-booking.ensurePackageFollowUpVisit (visit 2 of a cockroach /
+// flea / bed bug package booked with visit 1), the call pipeline's package
+// follow-up plan and child shape, and the office-confirm hook in job-status.
+function packageFollowupAutobookLive() {
+  return process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK === 'true';
+}
+
 // GATE_PEST_RIDES_LAWN_AT_ACCEPT read at CALL time — strict `=== 'true'`. Gates
 // the estimate converter's rider seeding (quarterly riders on 6-week / monthly lawn).
 function pestRidesLawnAtAcceptLive() {
   return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
+}
+
+// GATE_RIDER_PAIRS_MONTHLY_LAWN read at CALL time — strict `=== 'true'`. Opens
+// the gated rows of RIDER_PAIRINGS (rider-series-preview.js): bi-monthly,
+// monthly, semiannual and seasonal riders on a monthly lawn host.
+function riderPairsMonthlyLawnLive() {
+  return process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN === 'true';
 }
 
 // GATE_FAST_COMPLETE_REPORT read at CALL time — strict `=== 'true'`, dark in
@@ -4175,6 +4848,136 @@ function fastCompleteReportLive() {
 // (services/neighborhood-access.js fileGateCodeAfterSave).
 function neighborhoodAccessLive() {
   return process.env.GATE_NEIGHBORHOOD_ACCESS === 'true';
+}
+
+// A technician's add / mark-wrong on a visit's neighborhood gate codes
+// (routes/admin-neighborhood-access.js). Needs the directory itself live.
+function neighborhoodTechActionsLive() {
+  return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS === 'true';
+}
+
+// Geofence auto clock-in at the first stop (services/geofence-handler.js
+// handleArrival, automatic mode only), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+function geofenceAutoClockInLive() {
+  return process.env.GATE_GEOFENCE_AUTO_CLOCK_IN === 'true';
+}
+
+// Staff onboarding documents (services/staff-onboarding.js), read at CALL time.
+// Strict `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+// The reads also need the staff documents gate itself.
+function staffOnboardingDocsLive() {
+  return process.env.GATE_STAFF_ONBOARDING_DOCS === 'true';
+}
+
+// Caller demotion + booking-confirmation replay after an on-site contact's YES
+// (services/recipient-optin.js settleOnSiteFollowUps), read at CALL time.
+// Strict `=== 'true'`, dark in every environment.
+function onSiteCallerDemoteLive() {
+  return process.env.GATE_ONSITE_CALLER_DEMOTE === 'true';
+}
+
+// GATE_IB_INVOICE_ACTIONS read at CALL time — strict `=== 'true'`, dark. The
+// Intelligence Bar's send_invoice tool
+// (services/intelligence-bar/invoice-action-tools.js): offered and executable
+// only while on. Kill: unset.
+function ibInvoiceActionsLive() {
+  return process.env.GATE_IB_INVOICE_ACTIONS === 'true';
+}
+
+// Report text to on-location contacts (services/contact-report-text.js),
+// read at CALL time. Strict `=== 'true'`, dark in every environment.
+function contactReportTextLive() {
+  return process.env.GATE_CONTACT_REPORT_TEXT === 'true';
+}
+
+// GATE_IB_REPRICE_VISITS read at CALL time — strict `=== 'true'`, dark. The
+// Intelligence Bar's reprice_future_visits tool (services/intelligence-bar/
+// reprice-visits-tools.js): offered and executable only while on. Kill: unset.
+function ibRepriceVisitsLive() {
+  return process.env.GATE_IB_REPRICE_VISITS === 'true';
+}
+
+// GATE_IB_GENERAL_READ read at CALL time — strict `=== 'true'`, dark, and it
+// needs GATE_IB_PLATFORM. The Intelligence Bar's find_admin_reads /
+// read_admin_data tools (services/intelligence-bar/admin-read-tools.js):
+// offered and executable only while on, and only on the owner login. Only the
+// platform path has the owner-only access model (fullAccess), so with
+// GATE_IB_PLATFORM off nothing offers the tools and a forced call is refused:
+// this reader is false then, everywhere. Kill: unset either variable.
+function ibGeneralReadLive() {
+  return process.env.GATE_IB_GENERAL_READ === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
+// GATE_IB_TOOL_SEARCH read at CALL time — strict `=== 'true'`, dark. A
+// full-access Intelligence Bar login on an ordinary admin page gets its page's
+// tools up front plus every other allowed tool deferred behind the Anthropic
+// API's tool search (action-registry.js initialTools, scope.toolSearch). Off =
+// the page list plus discover_capabilities for everyone. Has effect only on a
+// model that accepts tool search (models.anthropicSupportsToolSearch) and does
+// not think by default (models.anthropicThinksByDefault); any other model
+// keeps the ordinary list. Kill: unset.
+function ibToolSearchLive() {
+  return process.env.GATE_IB_TOOL_SEARCH === 'true';
+}
+
+// GATE_IB_BILLING_MODE_EDIT read at CALL time — strict `=== 'true'`, dark.
+// The Intelligence Bar's update_customer billing type + per-application fee
+// edit (services/intelligence-bar/billing-mode-change.js). Kill: unset.
+function ibBillingModeEditLive() {
+  return process.env.GATE_IB_BILLING_MODE_EDIT === 'true';
+}
+
+// GATE_IB_TIER_UPGRADE_EMAIL read at CALL time — strict `=== 'true'`, dark. An
+// Intelligence Bar update_customer card that raises the WaveGuard tier and
+// changes the billed monthly rate emails the customer the tier-upgrade notice
+// (services/intelligence-bar/tier-upgrade-email.js). Kill: unset.
+function ibTierUpgradeEmailLive() {
+  return process.env.GATE_IB_TIER_UPGRADE_EMAIL === 'true';
+}
+
+// Staff Auto Pay-off step of the Intelligence Bar's remove_saved_payment_method
+// (services/intelligence-bar/billing-write-tools.js), read at CALL time.
+// Strict `=== 'true'`, dark in every environment.
+function ibStaffAutopayOffLive() {
+  return process.env.GATE_IB_STAFF_AUTOPAY_OFF === 'true';
+}
+
+// Intelligence Bar accept_estimate (services/intelligence-bar/estimate-accept-tools.js),
+// read at CALL time. Strict `=== 'true'`, dark in every environment.
+function ibAcceptEstimateLive() {
+  return process.env.GATE_IB_ACCEPT_ESTIMATE === 'true';
+}
+
+// GATE_DUPLICATES_SAME_ADDRESS read at REQUEST time — strict `=== 'true'`, dark.
+// Adds the "Same address, different phone" section to the admin Duplicates
+// review queue (customer-dedupe.js findSameAddressGroups). Review-only: the
+// auto-merge cron never reads that group kind. Off = byte-identical.
+function duplicatesSameAddressLive() {
+  return process.env.GATE_DUPLICATES_SAME_ADDRESS === 'true';
+}
+
+// GATE_DUPLICATES_SAME_NAME read at REQUEST time — strict `=== 'true'`, dark.
+// Adds the "Same name, different phone and address" section to the admin
+// Duplicates review queue (customer-dedupe.js findSameNameGroups). Review-only:
+// the auto-merge cron never reads that group kind. Off = byte-identical.
+function duplicatesSameNameLive() {
+  return process.env.GATE_DUPLICATES_SAME_NAME === 'true';
+}
+
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL — ships DARK, off unless exactly
+// 'true'. Same switch the text-back service reads through isEnabled().
+function missedCallTextBackEmptyVoicemailLive() {
+  return process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true';
+}
+
+// GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT read at CALL time — strict `=== 'true'`,
+// dark. On, the ten-minute sweep (assessment-estimate-closeout.js) completes
+// an open Waves Assessment visit once an estimate has been sent to its
+// customer after it (owner ruling 2026-10-04). Off = the sweep returns before
+// reading anything. Kill switch: unset it.
+function estimateSentClosesAssessmentLive() {
+  return process.env.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT === 'true';
 }
 
 function pestInsiderProofLive() {
@@ -4213,6 +5016,18 @@ function reportPhotoContentLive() {
   return process.env.GATE_REPORT_PHOTO_CONTENT === 'true';
 }
 
+// GATE_ADMIN_MFA / GATE_ADMIN_MFA_ENFORCE read at CALL time — strict
+// `=== 'true'`, ships DARK. The ONLY readers (server/services/staff-mfa.js):
+// off, every persisted enrollment is ignored, so unset is the kill switch and
+// needs no redeploy. Enforce is honoured only while the master gate is on.
+function adminMfaLive() {
+  return process.env.GATE_ADMIN_MFA === 'true';
+}
+
+function adminMfaEnforceLive() {
+  return adminMfaLive() && process.env.GATE_ADMIN_MFA_ENFORCE === 'true';
+}
+
 // GATE_TYPED_DECISIONS read at CALL time — ships DARK, off unless set
 // (gateEnvValue: true / 1 / on). Off, askPackage (typed-decisions/jev.js)
 // returns { ok:false, reason:'gate_off' } before any provider call, so a flip
@@ -4238,6 +5053,37 @@ function typedDecisionsClefLive() {
   return typedDecisionsLive() && gateEnvValue('GATE_TYPED_DECISIONS_CLEF');
 }
 
+// GATE_VISIT_ACCESS_FLAGS read at CALL time — ships DARK, live only when it
+// is exactly 'shadow' AND GATE_TYPED_DECISIONS is live (the sweep's answers
+// are decision_reviews rows). Off, the visit-access sweep
+// (typed-decisions/visit-access-shadow.js) returns before any read or
+// provider call; unset is the kill, no redeploy. Shadow is the only mode this
+// gate has: nothing reaches a technician's card yet.
+function visitAccessShadowLive() {
+  return typedDecisionsLive() && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow';
+}
+
+// GATE_PHOTO_PRIVACY read at CALL time: 'shadow' while the variable says
+// shadow AND the Clef typed-decision leg is live (the photo questions go to
+// Clef only), otherwise 'off'. `suggest` and `act` are not built: any other
+// value is off, so a later mode can never switch on by a typo. Unset is the
+// kill, no redeploy.
+function photoPrivacyMode() {
+  if (!typedDecisionsClefLive()) return 'off';
+  return String(process.env.GATE_PHOTO_PRIVACY || '').toLowerCase() === 'shadow' ? 'shadow' : 'off';
+}
+
+// GATE_PREPAY_MINT_PRICE_HOLD read at CALL time: 'shadow', 'true' or 'off'.
+// The stamp-time price check (annual-prepay-renewals.js holdPriceDriftedRows)
+// for annual prepay terms that are not a /secure pick. 'shadow' records each
+// covered visit's price when a term is created and only logs a visit the
+// check would hold; 'true' also holds it. Any other value is off: nothing is
+// recorded or read. Unset is the kill, no redeploy.
+function prepayMintPriceHoldMode() {
+  const value = String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_REPORT_WRITER_RULES read at CALL time — off unless exactly 'true'.
 // On, POST /generate-report (admin-schedule.js) gives every report writer
 // except lawn and tree/shrub/palm the owner rules block, withholds product
@@ -4256,10 +5102,53 @@ function reportBlogPostLive() {
   return process.env.GATE_REPORT_BLOG_POST === 'true';
 }
 
+// GATE_REPORT_ASK_AI read at CALL time — strict `=== 'true'`, dark in every
+// environment. Off, POST /api/reports/:token/ask answers with the fixed-rule
+// text alone and makes no model call.
+function reportAskAiLive() {
+  return process.env.GATE_REPORT_ASK_AI === 'true';
+}
+
+// GATE_REPORT_PLAN_RESCHEDULE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On, the service report merges "Your plan" with "Your
+// upcoming visits" and each visit carries a Reschedule link.
+function reportPlanRescheduleLive() {
+  return process.env.GATE_REPORT_PLAN_RESCHEDULE === 'true';
+}
+
+// GATE_LAWN_REPORT_CLARITY read at CALL time — strict `=== 'true'`, dark in every
+// environment. On, a water-in frozen at completion with no sprinkler setup on file
+// gives the amount and no minutes, and a lawn report's plan card shows only the
+// next lawn visit. Off, both stay exactly as before.
+function lawnReportClarityLive() {
+  return process.env.GATE_LAWN_REPORT_CLARITY === 'true';
+}
+
 // GATE_STANDARD_WORDING_PREVIEW read at CALL time — strict `=== 'true'`, dark
 // in every environment. Off, the preview route answers { available: false }.
 function standardWordingPreviewLive() {
   return process.env.GATE_STANDARD_WORDING_PREVIEW === 'true';
+}
+
+// GATE_TRACE_REUSE read at CALL time — strict `=== 'true'`, dark in every
+// environment. Off, GET .../treatment-zone/last answers { available: false },
+// POST .../treatment-zone/reuse answers 404, and the Fast Complete sheet
+// shows no "Same as last visit" button.
+function traceReuseLive() {
+  return process.env.GATE_TRACE_REUSE === 'true';
+}
+
+// GATE_BLOG_SEARCH_SUGGEST read at CALL time — strict `=== 'true'`, dark in
+// every environment. Off, the blog search answers suggest:false, the
+// suggestion route answers 404 and the queue claims no queued suggestion.
+function blogSearchSuggestLive() {
+  return process.env.GATE_BLOG_SEARCH_SUGGEST === 'true';
+}
+
+// GATE_RELAY_UNBOOKED_HANDOFF read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for Sandy's unbooked-call hand-off.
+function relayUnbookedHandoffLive() {
+  return process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true';
 }
 
 // GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
@@ -4378,6 +5267,11 @@ function autoDispatchSharedModelLive() {
 // reader server/services/estimate-consultation-offer.js uses. The offer
 // additionally requires leadInspectionLinkLive() (the /inspection/:token page
 // itself must be live too) — checked by the builder, not duplicated here.
+// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only.
+function estimateOfferTiersLive() {
+  return process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+}
+
 function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
 }
@@ -4568,21 +5462,42 @@ function lawnWateringRuleLive() {
   return gateEnvValue('GATE_LAWN_WATERING_RULE');
 }
 
-// GATE_LAWN_REPORT_LEAD read at CALL time (same 1/true/on convention as
-// gateEnvValue). The one canonical reader for the lawn report lead: the tail of
-// applyLawnReportReconciliation derives reportV2.lead from the final reconciled
-// strings. Off = the report payload is byte-identical to before (no lead key),
-// and the client keeps rendering the snapshot hero + follow-up card.
-function lawnReportLeadLive() {
-  return gateEnvValue('GATE_LAWN_REPORT_LEAD');
+// GATE_LAWN_WATERING_FORECAST read at CALL time (same 1/true/on convention as
+// gateEnvValue). Lawn report rebuild P30: the forecast-aware water-in sentence
+// frozen at completion and the live-view rain close-out. Needs the watering
+// instruction (GATE_LAWN_WATERING_RULE) to exist at all. Off = the write gate
+// reads no forecast, the payload and PDF are byte-identical.
+function lawnWateringForecastLive() {
+  return gateEnvValue('GATE_LAWN_WATERING_FORECAST');
 }
 
 // GATE_LAWN_EXPECTATIONS read at CALL time (same 1/true/on convention as
 // gateEnvValue). The one canonical reader for the lawn monthly program line:
-// buildLawnReportV2 swaps snapshot.seasonalNote for the protocols.json month
-// sentence while it is live. Off = the payload is byte-identical to before.
+// buildLawnReportV2 swaps snapshot.seasonalNote for the lawn program v13 month
+// sentence (v13 visits only) while it is live. Off = the payload is
+// byte-identical to before.
 function lawnExpectationsLive() {
   return gateEnvValue('GATE_LAWN_EXPECTATIONS');
+}
+
+// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES read at CALL time (same 1/true/on
+// convention as the other lawn report gates). Live: the lawn write gate freezes
+// the coverage verdict at completion, and a render hides the coverage section
+// (the A-D perimeter list under a satellite photo claimed marks nobody made)
+// only when that frozen verdict says defaults only. No frozen verdict = shown as
+// before. Off = the payload is byte-identical to before.
+function lawnCoverageHideDefaultZonesLive() {
+  return gateEnvValue('GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES');
+}
+
+// GATE_LAWN_PROGRAM_DETAIL read at CALL time. Live (with GATE_LAWN_EXPECTATIONS,
+// which supplies the month sentence it sits under): snapshot.seasonalDetail
+// carries the month's whyNow line (lawn-program-line.js PROGRAM_DETAIL_V13).
+// Off = byte-identical payload.
+function lawnProgramDetailLive() {
+  // Strict 'true' only (codex #6091 r1). The detail renders in the lead
+  // layout's "This time of year" card.
+  return process.env.GATE_LAWN_PROGRAM_DETAIL === 'true';
 }
 
 // GATE_LAWN_VISIT_MEMORY read at CALL time (same 1/true/on convention as
@@ -4593,15 +5508,26 @@ function lawnVisitMemoryLive() {
   return gateEnvValue('GATE_LAWN_VISIT_MEMORY');
 }
 
-// GATE_LAWN_REPORT_COPY_V6 read at CALL time (same 1/true/on convention as
-// gateEnvValue). The one canonical reader for the lawn v6 copy. It is
-// effective only while GATE_LAWN_REPORT_LEAD is live too: its fields reach a
-// customer only through reportV2.lead, so with the lead off there is nothing
-// to build or freeze. Off = the payload, render
-// and PDF are byte-identical to before and the old LAWN_REPORT_V2_NARRATIVE
-// path is untouched.
-function lawnReportCopyV6Live() {
-  return gateEnvValue('GATE_LAWN_REPORT_COPY_V6') && lawnReportLeadLive();
+// GATE_LAWN_PAIRED_RECHECK read at CALL time (same 1/true/on convention as
+// gateEnvValue). The one canonical reader for the paired-photo recheck
+// (services/lawn-paired-recheck.js). THREE prerequisites, all required:
+// GATE_LAWN_VISIT_MEMORY (it writes onto that store's frozen entry) and
+// GATE_LAWN_PROPERTY_HISTORY (the prior visit exists only from the
+// property-scoped history; without it the first render freezes sinceLast: null
+// and the one chance this visit has to be rechecked would be spent for good).
+// With any of them off it reports off: no hook, no extra model call, no photo
+// read, no stored field, byte-identical payload.
+function lawnPairedRecheckLive() {
+  return gateEnvValue('GATE_LAWN_PAIRED_RECHECK') && lawnVisitMemoryLive() && gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+}
+
+// GATE_LAWN_RAINFAST_WATCH read at CALL time (same 1/true/on convention as
+// gateEnvValue). Lawn report rebuild P31: the rainfast breach watch
+// (service-report/lawn-rainfast-watch.js). It writes onto the frozen visit
+// memory entry, so GATE_LAWN_VISIT_MEMORY is a prerequisite. Off, or with the
+// memory off: no weather read, no write, byte-identical payload.
+function lawnRainfastWatchLive() {
+  return gateEnvValue('GATE_LAWN_RAINFAST_WATCH') && lawnVisitMemoryLive();
 }
 
 // GATE_LAWN_DIAGNOSTIC_EVIDENCE read at CALL time (same 1/true/on convention).
@@ -4610,10 +5536,10 @@ function lawnDiagnosticEvidenceLive() {
 }
 
 // GATE_LAWN_SINCE_LAST read at CALL time (same 1/true/on convention). The
-// block needs the memory it reads and the lead it renders in, so this is
-// false unless all three gates are live.
+// block needs the memory it reads, so this is false unless both gates are
+// live.
 function lawnSinceLastLive() {
-  return gateEnvValue('GATE_LAWN_SINCE_LAST') && lawnVisitMemoryLive() && lawnReportLeadLive();
+  return gateEnvValue('GATE_LAWN_SINCE_LAST') && lawnVisitMemoryLive();
 }
 
 // GATE_LAWN_WATERING_SMS read at CALL time — strict `=== 'true'`, dark in every
@@ -4634,6 +5560,15 @@ function lawnWateringSmsLive() {
 // logGateStatus only.
 function callAddressOnFileAssistLive() {
   return process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true';
+}
+
+// GATE_CALL_ROUTE_SPELLING_RETRY read at CALL time — strict `=== 'true'`, off
+// by default. The one canonical reader for
+// server/services/address-validation/recovery.js. Off, street recovery is
+// byte-identical: no extra Address Validation request. The gates-map entry
+// above is for logGateStatus only.
+function callRouteSpellingRetryLive() {
+  return process.env.GATE_CALL_ROUTE_SPELLING_RETRY === 'true';
 }
 
 // GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
@@ -4883,6 +5818,41 @@ function callCommercialDictatedBookingLive() {
   return process.env.GATE_CALL_COMMERCIAL_DICTATED_BOOKING === 'true';
 }
 
+// GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING read at CALL time — strict
+// `=== 'true'`, dark by default (owner ruling 2026-10-06). The canonical reader
+// for call-recording-processor.js's canAutoRoute call sites (the enforce lane,
+// the shadow pass and the audit reconstruction): on, a commercial_requires_quote
+// hold clears for a Waves Assessment staff booked on the call with no price
+// discussed — outbound callback calls too, once staff identity is proven
+// independent of the speaker labels (see services/call-commercial-dictated-booking.js).
+// Needs GATE_CALL_AGENT_COMMIT_BOOKING on (processor). Off, byte-identical to
+// before. The `callCommercialAssessmentBooking` gates-map entry above is for
+// logGateStatus only.
+function callCommercialAssessmentBookingLive() {
+  return process.env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING === 'true';
+}
+
+// GATE_CALL_EXTRACTION_SYSTEM_PROMPT read at CALL time — strict `=== 'true'`,
+// dark by default. The canonical reader for call-recording-processor.js: on, the
+// V2 extraction request carries the rules and the output contract as a static
+// system part (cacheable across calls) and the call's own facts and transcript
+// as the user message, and the prompt version carries the `s` / `b` cohort mark.
+// Off, the one-message prompt and its version are byte-identical to before. The
+// `callExtractionSystemPrompt` gates-map entry above is for logGateStatus only.
+function callExtractionSystemPromptLive() {
+  return process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT === 'true';
+}
+
+// GATE_CALL_SPELLING_COLLAPSE_TRIGGER read at CALL time — strict `=== 'true'`, dark by
+// default. The canonical reader for call-recording-processor.js: on, the second
+// transcription pass and the contact decoder also run when spellingCollapseSignals
+// (contact-dictation.js) finds the marks a collapsed spelling leaves in the primary
+// transcript. Off, only detectContactDictationSignals decides, byte-identical to before.
+// The `callSpellingCollapseTrigger` gates-map entry above is for logGateStatus only.
+function callSpellingCollapseTriggerLive() {
+  return process.env.GATE_CALL_SPELLING_COLLAPSE_TRIGGER === 'true';
+}
+
 // GATE_CALL_FIRST_NAME_ADVISORY read at CALL time — strict `=== 'true'`, dark by
 // default (owner ruling 2026-10-02: the AI booker approved two confirmed bookings,
 // then skipped one because the caller gave only a last name). The canonical reader
@@ -4893,6 +5863,38 @@ function callCommercialDictatedBookingLive() {
 // `callFirstNameAdvisory` gates-map entry above is for logGateStatus only.
 function callFirstNameAdvisoryLive() {
   return process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true';
+}
+
+// GATE_CALL_LAST_NAME_LOOKUP read at CALL time — strict `=== 'true'`, dark by
+// default (owner ruling 2026-10-08). The canonical reader for
+// services/call-last-name-lookup.js: on, a call that left a customer with a
+// first name and no last name fires a background lookup (county owner record
+// for the homeowner, our own records, the email address, the Twilio caller
+// name) that posts ONE admin notification suggesting the last name. It never
+// writes the name; the office saves it. Off, nothing runs. Kill: unset.
+function callLastNameLookupLive() {
+  return process.env.GATE_CALL_LAST_NAME_LOOKUP === 'true';
+}
+
+// GATE_STATION_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark by
+// default (owner ruling 2026-10-08). On, a termite or rodent bait station visit
+// opens the one-screen Fast Complete sheet in admin Dispatch with the station
+// checks on it (client/src/components/tech/FastCompleteStations.jsx), and
+// POST /admin/dispatch/:id/typed-facts reads station exceptions from the note
+// (services/visit-station-facts.js). Off, the schedule row flag is false and
+// station visits route as before. Kill: unset.
+function stationFastCompleteLive() {
+  return process.env.GATE_STATION_FAST_COMPLETE === 'true';
+}
+
+// GATE_PIN_PARKED_CHECK read at CALL time — strict `=== 'true'`, dark by default
+// (owner "build guardrail" 2026-10-09). The canonical reader for
+// services/pin-parked-check.js and the pin_suggestion part of
+// routes/admin-customer-geocodes.js. Off: the daily job returns before any query,
+// the review endpoints add no suggestion and the dismiss route answers 404.
+// It never writes a pin and never contacts a customer. Kill: unset.
+function pinParkedCheckLive() {
+  return process.env.GATE_PIN_PARKED_CHECK === 'true';
 }
 
 // GATE_SIGNUP_SINGLE_EMAIL read at CALL time — strict `=== 'true'`, dark by
@@ -5101,6 +6103,271 @@ function permitDetailSyncLive() {
   return process.env.GATE_PERMIT_DETAIL_SYNC === 'true';
 }
 
+// GATE_LOOKUP_BUSINESS_IDENTITY read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for the business-identity leg of the admin
+// property lookup and the estimator engine (services/property-lookup/
+// business-identity.js): off, no Places request is made and the lookup and
+// the engine behave exactly as before.
+function lookupBusinessIdentityLive() {
+  return process.env.GATE_LOOKUP_BUSINESS_IDENTITY === 'true';
+}
+
+// GATE_LOOKUP_LISTING_SIZE read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the listing-size leg of commercial suite sizing
+// (services/commercial-suite-size/listing-size.js): off, no search and no
+// page fetch, and the sizing ladder is exactly as before.
+function lookupListingSizeLive() {
+  return process.env.GATE_LOOKUP_LISTING_SIZE === 'true';
+}
+
+// GATE_LOOKUP_ADDRESS_STATUS read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the admin lookup's address status line
+// (services/property-lookup/address-status.js): off, no Address Validation
+// call is made for a lookup and the route's response is exactly as before.
+function lookupAddressStatusLive() {
+  return process.env.GATE_LOOKUP_ADDRESS_STATUS === 'true';
+}
+
+// GATE_LOOKUP_PERMIT_FACTS read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the permit-facts leg of the property lookup
+// (routes/property-lookup-v2.js: the _permitBuildingFacts stamp and the
+// enriched profile's permitBuildingFacts) and the estimator engine's
+// permit-plan sqft source: off, construction_permit_records is never read
+// for a lookup and the lookup, profile and draft are exactly as before.
+function lookupPermitFactsLive() {
+  return process.env.GATE_LOOKUP_PERMIT_FACTS === 'true';
+}
+
+// GATE_LAWN_REPORT_PHOTO_SET read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for the lawn report's photo set (report-data.js
+// buildLawnAssessmentReportData, lawnAssessmentPdfSignature): off, the report
+// payload and the PDF cache key are byte-identical to before.
+function lawnReportPhotoSetLive() {
+  return process.env.GATE_LAWN_REPORT_PHOTO_SET === 'true';
+}
+
+// GATE_LAWN_REPORT_PHOTO_FINDINGS read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for the lawn report's "What the photos showed"
+// block (report-data.js, lawn-photo-findings.js). It works only together with
+// GATE_LAWN_REPORT_PHOTO_SET (the block hangs off the photo set); off, the run
+// is never read and the payload and the PDF cache key are unchanged.
+function lawnReportPhotoFindingsLive() {
+  return process.env.GATE_LAWN_REPORT_PHOTO_FINDINGS === 'true';
+}
+
+// GATE_LAWN_LIGHTING read at CALL time — ships DARK, off unless exactly 'true' AND
+// GATE_LAWN_VISIT_ASSESSMENT is on. The light read comes only from the one-call
+// visit assessment (POST /admin/lawn-assessment/assess stays on the legacy
+// per-photo path without it), so with that gate off no run would ever store a
+// light and every effect below would only hide color for nothing: the reader
+// reports off then, and NO effect of the gate can run without the reader that
+// feeds it (same composition as lawnPairedRecheckLive).
+// The one reader for the lawn lighting-aware color work (owner 2026-10-04):
+// the visit assessment's light read and prompt variant (lawn-visit-assessment.js),
+// the paired recheck's v3 prompt (lawn-paired-recheck.js), the progress engine's
+// color rules (service-report/lawn-progress.js, called from report-data.js) and
+// the report writer's prior-visit score line (report-copy-context.js). Off, every
+// one of them is byte-identical to before.
+function lawnLightingLive() {
+  return process.env.GATE_LAWN_LIGHTING === 'true' && gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
+}
+
+// GATE_LAWN_TECH_PARAGRAPH read at CALL time (same 1/true/on convention as
+// gateEnvValue) — ships DARK. The one reader for the lawn report's "From your
+// technician" paragraph (lawn-tech-paragraph.js): the completion gate
+// (lawn-report-write-gate.js) makes its one model call and freezes the text
+// only while this is live, and the report build hands a frozen text to the lead
+// only while it is live. It renders only inside the lead. Off = no model call, no read, and the payload, the
+// PDF and its cache key are byte-identical to before.
+function lawnTechParagraphLive() {
+  return gateEnvValue('GATE_LAWN_TECH_PARAGRAPH');
+}
+
+// GATE_LAWN_VISIT_SUMMARY_V2 read at CALL time, strict `=== 'true'` (customer copy),
+// so an unset variable is the kill switch for NEW summaries. The one reader for the lawn Visit
+// Summary composer (lawn-visit-summary.js, fixed sentences, no model): ONLY the completion gate
+// (lawn-report-write-gate.js) reads it, to compose and freeze. A render shows any whole frozen
+// summary whatever this says, so every pod and browser agrees during a rollout and a rollback
+// leaves existing summaries in place.
+function lawnVisitSummaryV2Live() {
+  return process.env.GATE_LAWN_VISIT_SUMMARY_V2 === 'true';
+}
+
+// GATE_LAWN_REPORT_COPY_FIXES read at CALL time, strict `=== 'true'` (customer copy), so an
+// unset variable is the kill switch. The one reader for the six lawn report copy fixes (category
+// words instead of chemical names, the seasonal color line rule, "Weed Cleanliness", no pest
+// re-service wording, no stale charts, the water target source line). Lawn reports only: every
+// caller checks the service line first. Off = the payload, render, PDF and PDF cache key are
+// byte-identical to before. Frozen entries (the tech paragraph, the v6 copy) are written in the
+// category form only while this is live and replay unchanged afterwards.
+function lawnReportCopyFixesLive() {
+  return process.env.GATE_LAWN_REPORT_COPY_FIXES === 'true';
+}
+
+// GATE_LAWN_REPORT_LAYOUT read at CALL time, strict `=== 'true'` (customer copy), so an unset
+// variable is the kill switch. The one reader for the lawn web report layout: the payload key
+// `lawnLayout` (lawn-report-layout.js) is added only while it is live, and the page orders and
+// trims the report from that key. Lawn reports only: every caller checks the service line first.
+// Off = the payload, render, PDF and PDF cache key are byte-identical to before.
+function lawnReportLayoutLive() {
+  return process.env.GATE_LAWN_REPORT_LAYOUT === 'true';
+}
+
+// GATE_LAWN_REPORT_POLISH read at CALL time, strict `=== 'true'` (customer copy), so an unset variable
+// is the kill switch. The one reader for the lawn report polish: the Water card's third state, the
+// frozen one-label-line decision, the status card's keep-off line. Lawn reports only: every caller
+// checks the service line first. Off = the payload, render, PDF and PDF cache key are byte-identical.
+function lawnReportPolishLive() {
+  return process.env.GATE_LAWN_REPORT_POLISH === 'true';
+}
+
+// GATE_LAWN_REPORT_STAGE1_FIXES read at CALL time, strict `=== 'true'` (customer copy), so an unset variable
+// is the kill switch. The one reader for the five lawn report stage 1 fixes (the damage finding names the targeted
+// pest, a second "What to expect" line, no irrigation-settings tip beside a schedule on file, the applied card not
+// repeated, no email or phone in the web hero). Lawn reports only: every caller checks the service line first.
+// Off = the payload, render, PDF and PDF cache key of a record with no frozen stage 1 copy are byte-identical to before;
+// a second "What to expect" line frozen while the gate was live keeps replaying (and its PDF key part ':s1f=1') after it is unset.
+function lawnReportStage1FixesLive() {
+  return process.env.GATE_LAWN_REPORT_STAGE1_FIXES === 'true';
+}
+
+// The FREEZE half of GATE_LAWN_REPORT_POLISH (the one-label-line decision and the longer-cycles decision) is live
+// only while GATE_LAWN_REPORT_FACTS is also live: both decisions are frozen INSIDE the facts block
+// (lawnReportFacts.labelLines, lawnReportFacts.waterAdvice, written by the facts freeze), and with the facts gate dark
+// nothing is frozen. Both gates must be live, so the dependency is stated here, once, and the freeze reads this helper
+// instead of the polish gate. The Water card half (third state, basis line) and the status card half read
+// lawnReportPolishLive() alone and need no facts gate. A render reads the frozen record whatever either gate says.
+function lawnReportPolishFreezeLive() {
+  return lawnReportPolishLive() && lawnReportFactsLive();
+}
+
+// GATE_LAWN_WATER_RAIN read at CALL time, strict `=== 'true'` (customer copy), so an unset variable is the kill
+// switch. It controls ONLY the freeze at completion: a render reads the frozen record (lawnReportFacts.waterAdvice,
+// version 2) whatever this gate says. Lawn reports only: every caller checks the service line first.
+function lawnWaterRainLive() {
+  return process.env.GATE_LAWN_WATER_RAIN === 'true';
+}
+
+// GATE_LAWN_WATER_IN_RAIN read at CALL time, strict `=== 'true'` (customer copy), so an unset variable is the kill switch.
+// Read-time only: nothing is frozen, so the PDF cache key (':wir=') follows this gate while a frozen water-in instruction exists.
+function lawnWaterInRainLive() {
+  return process.env.GATE_LAWN_WATER_IN_RAIN === 'true';
+}
+
+// The freeze of the rain-card decision is live only while GATE_LAWN_REPORT_FACTS is also live: the decision is frozen
+// INSIDE the facts block (lawnReportFacts.waterAdvice), and with the facts gate dark nothing is frozen. The one place
+// the dependency is stated.
+function lawnWaterRainFreezeLive() {
+  return lawnWaterRainLive() && lawnReportFactsLive();
+}
+
+// GATE_LAWN_V13 read at CALL time — strict `'true'` only, so an unset variable
+// is the kill switch. The one reader for the v13 lawn program: lawn-program.js
+// hands every recipe reader the v13 program instead of protocols.json `lawn`,
+// and getActiveLawnProtocol resolves the staged v13 protocol version for a
+// visit with no assignment. Off = every output is byte-identical to before.
+function lawnV13Live() {
+  return process.env.GATE_LAWN_V13 === 'true';
+}
+
+// GATE_LAWN_BERMUDA_REMOVAL read at CALL time, strict 'true' only. The one
+// reader for the lawn bermuda-removal add-on (services/lawn-bermuda-removal.js,
+// the plan engine, the tank sheet and the cost line in service-pricing.js). Off = every output is byte-identical to before.
+function lawnBermudaRemovalLive() {
+  return process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true';
+}
+
+// GATE_LAWN_SPOT_RULES read at CALL time — strict `'true'` only, so an unset variable
+// is the kill switch. The lawn Fast Complete context adds plannedProducts.weedMix and
+// spotRules only while it is on (lawn-fast-complete.js); off = the old payload exactly.
+function lawnSpotRulesLive() {
+  return process.env.GATE_LAWN_SPOT_RULES === 'true';
+}
+
+// GATE_LAWN_TREATMENT_GUIDE read at CALL time — strict `'true'` only, so an unset variable
+// is the kill switch. Live only while the spot rules AND the v13 program are too (fail closed):
+// the weed card is the spot rules' Weed spots entry, and every product comes from the staged v13
+// rows. The lawn Fast Complete context, the treatment-guide route and the completion record all
+// follow this one reader; off = the old behavior exactly.
+function lawnTreatmentGuideLive() {
+  return process.env.GATE_LAWN_TREATMENT_GUIDE === 'true' && lawnSpotRulesLive() && lawnV13Live();
+}
+
+// GATE_LAWN_TROUBLE_AREAS read at CALL time — strict `'true'` only, so an unset variable is the kill
+// switch. Live only while the spot rules, the v13 program AND the treatment guide are too (fail closed): the
+// place belongs to the spot rows the spot rules ask for, the per-place limits are the v13 yearly caps, and the
+// guide supplies the take-all and chinch sets the places are classified and held to (the guide is live in
+// production; without it the sheet has no take-all ids). The context, the clear route, the /complete preflight
+// and record, and the limit reader all follow this one reader; off = the old behavior exactly.
+function lawnTroubleAreasLive() {
+  return process.env.GATE_LAWN_TROUBLE_AREAS === 'true' && lawnSpotRulesLive() && lawnV13Live() && lawnTreatmentGuideLive();
+}
+
+// GATE_LAWN_NEW_SOD_NOTE read at CALL time — strict `'true'` only, so an unset variable is the kill
+// switch. The lawn Fast Complete context carries `newSod` (the banner, the held lines, the bag swap) and
+// the rooted-tick route answers only while it is on (lawn-sod-sheet.js); off = the old payload exactly.
+function lawnNewSodNoteLive() {
+  return process.env.GATE_LAWN_NEW_SOD_NOTE === 'true';
+}
+
+// GATE_LAWN_NOV_LARGE_PATCH_N read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Live only while the
+// trouble areas are too (fail closed): the rule reads the mapped fungus areas, and lawnTroubleAreasLive() already needs the v13 program.
+// The plan and the tank sheet follow this one reader; off = the old targets exactly.
+function lawnNovLargePatchNLive() {
+  return process.env.GATE_LAWN_NOV_LARGE_PATCH_N === 'true' && lawnTroubleAreasLive();
+}
+
+// GATE_LAWN_NEW_SOD_REPORT_CARD read at CALL time — strict `'true'` only, so an unset variable is the kill switch.
+// It also needs the sheet's own holds (GATE_LAWN_NEW_SOD_NOTE): the card is frozen from the sod-aware context. Controls
+// the freeze at completion and the payload key (lawn-sod-report-card.js); off = no freeze, the old payload exactly.
+function lawnNewSodReportCardLive() {
+  return process.env.GATE_LAWN_NEW_SOD_REPORT_CARD === 'true' && lawnNewSodNoteLive();
+}
+
+// GATE_LAWN_SPOT_TARGET read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Live only while the
+// treatment guide is too (fail closed): the confirmation of a row's type uses the guide's staged sets. The context key, the sheet's
+// control and the completion's stored targets all follow this one reader; off = the old behavior exactly.
+function lawnSpotTargetLive() {
+  return process.env.GATE_LAWN_SPOT_TARGET === 'true' && lawnTreatmentGuideLive();
+}
+
+// GATE_LAWN_PHOTO_LABEL_PICK read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Controls the sheet's
+// "Shown to the customer as" chooser (via the assess lookup), the stored pick and the report's label; off = the old behavior exactly.
+function lawnPhotoLabelPickLive() {
+  return process.env.GATE_LAWN_PHOTO_LABEL_PICK === 'true';
+}
+
+// GATE_LAWN_MIX_HELP read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Live only while
+// the spot rules AND the v13 program are too (fail closed): the mix help reads the staged v13 rows of the spot sheet's
+// products. The lawn Fast Complete context and the completion follow this one reader; off = the old behavior exactly.
+function lawnMixHelpLive() {
+  return process.env.GATE_LAWN_MIX_HELP === 'true' && lawnSpotRulesLive() && lawnV13Live();
+}
+
+// GATE_LAWN_REPORT_FACTS read at CALL time — strict `'true'` only, so an unset variable is the kill
+// switch. It controls ONLY the freeze at completion (the lawn write gate): a render and the PDF key
+// read what the record already carries and never this gate, so a flip cannot change a stored report.
+function lawnReportFactsLive() {
+  return process.env.GATE_LAWN_REPORT_FACTS === 'true';
+}
+
+// The TIE part of GATE_LAWN_REPORT_FACTS (the finding-to-product tie and its curative "What to expect" line) is
+// live only while the surfaces that print it are live: the Visit Summary freeze (GATE_LAWN_VISIT_SUMMARY_V2 writes
+// the tie sentences); the v6 copy that prints the "What to expect" line is always live. With the Visit Summary
+// dark, no tie is frozen. The re-entry condition and the spot-product text need no other gate. This is the one
+// place the dependency is stated.
+function lawnReportTiesLive() {
+  return lawnReportFactsLive() && lawnVisitSummaryV2Live();
+}
+
+// GATE_AIO_GAP_SWEEP_MONTHLY read at CALL time — strict 'true' only, so an
+// unset variable is off. Lets the scheduler start the monthly AI Overview gap
+// sweep (services/seo/aio-gap-sweep.js) on the 2nd. A manual sweep started
+// from the admin route needs no gate.
+function aioGapSweepMonthlyLive() {
+  return process.env.GATE_AIO_GAP_SWEEP_MONTHLY === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -5133,12 +6400,27 @@ function portalChatReserviceLawnLive() {
   return process.env.GATE_PORTAL_CHAT_RESERVICE_LAWN === 'true';
 }
 
+// GATE_PORTAL_CHAT_EMAIL_CHANGE read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for the portal assistant's confirmed
+// email-change hand-off (services/ai-assistant request_email_change). Needs
+// PORTAL_CHAT_SELF_SERVE.
+function portalChatEmailChangeLive() {
+  return process.env.GATE_PORTAL_CHAT_EMAIL_CHANGE === 'true';
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.pestRidesLawnAtAcceptLive = pestRidesLawnAtAcceptLive;
+module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
+module.exports.riderPairsMonthlyLawnLive = riderPairsMonthlyLawnLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
+module.exports.adminMfaLive = adminMfaLive;
+module.exports.adminMfaEnforceLive = adminMfaEnforceLive;
+// GATE_IB_DELETE_CUSTOMER reader, on its own line so gate PRs never conflict.
+module.exports.ibDeleteCustomerLive = ibDeleteCustomerLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
@@ -5151,14 +6433,20 @@ module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBookingLive;
+module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBookingLive;
+module.exports.callExtractionSystemPromptLive = callExtractionSystemPromptLive;
+module.exports.callSpellingCollapseTriggerLive = callSpellingCollapseTriggerLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
-module.exports.lawnReportLeadLive = lawnReportLeadLive;
+module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
+module.exports.lawnCoverageHideDefaultZonesLive = lawnCoverageHideDefaultZonesLive;
+module.exports.lawnProgramDetailLive = lawnProgramDetailLive;
 module.exports.lawnVisitMemoryLive = lawnVisitMemoryLive;
-module.exports.lawnReportCopyV6Live = lawnReportCopyV6Live;
+// Own line (P19b) so concurrent gate PRs appending to the shared list never conflict.
+module.exports.lawnPairedRecheckLive = lawnPairedRecheckLive;
 module.exports.lawnDiagnosticEvidenceLive = lawnDiagnosticEvidenceLive;
 module.exports.lawnSinceLastLive = lawnSinceLastLive;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
@@ -5169,6 +6457,7 @@ module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowli
 module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleAllowlistStatus;
 module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
+module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
@@ -5191,7 +6480,9 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
+module.exports.reportAskAiLive = reportAskAiLive;
 module.exports.standardWordingPreviewLive = standardWordingPreviewLive;
+module.exports.blogSearchSuggestLive = blogSearchSuggestLive;
 module.exports.kbSpeciesQaLive = kbSpeciesQaLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
@@ -5204,14 +6495,26 @@ module.exports.portalChatVisitFactsLive = portalChatVisitFactsLive;
 module.exports.portalChatReserviceLive = portalChatReserviceLive;
 // GATE_PORTAL_CHAT_RESERVICE_LAWN reader, on its own line so gate PRs never conflict.
 module.exports.portalChatReserviceLawnLive = portalChatReserviceLawnLive;
+// GATE_PORTAL_CHAT_EMAIL_CHANGE reader, on its own line so gate PRs never conflict.
+module.exports.portalChatEmailChangeLive = portalChatEmailChangeLive;
 // GATE_TYPED_DECISIONS reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.typedDecisionsLive = typedDecisionsLive;
 module.exports.callIncidentsLive = callIncidentsLive;
 module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
+module.exports.visitAccessShadowLive = visitAccessShadowLive;
+module.exports.photoPrivacyMode = photoPrivacyMode;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
 module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
+module.exports.tsWatchListLive = tsWatchListLive;
+// GATE_TS_PEST_CHECK reader, on its own line so gate PRs never conflict.
+module.exports.tsPestCheckLive = tsPestCheckLive;
+// GATE_TS_NEONIC_CAP reader, on its own line so gate PRs never conflict.
+module.exports.tsNeonicCapLive = tsNeonicCapLive;
+// GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
+module.exports.tsTechParagraphLive = tsTechParagraphLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
+module.exports.lawnFastCompleteLive = lawnFastCompleteLive;
 module.exports.noteBoxPhotosLive = noteBoxPhotosLive;
 module.exports.laneVoiceFillLive = laneVoiceFillLive;
 module.exports.typedVoiceFillLive = typedVoiceFillLive;
@@ -5225,14 +6528,169 @@ module.exports.fastCompleteVoiceFillLive = fastCompleteVoiceFillLive;
 module.exports.fastCompleteReportLive = fastCompleteReportLive;
 // GATE_KB_CUSTOMER_AUDIENCE reader, on its own line.
 module.exports.kbCustomerAudienceLive = kbCustomerAudienceLive;
+// GATE_SERIES_MOVE_TEXT_COALESCE reader, on its own line.
+module.exports.seriesMoveTextCoalesceLive = seriesMoveTextCoalesceLive;
+// GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND reader. Kept here, away from the end of the file, so gate PRs appending there never conflict with it.
+module.exports.estimateDraftRetireOnSendLive = estimateDraftRetireOnSendLive;
 // GATE_SMS_UNANSWERED_REPLY reader, on its own line.
 module.exports.smsUnansweredReplyLive = smsUnansweredReplyLive;
 // GATE_NEIGHBORHOOD_ACCESS reader, on its own line.
 module.exports.neighborhoodAccessLive = neighborhoodAccessLive;
+// GATE_NEIGHBORHOOD_TECH_ACTIONS reader, on its own line.
+module.exports.neighborhoodTechActionsLive = neighborhoodTechActionsLive;
+// GATE_CONTACT_REPORT_TEXT reader, on its own line.
+module.exports.contactReportTextLive = contactReportTextLive;
+// GATE_IB_STAFF_AUTOPAY_OFF reader, on its own line.
+module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
+// GATE_IB_ACCEPT_ESTIMATE reader, on its own line.
+module.exports.ibAcceptEstimateLive = ibAcceptEstimateLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
+// GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
+module.exports.duplicatesSameAddressLive = duplicatesSameAddressLive;
+// GATE_DUPLICATES_SAME_NAME reader, on its own line.
+module.exports.duplicatesSameNameLive = duplicatesSameNameLive;
+// GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT reader, on its own line.
+module.exports.estimateSentClosesAssessmentLive = estimateSentClosesAssessmentLive;
 // GATE_PERMIT_DETAIL_SYNC reader, on its own line so gate PRs never conflict.
 module.exports.permitDetailSyncLive = permitDetailSyncLive;
+// GATE_LOOKUP_BUSINESS_IDENTITY reader, on its own line so gate PRs never conflict.
+module.exports.lookupBusinessIdentityLive = lookupBusinessIdentityLive;
+// GATE_LOOKUP_LISTING_SIZE reader, on its own line so gate PRs never conflict.
+module.exports.lookupListingSizeLive = lookupListingSizeLive;
+// GATE_LOOKUP_ADDRESS_STATUS reader, on its own line so gate PRs never conflict.
+module.exports.lookupAddressStatusLive = lookupAddressStatusLive;
+// GATE_LOOKUP_PERMIT_FACTS reader, on its own line so gate PRs never conflict.
+module.exports.lookupPermitFactsLive = lookupPermitFactsLive;
+// GATE_LAWN_RAINFAST_WATCH reader, on its own line so gate PRs never conflict.
+module.exports.lawnRainfastWatchLive = lawnRainfastWatchLive;
+// GATE_LAWN_LIGHTING reader, on its own line so gate PRs never conflict.
+module.exports.lawnLightingLive = lawnLightingLive;
+// GATE_LAWN_REPORT_PHOTO_SET reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportPhotoSetLive = lawnReportPhotoSetLive;
+// GATE_LAWN_REPORT_PHOTO_FINDINGS reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportPhotoFindingsLive = lawnReportPhotoFindingsLive;
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL reader, on its own line so gate PRs never conflict.
+module.exports.missedCallTextBackEmptyVoicemailLive = missedCallTextBackEmptyVoicemailLive;
+// GATE_RELAY_UNBOOKED_HANDOFF reader, on its own line so gate PRs never conflict.
+module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
+// GATE_LAWN_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
+module.exports.lawnTechParagraphLive = lawnTechParagraphLive;
+// GATE_LAWN_VISIT_SUMMARY_V2 reader, on its own line so gate PRs never conflict.
+module.exports.lawnVisitSummaryV2Live = lawnVisitSummaryV2Live;
+// GATE_LAWN_REPORT_COPY_FIXES reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportCopyFixesLive = lawnReportCopyFixesLive;
+// GATE_LAWN_REPORT_LAYOUT reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportLayoutLive = lawnReportLayoutLive;
+// GATE_LAWN_REPORT_POLISH reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportPolishLive = lawnReportPolishLive;
+module.exports.lawnReportPolishFreezeLive = lawnReportPolishFreezeLive;
+// GATE_LAWN_REPORT_STAGE1_FIXES reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportStage1FixesLive = lawnReportStage1FixesLive;
+module.exports.lawnWaterRainLive = lawnWaterRainLive;
+module.exports.lawnWaterRainFreezeLive = lawnWaterRainFreezeLive;
+// GATE_LAWN_WATER_IN_RAIN reader, on its own line so gate PRs never conflict.
+module.exports.lawnWaterInRainLive = lawnWaterInRainLive;
+// GATE_ONSITE_CALLER_DEMOTE reader, on its own line so gate PRs never conflict.
+module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
+// GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
+module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+// GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
+module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
+// GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
+module.exports.lawnV13Live = lawnV13Live;
+// GATE_LAWN_BERMUDA_REMOVAL reader, on its own line so gate PRs never conflict.
+module.exports.lawnBermudaRemovalLive = lawnBermudaRemovalLive;
+// GATE_LAWN_SPOT_RULES reader, on its own line so gate PRs never conflict.
+module.exports.lawnSpotRulesLive = lawnSpotRulesLive;
+// GATE_LAWN_TREATMENT_GUIDE reader, on its own line so gate PRs never conflict.
+module.exports.lawnTreatmentGuideLive = lawnTreatmentGuideLive;
+// GATE_LAWN_TROUBLE_AREAS reader, on its own line so gate PRs never conflict.
+module.exports.lawnTroubleAreasLive = lawnTroubleAreasLive;
+// GATE_LAWN_NEW_SOD_NOTE reader, on its own line so gate PRs never conflict.
+module.exports.lawnNewSodNoteLive = lawnNewSodNoteLive;
+// GATE_LAWN_NOV_LARGE_PATCH_N reader, on its own line so gate PRs never conflict.
+module.exports.lawnNovLargePatchNLive = lawnNovLargePatchNLive;
+// GATE_LAWN_NEW_SOD_REPORT_CARD reader, on its own line so gate PRs never conflict.
+module.exports.lawnNewSodReportCardLive = lawnNewSodReportCardLive;
+// GATE_LAWN_SPOT_TARGET reader, on its own line so gate PRs never conflict.
+module.exports.lawnSpotTargetLive = lawnSpotTargetLive;
+// GATE_LAWN_PHOTO_LABEL_PICK reader, on its own line so gate PRs never conflict.
+module.exports.lawnPhotoLabelPickLive = lawnPhotoLabelPickLive;
+// GATE_LAWN_MIX_HELP reader, on its own line so gate PRs never conflict.
+module.exports.lawnMixHelpLive = lawnMixHelpLive;
+// GATE_LAWN_REPORT_FACTS reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportFactsLive = lawnReportFactsLive;
+// GATE_LAWN_REPORT_FACTS tie part (needs the Visit Summary and report lead gates), on its own line.
+module.exports.lawnReportTiesLive = lawnReportTiesLive;
+// GATE_GEOFENCE_AUTO_CLOCK_IN reader, on its own line so gate PRs never conflict.
+module.exports.geofenceAutoClockInLive = geofenceAutoClockInLive;
+// GATE_MULTI_TECH_TEXT_TIMES reader, on its own line so gate PRs never conflict.
+module.exports.multiTechTextTimesLive = multiTechTextTimesLive;
+// GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
+module.exports.serverDictationLive = serverDictationLive;
+// GATE_REPORT_PLAN_RESCHEDULE reader, on its own line so gate PRs never conflict.
+module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
+// GATE_IB_INVOICE_ACTIONS reader, on its own line so gate PRs never conflict.
+module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;
+// GATE_IB_REPRICE_VISITS reader, on its own line so gate PRs never conflict.
+module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
+// GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
+module.exports.ibGeneralReadLive = ibGeneralReadLive;
+// GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
+module.exports.ibToolSearchLive = ibToolSearchLive;
+// GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
+module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
+// GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.
+module.exports.aioGapSweepMonthlyLive = aioGapSweepMonthlyLive;
+// GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
+module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
+// GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.
+module.exports.staffOnboardingDocsLive = staffOnboardingDocsLive;
+// GATE_CALL_LAST_NAME_LOOKUP reader, on its own line so gate PRs never conflict.
+module.exports.callLastNameLookupLive = callLastNameLookupLive;
+// GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
+module.exports.pinParkedCheckLive = pinParkedCheckLive;
+// GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
+module.exports.lawnReportClarityLive = lawnReportClarityLive;
+// GATE_TRACE_REUSE reader, on its own line so gate PRs never conflict.
+module.exports.traceReuseLive = traceReuseLive;
+// GATE_FAST_COMPLETE_INVOICED_VISITS reader, on its own line so gate PRs never conflict.
+module.exports.fastCompleteInvoicedVisitsLive = fastCompleteInvoicedVisitsLive;
+
+// GATE_AGENT_SESSION_GUARD read at CALL time, strict `=== 'true'`: a flip or
+// an unset kill needs no restart.
+function agentSessionGuardLive() {
+  return process.env.GATE_AGENT_SESSION_GUARD === 'true';
+}
+// GATE_AGENT_SESSION_GUARD reader, on its own line so gate PRs never conflict.
+module.exports.agentSessionGuardLive = agentSessionGuardLive;
+// GATE_STATION_FAST_COMPLETE reader, on its own line so gate PRs never conflict.
+module.exports.stationFastCompleteLive = stationFastCompleteLive;
+
+// GATE_ASSESSMENT_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On, the schedule payload's per-service
+// `assessmentFastCompleteEnabled` is true for a Waves Assessment visit, and admin
+// Dispatch opens its one-screen Fast Complete sheet instead of the full form.
+function assessmentFastCompleteLive() {
+  return process.env.GATE_ASSESSMENT_FAST_COMPLETE === 'true';
+}
+// GATE_ASSESSMENT_FAST_COMPLETE reader, on its own line so gate PRs never conflict.
+module.exports.assessmentFastCompleteLive = assessmentFastCompleteLive;
+
+// GATE_COMBO_FAST_COMPLETE read at CALL time, strict `=== 'true'`, dark in every environment.
+function comboFastCompleteLive() {
+  return process.env.GATE_COMBO_FAST_COMPLETE === 'true';
+}
+// GATE_COMBO_FAST_COMPLETE reader, on its own line so gate PRs never conflict.
+module.exports.comboFastCompleteLive = comboFastCompleteLive;
+
+// GATE_FAST_COMPLETE_WRAP_UP read at CALL time, strict `=== 'true'`, dark in every environment.
+function fastCompleteWrapUpLive() {
+  return process.env.GATE_FAST_COMPLETE_WRAP_UP === 'true';
+}
+// GATE_FAST_COMPLETE_WRAP_UP reader, on its own line so gate PRs never conflict.
+module.exports.fastCompleteWrapUpLive = fastCompleteWrapUpLive;

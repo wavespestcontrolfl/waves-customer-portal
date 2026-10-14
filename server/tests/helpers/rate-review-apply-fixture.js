@@ -132,6 +132,7 @@ class Query {
   orderByRaw() { return this; }
   limit(n) { this.limitN = n; return this; }
   forUpdate() { this.calls.push(['forUpdate', []]); this.db.log.push(['forUpdate', this.table]); return this; }
+  forShare() { this.calls.push(['forShare', []]); this.db.log.push(['forShare', this.table]); return this; }
   noWait() { return this; }
   select(...cols) { this.projection = cols.flat(); return this; }
   count(spec) { this.counting = spec || { n: '*' }; return this; }
@@ -272,7 +273,7 @@ function createFakeDb(tables = {}) {
   db.reset = (next = {}) => {
     const base = {
       customers: [], price_change_notices: [], rate_review_snapshots: [], rate_review_batches: [], scheduled_services: [], scheduled_service_addons: [],
-      customer_plan_rates: [], plan_holds: [], annual_prepay_terms: [], audit_log: [], activity_log: [], notifications: [],
+      customer_plan_rates: [], plan_holds: [], annual_prepay_terms: [], audit_log: [], activity_log: [], notifications: [], sms_log: [], rate_review_sms_failures: [],
     };
     db.store = { ...base, ...structuredClone(next) };
     db.log = [];

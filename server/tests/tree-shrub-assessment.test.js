@@ -639,3 +639,26 @@ describe('suggestLandscapeCondition (Fast Complete condition suggestion)', () =>
     for (const missing of [null, undefined, '', 'n/a', NaN]) expect(suggestLandscapeCondition(missing)).toBeNull();
   });
 });
+
+// Owner 2026-10-03: three palm diseases need a diagnosis, so the photo read
+// never names them. Its observations can reach the customer report.
+describe('the photo read never names a diagnosis-only palm disease', () => {
+  const { VISION_PROMPT, visionPromptText } = require('../services/tree-shrub-assessment');
+  const FORBIDDEN = /ganoderma|lethal\s+bronzing|fusarium/i;
+  test('the prompt names none of them, with the findings gate off or on', () => {
+    const saved = process.env.GATE_TS_TECH_FINDINGS_COPY;
+    try {
+      delete process.env.GATE_TS_TECH_FINDINGS_COPY;
+      expect(VISION_PROMPT).not.toMatch(FORBIDDEN);
+      expect(visionPromptText()).not.toMatch(FORBIDDEN);
+      process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
+      expect(visionPromptText()).not.toMatch(FORBIDDEN);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_TS_TECH_FINDINGS_COPY; else process.env.GATE_TS_TECH_FINDINGS_COPY = saved;
+    }
+  });
+  test('it tells the read to describe a trunk conk, not name a disease', () => {
+    expect(VISION_PROMPT).toContain('Diagnosis-only palm problems are NEVER named');
+    expect(VISION_PROMPT).toContain('needs an in-person diagnosis');
+  });
+});

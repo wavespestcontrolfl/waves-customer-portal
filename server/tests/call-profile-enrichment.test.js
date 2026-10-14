@@ -30,7 +30,8 @@ describe('appendWithProvenance', () => {
   test('appends with a dated tag and preserves existing text', () => {
     const out = appendWithProvenance('Admin note: side gate sticks', 'dogs in back yard', '2026-07-10T01:00:00Z');
     expect(out).toContain('Admin note: side gate sticks');
-    expect(out).toContain('[call 2026-07-10] dogs in back yard');
+    // 01:00 UTC on July 10 is 9 PM Eastern on July 9: the tag is the Eastern day.
+    expect(out).toContain('[call 2026-07-09] dogs in back yard');
   });
 
   test('idempotent on reprocess (same addition not duplicated)', () => {
@@ -71,7 +72,7 @@ describe('enrichFromCall', () => {
     const prefUpdate = updates.find((x) => x.table === 'property_preferences');
     expect(prefUpdate.u.property_gate_code).toBeUndefined(); // admin's 9999 preserved
     expect(prefUpdate.u.lockbox_code).toBe('6214');          // empty field filled
-    expect(prefUpdate.u.access_notes).toContain('[call 2026-07-10]');
+    expect(prefUpdate.u.access_notes).toContain('[call 2026-07-09]'); // the Eastern day of 01:00 UTC July 10
   });
 
   test('creates the preferences row when none exists', async () => {
@@ -101,5 +102,127 @@ describe('enrichFromCall', () => {
     db.mockImplementation(() => ({ where() { return this; }, forUpdate() { return this; }, first: async () => { throw new Error('boom'); } }));
     const res = await enrichFromCall({ customerId: 'c1', extraction: { property: { access_notes: 'gate code is 4545' } } });
     expect(res.applied).toEqual([]);
+  });
+});
+
+describe('provider note on internal_notes', () => {
+  // Runs enrichFromCall against a customer with empty notes; returns the note written, or null.
+  async function noteFor({ extraction, legacy = null, existing = null }) {
+    isEnabled.mockReturnValue(true);
+    const updates = [];
+    db.mockImplementation((table) => {
+      const builder = {
+        where: () => builder,
+        forUpdate: () => builder,
+        first: async () => ({ internal_notes: existing }),
+        update: async (u) => { updates.push({ table, u }); return 1; },
+        insert: async () => {},
+      };
+      return builder;
+    });
+    await enrichFromCall({ customerId: 'c1', extraction, legacy, callCreatedAt: '2026-10-08T21:46:00Z' });
+    const write = updates.find((x) => x.table === 'customers');
+    return write ? write.u.internal_notes : existing;
+  }
+
+  describe('append-only: a provider this day\'s line already names is not named again', () => {
+    test('a reprocess under the new label adds no second statement and rewrites nothing', async () => {
+      const existing = 'Staff: gate sticks\n[call 2026-10-08] Referred by: a neighbor | Switching from: Acme Pest';
+      const note = await noteFor({
+        existing,
+        extraction: { customer_history: { status: 'former_lapsed', competitor_name: 'Acme Pest' } },
+        legacy: { referred_by: 'a neighbor' },
+      });
+      expect(note).toBe(existing);
+    });
+
+    test('two calls on one day naming one provider: the first call\'s line stands', async () => {
+      const existing = '[call 2026-10-08] Switching from: Acme Pest';
+      const note = await noteFor({ existing, extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } } });
+      expect(note).toBe(existing);
+    });
+
+    test('a V2 null removes nothing an earlier pass wrote', async () => {
+      const existing = '[call 2026-10-08] Switching from: Sample Home Inspections';
+      const note = await noteFor({
+        existing,
+        extraction: { customer_history: { status: 'new_customer', competitor_name: null } },
+        legacy: { competitor_name: 'Sample Home Inspections' },
+      });
+      expect(note).toBe(existing);
+    });
+
+    test('a different provider the same day, or the same provider another day, is added', async () => {
+      const sameDay = await noteFor({
+        existing: '[call 2026-10-08] Switching from: Beta Lawn',
+        extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } },
+      });
+      expect(sameDay).toBe('[call 2026-10-08] Switching from: Beta Lawn\n[call 2026-10-08] Other provider named: Acme Pest');
+      const otherDay = await noteFor({
+        existing: '[call 2026-09-01] Switching from: Acme Pest',
+        extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } },
+      });
+      expect(otherDay).toBe('[call 2026-09-01] Switching from: Acme Pest\n[call 2026-10-08] Other provider named: Acme Pest');
+    });
+  });
+
+  test('a caller leaving a provider reads "Switching from"', async () => {
+    const note = await noteFor({ extraction: { customer_history: { status: 'switching_from_competitor', competitor_name: 'Acme Pest' } } });
+    expect(note).toBe('[call 2026-10-08] Switching from: Acme Pest');
+  });
+
+  test('a provider only used before or compared is named without a switch claim', async () => {
+    const note = await noteFor({ extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } } });
+    expect(note).toBe('[call 2026-10-08] Other provider named: Acme Pest');
+    expect(note).not.toMatch(/Switching from/);
+  });
+
+  test('a V2 null is not refilled from the legacy extraction (home inspector on a realtor call)', async () => {
+    const note = await noteFor({
+      extraction: { customer_history: { status: 'new_customer', competitor_name: null } },
+      legacy: { competitor_name: 'Sample Home Inspections' },
+    });
+    expect(note).toBeNull();
+  });
+
+  test('a V2 history block with the field omitted is not refilled either', async () => {
+    const note = await noteFor({
+      extraction: { customer_history: { status: 'unknown' } },
+      legacy: { competitor_name: 'Sample Home Inspections' },
+    });
+    expect(note).toBeNull();
+  });
+
+  test('no V2 history block: the legacy name is kept, with no switch claim', async () => {
+    const note = await noteFor({ extraction: { property: {} }, legacy: { competitor_name: 'Acme Pest' } });
+    expect(note).toBe('[call 2026-10-08] Other provider named: Acme Pest');
+  });
+});
+
+describe('the dated tag on a note line', () => {
+  const { callDayTag, providerAlreadyNoted } = _test;
+
+  test('a Date (what the pipeline passes) prints the Eastern day, never "Thu Oct 08"', () => {
+    expect(callDayTag(new Date('2026-10-08T21:46:00Z'))).toBe('[call 2026-10-08]');
+    expect(appendWithProvenance(null, 'dogs in back yard', new Date('2026-10-08T21:46:00Z'))).toBe('[call 2026-10-08] dogs in back yard');
+  });
+
+  test('an evening call keeps its Eastern day, not the next UTC day', () => {
+    expect(callDayTag(new Date('2026-10-09T01:30:00Z'))).toBe('[call 2026-10-08]');
+    expect(callDayTag('2026-10-09T01:30:00Z')).toBe('[call 2026-10-08]');
+  });
+
+  test('a plain day is kept as given; an unreadable value falls back to its first ten characters', () => {
+    expect(callDayTag('2026-10-08')).toBe('[call 2026-10-08]');
+    expect(callDayTag('not a date at all')).toBe('[call not a date]');
+  });
+
+  test('a provider on a line written under the old tag is still seen as already noted', () => {
+    const when = new Date('2026-10-08T21:46:00Z');
+    const oldLine = `[call ${String(when).slice(0, 10)}] Switching from: Acme Pest`;
+    expect(oldLine.startsWith('[call Thu Oct 08]')).toBe(true);
+    expect(providerAlreadyNoted(oldLine, when, 'Acme Pest')).toBe(true);
+    expect(providerAlreadyNoted('[call 2026-10-08] Other provider named: Acme Pest', when, 'Acme Pest')).toBe(true);
+    expect(providerAlreadyNoted('[call 2026-10-07] Switching from: Acme Pest', when, 'Acme Pest')).toBe(false);
   });
 });

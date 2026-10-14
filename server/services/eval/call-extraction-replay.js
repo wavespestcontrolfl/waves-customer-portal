@@ -14,6 +14,7 @@ const logger = require('../logger');
 const { deliverOpsDigest } = require('../ops-digest');
 const { retireIfClean } = require('../ops-digest-fall-off');
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'call-extraction-eval', 'reviewed-calls.json');
+const EVAL_KEY = 'call-extraction-eval';
 const MANUAL_RERUN = 'node server/scripts/run-call-extraction-replay-eval.js --json';
 
 function compactSummary(summary = {}) {
@@ -200,7 +201,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
-        evalKey: 'call-extraction-eval', // the fall-off retires this bell with the digest
+        evalKey: EVAL_KEY, // the fall-off retires this bell with the digest
         fixturePath,
         summary: compactSummary(finalRun?.summary),
         failures: lines,
@@ -234,7 +235,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
-        evalKey: 'call-extraction-eval',
+        evalKey: EVAL_KEY,
         fixturePath,
         error: attempt.error || null,
       }),
@@ -261,6 +262,9 @@ async function runCallExtractionReplayEval(opts = {}) {
     || ((options) => require('../../scripts/replay-call-extraction-variance').runReplayVariance(options));
   const notify = opts.notify || defaultNotify;
   const sendEmail = opts.sendEmail || defaultSendEmail;
+  // Written only after the notify step returned: a notify that threw did not
+  // deliver for certain, so that run stays eligible for the deploy-kill retry.
+  const markReported = opts.markReported || markVerdictReported;
   // notifyOnFailure: false = a manual run — no bell, no email and no ops
   // digest (emailFailure's deliverOpsDigest writes an in-app notification
   // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
@@ -292,8 +296,10 @@ async function runCallExtractionReplayEval(opts = {}) {
     logger.info(`[call-replay-eval] manual run — ${finalAttempt.status}, no notification`);
   } else if (finalAttempt.status === 'fail') {
     await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
+    await markReported();
   } else if (finalAttempt.status === 'inconclusive') {
     await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+    await markReported();
   } else if (notifyOnFailure && finalAttempt.status === 'pass') {
     // Fall-off: an explicit SCHEDULED PASS clears the standing FIX — never
     // "not fail and not inconclusive" (a skip / crash status must leave the
@@ -322,7 +328,51 @@ async function runCallExtractionReplayEval(opts = {}) {
   return result;
 }
 
+// system_settings key: when this eval last REPORTED a verdict (a failure or
+// an inconclusive run), written after the notify step succeeded. It is the
+// deploy-kill retry's "already reported" marker. A notification row cannot
+// serve: under the bell policy the eval_regression row can be suppressed
+// while the verdict still goes out by the ops digest or email.
+const REPORTED_AT_KEY = 'eval.call_replay.reported_at';
+
+async function markVerdictReported(now = new Date(), { conn = require('../../models/db') } = {}) {
+  try {
+    await conn('system_settings')
+      .insert({ key: REPORTED_AT_KEY, value: now.toISOString(), category: 'eval', description: 'When the call extraction replay last reported a failure or an inconclusive run', created_at: now, updated_at: now })
+      .onConflict('key')
+      .merge({ value: now.toISOString(), updated_at: now });
+  } catch (err) {
+    // The verdict is already delivered; without the marker a deploy kill in
+    // the next moments can only repeat it, never lose it.
+    logger.warn(`[call-replay-eval] could not record the reported verdict: ${err.message}`);
+  }
+}
+
+/**
+ * True when this eval reported a verdict at or after `since`: the marker, or
+ * failing that its admin notification row. The deploy-kill retry asks before
+ * re-running a killed run: a run that died AFTER it reported must not report
+ * the same thing twice. A run that died before reporting, or that had passed
+ * (a pass reports nothing), is retried.
+ */
+async function verdictNotifiedSince(since, { conn = require('../../models/db') } = {}) {
+  const row = await conn('system_settings').where({ key: REPORTED_AT_KEY }).first('value');
+  const at = row?.value ? new Date(row.value).getTime() : NaN;
+  if (Number.isFinite(at) && at >= new Date(since).getTime()) return true;
+  // The marker is written last. A run killed between its admin notification
+  // and the marker (the email step runs in between) has still reported: the
+  // notification row itself says so, when the bell policy let it be written.
+  const bell = await conn('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'evalKey' = ?", [EVAL_KEY])
+    .where('created_at', '>=', since)
+    .first('id');
+  return Boolean(bell);
+}
+
 module.exports = {
+  verdictNotifiedSince,
+  markVerdictReported,
   runCallExtractionReplayEval,
   goldAccuracyLine,
   // The retry-once / notify plumbing, reused by the voice relay eval

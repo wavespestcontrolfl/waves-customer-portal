@@ -4,7 +4,8 @@
  * payment_plans rows are created by POST /admin/invoices/:id/payment-plan and
  * an `active` row gates invoice edits, credit reversal and auto-credit. Nothing
  * charges installments yet, so the ONLY ways a plan leaves `active` are:
- *   - the invoice settles (any paid/prepaid path) → `completed`
+ *   - the invoice settles (any paid/prepaid path) → `completed`; the same
+ *     hook closes the invoice's open payment_failed admin bells
  *   - an admin cancels it (POST .../payment-plan/cancel) → `cancelled`
  */
 const db = require('../models/db');
@@ -39,6 +40,9 @@ async function completeActivePlansLocked(invoiceId, conn) {
   // commits, or we see the reopened status and touch nothing.
   const invoice = await conn('invoices').where({ id: invoiceId }).forUpdate().first('status');
   if (!invoice || !['paid', 'prepaid'].includes(String(invoice.status || ''))) return 0;
+  // The invoice is settled (locked read above): close the open payment_failed
+  // bells about it. Best-effort in a savepoint; never fails the payment.
+  await require('./payment-failed-alert-close').closePaymentFailedAlertsForPaidInvoice(invoiceId, conn);
   // Settlement is re-verified IN the update statement (codex PR r4 P2): a
   // delayed post-commit caller can run after a dispute reopened the invoice
   // and an admin created a REPLACEMENT plan — completing that plan (and its

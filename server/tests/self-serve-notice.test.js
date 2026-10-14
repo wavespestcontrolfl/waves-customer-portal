@@ -286,4 +286,20 @@ describe('visitInsideMoveNoticeWindow — mirrors visitInsideNoticeWindow agains
     expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '10:01' }, now)).toBe(false);
     expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '09:59' }, now)).toBe(true);
   });
+
+  // Owner 2026-10-06: the office texting the reschedule link approves the
+  // move for the visit's current start; any move ends the approval.
+  test('an office approval for the CURRENT start lifts the window; a stale one (the visit moved) does not', () => {
+    delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    const approvedFor = new Date('2027-06-02T00:00:00Z'); // 2027-06-01 20:00 EDT
+    expect(visitInsideMoveNoticeWindow({
+      scheduled_date: '2027-06-01', window_start: '20:00', office_move_approved_for: approvedFor,
+    }, now)).toBe(false);
+    expect(visitInsideMoveNoticeWindow({
+      scheduled_date: '2027-06-01', window_start: '19:00', office_move_approved_for: approvedFor,
+    }, now)).toBe(true);
+    expect(visitInsideMoveNoticeWindow({
+      scheduled_date: '2027-06-01', window_start: '20:00', office_move_approved_for: 'not a date',
+    }, now)).toBe(true);
+  });
 });

@@ -16,13 +16,19 @@
 // services/admin-estimate-persistence.js (same env-free default).
 const ESTIMATE_DELIVERY_CLAIM_TTL_MS = 10 * 60 * 1000;
 
+// Shape AND validity: an ISO-looking but invalid value would pass the regex
+// alone and abort the whole statement at the cast, and pg_input_is_valid
+// alone accepts special literals such as 'infinity' (a forever-live claim).
 // A claim blocks a write only while it is LIVE. Without the TTL arm, a
 // process that died after stamping delivering_at — but before recording any
 // invalidation — left the keys forever and permanently blocked edits.
 const DELIVERY_CLAIM_NOT_LIVE_SQL = `(
   COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''
   OR (estimate_data->'estimatorEngine'->>'delivering_at') !~ '^[0-9]{4}-'
-  OR (estimate_data->'estimatorEngine'->>'delivering_at')::timestamptz
+  OR NOT pg_input_is_valid(estimate_data->'estimatorEngine'->>'delivering_at', 'timestamptz')
+  OR (CASE WHEN (estimate_data->'estimatorEngine'->>'delivering_at') ~ '^[0-9]{4}-'
+             AND pg_input_is_valid(estimate_data->'estimatorEngine'->>'delivering_at', 'timestamptz')
+        THEN (estimate_data->'estimatorEngine'->>'delivering_at')::timestamptz END)
        < NOW() - (INTERVAL '1 millisecond' * ${ESTIMATE_DELIVERY_CLAIM_TTL_MS})
 )`;
 
@@ -45,7 +51,7 @@ const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngin
 // retry that will claim it can change the call's identity and linkage
 // (pre-push P0, PR #3304 — the guard below treated the queue-to-claim
 // window as settled and could disclose or charge during it).
-const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'pending', 'no_transcription']);
+const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'pending']);
 const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 const CALL_EXTRACTION_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -53,6 +59,11 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
   if (callRow.processing_token != null) return true;
   const status = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
   if (CALL_IN_FLIGHT_STATUSES.has(status)) return true;
+  // no_transcription retries under the sweep's attempt cap (no age window: a
+  // recording adoption resets the count); at the cap the lane has ended and
+  // the row is settled. Forever-in-flight blocked its estimate for good
+  // (codex #6271 r40 P1).
+  if (status === 'no_transcription') return (Number(callRow.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS;
   if (status === 'extraction_failed') {
     // Mirrors the sweep's own eligibility EXACTLY: attempts under the cap
     // AND inside the 7-day window. An exhausted or aged-out row is settled

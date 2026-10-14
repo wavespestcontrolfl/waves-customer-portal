@@ -12,6 +12,23 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Arrival prompts and the auto-start card wait for the tech to see them, but
+// not past the end of the ET day they were raised: Start timer on yesterday's
+// visit is wrong, and "Timer auto-started" days later is noise. A stop notice
+// is not held: it is served only inside its 30-minute Undo window. Only the
+// two ACTIONABLE types (reminder, select) get the high sort bucket in the
+// order below;
+// the started card keeps its old sort position so a burst of them (two rows
+// per automatic stop) cannot crowd out an unseen prompt.
+const DAY_CAPPED_TYPES = ['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started'];
+const UNDO_WINDOW_MINUTES = 30;
+
+// 00:00 ET of today as an instant (the server runs UTC).
+function startOfTodayET(now = new Date()) {
+  const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+  return parseETDateTime(`${etDateString(now)}T00:00`);
+}
+
 // GET /api/tech/notifications?unreadOnly=true
 router.get('/', async (req, res, next) => {
   try {
@@ -26,6 +43,22 @@ router.get('/', async (req, res, next) => {
       .where(function stormFreshness() {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
+      })
+      // A stop notice is only useful inside its Undo window (undo-stop
+      // answers 410 after it), so the feed stops serving it then, seen or not.
+      .where(function stopFreshness() {
+        this.whereNot({ type: 'geofence_timer_stopped' })
+          .orWhereRaw(`created_at >= now() - interval '${UNDO_WINDOW_MINUTES} minutes'`);
+      })
+      // Arrival prompts and the started card stay until the tech has SEEN them (owner 2026-10-06,
+      // "keep notices"): the client starts its 5-minute clock only after the
+      // card has been on screen, and marks it read then. Until that, the row
+      // stays unread and this feed keeps serving it. The hard cap is the end
+      // of the tech's ET day, so an unseen prompt from earlier days cannot
+      // pile up into a wall of cards on the next load.
+      .where(function noticeDayCap() {
+        this.whereNotIn('type', DAY_CAPPED_TYPES)
+          .orWhere('created_at', '>=', startOfTodayET());
       });
     // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
     // stops the sweep — which is the only thing that dismisses a tracking
@@ -82,9 +115,14 @@ router.get('/', async (req, res, next) => {
     // bucket 0 with them meant an offline tech who collected 20 newer
     // geofence/timer prompts — two events across ten stops — still lost the
     // stage-2 card from the window (codex P2 round 17). The other buckets
-    // keep their relative order, one step down.
+    // keep their relative order, one step down. Actionable arrival prompts
+    // (reminder, select) are held until the tech has seen them (owner
+    // 2026-10-06, "keep notices"), so they get their OWN bucket 1 for the
+    // rest of their ET day: a burst of informational started/stopped cards
+    // (automatic mode writes two per stop) or visit cards cannot push an
+    // unseen prompt out of the window.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN ('geofence_arrival_reminder', 'geofence_arrival_select') THEN 1 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer
@@ -96,6 +134,109 @@ router.get('/', async (req, res, next) => {
     let parsed = rows.map(parseRow);
     if (photoAlerts.isEnabled()) parsed = await photoAlerts.refreshPhotoCardDates(parsed, db);
     res.json({ notifications: parsed });
+  } catch (err) { next(err); }
+});
+
+// Schedule-change cards (tech-visit-notifications.js) for the Today page,
+// which shows every open one: a change that touches today or tomorrow as its
+// own card (`soon`), the rest folded into one summary (owner ruling
+// 2026-10-03). The main feed above returns 20 rows, too few for a nightly
+// auto-dispatch run, so these have their own read.
+const SCHEDULE_CHANGE_TYPES = ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled'];
+// Rows per list (soon cards, folded rows); the summary's count and "clear
+// all" cover the whole open set, past this cap (Codex #5783 P2).
+const SCHEDULE_CHANGE_LIMIT = 300;
+const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+// The open schedule-change cards for one tech, with the visit row joined on
+// its uuid primary key (the payload id is pattern-checked before the cast,
+// so a malformed one joins nothing instead of failing the read).
+function openScheduleChanges(technicianId) {
+  return db('tech_notifications as n')
+    .leftJoin('scheduled_services as s', function joinVisit() {
+      this.on('s.id', '=', db.raw(`CASE WHEN n.payload->>'visit_id' ~* '${UUID_PATTERN}' THEN (n.payload->>'visit_id')::uuid END`));
+    })
+    .where('n.technician_id', technicianId)
+    .whereNull('n.dismissed_at')
+    .whereIn('n.type', SCHEDULE_CHANGE_TYPES);
+}
+
+// `soon` in SQL: the card's new or previous day is today or tomorrow (ET) as
+// of `asOf`; a card written before the ISO days existed falls back to the
+// visit's day. Clear-all passes the read's own as_of, so an ET midnight
+// between the read and the tap never clears a card the tech saw as its own
+// today/tomorrow card (pre-push audit P1).
+function soonSql(asOf) {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const now = asOf;
+  const days = [etDateString(now), etDateString(addETDays(now, 1))];
+  return {
+    // prior_day_unknown: an old assignment card that never recorded the slot
+    // it left (backfill 20261003150000) — kept as its own card.
+    sql: "COALESCE(n.payload->>'date' IN (?, ?) OR n.payload->>'previous_date' IN (?, ?)"
+      + " OR (n.payload->>'date' IS NULL AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?))"
+      + " OR n.payload->>'prior_day_unknown' = 'true', false)",
+    bindings: [...days, ...days, ...days],
+  };
+}
+
+// GET /schedule-changes — the soon cards and the folded (non-soon) rows are
+// read separately, each up to the cap, so a pile of soon cards can never
+// crowd the folded rows out of the response (Codex #5786 P2); `later_total`
+// counts every open folded card. All reads stop at `as_of`, the same bound a
+// following clear-all uses, so a card written mid-read is neither shown nor
+// cleared — the next read shows it.
+router.get('/schedule-changes', async (req, res, next) => {
+  try {
+    const asOf = new Date();
+    const soon = soonSql(asOf);
+    const columns = ['n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at'];
+    const [soonRows, laterRows, totals] = await Promise.all([
+      openScheduleChanges(req.technicianId)
+        .where('n.created_at', '<=', asOf)
+        .whereRaw(soon.sql, soon.bindings)
+        .orderBy('n.created_at', 'desc')
+        .limit(SCHEDULE_CHANGE_LIMIT)
+        .select(columns),
+      openScheduleChanges(req.technicianId)
+        .where('n.created_at', '<=', asOf)
+        .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+        .orderBy('n.created_at', 'desc')
+        .limit(SCHEDULE_CHANGE_LIMIT)
+        .select(columns),
+      openScheduleChanges(req.technicianId)
+        .where('n.created_at', '<=', asOf)
+        .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+        .count('* as n'),
+    ]);
+    const changes = [
+      ...soonRows.map((row) => ({ ...parseRow(row), soon: true })),
+      ...laterRows.map((row) => ({ ...parseRow(row), soon: false })),
+    ];
+    res.json({ changes, later_total: Number(totals[0]?.n) || 0, as_of: asOf.toISOString() });
+  } catch (err) { next(err); }
+});
+
+// POST /dismiss-batch { as_of } — "Got it, clear all" on the summary card:
+// every open NON-soon schedule-change card of this tech written by `as_of`
+// (the read the tech was looking at). Soon cards keep their own Got it.
+router.post('/dismiss-batch', async (req, res, next) => {
+  try {
+    // A non-empty timestamp string only: new Date(null) is a valid 1970
+    // instant that would clear nothing yet report success (Codex #5783 P2).
+    const raw = req.body?.as_of;
+    const asOf = typeof raw === 'string' && raw.trim() ? new Date(raw) : null;
+    if (!asOf || Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
+    const soon = soonSql(asOf);
+    const ids = openScheduleChanges(req.technicianId)
+      .where('n.created_at', '<=', asOf)
+      .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+      .select('n.id');
+    const dismissed = await db('tech_notifications')
+      .whereIn('id', ids)
+      .whereNull('dismissed_at')
+      .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
+    res.json({ success: true, dismissed });
   } catch (err) { next(err); }
 });
 

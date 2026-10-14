@@ -45,7 +45,7 @@ describe.each([
       source: 'texting-ai',
       summary: 'Unclear ask about fish',
       attempted: 'Customer text: the fish are dying, what do I do',
-    });
+    }, undefined);
   });
 
   test('an empty reason falls back to the customer message as the summary', async () => {
@@ -54,12 +54,12 @@ describe.each([
       source: 'texting-ai',
       summary: 'the fish are dying, what do I do',
       attempted: 'Customer text: the fish are dying, what do I do',
-    });
+    }, undefined);
   });
 
   test('a message the keyword classifier would bucket as a staff topic still records when the caller marks it a gap', async () => {
     await target.escalate(conversation, 'change the email on my account', 'Cannot update account email', { gap: true });
-    expect(mockRecordGap).toHaveBeenCalledWith(expect.objectContaining({ summary: 'Cannot update account email' }));
+    expect(mockRecordGap).toHaveBeenCalledWith(expect.objectContaining({ summary: 'Cannot update account email' }), undefined);
   });
 
   test.each([

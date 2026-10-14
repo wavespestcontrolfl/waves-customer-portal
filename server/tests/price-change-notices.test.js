@@ -12,6 +12,7 @@ jest.mock('../utils/datetime-et', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  isSendRefusal: jest.fn((err) => !!err && err.preDispatchRefusal === true),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(),
@@ -33,7 +34,7 @@ const { getActivelyCoveredCustomerIds, getPaymentPendingCustomerIds } = require(
 const { sendTemplate } = require('../services/email-template-library');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { previewPriceChange, createAndSendBatch } = require('../services/price-change-notices');
+const { previewPriceChange, createAndSendBatch, sendNoticeSms, sendNoticeEmail } = require('../services/price-change-notices');
 
 let customerRows;
 let noticeInserts;
@@ -317,6 +318,18 @@ describe('createAndSendBatch delivery', () => {
     expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
   });
 
+  it('never claims or stamps an annual rate review notice for the same change tuple', async () => {
+    customerRows = [CUSTOMER];
+    existingNoticeRow = {
+      id: 'n-review', status: 'draft', notice_token: 'abcdabcdabcdabcdabcdabcdabcdabcd', rate_review_row_id: 'row-1',
+      customer_id: 'c-1', current_amount_cents: 4900, new_amount_cents: 5200,
+    };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ created: 0, emailed: 0, texted: 0, alreadyNotified: 1 });
+    expect(noticeUpdates).toEqual([]);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
   it('excludes customers covered by active or pending annual-prepay terms', async () => {
     customerRows = [CUSTOMER];
     getActivelyCoveredCustomerIds.mockResolvedValue(['ap-1']);
@@ -443,5 +456,82 @@ describe('createAndSendBatch delivery', () => {
     const out = await createAndSendBatch({ ...GOOD_ARGS, expectedCount: 2, expectedDigest: digest });
     expect(out).toMatchObject({ ok: false, created: 1, failed: 1 });
     expect(activityInserts).toHaveLength(1);
+  });
+});
+
+describe('sendNoticeSms delivery evidence', () => {
+  const args = { customer: CUSTOMER, vars: { effective_date: 'December 10, 2026', price_change_url: 'waves.test/p/abc' }, hasEmailLeg: false };
+  it('legacy callers keep counting a sent answer as sent', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent' });
+    expect(await sendNoticeSms(args)).toEqual({ sent: true, attempted: true });
+  });
+  it.each([
+    [{ sent: true, deliveryOutcome: 'accepted' }, { sent: true, attempted: true }],
+    // SMS gate off / owner silence answer sent:true but nothing left: definitively unsent
+    [{ sent: true, deliveryOutcome: 'not_sent' }, { sent: false, attempted: false }],
+    // unknown whether it left: held by the caller, never stamped delivered
+    [{ sent: true, deliveryOutcome: 'uncertain' }, { sent: false, attempted: true }],
+    // the canonical sender's definite provider non-send: sent:false with a not_sent outcome (not blocked)
+    [{ sent: false, deliveryOutcome: 'not_sent' }, { sent: false, attempted: false }],
+    // an ambiguous failure keeps the attempt (held for the owner)
+    [{ sent: false, deliveryOutcome: 'uncertain' }, { sent: false, attempted: true }],
+    [{ sent: true }, { sent: false, attempted: true }],
+  ])('requireAccepted: %j', async (answer, expected) => {
+    sendCustomerMessage.mockResolvedValue(answer);
+    expect(await sendNoticeSms({ ...args, requireAccepted: true })).toEqual(expected);
+  });
+  it('surfaces a caller hook refusal code and merges caller metadata without losing the base', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NOTICE_REPOINTED' });
+    const res = await sendNoticeSms({ ...args, sendOptions: { metadata: { rate_review_letter: true } } });
+    expect(res).toEqual({ sent: false, attempted: false, blockedCode: 'NOTICE_REPOINTED' });
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata).toMatchObject({ original_message_type: 'price_change_notice', rate_review_letter: true });
+  });
+});
+
+describe('sendNoticeEmail definite-non-send classification', () => {
+  const args = { customer: CUSTOMER, idempotencyKeyBase: 'k', vars: {} };
+  beforeEach(() => {
+    getInvoiceEmailRecipients.mockReturnValue([{ email: 'pat@example.com', name: 'Pat' }]);
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsQuery();
+      throw new Error(`unexpected table ${table}`);
+    });
+  });
+  it.each([
+    ['unconfigured sender', Object.assign(new Error('not configured'), { code: 'SENDGRID_NOT_CONFIGURED' })],
+    ['a provider status that conclusively rejects the payload', Object.assign(new Error('bad request'), { status: 400 })],
+    ['a pre-dispatch refusal (the reviewed template changed before dispatch)', Object.assign(new Error('The reviewed email content changed.'), { preDispatchRefusal: true })],
+  ])('%s: a certain non-send', async (_label, err) => {
+    sendTemplate.mockRejectedValue(err);
+    expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+  });
+  it('an explicit pre-dispatch abort from the library ({ sent: false, aborted: true }) is a certain non-send', async () => {
+    sendTemplate.mockResolvedValue({ sent: false, aborted: true, reason: 'aborted_before_dispatch' });
+    expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+  });
+  it.each([
+    ['a 5xx the provider may have processed', Object.assign(new Error('boom'), { status: 502 })],
+    ['a network failure', new Error('socket hang up')],
+  ])('%s: stays ambiguous', async (_label, err) => {
+    sendTemplate.mockRejectedValue(err);
+    expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true });
+  });
+});
+
+describe('sendNoticeSms preparation failures are certain non-sends', () => {
+  const args = { customer: CUSTOMER, vars: { effective_date: 'December 10, 2026', price_change_url: 'waves.test/p/abc' }, hasEmailLeg: false };
+  it('a template that renders nothing (missing or inactive) never reached the sender', async () => {
+    renderSmsTemplate.mockResolvedValue(null);
+    expect(await sendNoticeSms(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+  it('a rendering throw never reached the sender', async () => {
+    renderSmsTemplate.mockRejectedValue(new Error('template exploded'));
+    expect(await sendNoticeSms(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+  it('a throw from the canonical sender itself stays ambiguous', async () => {
+    sendCustomerMessage.mockRejectedValue(new Error('socket hang up'));
+    expect(await sendNoticeSms(args)).toEqual({ sent: false, attempted: true });
   });
 });

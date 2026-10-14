@@ -106,7 +106,8 @@ describe('the two-model rule for a call finding', () => {
     await incidentsMigration.up(database);
     await proposalsMigration.up(database);
     await database.raw(`CREATE TABLE ??.call_log (id uuid PRIMARY KEY, direction varchar(20), transcription text,
-      created_at timestamptz, ai_extraction_prompt_version varchar(80))`, [schema]);
+      created_at timestamptz, ai_extraction_prompt_version varchar(80),
+      ai_extraction jsonb, ai_extraction_enriched jsonb, v2_extraction_status varchar(40))`, [schema]);
     await database.raw(`CREATE TABLE ??.call_audit_findings (id uuid PRIMARY KEY, call_log_id uuid, audit_source varchar(40),
       category varchar(40), field varchar(40), old_value text, new_value text, transcript_excerpt text, detail jsonb, created_at timestamptz)`, [schema]);
     await database.raw(`CREATE TABLE ??.decision_reviews (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), subject_type varchar(30),
@@ -268,7 +269,9 @@ describe('the two-model rule for a call finding', () => {
   test('the Sunday proposer counts distinct confirmed calls in the unversioned cohort', async () => {
     for (let i = 0; i < 5; i++) await finding(await call());
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
-    const out = await calls.proposeCallFixes({ dbi: database, now: new Date('2026-10-04T08:50:00Z') });
+    // The cutoff must not be a fixed date: ai_incidents.adjudicated_at defaults to the database's
+    // own now(), so a hardcoded cutoff excludes every incident once the calendar passes it.
+    const out = await calls.proposeCallFixes({ dbi: database, now: new Date(Date.now() + 60_000) });
     expect(out).toMatchObject({ proposed: 1 });
     expect(await database('ai_fix_proposals').first()).toMatchObject({
       area: 'calls', surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', prompt_version: null, status: 'pending', evidence_count: 5,

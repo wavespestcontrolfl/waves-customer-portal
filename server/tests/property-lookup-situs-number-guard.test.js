@@ -174,6 +174,21 @@ describe('lookupPropertyFromAITrio GIS acceptance', () => {
     );
   });
 
+  test('the parent-parcel check counts as run when the statewide layer recovers from a county-layer failure', async () => {
+    const { lookupCountyParcelByPoint } = require('../services/property-lookup/county-parcel-gis');
+    lookupCountyParcelByPoint.mockRejectedValueOnce(new Error('county gis down'));
+    lookupParcelByPoint.mockResolvedValue({ parcelId: 'EXAMPLE-PARCEL', situsAddress: TYPED.split(',')[0], county: 'Manatee' });
+    const recovered = {};
+    await lookupPropertyFromAITrio(TYPED, GEO, recovered);
+    expect(recovered.parentParcelCheckRan).toBe(true);
+    // Both layers come back empty after a county failure: not a completed check.
+    lookupCountyParcelByPoint.mockRejectedValueOnce(new Error('county gis down'));
+    lookupParcelByPoint.mockResolvedValue(null);
+    const failed = {};
+    await lookupPropertyFromAITrio(TYPED, GEO, failed);
+    expect(failed.parentParcelCheckRan).toBe(false);
+  });
+
   test('GIS miss is untouched by the guard', async () => {
     lookupParcelByPoint.mockResolvedValue(null);
 

@@ -251,6 +251,17 @@ const MATCH_RULES = [
     reason: 'tree_shrub',
     terms: ['tree', 'shrub', 'palm', 'ornamental'],
   },
+  // Area add-on treatments (GATE_AREA_ADDONS, migration 20261008200000): one-time
+  // treatments sold on an estimate, routed by catalog service key ONLY. No terms:
+  // their display names ("Fire Ant Yard Treatment", "Yearly Lawn Insect Preventive")
+  // read as pest or lawn jobs, and a name must never send them to those programs'
+  // visits (nor another service to these). The web sweep applies no product and has
+  // no visit.
+  { programKey: 'area_addon', visit: 1, reason: 'area_addon_bed_pre_emergent', serviceKeys: ['area_addon_bed_pre_emergent'], terms: [] },
+  { programKey: 'area_addon', visit: 2, reason: 'area_addon_lawn_insect_spot', serviceKeys: ['area_addon_lawn_insect_spot'], terms: [] },
+  { programKey: 'area_addon', visit: 3, reason: 'area_addon_fire_ant_yard', serviceKeys: ['area_addon_fire_ant_yard'], terms: [] },
+  { programKey: 'area_addon', visit: 4, reason: 'area_addon_lawn_insect_preventive', serviceKeys: ['area_addon_lawn_insect_preventive'], terms: [] },
+  { programKey: 'area_addon', visit: 5, reason: 'area_addon_hardscape_weed', serviceKeys: ['area_addon_hardscape_weed'], terms: [] },
 ];
 
 // The automatic mosquito misting SYSTEM's DESIGN-VISIT identity

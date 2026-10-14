@@ -514,6 +514,8 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
+      // Use Reply on the translation card (GATE_SMS_ANY_LANGUAGE_INBOX): the trial the body came from.
+      translationTrialId,
       // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
@@ -577,6 +579,11 @@ router.post('/sms', async (req, res, next) => {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // A translation card's reply is a customer-service reply: the applicant rail sends without its
+      // freshness, fact and claim checks, so it never goes out there.
+      if (translationTrialId) {
+        return res.status(409).json({ error: 'This suggested reply is for the customer thread and cannot go out on a job applicant thread. Clear the message box and write the reply yourself.' });
+      }
       // Codex #4709 r3 P1: a consultation link never goes out on the
       // applicant rail — that path skips the gate/expiry/lead checks and the
       // lead audit. Refuse rather than divert.
@@ -662,6 +669,25 @@ router.post('/sms', async (req, res, next) => {
       providerCoordinationCustomerId = trustedCustomerId;
     };
 
+    // A reply taken from the translation card (Use Reply) is re-checked and claimed UNDER THE THREAD LOCK
+    // below, as an Agent Review draft is. It is never also an Agent Review draft.
+    if (translationTrialId && agentDecisionId) return res.status(400).json({ error: 'A suggested reply cannot also be an Agent Review draft.' });
+    let translationClaim = translationTrialId ? 'stale' : null;
+    // Its facts are re-read first, with the Agent Review send checks and before the lock as those run: an
+    // offered time that is gone, a balance that changed, a technician no longer on the way.
+    // The same facts are read once more at the provider boundary (translationProviderPreSendCheck, below).
+    let translationProviderPreSendCheck;
+    if (translationTrialId) {
+      const sendChecks = await require('../services/sms-translation').translationReplySendChecks({ trialId: translationTrialId, customerId: trustedCustomerId, outgoingBody: body });
+      translationProviderPreSendCheck = sendChecks.providerPreSendCheck;
+      if (sendChecks.reason) {
+        logger.info(`[communications] translated reply refused at send: ${String(sendChecks.reason).slice(0, 80)}`);
+        return res.status(409).json({ error: sendChecks.reason === 'body_edited'
+          ? 'This suggested reply was edited, so it can no longer be checked. Clear the message box and write the reply yourself.'
+          : 'The facts in this suggested reply have changed since it was written. Clear the message box and write the reply yourself.' });
+      }
+    }
+
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
@@ -716,6 +742,13 @@ router.post('/sms', async (req, res, next) => {
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          if (translationTrialId) {
+            // Same final gate for a translation card's reply: under the thread lock, the customer's latest
+            // text must still be the one it answers, unanswered and unexpired, and one guarded UPDATE lets
+            // only one sender through. Nothing is parked or reserved for a refused send.
+            translationClaim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to, dbi: trx });
+            if (translationClaim !== 'ok') return [];
+          }
           if (claimedDecisionId) {
             // FINAL freshness gate, under the thread lock and AFTER the
             // claim: Twilio inbound inserts don't take this lock, so an
@@ -770,6 +803,11 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (translationClaim === 'claimed') return res.status(409).json({ error: 'This suggested reply was already sent or is being sent. Clear the message box and refresh the thread before replying.' });
+    if (translationClaim && translationClaim !== 'ok') {
+      return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
     }
 
     if (staleAtClaim) {
@@ -1170,7 +1208,8 @@ router.post('/sms', async (req, res, next) => {
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
           );
         })(),
-      } : {}),
+      // a translation card's reply: the same boundary checks, from the trial's stored snapshot
+      } : translationProviderPreSendCheck ? { providerPreSendCheck: translationProviderPreSendCheck } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —
@@ -1902,7 +1941,15 @@ router.post('/call', async (req, res, next) => {
     // rollback keeps its strict customer-leg proof and completion action,
     // whether the UI linked the commitment (card) or the source call (the
     // existing Call Log action). Pre-policy attempts keep the legacy proof.
-    const metadata = relatedCommitmentId ? { relatedCommitmentId } : relatedCallId ? { relatedCallId } : null;
+    // Who placed it, from the verified session, never the body: the callback
+    // spam settlement (GATE_CALLBACK_SPAM_CLOSES_PARENT) closes a voicemail's
+    // admin triage cards only on a callback an ADMIN placed, so a technician
+    // who can reach this route cannot settle admin review through it.
+    const placedBy = { placed_by: req.technicianId, placed_by_role: req.techRole };
+    // A commitment callback carries BOTH links: relatedCallId is set from the
+    // promise row (authoritative, never the body) once it is locked below, so
+    // the spam settlement and its correction always find the parent voicemail.
+    const metadata = relatedCommitmentId ? { relatedCommitmentId, ...placedBy } : relatedCallId ? { relatedCallId, ...placedBy } : null;
     const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
     if (cardPolicy) metadata.callback_policy = 'card';
     // The dial target is persisted canonical so the live-call interlock can
@@ -2029,8 +2076,13 @@ router.post('/call', async (req, res, next) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) {
         throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       }
+      // The staff leg rings from the main line regardless of the gate — the
+      // line the staff cell has always seen — and only the customer leg
+      // presents the home line (callerIdNumber on the prompt URL → the
+      // /outbound-connect <Dial callerId>). The lead auto-bridge splits the
+      // two legs the same way (routes/lead-webhook.js).
       bridged = await placeBridgeCall({
-        to: dialTo, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+        to: dialTo, bridgePhone, from, bridgeFrom: TWILIO_NUMBERS.mainLine.number, customer, source, adminUserId: req.technicianId, metadata, leadName,
       });
     } catch (err) {
       // An ambiguous create can already be ringing. Its claim and initiated
@@ -2362,10 +2414,20 @@ router.get('/agent-draft', async (req, res, next) => {
     }
 
     const row = await q.first();
-    if (!row) return res.json({ draft: null });
+    // Inbox assist for a text in another language (GATE_SMS_ANY_LANGUAGE_INBOX, read inside; null when off): the
+    // translation and the checked reply staff may send through this composer. Same customer guard as the draft.
+    // It can never break the draft card: any failure reads as no translation.
+    let translation = null;
+    try {
+      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId, new Date(), phoneLast10 ? String(req.query.phone) : null) : null;
+    } catch (err) {
+      logger.warn(`[communications] translation assist skipped: ${err.code || err.name || 'error'}`);
+    }
+    if (!row) return res.json({ draft: null, translation });
 
     const input = parseJson(row.input_snapshot, {});
     res.json({
+      translation,
       draft: {
         decisionId: row.id,
         workflow: row.workflow,
@@ -2784,11 +2846,50 @@ async function firstNameForPhone(last10, customerIds) {
 // Composer inserts use the same SMS formatting as templates and sends.
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
+// Stamp the office's approval to move a visit online inside the self-serve
+// move notice window: the start instant of the snapshot the link lookup
+// refused, written only while the row still has that snapshot's date, start,
+// status and group (a concurrent move, cancel or grouping wins and gets no
+// approval — codex #6039 r1 P1, r2 P2, r4 P2). Only this column changes, so no reminder or
+// confirmation re-arms; a later move clears it (trigger in 20261006230100).
+// True when the row now carries the approval.
+async function approveOfficeMove(svc) {
+  const { visitStartInstant } = require('../services/scheduling/self-serve-notice');
+  const { etCalendarDayOf } = require('../utils/datetime-et');
+  const startsAt = visitStartInstant(svc);
+  if (!startsAt) return false;
+  const updated = await db('scheduled_services')
+    .where({ id: svc.id, window_start: svc.window_start, status: svc.status })
+    .whereRaw('scheduled_date = ?::date', [etCalendarDayOf(svc.scheduled_date)])
+    // Grouping changes only visit_id and the page refuses a grouped row
+    // (codex #6039 r4 P2).
+    .whereRaw('visit_id IS NOT DISTINCT FROM ?', [svc.visit_id ?? null])
+    .update({ office_move_approved_for: startsAt });
+  if (updated) logger.info(`[reschedule-link] office approved online move inside notice window for ${svc.id}`);
+  return updated > 0;
+}
+
+// The composer's reschedule link for `svc`. Inside the self-serve move
+// notice window the office is the one asking the customer to move
+// (rain-out, running late — owner 2026-10-06). The link is built first,
+// with every check but the notice window; only a usable link gets the
+// approval stamped, so no approval ever needs revoking (codex #6039 r2).
+// The page and its commit honor the approval until the visit moves
+// (self-serve-notice.js officeApprovedMove).
+async function officeRescheduleLink(svc) {
+  const first = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+  if (!first.tooSoonToMove) return first;
+  const approved = await buildRescheduleLink(svc.id, { customerId: svc.customer_id, officeApproving: true });
+  if (!approved.url || !(await approveOfficeMove(svc))) return first;
+  return approved;
+}
+
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
 // the SMS body. Read-only apart from the short-url row buildRescheduleLink
-// mints. The reschedule token is a BEARER credential (AGENTS.md public-token
+// mints and, inside the move notice window, the office move approval
+// (approveOfficeMove). The reschedule token is a BEARER credential (AGENTS.md public-token
 // section), so this fails closed on every axis:
 //   - admin-only (requireAdmin): the comms composer is an admin surface, and
 //     the tech portal must not be able to mint arbitrary customers' links;
@@ -2810,7 +2911,7 @@ const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 // Final eligibility stays owned by the public /reschedule/:token page (e.g.
 // a missed same-day visit still rebooks there) — this endpoint only picks
 // WHICH visit the link points to.
-router.post('/reschedule-link', requireAdmin, async (req, res) => {
+async function rescheduleLinkHandler(req, res) {
   try {
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
@@ -2818,33 +2919,9 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     }
 
     const customerId = req.body?.customerId;
-    let customerIds = [];
-    if (customerId && UUID_RE.test(String(customerId))) {
-      const customer = await db('customers')
-        .where({ id: customerId })
-        .whereNull('deleted_at')
-        .first('id', 'phone', 'account_id');
-      if (!customer) return res.status(404).json({ error: 'Customer not found' });
-      if (fullPhoneLast10(customer.phone) !== last10) {
-        return res.status(400).json({ error: 'phone must match the selected customer' });
-      }
-      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
-    } else {
-      const matches = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id', 'account_id');
-      if (!matches.length) {
-        return res.status(404).json({ error: 'No customer found for that number' });
-      }
-      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
-      if (accountKeys.length > 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
-        });
-      }
-      customerIds = await customerIdsForAccount(accountKeys[0]);
-    }
+    const account = await reserviceAccountIds(customerId, last10);
+    if (account.error) return res.status(account.status).json({ error: account.error });
+    const { customerIds } = account;
     if (!customerIds.length) {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
@@ -2859,12 +2936,10 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    const { url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
-    // A dead-link-guard refusal (C3/C6) is not the same problem as a
-    // missing link: the visit is eligible, just too close to its own start
-    // to move online right now — a distinct 409 so the composer doesn't
-    // tell the operator this appointment has no reschedule link at all
-    // (independent-reviewer finding on PR #5308).
+    const { url, line, tooSoonToMove } = await officeRescheduleLink(svc);
+    // Still refused: the row moved between the read and the approval.
+    // Distinct 409 so the composer doesn't say the visit has no reschedule
+    // link at all (independent-reviewer finding on PR #5308).
     if (tooSoonToMove) {
       return res.status(409).json({
         error: 'This visit is too close to move online — ask them to reply or call.',
@@ -2891,7 +2966,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     logger.error(`reschedule-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/reschedule-link', requireAdmin, (req, res) => rescheduleLinkHandler(req, res));
 
 // POST /api/admin/communications/reservice-link  { phone, customerId? }
 // Composer helper: resolve the recipient's self-serve /reservice/:token short
@@ -2906,7 +2982,50 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     (services/reservice-scheduler.js) so the composer can't text a
 //     link that lands on the not-eligible page. Final eligibility stays
 //     owned by the public page — plan state can change after the text.
-router.post('/reservice-link', requireAdmin, async (req, res) => {
+// The account's customer ids a re-service link is built for: the selected
+// customer's account (their phone must match), else the one account the number
+// names. Returns { customerIds } or { status, error } (the route's own words).
+async function reserviceAccountIds(customerId, last10) {
+  if (customerId && UUID_RE.test(String(customerId))) {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'phone', 'account_id');
+    if (!customer) return { status: 404, error: 'Customer not found' };
+    if (fullPhoneLast10(customer.phone) !== last10) return { status: 400, error: 'phone must match the selected customer' };
+    return { customerIds: await customerIdsForAccount(customer.account_id || customer.id) };
+  }
+  const matches = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id', 'account_id');
+  if (!matches.length) return { status: 404, error: 'No customer found for that number' };
+  const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+  if (accountKeys.length > 1) {
+    return { status: 409, error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first' };
+  }
+  return { customerIds: await customerIdsForAccount(accountKeys[0]) };
+}
+
+// The first row, in order, with an eligible re-service lane. A lookup FAILURE
+// aborts the whole scan (Codex round-21 P2): never "no lanes, try the next
+// sibling", which could text a link for a different property than the operator
+// picked. Returns { eligibleId, lanes } (eligibleId null when none) or { lookupFailed }.
+async function firstEligibleReserviceRow(orderedIds, loadLanes) {
+  for (const id of orderedIds) {
+    let rowLanes;
+    try {
+      rowLanes = await loadLanes(id);
+    } catch (lookupErr) {
+      logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
+      return { lookupFailed: true };
+    }
+    if (rowLanes.length) return { eligibleId: id, lanes: rowLanes };
+  }
+  return { eligibleId: null, lanes: [] };
+}
+
+async function reserviceLinkHandler(req, res) {
   try {
     const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
@@ -2970,24 +3089,9 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     const orderedIds = selectedId
       ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
       : [...customerIds].sort();
-    let eligibleId = null;
-    let lanes = [];
-    for (const id of orderedIds) {
-      // Codex round-21 P2: a lookup FAILURE aborts the whole scan (500) — never "no lanes, try the next
-      // sibling", which could text a link for a different property than the operator picked.
-      let rowLanes;
-      try {
-        rowLanes = await loadEligibleReserviceLanesStrict(id);
-      } catch (lookupErr) {
-        logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
-        return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
-      }
-      if (rowLanes.length) {
-        eligibleId = id;
-        lanes = rowLanes;
-        break;
-      }
-    }
+    const scan = await firstEligibleReserviceRow(orderedIds, loadEligibleReserviceLanesStrict);
+    if (scan.lookupFailed) return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
+    const { eligibleId, lanes } = scan;
     if (!eligibleId) {
       return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
     }
@@ -3007,7 +3111,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
 // Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
 // a link build — the gate-wrapped engine path emails the ask now and nothing
@@ -3487,24 +3592,27 @@ async function consultationLeadOnlyResponse(kind, last10, leadId) {
   return { status: 200, body: customerLinkResponse(kind, undefined, result, leadOnly.lead.first_name || '') };
 }
 
-router.post('/customer-link', requireAdmin, async (req, res) => {
+// A /customer-link request's own fields, judged in the route's order: the kind
+// (one the composer builds), a full 10-digit phone, and — for the Quick Links
+// review ask only — its delivery channel (owner ruling 2026-09-03: sms | email
+// | both). Returns { kind, last10, channel } or { status, error }.
+function customerLinkRequest(body, builderByKind) {
+  const kind = String(body.kind || '');
+  if (!(kind in builderByKind)) return { status: 400, error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` };
+  const last10 = fullPhoneLast10(body.phone);
+  if (!last10) return { status: 400, error: 'Enter a full 10-digit phone number first' };
+  const channel = kind === 'review_request' ? String(body.channel || 'sms') : undefined;
+  if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) return { status: 400, error: 'channel must be one of sms, email, both' };
+  return { kind, last10, channel };
+}
+
+async function customerLinkHandler(req, res) {
   try {
     const body = req.body || {};
-    const kind = String(body.kind || '');
     const builderByKind = composerLinkBuilders(body);
-    if (!(kind in builderByKind)) {
-      return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
-    }
-
-    const last10 = fullPhoneLast10(body.phone);
-    if (!last10) {
-      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
-    }
-    // Quick Links review channel (owner ruling 2026-09-03): sms | email | both.
-    const channel = kind === 'review_request' ? String(body.channel || 'sms') : undefined;
-    if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
-      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
-    }
+    const request = customerLinkRequest(body, builderByKind);
+    if (request.error) return res.status(request.status).json({ error: request.error });
+    const { kind, last10, channel } = request;
     if (kind === 'statement') {
       const answer = await statementLinkInsert(require('../services/composer-customer-links'), last10, body.customerId);
       return res.status(answer.status).json(answer.body);
@@ -3553,7 +3661,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/customer-link', requireAdmin, (req, res) => customerLinkHandler(req, res));
 
 // GET /api/admin/communications/link-library
 // The Insert Link sheet's full searchable list (office review links computed
@@ -3961,7 +4070,10 @@ router.post('/schedule-sms', async (req, res, next) => {
     // reassignment it was granted under (Codex #5568 r14 P1). Refused before any
     // lookup or insert, with the staff default-deny gate on or off.
     if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId, translationTrialId } = req.body || {};
+    // A reply taken from the translation card answers the customer's latest text as of now; nothing re-checks
+    // it when a queued send fires, so it is sent now or not at all.
+    if (translationTrialId) return res.status(409).json({ error: 'A suggested reply in the customer\'s language can only be sent now, not scheduled.' });
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
@@ -4683,5 +4795,26 @@ router._internals = {
 };
 
 module.exports = router;
+
+// The Insert Link builders, callable without an HTTP request: the Intelligence
+// Bar's create_customer_link runs the SAME handler the composer's Insert Link
+// sheet posts to (recipient resolution, owner rules, per-kind builders) and
+// reads its answer as { status, body } instead of an Express response.
+function collectedReply() {
+  const out = { status: 200, body: null };
+  const res = {
+    status(code) { out.status = code; return res; },
+    json(body) { out.body = body; return out; },
+  };
+  return { res, out };
+}
+async function runLinkHandler(handler, body) {
+  const { res, out } = collectedReply();
+  await handler({ body: body || {} }, res);
+  return out;
+}
+module.exports.customerLinkInsert = (body) => runLinkHandler(customerLinkHandler, body);
+module.exports.rescheduleLinkInsert = (body) => runLinkHandler(rescheduleLinkHandler, body);
+module.exports.reserviceLinkInsert = (body) => runLinkHandler(reserviceLinkHandler, body);
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;

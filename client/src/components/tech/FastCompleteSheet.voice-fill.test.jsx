@@ -8,17 +8,18 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
-// The mics: a supported browser whose transcript the test delivers by hand. The
-// sheet's voice mic is the first instance, the visit note's mic the second.
+// The mics, driven by hand. The sheet's voice mic is the first instance: it only
+// records, and hands its clip to the fill (clipHandler). The visit note's mic is
+// the second and still takes a transcript.
 const dictation = vi.hoisted(() => ({ slots: [], perSlot: [], state: { listening: false, mode: 'speech', starting: false, uploading: false } }));
 vi.mock('../../hooks/useSpeechDictation', async () => {
   const { useRef, useState } = await import('react');
   return {
-    default: (onTranscript) => {
+    default: (onTranscript, options = {}) => {
       const [, setTick] = useState(0);
       const index = useRef(null);
       if (index.current === null) { index.current = dictation.slots.length; dictation.slots.push(null); }
-      dictation.slots[index.current] = { onTranscript, rerender: () => setTick((tick) => tick + 1) };
+      dictation.slots[index.current] = { onTranscript, clipHandler: options.clipHandler, rerender: () => setTick((tick) => tick + 1) };
       return { supported: true, toggle: () => {}, cancel: () => {}, ...dictation.state, ...(dictation.perSlot[index.current] || {}) };
     },
   };
@@ -32,7 +33,7 @@ beforeEach(() => {
   dictation.perSlot = [];
   dictation.state = { listening: false, mode: 'speech', starting: false, uploading: false };
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
@@ -67,16 +68,21 @@ const FILL = {
 
 function makeRequest({ fill = FILL, fillError = null } = {}) {
   const calls = [];
+  let fills = 0;
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: CATALOG };
+    // The clip goes through the sheet's own request (multipart).
+    // `request.onFill(n)` may answer the nth clip itself with { status, body }.
+    if (path.endsWith('/voice-fill/clip')) {
+      fills += 1;
+      const answer = request.onFill?.(fills) || (fillError ? { status: fillError.status || 502, body: { error: 'x' } } : { status: 200, body: fill });
+      if (answer.status >= 200 && answer.status < 300) return answer.body;
+      throw Object.assign(new Error(answer.body?.error || `Request failed (${answer.status})`), { status: answer.status, code: answer.body?.code });
+    }
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: CONTEXT_SERVICE, products: CATALOG };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.endsWith('/photos')) return { photos: [] };
-    if (path.endsWith('/voice-fill')) {
-      if (fillError) throw fillError;
-      return fill;
-    }
     if (path.endsWith('/complete')) return { success: true };
     return {};
   });
@@ -89,17 +95,17 @@ async function openSheet(request, props = { voiceFillEnabled: true }) {
   await screen.findByRole('button', { name: /Taurus SC/ });
 }
 
-// The tech taps the mic, talks (the words arrive in chunks), and taps again.
+// The tech taps the mic, talks, and taps again: the recording goes to the fill.
 const setDictation = (patch) => React.act(() => {
   dictation.state = { ...dictation.state, ...patch };
   dictation.slots.forEach((slot) => slot?.rerender());
 });
-function say(...chunks) {
+function say() {
   setDictation({ listening: true });
-  React.act(() => { chunks.forEach((chunk) => dictation.slots[0].onTranscript(chunk)); });
   setDictation({ listening: false });
+  React.act(() => { dictation.slots[0].clipHandler(new Blob(['clip'], { type: 'audio/webm;codecs=opus' }), 7); });
 }
-const voiceFillCalls = (request) => request.calls.filter((c) => c.path.endsWith('/voice-fill'));
+const voiceFillCalls = (request) => request.calls.filter((c) => c.path.endsWith('/voice-fill/clip'));
 const completeBodies = (request) => request.calls.filter((c) => c.path.endsWith('/complete')).map((c) => JSON.parse(c.options.body));
 const completeButton = () => screen.getByRole('button', { name: 'Complete re-service' });
 // The tech's ✓ on everything the fill set (one tap per product, visit taps too).
@@ -193,7 +199,8 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(body.areasServiced).toEqual(['Outside']);
     expect(body.technicianNotes).toBe(FILL.customerNote);
     expect(body.clientPestRating).toBe(2);
-  });
+  // the sheet's longest walk-through: room for a loaded CI runner
+  }, 15000);
 
   test('the customer note joins what the tech already typed', async () => {
     await openSheet(makeRequest());
@@ -252,16 +259,21 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(screen.queryByText('Check what I couldn\'t fill.')).toBeNull();
   });
 
-  test('the transcript goes to the fill only: not into the note, not on /complete', async () => {
+  test('the recording goes to the clip route only; no words ever reach the browser, the note or /complete', async () => {
     const request = makeRequest();
     await openSheet(request);
     say(TRANSCRIPT);
     await screen.findByRole('region', { name: 'Check' });
 
     const [fillCall] = voiceFillCalls(request);
-    expect(fillCall.path).toBe('/admin/dispatch/svc-1/fast-complete/voice-fill');
+    expect(fillCall.path).toBe('/admin/dispatch/svc-1/fast-complete/voice-fill/clip');
     expect(fillCall.options.method).toBe('POST');
-    expect(JSON.parse(fillCall.options.body)).toEqual({ sheet: 'pest_reservice', transcript: TRANSCRIPT });
+    const sent = fillCall.options.body;
+    expect(sent).toBeInstanceOf(FormData);
+    expect(sent.get('sheet')).toBe('pest_reservice');
+    expect(sent.get('duration_seconds')).toBe('7');
+    expect(sent.get('audio')).toBeInstanceOf(Blob);
+    expect(sent.has('transcript')).toBe(false);
     expect(screen.getByLabelText('Tell me about the visit').value).not.toContain('perimeter outside for ants and roaches, Taurus');
     expect(screen.getByLabelText('Office note (not on the report)').value).not.toContain('Taurus six ounces');
 
@@ -382,16 +394,8 @@ describe('FastCompleteSheet voice fill, gate on', () => {
   });
 
   test('a later 404 takes the mic away but keeps what still holds Complete reachable', async () => {
-    let calls = 0;
     const request = makeRequest();
-    const base = request.getMockImplementation();
-    request.mockImplementation(async (path, options) => {
-      if (path.endsWith('/voice-fill') && ++calls > 1) {
-        request.calls.push({ path, options });
-        throw Object.assign(new Error('Request failed (404)'), { status: 404 });
-      }
-      return base(path, options);
-    });
+    request.onFill = (n) => (n > 1 ? { status: 404, body: { enabled: false } } : null);
     await openSheet(request);
     say('first');
     await screen.findByRole('region', { name: 'Confirm what I filled' });
@@ -482,16 +486,8 @@ describe('FastCompleteSheet voice fill, gate on', () => {
   });
 
   test('✓ on an added product keeps its way against a later fill', async () => {
-    let calls = 0;
     const request = makeRequest({ fill: { ...FILL, unclear: [], visit: { ...FILL.visit, method: '' } } });
-    const base = request.getMockImplementation();
-    request.mockImplementation(async (path, options) => {
-      if (path.endsWith('/voice-fill') && ++calls > 1) {
-        request.calls.push({ path, options });
-        return { enabled: true, products: [{ productId: 'extra', amount: null, unit: '', sameAsLast: false, method: 'granular_broadcast', heard: 'broadcast the Advion' }], visit: { pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' }, customerNote: '', officeNote: '', unclear: [] };
-      }
-      return base(path, options);
-    });
+    request.onFill = (n) => (n > 1 ? { status: 200, body: { enabled: true, products: [{ productId: 'extra', amount: null, unit: '', sameAsLast: false, method: 'granular_broadcast', heard: 'broadcast the Advion' }], visit: { pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' }, customerNote: '', officeNote: '', unclear: [] } } : null);
     await openSheet(request);
     say('first');
     fireEvent.click(await screen.findByRole('button', { name: /^Confirm Advion Ant Bait Gel/ }));

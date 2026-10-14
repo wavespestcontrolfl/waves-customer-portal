@@ -103,3 +103,21 @@ test('admin-only records offer only administrators as owners', () => {
   expect(Array.from(owners.options, option => option.value)).toEqual(['tech']);
   expect(screen.getByRole('button', { name: 'Complete record' })).toBeEnabled();
 });
+
+test('an admin can mark the document required at onboarding, and the page reloads', async () => {
+  request.mockResolvedValue({});
+  const detail = draft(); detail.version.content_hash = 'issued'; detail.current_version_id = 'v1';
+  const onSaved = vi.fn();
+  render(<DocumentReader {...props(detail)} onSaved={onSaved} />);
+  const toggle = screen.getByLabelText('Required at onboarding');
+  expect(toggle).not.toBeChecked();
+  fireEvent.click(toggle);
+  await waitFor(() => expect(request).toHaveBeenCalledWith('/doc/onboarding-required', { required: true }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalledWith('Required at onboarding.'));
+});
+
+test('the required toggle is not offered to staff who cannot manage documents', () => {
+  const detail = draft(); detail.version.content_hash = 'issued'; detail.current_version_id = 'v1';
+  render(<DocumentReader {...props(detail)} manage={false} />);
+  expect(screen.queryByLabelText('Required at onboarding')).not.toBeInTheDocument();
+});

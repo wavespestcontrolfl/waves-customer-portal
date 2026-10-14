@@ -50,6 +50,14 @@ describe('stopWindow / stopPropertyAlerts (codex #3603 r1)', () => {
     const [single] = groupServicesIntoStops([{ id: 'x', status: 'pending', windowStart: '13:00', windowEnd: '14:00', windowDisplay: '1–2 PM' }]);
     expect(stopWindow(single)).toEqual({ windowStart: '13:00', windowEnd: '14:00', windowDisplay: '1–2 PM' });
   });
+  it('a duplicate gate line keeps the copy tagged with its directory entry', () => {
+    const tagged = { type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: 'e1', neighborhoodEntryCode: '4242', reportedWrong: false };
+    const [grouped] = groupServicesIntoStops([
+      { id: 'a', status: 'skipped', visit, propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)' }, 'Dog in yard'] },
+      { id: 'c', status: 'pending', visit, propertyAlerts: [tagged] },
+    ]);
+    expect(stopPropertyAlerts(grouped)).toEqual([tagged, 'Dog in yard']);
+  });
   it('merges every member\'s alerts, deduplicated by text, keeping object form', () => {
     const [grouped] = groupServicesIntoStops([
       { id: 'a', status: 'pending', visit, propertyAlerts: [{ type: 'gate', text: 'Gate 1234' }, 'Dog in yard'] },

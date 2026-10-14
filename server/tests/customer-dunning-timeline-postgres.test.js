@@ -661,7 +661,14 @@ postgres('customer-level overdue reminders: one customer through a whole episode
 
     test('the timeline script reads the whole episode back, read-only, in time order, with the sub-7-day gap flagged and no personal data', async () => {
       const c = ep.customer.id;
-      const report = await Timeline.inReadOnlyTransaction(app, (trx) => Timeline.readTimeline(trx, c, { now: AFTER, days: 120 }));
+      // The staff pause and resume rows take PostgreSQL's real now(), so the read
+      // window must end after the database clock (Date.now() is faked by this
+      // suite's timers); it still starts before the first touch. A fixed AFTER
+      // read dropped those rows once the real date passed it (2026-10-06).
+      const dbNow = new Date((await app.raw('SELECT now() AS now')).rows[0].now);
+      const readNow = new Date(Math.max(AFTER.getTime(), dbNow.getTime() + MIN));
+      const readDays = Math.ceil((readNow.getTime() - T1.getTime()) / (24 * HOUR)) + 2;
+      const report = await Timeline.inReadOnlyTransaction(app, (trx) => Timeline.readTimeline(trx, c, { now: readNow, days: readDays }));
       expect(report.notes).toEqual([]); // every table was readable
       // six touches, two legs each
       expect(report.attempts).toHaveLength(12);

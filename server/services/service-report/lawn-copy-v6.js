@@ -1,5 +1,5 @@
 /**
- * Lawn report v6 copy (lawn report rebuild P14, GATE_LAWN_REPORT_COPY_V6).
+ * Lawn report v6 copy (lawn report rebuild P14).
  *
  * FIXED SENTENCES, no model (owner ruling 2026-10-02, #5604 Codex r1: word
  * checks cannot stop a model claiming a feed on an insect-only visit). Every
@@ -33,9 +33,11 @@
  */
 
 const logger = require('../logger');
-const { buildTreatmentSummary } = require('./treatment-summary');
+const { buildTreatmentSummary, buildCategoryTreatmentSummary } = require('./treatment-summary');
+const { copyFixesLive } = require('./lawn-report-copy-fixes');
 const { buildLawnExpectations } = require('./lawn-expectations');
-const { CELSIUS_YTD_CAP } = require('../../config/lawn-expectations');
+const { stage1ExpectPlan } = require('./lawn-report-stage1');
+const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
 const FREEZE_KEY = 'lawnCopyV6';
@@ -58,6 +60,50 @@ const WATCH_TOPIC = {
 function countWords(text) {
   const t = typeof text === 'string' ? text.trim() : '';
   return t ? t.split(/\s+/).length : 0;
+}
+
+// The sentences of one approved piece (a row's visible-change or by-next-visit
+// text can hold two: "By your next visit, color may be up. Thickening takes longer.").
+function splitSentences(text) {
+  return String(text || '').trim().split(/(?<=[.!?])\s+(?=[A-Z])/).filter(Boolean);
+}
+
+// Lower-cased words with no punctuation, for "is this already said" checks.
+const sentenceWords = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).join(' ');
+
+const BY_NEXT_VISIT_RX = /^\s*by your next visit\b/i;
+
+/**
+ * The composition rule for the "What to expect" block, applied wherever the block
+ * is built or replayed (so web, PDF and every summary that reuses it agree).
+ * Pieces arrive in the engine's row order, each { text, needsVisit }:
+ *  - at most ONE by-next-visit piece: the first one (the first product's) stays,
+ *    the others are left out whole;
+ *  - a sentence already stated (the same words, or contained in a sentence
+ *    printed before it: "Thickening takes longer" after "...and thickening takes
+ *    longer") is not printed again.
+ * Every sentence that stays is printed verbatim. A piece left with no sentence
+ * is dropped.
+ */
+function composeExpectPieces(pieces) {
+  const out = [];
+  const said = [];
+  let hasNextVisit = false;
+  for (const piece of Array.isArray(pieces) ? pieces : []) {
+    const text = clean(piece && piece.text);
+    if (!text) continue;
+    const nextVisit = Boolean(piece.needsVisit || piece.gapBased) || BY_NEXT_VISIT_RX.test(text);
+    if (nextVisit && hasNextVisit) continue;
+    const kept = splitSentences(text).filter((sentence) => {
+      const words = ` ${sentenceWords(sentence)} `;
+      return !said.some((prior) => prior.includes(words));
+    });
+    if (!kept.length) continue;
+    kept.forEach((sentence) => said.push(` ${sentenceWords(sentence)} `));
+    if (nextVisit) hasNextVisit = true;
+    out.push({ ...piece, text: kept.join(' ') });
+  }
+  return out;
 }
 
 function parseJsonObject(value) {
@@ -111,43 +157,63 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const built = build({
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
+    // The frozen finding-to-product tie (GATE_LAWN_REPORT_FACTS): a product that treated a finding reads curative.
+    tiedFamilies: Array.isArray(ctx.tiedFamilies) ? ctx.tiedFamilies : [],
     visitDate: ctx.visitDate || null,
     nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
-    celsiusYtdCount: CELSIUS_YTD_CAP,
+    celsiusYtdCount: celsiusYtdCap(),
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
   const visitKnown = Number.isFinite(ctx.nextVisitGapDays);
-  const pieces = [];
-  const picked = [];
-  // Each printed sentence, in order, with whether it was timed from the gap to
-  // the next visit (a row judged by absence words its line without one).
-  const sentences = [];
+  // Every candidate sentence, in the engine's row order. The 42-word cap picks
+  // them (a sentence that would pass it is skipped whole), and a row counts
+  // toward the 2-row limit only when one of its sentences was kept.
+  const kept = [];
+  let rowsUsed = 0;
   let words = 0;
-  for (const row of rows) {
-    if (picked.length >= MAX_EXPECT_ROWS) break;
-    const keys = [];
-    for (const key of EXPECT_SENTENCE_KEYS) {
+  // GATE_LAWN_REPORT_STAGE1_FIXES: the print order is the engine's rows, or (live, with a second row that fits the cap) the
+  // first row followed by a second line from sentences that already exist: the curative insecticide row when a spot insecticide
+  // was applied, else the feeding row. The second row prints its visible-change sentence only, and its words are held back
+  // while the first row is read, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
+  const plan = stage1ExpectPlan(rows, products, FIELD_CAPS.whatToExpect, EXPECT_SENTENCE_KEYS);
+  const order = plan || rows.map((row) => ({ row, keys: EXPECT_SENTENCE_KEYS, hold: 0 }));
+  for (const { row, keys, hold } of order) {
+    if (rowsUsed >= MAX_EXPECT_ROWS) break;
+    const before = kept.length;
+    for (const key of keys) {
       // "By your next visit..." needs a visit the report shows: with no known
       // gap there is none, even for a row whose line is not timed by it.
       if (key === 'byNextVisit' && !visitKnown) continue;
       const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
       if (!sentence) continue;
       const w = countWords(sentence.text);
-      if (words + w > FIELD_CAPS.whatToExpect) continue;
+      if (words + w + hold > FIELD_CAPS.whatToExpect) continue;
       words += w;
-      pieces.push(sentence.text.trim());
-      keys.push(key);
-      sentences.push({
-        key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
+      kept.push({
+        id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
       });
     }
-    if (keys.length) picked.push({ id: row.id, keys });
+    if (kept.length > before) rowsUsed += 1;
   }
-  return { text: pieces.length ? pieces.join(' ') : null, rows: picked, sentences };
+  // `sentences` is every kept sentence, uncomposed: it is what freezes, so a
+  // replay for a rescheduled visit can still fall back to a later row's
+  // schedule-independent sentence. The composition (composeExpectPieces: one
+  // by-next-visit sentence, no restated sentence) runs where the text is
+  // chosen for print: here, and again in replayFields / staticWhatToExpect.
+  const composed = composeExpectPieces(kept);
+  const picked = [];
+  composed.forEach((piece) => {
+    const entry = picked.find((p) => p.id === piece.id);
+    if (entry) entry.keys.push(piece.key);
+    else picked.push({ id: piece.id, keys: [piece.key] });
+  });
+  const sentences = kept.map((piece) => ({ key: piece.key, text: piece.text, needsVisit: piece.needsVisit, gapBased: piece.gapBased }));
+  // `stage1` marks a block built with the stage 1 second line; it freezes with the entry so the PDF key can follow it.
+  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences, ...(plan ? { stage1: true } : {}) };
 }
 
 /**
@@ -162,19 +228,25 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
   if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [], expectSentences: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
-  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
+  // GATE_LAWN_REPORT_COPY_FIXES: a copy frozen while the gate is live names the product categories,
+  // never an active ingredient or a product name. The gate decides only what a NEW freeze writes;
+  // a frozen entry replays as it was written. The builder is chosen once, here.
+  const summarize = copyFixesLive() ? buildCategoryTreatmentSummary : buildTreatmentSummary;
+  fields.whatWeDid = clean(summarize(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   let expectSentences = [];
+  let stage1Expect = false;
   try {
     const expect = buildWhatToExpect(reportV2, ctx, deps);
     fields.whatToExpect = expect.text;
     expectRows = expect.rows;
     expectSentences = expect.sentences;
+    stage1Expect = expect.stage1 === true;
   } catch (err) {
     logger.warn(`[lawn-copy-v6] expectations failed: ${err.message}`);
   }
-  return { fields, expectRows, expectSentences };
+  return { fields, expectRows, expectSentences, ...(stage1Expect ? { stage1Expect: true } : {}) };
 }
 
 // ── Freeze (first writer wins, per assessment) ─────────────────────────────
@@ -191,8 +263,8 @@ function cleanFields(fields) {
 // so a reschedule can never leave a stale sentence in a stored document.
 function staticWhatToExpect(sentences, fallback) {
   if (!Array.isArray(sentences)) return fallback || null;
-  const kept = sentences.filter((s) => s && !s.needsVisit && !s.gapBased && clean(s.text)).map((s) => s.text.trim());
-  return kept.length ? kept.join(' ') : null;
+  const kept = composeExpectPieces(sentences.filter((s) => s && !s.needsVisit && !s.gapBased));
+  return kept.length ? kept.map((s) => s.text).join(' ') : null;
 }
 
 // A frozen entry's fields for THIS render. Everything replays as frozen except
@@ -209,9 +281,13 @@ function replayFields(entry, ctx = {}) {
   const shownIso = ctx.nextVisitIso || null;
   const moved = (entry.nextVisitIso || null) !== shownIso;
   const dropped = (s) => (s.gapBased && moved) || ((s.needsVisit || s.gapBased) && !shownIso);
-  if (!sentences.some((s) => s && dropped(s))) return { ...fields, whatToExpectStatic };
-  const kept = sentences.filter((s) => s && !dropped(s) && clean(s.text)).map((s) => s.text.trim());
-  return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null, whatToExpectStatic };
+  // The block is composed from the sentences still valid for this render
+  // (composeExpectPieces): the first by-next-visit one left, no repeats, so a
+  // reschedule that drops the first row's timed sentence falls back to a later
+  // row's schedule-independent one, and a copy frozen before the rule replays
+  // without its repeated sentences.
+  const kept = composeExpectPieces(sentences.filter((s) => s && !dropped(s)));
+  return { ...fields, whatToExpect: kept.length ? kept.map((s) => s.text).join(' ') : null, whatToExpectStatic };
 }
 
 /** One assessment's frozen entry out of a record's structured_notes, or null. */
@@ -297,6 +373,7 @@ async function resolveLawnCopyV6ForRender({
     expectRows: built.expectRows,
     // What the by-next-visit sentences were timed for (replayFields).
     expectSentences: built.expectSentences,
+    ...(built.stage1Expect ? { stage1Expect: true } : {}),
     nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);
@@ -313,5 +390,5 @@ module.exports = {
   resolveLawnCopyV6ForRender,
   storedLawnCopyV6For,
   freezeLawnCopyV6,
-  _test: { buildWatching, buildWhatToExpect, watchedIssues, WATCH_TOPIC },
+  _test: { buildWatching, buildWhatToExpect, watchedIssues, WATCH_TOPIC, composeExpectPieces },
 };

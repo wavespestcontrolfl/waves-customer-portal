@@ -156,6 +156,81 @@ describe('appointment tagger prep email automation', () => {
     db.fn = { now: jest.fn(() => 'NOW()') };
   });
 
+  // codex #6162 r1 P1: Admin Schedule can book the car roach row, which runs
+  // onServiceScheduled. The name carries "german" and "roach", so it used to
+  // classify as household roach work and queue prep.cockroach (a kitchen
+  // cabinets email). A car job now gets its own tag and no prep automation.
+  describe('vehicle roach rows get no household roach prep', () => {
+    function bookingRow(serviceType) {
+      return service({ service_type: serviceType, is_recurring: false });
+    }
+    function mockBooking(row) {
+      // First scheduled_services read is the booking row; later reads
+      // (prior-booking gate, prep token) fall through to the shared defaults.
+      let served = false;
+      db.mockImplementation((table) => {
+        if (table === 'scheduled_services') {
+          const q = priorBookingQuery();
+          const defaultFirst = q.first;
+          q.leftJoin = jest.fn(() => q);
+          q.select = jest.fn(() => q);
+          q.first = jest.fn(async (...args) => {
+            if (!served) { served = true; return row; }
+            return defaultFirst(...args);
+          });
+          return q;
+        }
+        if (table === 'customer_interactions') return interactionsQuery();
+        if (table === 'email_template_automations') return automationsQuery();
+        return customersQuery();
+      });
+    }
+
+    test.each([
+      'Vehicle German Roach Treatment (2 Visits)',
+      'Vehicle Roach Add-On',
+    ])('classifier: %s is not a household roach type', (name) => {
+      expect(AppointmentTagger.classifyAppointmentType(name)).toEqual({ tag: 'vehicle_roach', label: 'Vehicle Roach Treatment' });
+    });
+
+    test('household roach names still classify as roach work', () => {
+      expect(AppointmentTagger.classifyAppointmentType('German Roach Initial Service (3-Visit)').tag).toBe('german_roach');
+      expect(AppointmentTagger.classifyAppointmentType('Cockroach Treatment - Interior').tag).toBe('german_roach');
+      expect(AppointmentTagger.classifyAppointmentType('Roach Control').tag).toBe('cockroach');
+    });
+
+    test('onServiceScheduled for the car job sends no prep email, prep text or sequence enrollment', async () => {
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const automationRunner = require('../services/automation-runner');
+      mockBooking(bookingRow('Vehicle German Roach Treatment (2 Visits)'));
+
+      await AppointmentTagger.onServiceScheduled('svc-1');
+
+      expect(executor.processTrigger).not.toHaveBeenCalled();
+      expect(automationRunner.enrollCustomer).not.toHaveBeenCalled();
+      expect(renderSmsTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('the same path for a household roach job still queues prep.cockroach', async () => {
+      mockBooking(bookingRow('German Roach Initial Service (3-Visit)'));
+
+      await AppointmentTagger.onServiceScheduled('svc-1');
+
+      expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+      expect(executor.processTrigger.mock.calls[0][0].automationKey).toBe('prep.cockroach');
+    });
+
+    test('a prior car job does not count as a prior household roach booking', async () => {
+      // hasPriorSameTypeBooking looks only at the household roach tags.
+      priorBookingRow = null;
+      await AppointmentTagger.hasPriorSameTypeBooking(service(), 'cockroach');
+      const q = db.mock.results.at(-1).value;
+      expect(q.whereIn).toHaveBeenCalledWith('appointment_type', ['german_roach', 'cockroach']);
+    });
+  });
+
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
 

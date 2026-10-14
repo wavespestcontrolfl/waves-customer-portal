@@ -17,6 +17,10 @@
  *     only). The sheet reads this before the report is written, so the
  *     report and the record agree on it; the trace only gives a perimeter
  *     spray its length.
+ *   - whether the technician SWEPT the eaves and webs today (owner ruling
+ *     2026-10-08: the short sheet has no box for it, the note carries it). It
+ *     stands only on a quote that names a web-removal action and a web or
+ *     eave, that the note does not deny or put on another day.
  *
  * Every fact must quote the note word for word, or it is dropped; a pest's
  * words must sit inside its own quote, and an area, a pest or a way of
@@ -34,7 +38,7 @@ const { redactAccessCodes } = require('./context-aggregator');
 const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v6';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v7';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -89,8 +93,17 @@ const VOICE_FACTS_SCHEMA = {
       required: ['method', 'quote'],
       additionalProperties: false,
     },
+    sweep: {
+      type: 'object',
+      properties: {
+        done: { type: 'boolean' },
+        quote: { type: 'string' },
+      },
+      required: ['done', 'quote'],
+      additionalProperties: false,
+    },
   },
-  required: ['areas', 'pests', 'spray'],
+  required: ['areas', 'pests', 'spray', 'sweep'],
   additionalProperties: false,
 };
 
@@ -495,7 +508,7 @@ const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area,
 ]));
 
 // Rules only; the note rides the user channel as labeled data.
-const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out three facts, using ONLY the note.
+const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out four facts, using ONLY the note.
 
 areas: where the technician put product down (sprayed, baited, dusted, spread granules, placed bait stations or glue boards).
 - "inside": anywhere inside the home (kitchen, bathrooms, baseboards, cabinets, under sinks, inside door tracks, attic, any room).
@@ -506,6 +519,8 @@ List an area only when the note says product went down there. A place the techni
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
 
 spray: how the technician sprayed, as the note says it. "perimeter" when they sprayed around the outside of the home (around the house, the perimeter, the foundation, all the way around); "spot" when they sprayed only particular spots; "none" when the note says they did not spray ("didn't spray today"); "not_said" when the note does not say whether or how they sprayed. Give the quote: the exact words from the note that say it, copied character for character ("" for not_said).
+
+sweep: whether the technician swept, brushed or knocked down webs (cobwebs, spider webs) from the eaves, soffits or other parts of the house on this visit. done is true only when the note says they did it ("swept the eaves", "knocked down the webs", "brushed cobwebs off the lanai"). Webs only seen ("saw webs on the eaves"), a sweep the note says was not done ("didn't sweep", "no webs to sweep", "customer asked us not to knock down webs") and a sweep for another day ("will sweep next time") are NOT done. Give the quote: the exact words from the note that say it, copied character for character ("" and done false when the note does not say).
 
 Return empty lists when the note does not say. Never guess.
 
@@ -599,6 +614,8 @@ function validateVoiceFacts(json, note) {
     // Pests the note treats for that the reading left out (Codex #5538).
     unclearPests: pestsLeftOut(grounding, heardNames),
     ...readSpray(answer.spray || {}, grounding),
+    // Only when heard: { quote } of a web sweep done today.
+    ...readSweep(answer.sweep, grounding),
   };
 }
 
@@ -712,17 +729,153 @@ function readSpray(spray, grounding) {
   };
 }
 
+// The sweep (owner ruling 2026-10-08): the note fills it and the sheet's chip
+// corrects it, so this read takes only a plain statement and fails closed on
+// everything else (a missed sweep is one tap on the chip; a false one would
+// claim work on the customer's report). A sweep is one PART of the quote (the
+// words between commas, sentence ends and "and" / "then" / "but") that:
+//   - opens with the technician's own past-tense removal ("swept", "I knocked
+//     down", "we also brushed"): any other subject ("the homeowner", "rain",
+//     "maintenance") or tense ("will sweep", "didn't sweep", "sweeping") is
+//     not one;
+//   - takes the web or the eave as its direct object, a few plain words apart
+//     ("swept the front eaves", "removed all the cobwebs"); another object
+//     ("removed bait stations below cobwebs", "knocked down a wasp nest from
+//     the eaves") is not one. A web takes any removal word; an eave alone
+//     needs a sweeping word ("cleaned the eaves" may be anything);
+//     "dewebbed" says its own web;
+//   - says nothing that denies it, undoes it, puts it on another day or
+//     before the visit, or gives it to someone else;
+//   - names no place, or a place outside the home (the record's action is the
+//     exterior sweep: eaves, window and door frames, lanai). "Removed cobwebs
+//     from the foyer wall" names a place that is not outside.
+// The scan is one anchored match per part over a capped quote, so its cost is
+// linear in the quote (Codex security P2 on #6147).
+const SWEEP_MAX_QUOTE_CHARS = 600;
+const SWEEP_PART_BREAK_RE = /[.,;!?\n]|\b(?:and|then|but|plus)\b/;
+const SWEEP_CLAUSE_BREAK_RE = /[.,;!?\n]/;
+const SWEEP_BRUSH = String.raw`swept|brushed|knocked\s+(?:down|off|out)`;
+const SWEEP_REMOVE = String.raw`removed|cleared|cleaned|wiped|took\s+down`;
+const SWEEP_LEAD = String.raw`^\s*(?:(?:i|we)\s+)?(?:also\s+)?`;
+const SWEEP_FILLER = String.raw`(?:\s+(?:the|all|any|some|those|these|a\s+few|several|front|back|rear|side|exterior|outside|house|home|upper|lower|\w+['’]s))`;
+const SWEEP_WEB = String.raw`(?:spider\s?webs?|cobwebs?|webs?|webbing)`;
+const SWEEP_EAVE = String.raw`(?:eaves?|soffits?|fascia)`;
+const SWEEP_WEB_PART_RE = new RegExp(String.raw`${SWEEP_LEAD}(?:${SWEEP_BRUSH}|${SWEEP_REMOVE})${SWEEP_FILLER}{0,4}\s+${SWEEP_WEB}\b`);
+const SWEEP_EAVE_PART_RE = new RegExp(String.raw`${SWEEP_LEAD}(?:${SWEEP_BRUSH})${SWEEP_FILLER}{0,4}\s+${SWEEP_EAVE}\b`);
+const SWEEP_DEWEB_PART_RE = new RegExp(String.raw`${SWEEP_LEAD}de-?webbed\b`);
+// Said in the part itself: a denial, an undone sweep, another day, a sweep
+// that was already there, someone else's hand, or only if needed.
+const SWEEP_PART_REFUSED_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|incomplete|skipped|omitted|unfinished|already|if|unless|by(?!\s+hand\b)|before\s+(?:i|we)\b|prior\s+to)\b`);
+const SWEEP_TODAY_RE = /\b(?:today|this\s+(?:visit|time|service|trip|morning|afternoon))\b/;
+// A place said in the part: it must be outside the home.
+const SWEEP_PLACE_RE = /\b(?:from|in|inside|on|off|at|around|under|underneath|along|above|below|behind|near|within|throughout|across)\b/;
+// Outside is an outside fixture, or the outside of the house in so many words:
+// "the home", "the front" or "the back" alone say nothing ("removed cobwebs in
+// the home", "from the front bedroom"; Codex P2 on #6147).
+const SWEEP_OUTSIDE_RE = /\b(?:outside|exterior|outdoors?|eaves?|soffits?|fascia|overhangs?|roofline|gutters?|lanai|porch|patio|entry|entryway|entries|(?:front|back|side|garage|entry|exterior)\s+doors?|door\s+frames?|window\s+frames?|exterior\s+windows?|pool\s+cage|screen\s+enclosure|carport|(?:around|outside(?:\s+of)?)\s+the\s+(?:house|home|perimeter)|(?:front|back|sides?)\s+of\s+the\s+(?:house|home))\b/;
+const SWEEP_INSIDE_RE = /\b(?:inside|interior|indoors?|(?:bed|bath|living|dining|laundry|family|guest|utility|mud)\s?rooms?|rooms?|kitchen|foyer|hall(?:way)?s?|closets?|attic|basement|pantry|office|den|stairs?|stairwell|cabinets?|baseboards?)\b/;
+// 4) A day that is not today, named outright: a weekday, a month, a date,
+// "two days ago", "the previous service" (Codex P2 on #6147).
+const SWEEP_DATED_RE = /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:\d+|a|an|one|two|three|four|five|six|several|few|couple(?:\s+of)?)\s+(?:days?|weeks?|months?|visits?|services?)\s+(?:ago|back|earlier)|(?:previous|prior|earlier|past)\s+(?:service|visit|treatment|trip|appointment|week|month|quarter)s?|earlier\s+this\s+(?:week|month))\b/;
+
+// The clause a part sits in says something that reaches the part: another day
+// said anywhere in the clause ("swept the eaves and webs last visit"), or a
+// denial or a word of intent said before the part. "Today" in the part makes
+// it today's; "I" / "we" opening the part makes a denial before it another's
+// ("customer was not home and I swept the eaves").
+function sweepPartGoverned(part, clauseBefore, clause) {
+  // "Today" answers only the day; who did it and whether it was denied are
+  // still asked (pre-push P1).
+  if ((OTHER_DAY_RE.test(clause) || SWEEP_DATED_RE.test(clause)) && !SWEEP_TODAY_RE.test(part)) return true;
+  if (/^\s*(?:i|we)\s/.test(part)) return false;
+  return DENIAL_IN_RE.test(clauseBefore) || FUTURE_BEFORE_RE.test(`${clauseBefore} `) || !sweepClauseIsOwnWork(clauseBefore);
+}
+// A part with no "I" / "we" of its own takes its doer from the start of its
+// clause, which must then read as the technician's own work: nothing before
+// the part, or a clause that opens with "I" / "we" or straight with a
+// past-tense action ("sprayed the perimeter and swept the eaves"). Any other
+// opening names another doer: "customer brushed the porch and swept the
+// eaves", "rain washed the walls and knocked down the webs" (pre-push P1).
+const SWEEP_OWN_OPENING_RE = /^\s*(?:(?:also|then|today|yesterday|previously|last\s+(?:visit|time|service|week|month))\s+)?(?:(?:i|we)\b|(?:[a-z]+ed|swept|took|put|did|found|saw|ran|went|left|made|set|got|spoke|met|came|gave|kept)\b)/;
+function sweepClauseIsOwnWork(clauseBefore) {
+  // The joining words themselves ("..., but swept the eaves") are no opening.
+  const opening = clauseBefore.replace(/^(?:\s|\b(?:and|then|but|plus)\b)+/, '');
+  return !opening.trim() || SWEEP_OWN_OPENING_RE.test(opening);
+}
+function sweepPartStands(part, clauseBefore, clause) {
+  const swept = SWEEP_WEB_PART_RE.test(part) || SWEEP_EAVE_PART_RE.test(part) || SWEEP_DEWEB_PART_RE.test(part);
+  if (!swept) return false;
+  if (SWEEP_PART_REFUSED_RE.test(part) || OTHER_DAY_RE.test(part)) return false;
+  if (SWEEP_INSIDE_RE.test(part)) return false;
+  if (SWEEP_PLACE_RE.test(part) && !SWEEP_OUTSIDE_RE.test(part)) return false;
+  return !sweepPartGoverned(part, clauseBefore, clause);
+}
+// A sentence's parts, each with where it starts, its own clause and the words
+// of that clause that come before it.
+function sweepParts(sentence) {
+  const parts = [];
+  let clauseStart = 0;
+  let at = 0;
+  const breaker = new RegExp(SWEEP_PART_BREAK_RE.source, 'g');
+  for (let m = breaker.exec(sentence); ; m = breaker.exec(sentence)) {
+    const end = m ? m.index : sentence.length;
+    parts.push({ start: at, end, clauseStart });
+    if (!m) break;
+    at = m.index + m[0].length;
+    if (SWEEP_CLAUSE_BREAK_RE.test(m[0])) clauseStart = at;
+  }
+  return parts.map((part, index) => {
+    // The clause runs to the start of the next clause's first part.
+    const next = parts.slice(index + 1).find((other) => other.clauseStart !== part.clauseStart);
+    const clauseEnd = next ? next.clauseStart : sentence.length;
+    return {
+      ...part,
+      text: sentence.slice(part.start, part.end),
+      before: sentence.slice(part.clauseStart, part.start),
+      clause: sentence.slice(part.clauseStart, clauseEnd),
+    };
+  });
+}
+// The quote is judged where it stands in the note, in its whole sentence: the
+// words around it may deny it, give it another day or another hand ("last
+// visit we swept the eaves" quoted as "swept the eaves"). A sweep stands when
+// a part that overlaps the quote stands, at one of the first few places the
+// note holds the quote.
+const SWEEP_SENTENCE_END_RE = /[.!?\n]/;
+const SWEEP_MAX_PLACES = 5;
+function sweepStandsAt(note, at, length) {
+  const sentenceStart = Math.max(note.lastIndexOf('.', at - 1), note.lastIndexOf('!', at - 1), note.lastIndexOf('?', at - 1), note.lastIndexOf('\n', at - 1)) + 1;
+  const rest = note.slice(at + length).search(SWEEP_SENTENCE_END_RE);
+  const sentenceEnd = rest < 0 ? note.length : at + length + rest;
+  if (sentenceEnd - sentenceStart > SWEEP_MAX_QUOTE_CHARS) return false;
+  const from = at - sentenceStart;
+  return sweepParts(note.slice(sentenceStart, sentenceEnd))
+    .some((part) => part.start < from + length && part.end > from && sweepPartStands(part.text, part.before, part.clause));
+}
+function readSweep(sweep, grounding) {
+  if (sweep?.done !== true) return {};
+  const quote = groundedQuote(sweep.quote, grounding);
+  if (!quote || quote.length > SWEEP_MAX_QUOTE_CHARS) return {};
+  let at = grounding.indexOf(quote);
+  for (let place = 0; at >= 0 && place < SWEEP_MAX_PLACES; place += 1) {
+    if (sweepStandsAt(grounding, at, quote.length)) return { sweep: { quote } };
+    at = grounding.indexOf(quote, at + 1);
+  }
+  return {};
+}
+
 /**
  * Reads where product went down, the pests named and how the sprays went
- * down from the technician's note. Returns { status, areas, unclearAreas,
- * pests, spray, heard } where status is 'read',
+ * down from the technician's note, and whether they swept the eaves and webs.
+ * Returns { status, areas, unclearAreas,
+ * pests, spray, sweptEaves, heard } where status is 'read',
  * 'empty_note', 'too_long' or 'failed'; areas and pests are what the sheet records
  * (labels and the technician's words), heard carries each fact's quote.
  * Never throws.
  */
 async function readVoiceFacts(note) {
   const empty = (status) => ({
-    status, areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false,
+    status, areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false, sweptEaves: false,
     heard: { areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false }, version: VOICE_FACTS_VERSION,
   });
   // Access codes never reach a provider; quotes are checked against what
@@ -761,6 +914,8 @@ async function readVoiceFacts(note) {
     unclearSpray: heard.unclearSpray,
     // "Didn't spray", in the note's own words.
     noSpray: heard.noSpray,
+    // A web sweep the technician did today, in the note's own words (heard.sweep).
+    sweptEaves: !!heard.sweep,
     heard,
     version: VOICE_FACTS_VERSION,
   };

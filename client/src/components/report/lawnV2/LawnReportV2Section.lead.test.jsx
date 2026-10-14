@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The lawn report LEAD layout (lawn report rebuild P7, GATE_LAWN_REPORT_LEAD):
+// The lawn report LEAD layout (lawn report rebuild P7):
 // ReportViewPage mounts LawnLeadCard under the watering banner; the lawn section
 // then drops the snapshot hero and the follow-up card and opens with the photo
 // strip. A payload without `lead` renders the legacy layout.
@@ -86,6 +86,25 @@ describe('LawnLeadCard layout', () => {
     expect(expectBlock).toHaveTextContent('Weeds usually start to yellow or curl within about 3 to 7 days.');
     expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Watching');
     expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Thin areas along the driveway edge.');
+  });
+
+  it('renders "From your technician" right under the applied block, at 16px, and nothing when the key is absent (GATE_LAWN_TECH_PARAGRAPH)', () => {
+    const TEXT = 'Our technician saw chinch bugs at the trouble spot, which explains the damaged turf in the photo. Arena 50 WDG went on the front and side yards to treat them.';
+    const { unmount } = renderLead();
+    expect(screen.queryByTestId('lawn-lead-tech')).toBeNull();
+    expect(screen.queryByText('From your technician')).toBeNull();
+    unmount();
+    renderLead({ lead: { ...LEAD, whatToExpect: 'Weeds usually start to yellow or curl.', techParagraph: TEXT } });
+    const block = screen.getByTestId('lawn-lead-tech');
+    expect(block).toHaveTextContent('From your technician');
+    expect(block).toHaveTextContent(TEXT);
+    expect(within(block).getByText(TEXT)).toHaveStyle({ fontSize: '16px' });
+    expect(within(block).getByText('From your technician')).toHaveStyle({ fontSize: '14px' });
+    // Directly under the applied block, above What to expect.
+    const region = screen.getByTestId('lawn-lead-region');
+    const applied = within(region).getByText(LEAD.applied).closest('div[style]').parentElement;
+    expect(applied.nextElementSibling).toBe(block);
+    expect(block.nextElementSibling).toBe(screen.getByTestId('lawn-lead-expect'));
   });
 
   it('leaves out Today’s focus, the driving box, the watching list, "What Waves will do next" and the seasonal note', () => {
@@ -307,6 +326,26 @@ describe('LawnReportV2Section lead mode', () => {
     const text = container.textContent;
     expect(text.indexOf('Water This Week')).toBeGreaterThan(text.indexOf('Priority findings'));
     expect(text.indexOf('Turf Density')).toBeGreaterThan(text.indexOf('Water This Week'));
+  });
+});
+
+describe('program detail (GATE_LAWN_PROGRAM_DETAIL)', () => {
+  const PROGRAM = 'In October the program focuses on the fall feeding with iron, plus fall disease prevention where the lawn needs it and a thatch check.';
+  const DETAIL = { whyNow: 'Soil cools and winter weeds start to sprout.' };
+
+  it('renders why now under the program line', () => {
+    render(<LawnReportV2Section data={payload({ snapshot: { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program', seasonalDetail: DETAIL } })} />);
+    expect(screen.getByText('Why now')).toBeInTheDocument();
+    expect(screen.getByText(DETAIL.whyNow)).toBeInTheDocument();
+    expect(screen.queryByText('What you will see')).toBeNull();
+    expect(screen.getByText(DETAIL.whyNow).style.fontSize).toBe('16px');
+  });
+
+  it('without seasonalDetail the card is the program line alone', () => {
+    render(<LawnReportV2Section data={payload({ snapshot: { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program' } })} />);
+    expect(screen.getByText('This time of year')).toBeInTheDocument();
+    expect(screen.queryByText('Why now')).toBeNull();
+    expect(screen.queryByText(/^Watering in /)).toBeNull();
   });
 });
 

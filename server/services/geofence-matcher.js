@@ -8,6 +8,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { STAFF_WORK_DATE_SQL, staffWorkDate } = require('../utils/staff-time-work-date');
 
 const EARTH_METERS = 6371000;
 
@@ -330,7 +331,7 @@ async function isDuplicateEnter(techId, customerId, cooldownMinutes = 15) {
     const cutoff = new Date(Date.now() - cooldownMinutes * 60_000);
     const row = await db('geofence_events')
       .where({ technician_id: techId, matched_customer_id: customerId, event_type: 'ENTER' })
-      .whereIn('action_taken', ['timer_started', 'reminder_sent', 'timer_already_running'])
+      .whereIn('action_taken', ['timer_started', 'clocked_in_timer_started', 'reminder_sent', 'timer_already_running'])
       .where('event_timestamp', '>', cutoff)
       .first();
     return !!row;
@@ -350,6 +351,48 @@ async function getActiveJobTimer(techId) {
       .first();
   } catch (err) {
     logger.error(`[geofence-matcher] getActiveJobTimer failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Every live visit assigned to this tech for this customer on the ET calendar
+ * day of `date`, earliest window first. `notLive` ({ statuses, trackStates }) is
+ * owned by services/geofence-auto-clock-in.js so the one definition of "live"
+ * is shared. `conn` is db, or the open transaction for the locked recheck in
+ * time-tracking.startJob. Throws on a read error: the caller must fail closed.
+ */
+async function findLiveVisitsOn(conn, technicianId, customerId, date, notLive) {
+  return conn('scheduled_services')
+    .where({ technician_id: technicianId, customer_id: customerId })
+    .where('scheduled_date', etDateString(new Date(date)))
+    .whereNotIn('status', notLive.statuses)
+    .where(function () {
+      this.whereNull('track_state').orWhereNotIn('track_state', notLive.trackStates);
+    })
+    .orderBy('window_start', 'asc')
+    .select('*');
+}
+
+/**
+ * The tech's shift state for the current ET work day, for the geofence auto
+ * clock-in decision: { active, anyToday } (voided shifts do not count), or
+ * null when it cannot be read (the caller then does NOT clock anyone in).
+ * `active` counts any open shift, whatever day it started.
+ */
+async function getShiftStateToday(techId, date = new Date()) {
+  try {
+    const rows = await db('time_entries')
+      .where({ technician_id: techId, entry_type: 'shift' })
+      .where('status', '!=', 'voided')
+      .where(function () {
+        this.where('status', 'active')
+          .orWhereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [staffWorkDate(date)]);
+      })
+      .select('status');
+    return { active: rows.some((r) => r.status === 'active'), anyToday: rows.length > 0 };
+  } catch (err) {
+    logger.error(`[geofence-matcher] getShiftStateToday failed: ${err.message}`);
     return null;
   }
 }
@@ -400,6 +443,8 @@ module.exports = {
   isAutoFlipDisabledForCustomer,
   isRecentAutoFlipForCustomer,
   getActiveJobTimer,
+  getShiftStateToday,
+  findLiveVisitsOn,
   getActiveTimerDwellMinutes,
   logEvent,
   distanceMeters,

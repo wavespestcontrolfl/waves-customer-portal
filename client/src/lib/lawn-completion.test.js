@@ -172,3 +172,16 @@ it('a chosen rate unit never relabels the plan rate: the still-derived rate and 
   // An entered rate under the chosen unit is the tech's actual and refreshes nothing but the area.
   expect(reconcileLawnPlanSelections([{ ...row, rate: 2, lawnPlanManualFields: ['rate', 'rateUnit'] }], [fresh])[0]).toMatchObject({ rate: 2, rateUnit: 'lb', areaValue: 5000 });
 });
+
+it('an area add-on\'s row of a plan-default product is never the default: it does not consume the host\'s row, and the default is still seeded', () => {
+  const planRow = { productId: 'snap', rate: 3, areaValue: 1000, lawnPlanDefaults: {} };
+  const addOnRow = { productId: 'snap', areaAddOnKey: 'area_addon_bed_pre_emergent', rate: 3.45, areaValue: 800 };
+  // add-on row first, as when the tech records the add-on before the host
+  const out = reconcileLawnPlanSelections([addOnRow], [planRow]);
+  expect(out).toContainEqual(addOnRow);
+  expect(out.filter((r) => !r.areaAddOnKey)).toHaveLength(1);
+  // both present: the add-on row passes through untouched and the host row still reconciles with the plan
+  const both = reconcileLawnPlanSelections([addOnRow, { ...planRow, rate: 9 }], [planRow]);
+  expect(both).toHaveLength(2);
+  expect(both.find((r) => r.areaAddOnKey)).toBe(addOnRow);
+});

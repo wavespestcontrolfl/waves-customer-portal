@@ -22,7 +22,7 @@ const CUSTOMER_ESTIMATE_TOOLS = [
   {
     name: 'save_customer_estimate',
     _sideEffects: true,
-    description: 'Prepare a lawn estimate for an existing customer using its saved property measurements and live membership/pricing rules. Currently supports residential lawn at 9 or 12 applications per year (6/bi-monthly is retired for new sales — owner directive 2026-09-24). New drafts default to the portal’s 9-application program. Revisions preserve the saved cadence unless a change is requested; a saved 6x estimate can be revised here only with an explicit lawn_applications of 9 or 12 (preserving 6x is refused). Requires the saved property ID; never create a duplicate lead. The first call previews the price, source facts and options for confirmation. With estimate_id, revises that property’s existing estimate in place under the usual editability rules. Saving never sends, schedules a send or books work.',
+    description: 'Prepare a lawn estimate for an existing customer using its saved property measurements and live membership/pricing rules. Currently supports residential lawn at 9 or 12 applications per year (6/bi-monthly is retired for new sales — owner directive 2026-09-24). New drafts default to the portal’s 9-application program. Revisions preserve the saved cadence unless a change is requested; a saved 6x estimate can be revised here only with an explicit lawn_applications of 9 or 12 (preserving 6x is refused). Requires the saved property ID; never create a duplicate lead. The first call previews the price, source facts and options for confirmation. With estimate_id, revises that property’s existing UNSENT estimate in place under the usual editability rules; a quote already sent to the customer is honored and refused with code estimate_already_sent (offer a new estimate draft instead). Saving never sends, schedules a send or books work.',
     input_schema: { type: 'object', additionalProperties: false,
       properties: { customer_id: uuid, property_id: uuid, estimate_id: uuid,
         lawn_applications: { type: 'integer', enum: [9, 12] } },
@@ -123,15 +123,46 @@ function estimateBody(input, context) {
       property_id: property.id }, grass_type: { value: property.grass_type, source: property.measurement_source, property_id: property.id } } } };
 }
 
+// "Sent" = the quote is with the customer: status sent or viewed, or a send or
+// view stamp on a row that is not closed (accepted, declined and sending keep
+// the estimate editor's own, more specific refusal). An EXPIRED quote that
+// carries a send or view stamp is still a quote the customer has, so it is
+// honored too: the editor deliberately lets an expired legacy/fallback-priced
+// row through when expiredRowRecoverableUnderGate holds, and that recovery
+// must not revise a delivered quote in place from the bar (Codex r3 on
+// #6023, P2). An expired row with no stamp keeps the editor's refusal.
+const CLOSED_ESTIMATE_STATUSES = ['accepted', 'declined', 'sending'];
+function estimateWasSentToCustomer(estimate) {
+  const status = String(estimate?.status || '');
+  if (CLOSED_ESTIMATE_STATUSES.includes(status)) return false;
+  const stamped = !!(estimate?.sent_at || estimate?.viewed_at);
+  if (status === 'expired') return stamped;
+  return status === 'sent' || status === 'viewed' || stamped;
+}
+
 async function estimatePreview(input, database = db, context = null) {
   context = context || await loadContext(input, database);
-  const body = estimateBody(input, context);
   let prior = null;
   if (input.estimate_id) {
     prior = await database('estimates').where({ id: input.estimate_id }).first();
     if (!prior || !sameId(prior.customer_id, input.customer_id) || !sameId(prior.property_id, input.property_id)) {
       throw failure('The estimate does not belong to this customer and service property', 'target_relationship_mismatch');
     }
+    // A quote the customer already has is honored (W8-dev-07): the bar does
+    // not revise it in place, at the card or at Confirm (this preview reruns
+    // under the locks). The path that exists is a new estimate draft, which
+    // the operator chooses. Judged BEFORE the property's current quote
+    // eligibility (estimateBody), so a sent quote whose facts changed since
+    // (lawn profile cleared, property now commercial, lawn service now
+    // active) is still answered "honored", not "repair the facts" (Codex r1
+    // on #6023, P2). The admin estimate screen still edits a sent quote;
+    // that rule is unchanged.
+    if (estimateWasSentToCustomer(prior)) {
+      throw failure('That quote was already sent to the customer and is honored, so it was not changed and no card was made. Ask the operator whether to start a new estimate draft for this property; if they say yes, call save_customer_estimate again without estimate_id.', 'estimate_already_sent');
+    }
+  }
+  const body = estimateBody(input, context);
+  if (prior) {
     // The whole group is judged, not only this row: a scheduled anchor pins
     // every sibling's offer in its receipt. Under confirmation this reruns
     // after the group locks are held, so the verdict is authoritative there.

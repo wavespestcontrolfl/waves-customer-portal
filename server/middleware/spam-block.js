@@ -27,10 +27,14 @@ const { isEnabled } = require('../config/feature-gates');
 
 // Match the call log's mixed stored phone formats with toE164's full-country
 // identity. Recovery queries use this same key for block checks and grouping.
-const PHONE_DIGITS_SQL = "regexp_replace(COALESCE(call_log.from_phone, ''), '[^0-9]', '', 'g')";
-const PHONE_KEY_SQL = `(CASE WHEN LEFT(BTRIM(COALESCE(call_log.from_phone, '')), 1) = '+' THEN ${PHONE_DIGITS_SQL}`
-  + ` WHEN LENGTH(${PHONE_DIGITS_SQL}) >= 10 THEN '1' || RIGHT(${PHONE_DIGITS_SQL}, 10)`
-  + ` ELSE ${PHONE_DIGITS_SQL} END)`;
+// `column` is a trusted SQL column reference, never caller input.
+function phoneKeySql(column) {
+  const digits = `regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
+  return `(CASE WHEN LEFT(BTRIM(COALESCE(${column}, '')), 1) = '+' THEN ${digits}`
+    + ` WHEN LENGTH(${digits}) >= 10 THEN '1' || RIGHT(${digits}, 10)`
+    + ` ELSE ${digits} END)`;
+}
+const PHONE_KEY_SQL = phoneKeySql('call_log.from_phone');
 
 // A rejected /voice call may still receive a /call-status fallback row.
 // Read existing block evidence without recording another blocked attempt.
@@ -203,4 +207,4 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, signals
   return { blocked: true, twiml, blockType: block.block_type };
 }
 
-module.exports = { checkInboundBlock, whereNotBlockedCall, PHONE_KEY_SQL };
+module.exports = { checkInboundBlock, whereNotBlockedCall, PHONE_KEY_SQL, phoneKeySql };

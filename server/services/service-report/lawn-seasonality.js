@@ -15,6 +15,8 @@
  *      a winter-vs-summer photo/score diff never reads as decline.
  */
 
+const { ISSUE_ROWS } = require('../../config/lawn-expectations');
+
 function getSeason(month) {
   if (month >= 5 && month <= 9) return 'peak';
   if ((month >= 3 && month <= 4) || (month >= 10 && month <= 11)) return 'shoulder';
@@ -67,6 +69,36 @@ function dormancyLikely({ colorHealth, stressDamage, month, recentMinTempF } = {
   return { likely, pressure };
 }
 
+// The seasonal_dip expectation row is the only source of the "color returns as
+// nights warm" claim. `approved` is the switch that keeps an unsigned row from
+// a customer, so every seasonal copy site asks here, at call time: the row when
+// it is approved and has its sentence, otherwise null (say it without the claim).
+function approvedSeasonalDipRow() {
+  const row = ISSUE_ROWS.seasonal_dip;
+  return row && row.approved === true && row.visibleChange ? row : null;
+}
+function seasonalDipClaimApproved() {
+  return approvedSeasonalDipRow() !== null;
+}
+
+// GATE_LAWN_REPORT_COPY_FIXES: the seasonal color lines print only when the visit month is in
+// the cool season this module defines (shoulder and dormant) AND the overall score did not rise.
+// "Did not rise" is against the prior visit and, when the line compares against a base visit,
+// against that base too. A score that is not known can not prove it, so no line (fail closed).
+function seasonalColorLineAllowed({ month, currentScore, priorScore, baseScore } = {}) {
+  const m = Number(month);
+  if (!Number.isInteger(m) || m < 1 || m > 12 || !isCoolSeason(getSeason(m))) return false;
+  const cur = Number(currentScore);
+  const prior = Number(priorScore);
+  if (currentScore == null || priorScore == null || !Number.isFinite(cur) || !Number.isFinite(prior)) return false;
+  if (cur > prior) return false;
+  if (baseScore !== undefined) {
+    const base = Number(baseScore);
+    if (baseScore === null || !Number.isFinite(base) || cur > base) return false;
+  }
+  return true;
+}
+
 // When two compared visits fall in different seasons, surface that the difference is
 // largely seasonal so the before/after wipe + trend never imply decline from dormancy.
 function crossSeasonNote(dateA, dateB) {
@@ -74,7 +106,7 @@ function crossSeasonNote(dateA, dateB) {
   const b = seasonOfDate(dateB);
   if (!a || !b || a === b) return null;
   if (isCoolSeason(a) || isCoolSeason(b)) {
-    return 'Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months, then greens back up as it warms.';
+    return `Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months${seasonalDipClaimApproved() ? ', and color often returns as nights warm' : ''}.`;
   }
   return 'These visits fall in different parts of the growing season, so some change is expected.';
 }
@@ -83,12 +115,15 @@ function crossSeasonNote(dateA, dateB) {
 function crossSeasonNoteFromSeasons(seasonA, seasonB) {
   if (!seasonA || !seasonB || seasonA === seasonB) return null;
   if (isCoolSeason(seasonA) || isCoolSeason(seasonB)) {
-    return 'Most of the change across these visits is seasonal — color naturally dips in the cooler months and recovers as it warms.';
+    return `Most of the change across these visits is seasonal — color naturally dips in the cooler months${seasonalDipClaimApproved() ? ' and often returns as nights warm' : ''}.`;
   }
   return null;
 }
 
 module.exports = {
+  approvedSeasonalDipRow,
+  isCoolSeason,
+  seasonalColorLineAllowed,
   getSeason,
   seasonOfDate,
   dormancyPressure,

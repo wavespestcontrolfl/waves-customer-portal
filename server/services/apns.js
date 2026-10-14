@@ -224,6 +224,7 @@ function status() {
 }
 
 module.exports = {
+  APNS_REQUEST_TIMEOUT_MS,
   send,
   status,
   // exported for unit tests

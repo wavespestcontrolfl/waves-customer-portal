@@ -1,0 +1,281 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { getAdminAuthToken } from '../../lib/adminAuth';
+
+// Schedule changes on the Today page (owner ruling 2026-10-03). A change that
+// touches today or tomorrow keeps its own card; every other one folds into a
+// single summary ("Auto-dispatch moved 20 visits") with Review and Clear all.
+// The server marks `soon` (routes/tech-notifications.js /schedule-changes).
+
+const API = import.meta.env.VITE_API_URL || '';
+// Same cadence as the notification feed (GeofenceArrivalPrompt): with the
+// floating cards off on Today, this read is how a new change shows up
+// (Codex #5786 P2).
+const POLL_MS = 10_000;
+const VERB = { visit_assigned: 'Assigned', visit_unassigned: 'Reassigned', visit_rescheduled: 'Moved', visit_cancelled: 'Cancelled' };
+const AUTO_DISPATCH = 'by auto-dispatch';
+
+async function api(path, options = {}) {
+  const res = await fetch(`${API}/api/tech/notifications${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAdminAuthToken()}` },
+  });
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function shortDay(iso) {
+  if (!iso) return null;
+  return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+// EARLIER / LATER / SAME DAY for a move both of whose days are known.
+function direction(change) {
+  const { date, previous_date: before } = change.payload || {};
+  if (change.type !== 'visit_rescheduled' || !date || !before) return null;
+  if (date < before) return 'EARLIER';
+  if (date > before) return 'LATER';
+  return 'SAME DAY';
+}
+
+// Two visits that traded slots name each other.
+function swapPartners(changes) {
+  const partners = new Map();
+  for (const a of changes) {
+    const pa = a.payload || {};
+    if (a.type !== 'visit_rescheduled' || !pa.previous_when) continue;
+    // A different visit: one visit moved A→B and back B→A is not a swap.
+    const b = changes.find((c) => c !== a && c.type === 'visit_rescheduled'
+      && String(c.payload?.visit_id) !== String(pa.visit_id)
+      && c.payload?.when === pa.previous_when && c.payload?.previous_when === pa.when);
+    if (b) partners.set(a.id, b.payload?.customer_name || 'another visit');
+  }
+  return partners;
+}
+
+function detailLines(change) {
+  const p = change.payload || {};
+  const lines = [];
+  if (change.type === 'visit_rescheduled') {
+    if (p.service_type) lines.push({ text: p.service_type });
+    if (p.previous_when) lines.push({ text: `Was ${p.previous_when}`, struck: true });
+    if (p.when) lines.push({ text: `Now ${p.when}` });
+  } else {
+    lines.push({ text: [p.service_type, p.when].filter(Boolean).join(' · ') });
+    if (change.type === 'visit_assigned' && p.address) lines.push({ text: p.address });
+    if (change.type === 'visit_unassigned') lines.push({ text: p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned') });
+  }
+  if (p.actor) lines.push({ text: `${VERB[change.type]} ${p.actor}` });
+  return lines.filter((line) => line.text);
+}
+
+// One today/tomorrow change: its own card with Got it.
+function SoonCard({ change, onDismiss, busy }) {
+  const p = change.payload || {};
+  return (
+    <article className="tf-card" data-testid="schedule-change-soon">
+      <div className="tf-card-top">{p.headline || 'Schedule change'}</div>
+      <div className="tf-card-main">
+        <h2>{p.customer_name || 'Customer'}</h2>
+        {detailLines(change).map((line, i) => (
+          <p key={i} className={line.struck ? 'tf-muted tf-struck' : 'tf-muted'}>{line.text}</p>
+        ))}
+        <div className="tf-actions"><button type="button" className="tf-button" onClick={() => onDismiss(change)} disabled={busy}>Got it</button></div>
+      </div>
+    </article>
+  );
+}
+
+// `total` is every open folded change (the server counts past the rows it
+// returns); the breakdown reads the rows on hand.
+function summaryOf(changes, total = changes.length) {
+  const n = Math.max(total, changes.length);
+  // Named after auto-dispatch only when every folded change is on hand and
+  // shows it: a capped sample never speaks for the whole backlog.
+  const complete = changes.length > 0 && changes.length >= total;
+  const allAuto = complete && changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
+  // "visits" counts appointments: one moved on two runs is one visit.
+  const visits = new Set(changes.map((c) => String(c.payload?.visit_id ?? c.id))).size;
+  const title = allAuto ? `Auto-dispatch moved ${plural(visits, 'visit')}` : plural(n, 'schedule change');
+  const services = new Set(changes.map((c) => c.payload?.service_type).filter(Boolean));
+  const days = changes.map((c) => c.payload?.date).filter(Boolean).sort();
+  const counts = { EARLIER: 0, LATER: 0 };
+  for (const c of changes) { const d = direction(c); if (d in counts) counts[d] += 1; }
+  const parts = [];
+  // Service, day range and earlier/later describe the whole set only when it
+  // is all on hand; a capped sample says so instead (Codex #5786 P2).
+  if (complete) {
+    if (n > 1 && services.size === 1) parts.push(`All ${[...services][0]}`);
+    if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0]) : `${shortDay(days[0])} – ${shortDay(days[days.length - 1])}`);
+    const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
+    if (moved) parts.push(moved);
+  } else if (changes.length) {
+    parts.push(`Newest ${changes.length} shown`);
+  }
+  const allMoves = complete && changes.every((c) => c.type === 'visit_rescheduled');
+  return { title, detail: parts.join(' · '), counts, complete, total: n, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
+}
+
+const FILTERS = [['ALL', 'All'], ['EARLIER', 'Earlier'], ['LATER', 'Later']];
+
+function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatch }) {
+  const [filter, setFilter] = useState('ALL');
+  const partners = useMemo(() => swapPartners(changes), [changes]);
+  const shown = filter === 'ALL' ? changes : changes.filter((c) => direction(c) === filter);
+  const count = { ALL: changes.length, ...summary.counts };
+  return (
+    <section className="tf-card" aria-label="Review schedule changes" data-testid="schedule-changes-review">
+      <div className="tf-card-top tf-review-top">
+        <button type="button" className="tf-button tf-ghost" onClick={onBack}>Back</button>
+        <span>{summary.title}</span>
+      </div>
+      <div className="tf-card-main">
+        {summary.detail && <p className="tf-muted">{summary.detail}</p>}
+        {summary.complete && (count.EARLIER > 0 || count.LATER > 0) && (
+          <div className="tf-chips" role="group" aria-label="Filter moves">
+            {FILTERS.filter(([key]) => key === 'ALL' || count[key] > 0).map(([key, label]) => (
+              <button key={key} type="button" className="tf-chip" aria-pressed={filter === key} onClick={() => setFilter(key)}>
+                {label} {count[key]}
+              </button>
+            ))}
+          </div>
+        )}
+        <ul className="tf-change-list">
+          {shown.map((c) => {
+            const p = c.payload || {};
+            const dir = direction(c);
+            return (
+              <li key={c.id} className="tf-change-row">
+                <div className="tf-change-head"><strong>{p.customer_name || 'Customer'}</strong>{dir && <span className="tf-dir">{dir}</span>}</div>
+                {c.type === 'visit_rescheduled' && p.previous_when
+                  ? <>
+                    <div className="tf-change-when"><span className="tf-struck">{p.previous_when}</span><span aria-hidden="true"> → </span><strong>{p.when}</strong></div>
+                    <div className="tf-muted">{[p.service_type, partners.has(c.id) && `Swapped with ${partners.get(c.id)}`].filter(Boolean).join(' · ')}</div>
+                    {p.actor && <div className="tf-muted">{`${VERB[c.type]} ${p.actor}`}</div>}
+                  </>
+                  : <>
+                    {/* Same details the card itself shows: where a new visit is, who holds a removed one, who acted. */}
+                    <div className="tf-change-when">{p.headline}</div>
+                    {detailLines(c).map((line, i) => <div key={i} className={line.struck ? 'tf-muted tf-struck' : 'tf-muted'}>{line.text}</div>)}
+                  </>}
+              </li>
+            );
+          })}
+        </ul>
+        {summary.total > changes.length && <p className="tf-muted">{summary.total - changes.length} more not shown. Clear all covers them too.</p>}
+        <div className="tf-actions">
+          {canOpenDispatch && <Link className="tf-button" to="/admin/dispatch?tab=schedule">Open in Dispatch</Link>}
+          <button type="button" className="tf-button tf-primary" onClick={onClearAll} disabled={busy}>
+            {busy ? 'Clearing…' : `Got it, clear all ${summary.total}`}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// onReady(true) once a read has succeeded: until then the floating cards stay
+// up as the fallback (Codex #5786 P2); onReady(false) when this unmounts.
+export default function TechScheduleChanges({ canOpenDispatch = false, onReady = null }) {
+  const [changes, setChanges] = useState([]);
+  const [feed, setFeed] = useState({ laterTotal: 0, asOf: null });
+  const [reviewing, setReviewing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Only the newest read of a still-mounted list may report: an older or
+  // unmounted request finishing late never marks the feed ready (Codex #5786).
+  const mounted = useRef(true);
+  const latest = useRef(0);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const load = useCallback(async () => {
+    const mine = latest.current + 1;
+    latest.current = mine;
+    const current = () => mounted.current && latest.current === mine;
+    try {
+      const data = await api('/schedule-changes');
+      if (!current()) return;
+      setChanges(Array.isArray(data.changes) ? data.changes : []);
+      setFeed({ laterTotal: Number(data.later_total) || 0, asOf: data.as_of || null });
+      onReady?.(true);
+    } catch {
+      if (!current()) return;
+      // A failed poll keeps what is on screen and hands schedule changes back
+      // to the floating cards until a read succeeds again (Codex #5786 P2).
+      onReady?.(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, POLL_MS);
+    window.addEventListener('focus', load);
+    return () => { clearInterval(id); window.removeEventListener('focus', load); };
+  }, [load]);
+  useEffect(() => () => onReady?.(false), [onReady]);
+
+  const soon = changes.filter((c) => c.soon);
+  const later = changes.filter((c) => !c.soon);
+  const summary = useMemo(() => summaryOf(later, feed.laterTotal), [later, feed.laterTotal]);
+
+  const dismissOne = async (change) => {
+    // A read already in flight predates this change: it must not put the
+    // card back (Codex #5786 P2).
+    latest.current += 1;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/${change.id}/dismiss`, { method: 'POST' });
+      // …nor a read that started while the dismiss was pending (Codex #5786).
+      latest.current += 1;
+      setChanges((prev) => prev.filter((c) => c.id !== change.id));
+    } catch {
+      setError('Could not clear that card. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearAll = async () => {
+    latest.current += 1;
+    setBusy(true);
+    setError(null);
+    try {
+      // The server clears every folded change up to the read on screen.
+      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf }) });
+      latest.current += 1;
+      setChanges((prev) => prev.filter((c) => c.soon));
+      setFeed((prev) => ({ ...prev, laterTotal: 0 }));
+      setReviewing(false);
+    } catch {
+      setError('Could not clear the schedule changes. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!changes.length && !feed.laterTotal) return null;
+  return (
+    <div className="tf-changes">
+      {error && <div role="alert" className="tf-alert tf-error">{error}</div>}
+      {soon.map((c) => <SoonCard key={c.id} change={c} onDismiss={dismissOne} busy={busy} />)}
+      {(later.length > 0 || feed.laterTotal > 0) && (reviewing
+        ? <ReviewList changes={later} summary={summary} onClearAll={clearAll} onBack={() => setReviewing(false)} busy={busy} canOpenDispatch={canOpenDispatch} />
+        : (
+          <section className="tf-card" aria-label="Schedule changes" data-testid="schedule-changes-summary">
+            <div className="tf-card-top"><span className="tf-dot" aria-hidden="true" />Schedule changes</div>
+            <div className="tf-card-main">
+              <h2>{summary.title}</h2>
+              {summary.detail && <p className="tf-muted">{summary.detail}</p>}
+              <div className="tf-actions">
+                <button type="button" className="tf-button" onClick={() => setReviewing(true)}>{summary.reviewLabel}</button>
+                <button type="button" className="tf-button tf-ghost" onClick={clearAll} disabled={busy}>Clear all</button>
+              </div>
+            </div>
+          </section>
+        ))}
+    </div>
+  );
+}

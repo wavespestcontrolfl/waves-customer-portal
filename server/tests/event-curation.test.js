@@ -7,6 +7,7 @@
 const {
   buildCurationPrompt,
   CURATION_SCHEMA,
+  CURATION_POLICY,
   parseCurationResponse,
   missingAssessmentFallbacks,
   curationEnabled,
@@ -253,5 +254,21 @@ describe('event-curation deadline (finishes before the 7 AM autopilot)', () => {
     expect(batchFitsDeadline(et('06:45:00').getTime(), deadline)).toBe(true);
     expect(batchFitsDeadline(et('06:45:00').getTime() + 1, deadline)).toBe(false);
     expect(batchFitsDeadline(et('06:15:00').getTime(), deadline)).toBe(true);
+  });
+});
+
+// Owner 2026-10-05: curation scoring runs the newsletter model at effort
+// 'high' (max-effort thinking ran past the 24000-token cap); the newsletter
+// writer policy itself stays at 'max'.
+describe('curation policy effort', () => {
+  const MODELS = require('../config/models');
+  test('curation runs the newsletterWriter model and fallback at effort high', () => {
+    const writer = MODELS.TEXT_POLICIES.newsletterWriter;
+    expect(CURATION_POLICY.primary).toEqual({ ...writer.primary, effort: 'high' });
+    expect(CURATION_POLICY.fallback).toEqual(writer.fallback);
+    expect(CURATION_POLICY.name).toBe(writer.name);
+  });
+  test('the newsletter writer itself stays at effort max', () => {
+    expect(MODELS.TEXT_POLICIES.newsletterWriter.primary.effort).toBe('max');
   });
 });

@@ -13,6 +13,21 @@ function normalizeCommercialString(value) {
     .replace(/_+/g, '_');
 }
 
+// customers.property_type / customer_properties.property_type are read by
+// EXACT lowercase match in the tax, invoice, pay-page and triage code
+// ('commercial' | 'business'). A typed "Commercial" therefore reads as
+// residential and its invoices carry $0 tax. Canonicalize only case and
+// whitespace variants of those two literals at the write; every other value
+// (residential types, subtypes, blanks) is returned untouched — widening this
+// to subtypes would switch tax on from a classification, which is a ruling.
+const STORED_COMMERCIAL_PROPERTY_TYPES = new Set(['commercial', 'business']);
+
+function canonicalStoredPropertyType(value) {
+  if (typeof value !== 'string') return value;
+  const folded = value.trim().toLowerCase();
+  return STORED_COMMERCIAL_PROPERTY_TYPES.has(folded) ? folded : value;
+}
+
 function normalizePropertyType(value) {
   const normalized = normalizeCommercialString(value);
   if (!normalized) return '';
@@ -307,6 +322,7 @@ function markCommercialOneTimeLine(result, property = {}, options = {}) {
 module.exports = {
   normalizeCommercialString,
   normalizePropertyType,
+  canonicalStoredPropertyType,
   isCommercialProperty,
   buildCommercialManualQuoteResult,
   COMMERCIAL_SCOPED_ONETIME_SERVICES,

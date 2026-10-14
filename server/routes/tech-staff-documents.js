@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { parseETDateTime, etParts, etDateString } = require('../utils/datetime-et');
 const { validate, reject } = require('../services/staff-document-source');
 const documents = require('../services/staff-documents');
+const onboarding = require('../services/staff-onboarding');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -48,6 +49,13 @@ router.get('/people', handle(async (req, res) => {
   }).select('id', 'name', 'role').orderBy('name');
   res.json({ people, self_id: req.technicianId, can_manage: req.techRole === 'admin' });
 }));
+// Staff onboarding documents (GATE_STAFF_ONBOARDING_DOCS). Gate off = an empty answer, no reads.
+router.get('/onboarding', handle(async (req, res) => {
+  res.json(await onboarding.onboardingFor(actor(req)));
+}));
+router.get('/onboarding/team', requireAdmin, handle(async (req, res) => {
+  res.json(await onboarding.onboardingForTeam());
+}));
 router.get('/policy-values', requireAdmin, handle(async (req, res) => {
   res.json({ revisions: await db('policy_values').orderBy('revision', 'desc') });
 }));
@@ -66,6 +74,11 @@ router.get('/:id', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   if (req.query.version) validate(uuid.required(), req.query.version);
   res.json(await documents.detail(req.params.id, actor(req), req.query.version, req.query.at ? instant(req.query.at) : null));
+}));
+router.post('/:id/onboarding-required', requireAdmin, handle(async (req, res) => {
+  validate(uuid.required(), req.params.id);
+  validate(Joi.object({ required: Joi.boolean().required() }), req.body);
+  res.json({ document: await documents.setOnboardingRequired(req.params.id, req.body.required, actor(req)) });
 }));
 router.post('/:id/preview', requireAdmin, handle(async (req, res) => {
   validate(uuid.required(), req.params.id);

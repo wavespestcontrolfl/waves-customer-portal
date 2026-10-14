@@ -3,7 +3,7 @@
  * rendered with placeholder photos out of the healthy cache (codex P2
  * #3176 r18). Ranged GETs because presigned S3 URLs are method-specific.
  */
-const { countUnreachableReportPhotos } = require('../services/service-report/pdf');
+const { countUnreachableReportPhotos, collectRenderedImageUrls } = require('../services/service-report/pdf');
 
 describe('countUnreachableReportPhotos', () => {
   const realFetch = global.fetch;
@@ -50,6 +50,34 @@ describe('countUnreachableReportPhotos', () => {
       'https://s3.example.com/traced.png',
       'https://s3.example.com/v2.jpg',
     ]);
+  });
+
+  it('probes the lawn photo set and not the copies the document suppresses (P23)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 206 });
+    const data = {
+      photos: [{ id: 'p1', url: 'https://s3.example.com/service.jpg' }, { id: 'lawn-1', url: 'https://s3.example.com/turf-copy.jpg' }],
+      reportV2: {
+        photoSet: [{ url: 'https://s3.example.com/set-1.jpg', label: 'Front yard' }, { url: 'https://s3.example.com/set-2.jpg', label: 'Back yard' }, { url: '', label: 'Close-up' }],
+        photos: [{ url: 'https://s3.example.com/strip.jpg' }],
+      },
+    };
+    expect(collectRenderedImageUrls(data).sort()).toEqual([
+      'https://s3.example.com/service.jpg', 'https://s3.example.com/set-1.jpg', 'https://s3.example.com/set-2.jpg',
+    ]);
+    expect(await countUnreachableReportPhotos(data)).toBe(0);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    // No set (gate off, legacy visit, or a withheld set): the old sources, as before.
+    expect(collectRenderedImageUrls({ ...data, reportV2: { photos: data.reportV2.photos } }).sort()).toEqual([
+      'https://s3.example.com/service.jpg', 'https://s3.example.com/strip.jpg', 'https://s3.example.com/turf-copy.jpg',
+    ]);
+  });
+
+  it('probes the thumbnails of "What the photos showed" only where a set renders (P23b)', () => {
+    const findings = [{ label: 'Weed pressure', photos: [{ url: 'https://s3.example.com/set-1.jpg', label: 'Front yard' }, { url: 'https://s3.example.com/thumb-only.jpg', label: 'Close-up' }, { url: '' }] }];
+    const withSet = { reportV2: { photoSet: [{ url: 'https://s3.example.com/set-1.jpg', label: 'Front yard' }], photoFindings: findings } };
+    expect(collectRenderedImageUrls(withSet).sort()).toEqual(['https://s3.example.com/set-1.jpg', 'https://s3.example.com/thumb-only.jpg']);
+    // the document prints the block only beside a set
+    expect(collectRenderedImageUrls({ reportV2: { photoFindings: findings } })).toEqual([]);
   });
 
   it('counts a non-OK response and a network error as unreachable', async () => {

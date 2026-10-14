@@ -276,8 +276,41 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     });
     const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
     expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledTimes(1);
-    expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1');
+    expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1', { conn: db });
     expect(scope).toMatchObject({ enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-a' } });
+  });
+
+  test('a supplied transaction owns every lazy-primary read and write', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const bounded = jest.fn();
+    bounded.isTransaction = true;
+    let reads = 0;
+    bounded.mockImplementation((table) => {
+      expect(table).toBe('customer_properties');
+      reads += 1;
+      return chain(reads === 3 ? [PROPS['cust-1'][0]] : []);
+    });
+    db.mockClear();
+
+    const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null }, bounded);
+
+    expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1', { conn: bounded });
+    expect(bounded).toHaveBeenCalledTimes(4);
+    expect(db).not.toHaveBeenCalled();
+    expect(scope).toMatchObject({ enabled: true, property: { id: 'prop-a' } });
+  });
+
+  test('a lazy-primary failure propagates from a supplied transaction so its caller can roll back', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const bounded = jest.fn(() => chain([]));
+    bounded.isTransaction = true;
+    customerProperties.ensurePrimaryProperty.mockRejectedValueOnce(new Error('lazy primary failed'));
+
+    await expect(resolveSessionScope(
+      { customerId: 'cust-1', propertyId: null },
+      bounded,
+    )).rejects.toThrow('lazy primary failed');
+    expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1', { conn: bounded });
   });
 
   test('gate on, three properties: the claim wins; the primary also owns unstamped visits; a secondary does not', async () => {

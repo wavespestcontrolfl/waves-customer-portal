@@ -856,6 +856,14 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterTreatment);
   });
 
+  test('a 14-day pre-emergent water-in (owner 2026-10-09: follow the label) never credits a plan run: the regular schedule IS how it gets its water', () => {
+    const { instruction, report } = build([{ ...WATER_IN_RULE, water_in_inches: 0.5, water_in_by_hours: 336 }], { runtime: { headTypes: ['rotor'] } });
+    expect(instruction.longWindow).toBe(true);
+    expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: false, creditableWaterIn: false, waterInRequired: true });
+    expect(report.aftercare.watering).not.toMatch(/minutes/);
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(report.water.weekPlan);
+  });
+
   test('a quarter-inch water-in against a half-inch run is NOT credited: the plan stays whole and the banner says it counts toward the week', () => {
     const { instruction, report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
     expect(instruction.waterInInches).toBe(0.25);
@@ -984,10 +992,35 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(buildWateringBanner(hold)).toEqual({
       state: 'hold', lines: hold.lines, holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: null, expiresAt: '2026-10-01T19:00:00.000Z', ruleSource: 'label',
     });
+    // A short water-in beside a 14-day one: the frozen later phase rides to the live banner and is dropped from a
+    // printed record (the record keeps the instruction as written). A malformed block never reaches the payload.
+    const twoWindows = buildWateringInstruction({
+      rules: [WATER_IN_RULE, { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 336, source: 'label' }],
+      completedAt: COMPLETED,
+    });
+    const twoWindowBanner = buildWateringBanner(twoWindows);
+    // The page gets what it prints (at, state, lines); the long amount and deadline stay server-side for the rain check.
+    expect(twoWindowBanner.later).toEqual({ at: twoWindows.later.at, state: 'water_in', lines: twoWindows.later.lines });
+    expect(twoWindows.later).toMatchObject({ waterInInches: 0.5 });
+    expect(twoWindowBanner.later.at).toBe(twoWindows.waterInBy);
+    expect(Date.parse(twoWindowBanner.expiresAt)).toBeGreaterThan(Date.parse(twoWindowBanner.later.at));
+    const { stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+    const printed = stripLiveOnlyScheduleFields({ reportV2: { banner: { ...twoWindowBanner } } });
+    expect(printed.reportV2.banner).not.toHaveProperty('later');
+    expect(printed.reportV2.banner.lines).toEqual(twoWindowBanner.lines);
+    expect(buildWateringBanner({ ...twoWindows, later: { at: 'not a date', state: 'water_in', lines: ['x'] } })).not.toHaveProperty('later');
+    expect(buildWateringBanner({ ...twoWindows, later: { at: twoWindows.waterInBy, state: 'water_in', lines: [] } })).not.toHaveProperty('later');
+    expect(buildWateringBanner(hold)).not.toHaveProperty('later');
+    // Rain covered the water-in (GATE_LAWN_WATER_IN_RAIN, read time): no later phase is left to announce.
+    const { coveredByRain } = require('../services/service-report/lawn-water-in-rain');
+    expect(coveredByRain(twoWindows)).not.toHaveProperty('later');
+    expect(buildWateringBanner(coveredByRain(twoWindows))).not.toHaveProperty('later');
+    expect(buildWateringBanner({ ...twoWindows, state: 'water_in_by_rain' })).not.toHaveProperty('later');
     const mixed = buildWateringInstruction({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
     expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-03T18:00:00.000Z' });
-    // A hold that reaches the water-in deadline is no claim, so no banner.
-    expect(buildWateringBanner(buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED }))).toBeNull();
+    // A hold that reaches the water-in deadline is followed by the water-in from the hold end (owner 2026-10-09).
+    expect(buildWateringBanner(buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED })))
+      .toMatchObject({ state: 'hold_then_water_in', holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: '2026-10-02T19:00:00.000Z', expiresAt: '2026-10-02T19:00:00.000Z' });
     expect(buildWateringBanner(buildWateringInstruction({ rules: [{ mode: 'none', source: 'label' }], completedAt: COMPLETED })))
       .toMatchObject({ state: 'none', expiresAt: null });
     expect(buildWateringBanner(buildWateringInstruction({ rules: [null], completedAt: COMPLETED }))).toBeNull();

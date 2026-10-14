@@ -58,6 +58,19 @@ it("a live code nobody has confirmed yet says so but carries no Unconfirmed badg
   expect(screen.queryByText("Unconfirmed")).toBeNull();
 });
 
+it("shows who added a code on a visit and who reported one wrong", async () => {
+  const field = { total: 1, neighborhoods: [{ id: "n8", name: "Field Glen", county: "Manatee", propertyCount: 2, hasConflict: false,
+    entries: [
+      entry({ id: "e7", code: "7070", source: "tech", addedBy: "Synthetic Tech" }),
+      entry({ id: "e8", code: "8080", status: "needs_confirm", markedWrongAt: "2026-10-02T16:00:00.000Z", markedWrongBy: "Synthetic Tech" }),
+    ] }] };
+  rawAdminFetch.mockImplementation(() => response(field));
+  renderPage();
+  expect(await screen.findByText("Field Glen")).toBeInTheDocument();
+  expect(screen.getByText("Last confirmed Sep 1, 2026 · Added on a visit by Synthetic Tech")).toBeInTheDocument();
+  expect(screen.getByText("Reported wrong on a visit by Synthetic Tech, Oct 2, 2026")).toBeInTheDocument();
+});
+
 it("renders neighborhoods, entries and the stale / unconfirmed / conflict markers", async () => {
   rawAdminFetch.mockImplementation(() => response(ALL));
   renderPage();
@@ -172,4 +185,193 @@ it("a malformed ?neighborhood= is ignored: everything lists, no control", async 
   expect(await screen.findByText("Sample Pines")).toBeInTheDocument();
   expect(rawAdminFetch.mock.calls[0][0]).not.toContain("neighborhood=");
   expect(screen.queryByText("Showing one neighborhood")).toBeNull();
+});
+
+// ---- Found in messages (access codes section) ----
+
+const FOUND_ROW = {
+  id: "f1", customerId: "cust-1", customerName: "Pat Sample", kind: "door", code: "9876", instructions: null,
+  life: "standing", scheduledServiceId: null, scheduledDate: null, status: "found", sourceType: "sms",
+  sourceQuote: "Door code is 9876", sourceAt: "2026-10-03T15:00:00.000Z",
+  visitChoices: [{ id: "v1", scheduled_date: "2026-10-08", service_type: "Pest control", status: "confirmed" }],
+};
+
+function foundRoutes(over = {}) {
+  return (path, init = {}) => {
+    if (path.startsWith("/admin/access-codes/found")) return over.found ? over.found() : response({ total: 1, items: [FOUND_ROW] });
+    if (path.startsWith("/admin/access-codes/")) return response({ accessCode: { ...FOUND_ROW, status: "active" } });
+    if (path.startsWith("/admin/customers/cust-1")) return response({ upcomingScheduled: [{ id: "v1", scheduled_date: "2026-10-08", service_type: "Pest control", status: "confirmed" }] });
+    return response(ALL);
+  };
+}
+
+it("has no Found in messages tab when the access codes section is off (404)", async () => {
+  rawAdminFetch.mockImplementation((path) => (path.startsWith("/admin/access-codes/found")
+    ? response({ enabled: false }, { ok: false, status: 404 })
+    : response(ALL)));
+  renderPage();
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p.startsWith("/admin/access-codes/found"))).toBe(true));
+  expect(screen.queryByRole("button", { name: /Found in messages/ })).toBeNull();
+});
+
+it("lists found codes with the customer linked, the client sentence and the code; Save posts accept", async () => {
+  let items = [FOUND_ROW];
+  rawAdminFetch.mockImplementation((path, init) => {
+    if (path.startsWith("/admin/access-codes/found")) return response({ total: items.length, items });
+    if (init?.method === "POST") { items = []; return response({ accessCode: {} }); }
+    return foundRoutes()(path, init);
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Pat Sample" })).toHaveAttribute("href", "/admin/customers?customerId=cust-1");
+  expect(screen.getByLabelText("Code")).toHaveValue("9876");
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(screen.getByText("No codes are waiting.")).toBeInTheDocument());
+  const post = rawAdminFetch.mock.calls.find(([, init]) => init?.method === "POST");
+  expect(post[0]).toBe("/admin/access-codes/f1/accept");
+  // Nothing edited: the save sends no field, so the server keeps the row as filed.
+  expect(JSON.parse(post[1].body)).toEqual({});
+});
+
+it("Dismiss posts dismiss, and a one-visit code offers the visits that came with the list", async () => {
+  rawAdminFetch.mockImplementation(foundRoutes());
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  await screen.findByText("Door code is 9876");
+  fireEvent.click(screen.getByRole("button", { name: "This visit only" }));
+  expect(await screen.findByRole("option", { name: "Thu, Oct 8 · Pest control" })).toBeInTheDocument();
+  // The choices come with the found list: no customer record is loaded per card.
+  expect(rawAdminFetch.mock.calls.some(([p]) => String(p).startsWith("/admin/customers/"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/access-codes/f1/dismiss")).toBe(true));
+});
+
+it("a failed first load keeps the tab with a retry", async () => {
+  let calls = 0;
+  rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
+    ? (++calls === 1 ? response({ error: "Server error" }, { ok: false, status: 500 }) : response({ total: 1, items: [FOUND_ROW] }))
+    : foundRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: /Found in messages/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Try again|Retry/ }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+});
+
+it("a row the server changed starts a fresh draft, so Save never sends the old life back", async () => {
+  let version = 1;
+  rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
+    ? response({ total: 1, items: [version === 1 ? FOUND_ROW : { ...FOUND_ROW, life: "visit", updatedAt: "2026-10-04T10:00:00.000Z" }] })
+    : foundRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: /Found in messages/ }));
+  await screen.findByText("Door code is 9876");
+  version = 2;
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "This visit only" })).toHaveAttribute("aria-pressed", "true"));
+});
+
+it("shows the server's message when a save is refused", async () => {
+  rawAdminFetch.mockImplementation((path, init) => (init?.method === "POST"
+    ? response({ error: "That customer already has this code", code: "duplicate_active" }, { ok: false, status: 409 })
+    : foundRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+  expect(await screen.findByText("That customer already has this code")).toBeInTheDocument();
+});
+
+// ---- A code from a number with no customer record (owner ruling 2026-10-05) ----
+
+const UNLINKED_ROW = {
+  id: "f2", customerId: null, customerName: null, senderPhone: "+19415550188", kind: "pass", code: null,
+  instructions: "View your pass: https://pass.example.com/v/abc123", life: "standing", scheduledServiceId: null, scheduledDate: null,
+  status: "found", sourceType: "sms", sourceQuote: "Shared with you a Visitor Pass to visit 4455 Example Lane", sourceAt: "2026-10-03T15:00:00.000Z",
+  suggestedCustomer: { id: "cust-9", name: "Pat Sample", address: "4455 Example Lane, Lakewood Ranch" },
+};
+
+function unlinkedRoutes({ linkedAfter = true } = {}) {
+  let linked = false;
+  return (path, init = {}) => {
+    if (path.startsWith("/admin/access-codes/found")) {
+      return response({ total: 1, items: [linked ? { ...UNLINKED_ROW, customerId: "cust-9", customerName: "Pat Sample", senderPhone: null, suggestedCustomer: null } : UNLINKED_ROW] });
+    }
+    if (path === "/admin/access-codes/f2/link" && init.method === "POST") { linked = linkedAfter; return response({ accessCode: {} }); }
+    if (path.startsWith("/admin/customers?search=")) {
+      return response({ customers: [{ id: "cust-7", firstName: "Lee", lastName: "Example", address: "12 Other Court", phone: "+19415550142" }] });
+    }
+    if (path.startsWith("/admin/customers/")) return response({ upcomingScheduled: [] });
+    return response(ALL);
+  };
+}
+
+it("a code from an unknown number shows the sender and a one-tap link to the suggested customer, with no Save until linked", async () => {
+  rawAdminFetch.mockImplementation(unlinkedRoutes());
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  expect(await screen.findByText(/From \(941\) 555-0188, a number with no customer record/)).toBeInTheDocument();
+  expect(screen.getByText("No customer yet")).toBeInTheDocument();
+  expect(screen.getByText("4455 Example Lane, Lakewood Ranch")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Link to Pat Sample" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument());
+  const post = rawAdminFetch.mock.calls.find(([, init]) => init?.method === "POST");
+  expect(post[0]).toBe("/admin/access-codes/f2/link");
+  expect(JSON.parse(post[1].body)).toEqual({ customerId: "cust-9" });
+  // Linked: it is an ordinary found row now, under the customer's name.
+  expect(screen.getByRole("link", { name: "Pat Sample" })).toHaveAttribute("href", "/admin/customers?customerId=cust-9");
+  expect(screen.queryByText(/a number with no customer record/)).toBeNull();
+});
+
+it("with no suggestion the office finds a customer and links the one it picks", async () => {
+  rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
+    ? response({ total: 1, items: [{ ...UNLINKED_ROW, suggestedCustomer: null }] })
+    : unlinkedRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  expect(screen.queryByRole("button", { name: /^Link to / })).toBeNull();
+  fireEvent.change(await screen.findByLabelText("Find a customer"), { target: { value: "Example" } });
+  const pick = await screen.findByRole("button", { name: "Lee Example · 12 Other Court · +19415550142" });
+  expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/customers?search=Example&limit=8&sort=name")).toBe(true);
+  fireEvent.click(pick);
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p, init]) => p === "/admin/access-codes/f2/link" && init?.method === "POST")).toBe(true));
+  const post = rawAdminFetch.mock.calls.find(([p]) => p === "/admin/access-codes/f2/link");
+  expect(JSON.parse(post[1].body)).toEqual({ customerId: "cust-7" });
+});
+
+it("an unlinked code can be dismissed, and a refused link shows the server's message", async () => {
+  rawAdminFetch.mockImplementation((path, init) => (path === "/admin/access-codes/f2/link"
+    ? response({ error: "That code already belongs to a customer", code: "not_unlinked" }, { ok: false, status: 409 })
+    : unlinkedRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Link to Pat Sample" }));
+  expect(await screen.findByText("That code already belongs to a customer")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/access-codes/f2/dismiss")).toBe(true));
+});
+
+it("a new search term clears the old results at once and no result can be picked while a search runs", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  rawAdminFetch.mockImplementation((path, init) => {
+    if (path.startsWith("/admin/access-codes/found")) return response({ total: 1, items: [{ ...UNLINKED_ROW, suggestedCustomer: null }] });
+    if (path === "/admin/customers?search=Example&limit=8&sort=name") {
+      return response({ customers: [{ id: "cust-7", firstName: "Lee", lastName: "Example", address: "12 Other Court", phone: "+19415550142" }] });
+    }
+    if (path === "/admin/customers?search=Examples&limit=8&sort=name") return pending.then(() => response({ customers: [] }));
+    return unlinkedRoutes()(path, init);
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  const box = await screen.findByLabelText("Find a customer");
+  fireEvent.change(box, { target: { value: "Example" } });
+  expect(await screen.findByRole("button", { name: /Lee Example/ })).toBeEnabled();
+  fireEvent.change(box, { target: { value: "Examples" } });
+  expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
+  release();
+  await waitFor(() => expect(screen.queryByText("Searching…")).toBeNull());
+  expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
 });

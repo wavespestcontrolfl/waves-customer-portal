@@ -38,11 +38,12 @@ const GBP_OAUTH_STATE_LEGACY_KEY = 'gbp.oauth_state';
 const GBP_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const GOOGLE_BUSINESS_LOCATION_IDS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
 
-async function createGoogleOAuthState(locationId, technician) {
+async function createGoogleOAuthState(locationId, technician, staffToken) {
   await db('system_settings').where({ key: GBP_OAUTH_STATE_LEGACY_KEY }).del();
   return createStaffOAuthState({
     prefix: GBP_OAUTH_STATE_PREFIX,
     technician,
+    staffToken,
     ttlMs: GBP_OAUTH_STATE_TTL_MS,
     metadata: { locationId },
     description: 'Google Business Profile OAuth one-time state',
@@ -77,7 +78,7 @@ router.get('/google/auth-url', adminAuthenticate, requireAdmin, async (req, res)
     if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) {
       return res.status(400).json({ error: 'Unknown location. Use: bradenton, parrish, sarasota, or venice' });
     }
-    const state = await createGoogleOAuthState(locationId, req.technician);
+    const state = await createGoogleOAuthState(locationId, req.technician, req.staffToken);
     const url = gbp.getAuthUrl(locationId, state);
     res.json({ url });
   } catch (err) {
@@ -94,7 +95,7 @@ router.get('/google/auth', adminAuthenticate, requireAdmin, async (req, res) => 
     if (!locationId) return res.status(400).send('Missing ?location= parameter. Use: bradenton, parrish, sarasota, or venice');
     if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) return res.status(400).send('Unknown location. Use: bradenton, parrish, sarasota, or venice');
 
-    const state = await createGoogleOAuthState(locationId, req.technician);
+    const state = await createGoogleOAuthState(locationId, req.technician, req.staffToken);
     const authUrl = gbp.getAuthUrl(locationId, state);
     res.redirect(authUrl);
   } catch (err) {
@@ -128,10 +129,11 @@ router.get('/google/callback', async (req, res) => {
 const LINKEDIN_OAUTH_STATE_PREFIX = 'linkedin.oauth_state:';
 const LINKEDIN_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
-async function createLinkedInOAuthState(technician) {
+async function createLinkedInOAuthState(technician, staffToken) {
   return createStaffOAuthState({
     prefix: LINKEDIN_OAUTH_STATE_PREFIX,
     technician,
+    staffToken,
     ttlMs: LINKEDIN_OAUTH_STATE_TTL_MS,
     description: 'LinkedIn OAuth one-time state',
   });
@@ -152,7 +154,7 @@ router.get('/linkedin/auth-url', adminAuthenticate, requireAdmin, async (req, re
     if (!linkedin.configured) {
       return res.status(400).json({ error: 'LinkedIn not configured — set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET.' });
     }
-    const state = await createLinkedInOAuthState(req.technician);
+    const state = await createLinkedInOAuthState(req.technician, req.staffToken);
     res.json({ url: linkedin.getAuthUrl(state) });
   } catch (err) {
     res.status(500).json({ error: err.message });

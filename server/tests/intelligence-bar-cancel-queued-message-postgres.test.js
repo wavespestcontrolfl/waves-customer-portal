@@ -226,10 +226,11 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('scheduled'); // untouched
   });
 
-  test('cancels exactly one scheduled text (physically deleted, the shared inbox workflow\'s ordinary case) and leaves a sibling untouched', async () => {
+  test('cancels exactly one scheduled text, KEEPING its row with status canceled (W7-dev-04), and leaves a sibling untouched', async () => {
     const custId = await customer();
     const targetId = await scheduledSms(custId);
     const siblingId = await scheduledSms(custId);
+    const before = await trx('sms_log').where({ id: targetId }).first();
 
     const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'sms' });
     expect(preview).toMatchObject({ proposal: true, channel: 'sms', message_id: targetId, masked_recipient: '…0100' });
@@ -241,10 +242,155 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     });
     expect(confirmed).toMatchObject({ success: true, cancelled: true, channel: 'sms', message_id: targetId, messages_sent: false });
 
-    // scheduled-sms-cancel.js's ordinary case physically deletes the row
-    // (the same shared workflow the admin SMS inbox's DELETE route uses).
-    expect(await trx('sms_log').where({ id: targetId }).first()).toBeUndefined();
+    // The row stays so the customer's record shows a text was scheduled and
+    // cancelled; only its status changes. (The admin inbox's DELETE route
+    // keeps its physical delete; only the bar passes keepRow.)
+    const kept = await trx('sms_log').where({ id: targetId }).first();
+    expect(kept).toBeDefined();
+    expect(kept.status).toBe('canceled');
+    expect(kept.message_body).toBe(before.message_body);
+    expect(kept.to_phone).toBe(before.to_phone);
+    expect(kept.direction).toBe('outbound');
     expect((await trx('sms_log').where({ id: siblingId }).first()).status).toBe('scheduled');
+
+    // It no longer counts as queued: not listed, and a second cancel finds nothing.
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId });
+    expect(listed.messages.map((m) => m.message_id)).toEqual([siblingId]);
+    expect(listed.total).toBe(1);
+    const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
+    const again = await cancelScheduledSmsRow({ id: targetId, techRole: 'admin', keepRow: true, simpleOnly: true });
+    expect(again).toEqual({ outcome: 'not_found', cancelled: false, row: null });
+    expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('canceled');
+  });
+
+  test('a cancelled-and-kept text does not block scheduling or cancelling a new text to the same customer', async () => {
+    const custId = await customer();
+    const firstId = await scheduledSms(custId);
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: firstId, customer_id: custId, channel: 'sms' });
+    await executeCommsTool('cancel_queued_message', {
+      message_id: firstId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
+    });
+
+    // Same body, recipient and time as the kept row: a fresh row inserts and lists as queued.
+    const kept = await trx('sms_log').where({ id: firstId }).first();
+    const secondId = await scheduledSms(custId, { message_body: kept.message_body, scheduled_for: kept.scheduled_for });
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId });
+    expect(listed.messages.map((m) => m.message_id)).toEqual([secondId]);
+  });
+
+  test('a cancelled-and-kept text shows in the thread and in search labelled canceled, never as a sent message; a queued one is labelled not sent yet', async () => {
+    const custId = await customer();
+    const sentId = await scheduledSms(custId, { status: 'sent', scheduled_for: null, message_body: 'Synthetic sent text', created_at: new Date(Date.now() - 7200000) });
+    const keptId = await scheduledSms(custId, { message_body: 'Synthetic staff text that gets cancelled', created_at: new Date(Date.now() - 3600000) });
+    const queuedId = await scheduledSms(custId, { message_body: 'Synthetic text still queued', created_at: new Date(Date.now() - 1800000) });
+    // A requeue after a send attempt (stale-claim recovery) and a claimed row: the provider may already have accepted both.
+    await scheduledSms(custId, {
+      message_body: 'Synthetic text requeued after an attempt', created_at: new Date(Date.now() - 1700000),
+      metadata: JSON.stringify({ scheduled_sms_recovered_at: new Date().toISOString() }),
+    });
+    await scheduledSms(custId, { message_body: 'Synthetic text being sent', status: 'sending', created_at: new Date(Date.now() - 1600000) });
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: keptId, customer_id: custId, channel: 'sms' });
+    const confirmed = await executeCommsTool('cancel_queued_message', {
+      message_id: keptId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
+    });
+    expect(confirmed.success).toBe(true);
+
+    const thread = await executeCommsTool('get_conversation_thread', { customer_id: custId, phone: '+19415550100' });
+    expect(thread.error).toBeUndefined();
+    const byBody = Object.fromEntries(thread.messages.map((m) => [m.body, m]));
+    expect(thread.messages).toHaveLength(5);
+    expect(byBody['Synthetic staff text that gets cancelled']).toMatchObject({
+      direction: 'outbound', status: 'canceled', canceled: true, from: 'Waves',
+      note: 'Scheduled text, cancelled before it was sent. The customer never received it.',
+    });
+    expect(byBody['Synthetic text still queued']).toMatchObject({
+      status: 'scheduled', not_sent_yet: true, note: 'Scheduled text, not sent yet. The customer has not received it.',
+    });
+    expect(byBody['Synthetic text still queued'].delivery_uncertain).toBeUndefined();
+    for (const body of ['Synthetic text requeued after an attempt', 'Synthetic text being sent']) {
+      expect(byBody[body]).toMatchObject({
+        delivery_uncertain: true, note: 'A send was attempted and the outcome is not known. The customer may have received it.',
+      });
+      expect(byBody[body].not_sent_yet).toBeUndefined();
+    }
+    expect(byBody['Synthetic text requeued after an attempt'].status).toBe('scheduled');
+    expect(byBody['Synthetic text being sent'].status).toBe('sending');
+    expect(byBody['Synthetic sent text']).toMatchObject({ status: 'sent' });
+    expect(byBody['Synthetic sent text'].canceled).toBeUndefined();
+    expect(byBody['Synthetic sent text'].not_sent_yet).toBeUndefined();
+
+    const found = await executeCommsTool('search_messages', { customer_id: custId, search: 'gets cancelled', days_back: 30 });
+    expect(found.messages).toHaveLength(1);
+    expect(found.messages[0]).toMatchObject({ id: keptId, status: 'canceled', canceled: true });
+    expect(sentId).toBeTruthy();
+    expect(queuedId).toBeTruthy();
+  });
+
+  test('the shared reader guard hides a cancelled-and-kept text from every general reader, and keepNeverSent lets the bar show it', async () => {
+    const { excludeUnresolvedSendReservations, isNeverSentSms } = require('../services/messaging/review-ask-reservation');
+    const custId = await customer();
+    const liveId = await scheduledSms(custId, { status: 'sent', scheduled_for: null, message_body: 'Synthetic delivered text' });
+    const keptId = await scheduledSms(custId, { message_body: 'Synthetic cancelled text' });
+    const britishId = await scheduledSms(custId, { status: 'cancelled', message_body: 'Synthetic cancelled text, other spelling' });
+    await trx('sms_log').where({ id: keptId }).update({ status: 'canceled' });
+
+    const general = await excludeUnresolvedSendReservations(trx('sms_log').where({ customer_id: custId })).pluck('id');
+    expect(general).toEqual([liveId]);
+    const labelled = await excludeUnresolvedSendReservations(trx('sms_log').where({ customer_id: custId }), 'sms_log', { keepNeverSent: true }).pluck('id');
+    expect(labelled.sort()).toEqual([liveId, keptId, britishId].sort());
+    expect(isNeverSentSms({ status: 'canceled' })).toBe(true);
+    expect(isNeverSentSms({ status: 'Cancelled' })).toBe(true);
+    expect(isNeverSentSms({ status: 'sent' })).toBe(false);
+  });
+
+  test('a cancelled-and-kept text does not count as a reply or as sent in the stats and today readers', async () => {
+    const custId = await customer();
+    await trx('sms_log').where({ customer_id: custId }).del();
+    await trx('sms_log').insert({
+      id: randomUUID(), customer_id: custId, direction: 'inbound', from_phone: '+19415550177', to_phone: '+19413529161',
+      message_body: 'Synthetic question from a customer', message_type: 'inbound', status: 'received',
+      created_at: new Date(Date.now() - 60000),
+    });
+    const keptId = await scheduledSms(custId, { to_phone: '+19415550177', message_body: 'Synthetic reply that is cancelled', created_at: new Date() });
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: keptId, customer_id: custId, channel: 'sms' });
+    await executeCommsTool('cancel_queued_message', {
+      message_id: keptId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
+    });
+    expect((await trx('sms_log').where({ id: keptId }).first()).status).toBe('canceled');
+
+    const stats = await executeCommsTool('get_sms_stats', { days: 1 });
+    expect(stats.error).toBeUndefined();
+    expect(stats.total_sent).toBe(0);
+    expect(stats.total_received).toBe(1);
+    const today = await executeCommsTool('get_todays_activity', {});
+    expect(today.error).toBeUndefined();
+    expect(today.sms_sent).toBe(0);
+    expect(today.unanswered_messages).toBe(1); // the cancelled reply did not answer the customer
+  });
+
+  test('the voice-corpus miner never mines a cancelled-and-kept text as a human reply', async () => {
+    const { _test: { mineSmsPairs } } = require('../services/sms-voice-corpus-miner');
+    const custId = await customer();
+    const created = new Date(Date.now() - 20 * 86400000);
+    const stamp = (offsetMin) => new Date(created.getTime() + offsetMin * 60000);
+    await trx('sms_log').insert({
+      id: randomUUID(), customer_id: custId, direction: 'inbound', from_phone: '+19415550100', to_phone: '+19413529161',
+      message_body: 'Can you come by on Friday morning instead?', message_type: 'inbound', status: 'received', created_at: stamp(0),
+    });
+    const keptId = await scheduledSms(custId, {
+      message_type: 'manual', message_body: 'Absolutely, we can move your visit to Friday morning.', created_at: stamp(5),
+    });
+    await trx('sms_log').where({ id: keptId }).update({ status: 'canceled' });
+    const sentId = await scheduledSms(custId, {
+      message_type: 'manual', status: 'sent', scheduled_for: null,
+      message_body: 'Friday morning is confirmed, see you then.', created_at: stamp(6),
+    });
+
+    const skipped = {};
+    const pairs = await mineSmsPairs({ since: new Date(created.getTime() - 86400000), until: new Date(), skipped });
+    const mined = pairs.map((p) => p.source_id);
+    expect(mined).toContain(sentId);
+    expect(mined).not.toContain(keptId);
   });
 
   // scheduled-sms-cancel.js's review-ask-reservation-in-place special case

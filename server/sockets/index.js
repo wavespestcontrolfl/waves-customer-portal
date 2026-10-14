@@ -49,6 +49,7 @@ const { socketAuth } = require('./auth');
 const logger = require('../services/logger');
 const db = require('../models/db');
 const { staffTokenVersionMatches } = require('../middleware/admin-auth');
+const { sessionMfaBlock } = require('../services/staff-mfa');
 
 // Module-level singleton so service modules (server/services/*.js)
 // can call getIo().to(room).emit(...) without us threading the io
@@ -100,7 +101,7 @@ async function revalidateStaffSocket(socket) {
   try {
     tech = await db('technicians')
       .where({ id: socket.userId })
-      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password', 'mfa_enabled_at');
   } catch (err) {
     logger.error(`[socket] staff recheck failed: tech_id=${socket.userId} error=${err.message}`);
     disconnectSocket(socket, 'auth_backend_unavailable');
@@ -118,6 +119,9 @@ async function revalidateStaffSocket(socket) {
     && tech.role === socket.userType
     && ['admin', 'technician'].includes(tech.role)
     && versionMatches
+    // Two-step sign-in (GATE_ADMIN_MFA): enrolling, or the gate going on,
+    // drops a socket whose session never passed the code.
+    && !sessionMfaBlock({ mfa: socket.staffTokenMfa === true }, tech)
   );
   if (!valid) disconnectSocket(socket, 'credential_revoked');
   return valid;

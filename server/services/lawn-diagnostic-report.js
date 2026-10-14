@@ -1,3 +1,6 @@
+const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+const { lawnResultTimingViolation } = require('./service-report/report-writer-rules');
+
 const FLAG_TYPES = new Set([
   'untreated_condition',
   'unsupported_application',
@@ -485,6 +488,28 @@ function runQaSafetyCheck({ products = [], findings = [], compliance = {}, water
   return flags;
 }
 
+// `approved` is the switch that keeps an unsigned row from a customer, so the
+// weed line reads the row only while it is approved. Unapproved (or missing):
+// fail closed to a line with no timing and no row text.
+const WEEDS_EXPECTATION_UNAPPROVED = 'How fast weeds respond depends on the weed and the weather.';
+function weedsExpectation() {
+  const row = PRODUCT_ROWS.herbicide_broadleaf;
+  if (!row || row.approved !== true || !row.visibleChange) return WEEDS_EXPECTATION_UNAPPROVED;
+  return row.secondApp && row.secondApp.line ? `${row.visibleChange} ${row.secondApp.line}` : row.visibleChange;
+}
+const INSECTS_EXPECTATION = 'The key sign is whether the damaged edge stops expanding.';
+
+// The weed and insect lines are computed at SERVE time, never read back from
+// the stored contract: a stored line may be a hand-written pre-v0.7 timeline or
+// the text of a row that has since been un-approved, and inspecting stored text
+// cannot tell the two apart. When the stored contract has the key at all, the
+// public route emits the current line; every other key passes through as stored.
+const SERVED_EXPECTATION = { weeds: weedsExpectation, insects: () => INSECTS_EXPECTATION };
+function servedExpectation(key, stored) {
+  const current = SERVED_EXPECTATION[key];
+  return current && stored ? current() : stored;
+}
+
 function buildExpectations(findings = []) {
   // Cause-specific expectations (disease/insect/weed) may only be published for findings
   // that clear the v0.4 naming gate (moderate+). Low/unknown findings stay symptom-only,
@@ -495,9 +520,12 @@ function buildExpectations(findings = []) {
     .map((finding) => normalizeKey(finding.name))
     .join(' ');
   return {
-    weeds: names.includes('weed') ? 'Visible weed response often takes 10-14 days and may need follow-up depending on weed type.' : null,
+    // Weed response timing: the owner-approved selective-weed-control row's
+    // sentences (no day count; no label or turf source gives one, owner
+    // 2026-10-03), never a hand-written number.
+    weeds: names.includes('weed') ? weedsExpectation() : null,
     fungus: names.includes('fung') || names.includes('large_patch') ? 'Disease treatments are aimed at stopping spread first; browned turf must regrow over time.' : null,
-    insects: names.includes('chinch') || names.includes('insect') ? 'The key sign is whether the damaged edge stops expanding over the next week.' : null,
+    insects: names.includes('chinch') || names.includes('insect') ? INSECTS_EXPECTATION : null,
     turf_recovery: 'Thin or brown turf recovers through new growth, not instant green-up.',
   };
 }
@@ -803,6 +831,14 @@ function safeConditionLabel(rawName, confidence) {
   return label;
 }
 
+// True when a finding name ASSERTS a governed cause (SUMMARY_CAUSE_RE) rather than
+// ruling it out: only the clauses safeConditionLabel keeps as positive are
+// tested, so "Thinning turf; no chinch bugs observed" names none.
+function namesAssertedCause(rawName) {
+  const lower = String(rawName || '').toLowerCase();
+  return !!lower && positiveClauses(lower).positive.some((clause) => SUMMARY_CAUSE_RE.test(clause));
+}
+
 function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   const primary = diagnosis.findings?.find((finding) => finding.name === diagnosis.primary_finding);
   if (!primary) return 'This lawn check is complete. The photos did not show enough detail to call out a specific pest or disease, so keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
@@ -911,9 +947,27 @@ function residualDefinitiveClaim(text) {
   ));
 }
 
+// P16 egress: a prospect report stored before the owner's 2026-10-03 timing
+// ruling can carry a withdrawn timeline ("10-14 days", "2-3 weeks", "60-90
+// days") in its summary. Drop only the sentences that state result timing,
+// using the P15 detector (lawnResultTimingViolation, fail closed: a sentence
+// with a count is dropped even if a current row carries that number). Text
+// with no timing passes through untouched; null when nothing usable remains.
+function withoutResultTimingSentences(text) {
+  const sentences = String(text).split(/(?<=[.!?])\s+/);
+  // No care-plan exemption here: a timeline phrased around watering or mowing
+  // ("color should return in 2-3 weeks once watering is corrected") is still a
+  // result promise in a customer summary.
+  const kept = sentences.filter((sentence) => !lawnResultTimingViolation(sentence, { carePlanExempt: false }));
+  if (kept.length === sentences.length) return text;
+  return kept.length ? kept.join(' ') : null;
+}
+
 function safeCustomerSummary(summary, confidence) {
-  const scrubbed = scrubCustomerText(summary);
+  let scrubbed = scrubCustomerText(summary);
   if (!scrubbed) return null;
+  scrubbed = withoutResultTimingSentences(scrubbed);
+  if (scrubbed === null) return GENERIC_LOW_CONFIDENCE_SUMMARY;
   if (confidenceRank(confidence) < CONFIDENCE_ORDER.moderate && SUMMARY_CAUSE_RE.test(scrubbed)) {
     return GENERIC_LOW_CONFIDENCE_SUMMARY;
   }
@@ -1163,6 +1217,7 @@ function buildDiagnosticReportContract(input = {}) {
 
 module.exports = {
   assessInputSufficiency,
+  servedExpectation,
   buildDiagnosticReportContract,
   buildDiagnosis,
   buildReconciliationFlags,
@@ -1179,6 +1234,7 @@ module.exports = {
   runQaSafetyCheck,
   scrubCustomerText,
   safeConditionLabel,
+  namesAssertedCause,
   residualDefinitiveClaim,
   spaceJoinedNon,
   stripNegatedRecovery,

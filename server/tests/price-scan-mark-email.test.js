@@ -4,6 +4,7 @@ const {
   perOzEquiv,
   hasProof,
   savingsPctOf,
+  shippingOfSide,
 } = require('../services/price-scan/mark-email');
 
 const PROOF = 'https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html';
@@ -119,7 +120,7 @@ describe('mark-email content', () => {
     const out = composeMarkEmail([{
       product: 'Granular Bait',
       baseline: { vendor: 'SiteOne', price: 40, quantity: '10 lb' },
-      competitor: { vendor: 'Keystone', price: 34, quantity: '10 lb', source_url: 'https://k.com/p' },
+      competitor: { vendor: 'Keystone', price: 34, quantity: '10 lb', source_url: 'https://www.domyown.com/k-p' },
     }]);
     expect(out.text).toContain('$4.00/lb');
     expect(out.text).toContain('$3.40/lb');
@@ -129,7 +130,7 @@ describe('mark-email content', () => {
     const out = composeMarkEmail([{
       product: 'Liquid Concentrate',
       baseline: { vendor: 'SiteOne', price: 50, quantity: '32 fl oz' },
-      competitor: { vendor: 'V', price: 40, quantity: '32 fl oz', source_url: 'https://a.com/p' },
+      competitor: { vendor: 'V', price: 40, quantity: '32 fl oz', source_url: 'https://www.domyown.com/a-p' },
     }]);
     expect(out).not.toBeNull();
     expect(out.text).toContain('/fl oz');
@@ -138,8 +139,8 @@ describe('mark-email content', () => {
   });
 
   test('biggest savings first', () => {
-    const small = { product: 'Small Win', baseline: { price: 100, quantity: '10 oz' }, competitor: { vendor: 'V', price: 98, quantity: '10 oz', source_url: 'https://a.com/p' } };
-    const big = { product: 'Big Win', baseline: { price: 100, quantity: '10 oz' }, competitor: { vendor: 'V', price: 60, quantity: '10 oz', source_url: 'https://b.com/p' } };
+    const small = { product: 'Small Win', baseline: { price: 100, quantity: '10 oz' }, competitor: { vendor: 'V', price: 98, quantity: '10 oz', source_url: 'https://www.domyown.com/a-p' } };
+    const big = { product: 'Big Win', baseline: { price: 100, quantity: '10 oz' }, competitor: { vendor: 'V', price: 60, quantity: '10 oz', source_url: 'https://www.domyown.com/b-p' } };
     const out = composeMarkEmail([small, big]);
     expect(out.text.indexOf('Big Win')).toBeLessThan(out.text.indexOf('Small Win'));
   });
@@ -148,7 +149,7 @@ describe('mark-email content', () => {
     const out = composeMarkEmail([{
       product: 'Bug & Weed <Pro>',
       baseline: { price: 10, quantity: '1 lb' },
-      competitor: { vendor: 'V', price: 8, quantity: '1 lb', source_url: 'https://a.com/p' },
+      competitor: { vendor: 'V', price: 8, quantity: '1 lb', source_url: 'https://www.domyown.com/a-p' },
     }]);
     expect(out.html).toContain('Bug &amp; Weed &lt;Pro&gt;');
     expect(out.html).not.toContain('<Pro>');
@@ -162,5 +163,103 @@ describe('mark-email content', () => {
     expect(out.text).toContain('Thanks,\nWaves Pest Control');
     expect(out.text).not.toContain('Waves Pest Control & Lawn Care');
     expect(out.html).toContain('Thanks,<br>Waves Pest Control</p>');
+  });
+});
+
+describe('mark-email delivered prices + shipping proof', () => {
+  const FORESTRY = 'https://www.forestrydistributing.com/bifen-it-bifenthrin-insecticide-talstar-control-solution';
+  const est = {
+    product: 'Bifen I/T',
+    baseline: { vendor: 'SiteOne', price: 95, quantity: '1 gal' },
+    competitor: { vendor: 'Forestry Distributing', name: 'Bifen I/T Insecticide, 1 Gal.', price: 60, quantity: '1 gal', source_url: FORESTRY },
+  };
+
+  test('free-shipping line: delivered = sticker, firm shipping, per-unit on delivered', () => {
+    const out = composeMarkEmail([taurus]);
+    expect(out.text).toContain('free shipping (firm)');
+    expect(out.text).toContain('delivered $89.00');
+    expect(out.text).toContain('delivered $95.00'); // SiteOne side too
+    expect(out.html).toContain('Delivered $89.00');
+    expect(out.text).not.toContain('shipping estimated');
+    expect(out.text).not.toContain('Lines marked "shipping estimated"');
+  });
+
+  test('estimated shipping is shown as delivered price AND clearly marked "shipping estimated"', () => {
+    const out = composeMarkEmail([est]);
+    expect(out).not.toBeNull();
+    expect(out.text).toContain('$60.00 / 1 gal');
+    expect(out.text).toContain('shipping estimated ~$15.00 (not a quote)');
+    expect(out.text).toContain('delivered $75.00');
+    expect(out.text).toContain('$75.00/gal'); // per-unit on the delivered price
+    expect(out.text).toContain('Lines marked "shipping estimated"'); // explainer for the rep
+    expect(out.html).toContain('shipping estimated ~$15.00 (not a quote)');
+    expect(out.html).toContain('Delivered $75.00');
+  });
+
+  test('every proof item Mark needs is on the line', () => {
+    const out = composeMarkEmail([est]);
+    expect(out.text).toContain('Forestry Distributing'); // competitor name
+    expect(out.text).toContain('listed as: Bifen I/T Insecticide, 1 Gal.'); // product as listed
+    expect(out.text).toContain('1 gal'); // pack size
+    expect(out.text).toContain('$60.00'); // sticker price
+    expect(out.text).toContain('delivered $75.00'); // delivered price
+    expect(out.text).toContain(FORESTRY); // source URL
+    expect(out.html).toContain('Listed as: Bifen I/T Insecticide, 1 Gal.');
+  });
+
+  test('savings are judged on delivered prices: a cheaper sticker that loses after shipping is excluded', () => {
+    const loses = { ...est, competitor: { ...est.competitor, price: 90 } }; // 90 + 15 est > 95
+    expect(composeMarkEmail([loses])).toBeNull();
+    expect(savingsPctOf(loses)).toBeLessThan(0);
+  });
+
+  test('a forwarded shipping object (from the scan) is used as-is and drives the line', () => {
+    const published = {
+      ...est,
+      competitor: { ...est.competitor, source_url: 'https://gemplers.com/products/x', shipping: { amount: 10.99, basis: 'weight_table', note: '' } },
+    };
+    const out = composeMarkEmail([published]);
+    expect(out.text).toContain('$10.99 shipping by published rule (firm)');
+    expect(out.text).toContain('delivered $70.99');
+    expect(out.text).not.toContain('shipping estimated');
+  });
+
+  test('min-savings default is unchanged: a tiny positive delivered saving still counts', () => {
+    const tiny = {
+      product: 'Tiny',
+      baseline: { vendor: 'SiteOne', price: 100, quantity: '1 gal' },
+      competitor: { vendor: 'DoMyOwn', price: 99.5, quantity: '1 gal', source_url: 'https://www.domyown.com/tiny-p-1.html' },
+    };
+    expect(composeMarkEmail([tiny])).not.toBeNull();
+  });
+});
+
+describe('mark-email firm / estimated wording by vendor', () => {
+  const line = (competitor) => composeMarkEmail([{
+    product: 'Grass Seed',
+    baseline: { vendor: 'SiteOne', price: 95, quantity: '1 gal' },
+    competitor: { vendor: 'V', price: 60, quantity: '1 gal', ...competitor },
+  }]);
+  test('SeedBarn is an estimate in the email, never firm', () => {
+    const out = line({ source_url: 'https://seedbarn.com/products/x' });
+    expect(out.text).toContain('shipping estimated ~$15.00 (not a quote)');
+    expect(out.text).not.toMatch(/V[^\n]*free shipping \(firm\)/);
+  });
+  test('only free-on-everything vendors read "(firm)" for free shipping', () => {
+    expect(line({ source_url: 'https://www.domyown.com/x-p-1.html' }).text).toContain('free shipping (firm)');
+    expect(line({ source_url: 'https://diypestcontrol.com/x' }).text).toContain('free shipping (firm)');
+    expect(line({ source_url: 'https://www.solutionsstores.com/x' }).text).toContain('shipping estimated');
+    expect(line({ source_url: 'https://golfcourselawn.store/products/x' }).text).toContain('shipping estimated');
+  });
+  test('a Gemplers special-freight item is estimated in the email, a clean table item is firm', () => {
+    const g = { source_url: 'https://gemplers.com/products/x', weight_lb: 3 };
+    expect(line(g).text).toContain('$10.99 shipping by published rule (firm)');
+    expect(line({ ...g, special_freight: true }).text).toContain('shipping estimated');
+  });
+  test('normalizeShipping keeps every field of an attached shipping object', () => {
+    const { shippingOfCandidate } = require('../services/price-scan/compare');
+    const sh = { amount: 10.99, basis: 'weight_table', note: 'n', extra: 'kept' };
+    expect(shippingOfCandidate({ price: 1, shipping: sh })).toMatchObject(sh);
+    expect(shippingOfSide({ price: 1, shipping: sh })).toMatchObject(sh);
   });
 });

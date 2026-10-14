@@ -36,11 +36,13 @@ async function prewarmReportCrossSellEvidence(serviceRecord, database) {
     // Lazy-required like the composer's own cache-only default —
     // property-lookup-v2 is heavy and cyclic-prone.
     const { performPropertyLookup } = require('../../routes/property-lookup-v2');
+    // Scope decision: lookup-callers.js (report_cross_sell_prewarm).
+    const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
     const result = await buildReportCrossSell(serviceRecord, database, {
       // The ONE difference from render: a cold cache may fetch live and
       // persist. performPropertyLookup is cache-first either way, so a
       // warm cache costs nothing and replayed completions are no-ops.
-      propertyLookup: (address) => performPropertyLookup(address, { cacheOnly: false, persist: true }),
+      propertyLookup: (address) => performPropertyLookup(address, lookupOptionsFor('report_cross_sell_prewarm', { cacheOnly: false, persist: true })),
     });
     return result ? result.mode : null;
   } catch (err) {

@@ -23,7 +23,8 @@ exists mainly to (a) get an App Store listing and (b) swap web-push → APNs.
 | `docs/mobile/apns-backend-pr-plan.md` | The backend follow-up (DB + APNs sender + subscribe route) |
 
 The generated Xcode project (`client/ios/`) is gitignored — regenerate it with
-the bootstrap script.
+the bootstrap script. The one tracked folder inside it is
+`client/ios/App/ci_scripts` (see Xcode Cloud below).
 
 ## Run the spike (macOS)
 
@@ -62,6 +63,33 @@ profile in Xcode, rebuild, and export again. A portal web deployment cannot
 change an entitlement in an installed iOS binary. See Apple's
 [APS entitlement documentation](https://developer.apple.com/documentation/bundleresources/entitlements/aps-environment).
 
+## Xcode Cloud
+
+Xcode Cloud clones the repository, and the clone has no Xcode project. It runs
+`client/ios/App/ci_scripts/ci_post_clone.sh` first, which installs Node (the
+`.nvmrc` major, from nodejs.org) and CocoaPods and then runs
+`bootstrap-ios.sh` with `CI=true`. The bootstrap also writes what a cloud build
+needs and a command line cannot supply there: a shared `App` scheme, the
+release version and the signing team.
+
+Workflow settings in App Store Connect → Xcode Cloud:
+
+- **Start condition:** branch `main`. A branch without this script fails in
+  under a minute with "Workspace App.xcworkspace does not exist".
+- **Version:** `ci_post_clone.sh` holds the default (`DEFAULT_MARKETING_VERSION`).
+  Raise it in a PR when App Review approves that version, or set the workflow
+  environment variable `WAVES_IOS_MARKETING_VERSION` for one build.
+- **Build number:** Xcode Cloud counts from 1. Local uploads use a date number
+  (`2026100503`), so set Settings → Build Number → next build number above the
+  last upload of the same version, or App Store Connect refuses the build.
+- **Export compliance:** the bootstrap writes `ITSAppUsesNonExemptEncryption =
+  false` into `Info.plist` (the app uses only HTTPS and the Keychain), so an
+  upload does not wait at "Missing Compliance" in TestFlight.
+- Run the push check in the section above on the cloud build's IPA
+  (Artifacts) before a first submission from Xcode Cloud.
+
+To run the same steps on a Mac: `bash client/ios/App/ci_scripts/ci_post_clone.sh`.
+
 ## Load modes (set in `capacitor.config.json`)
 
 - **MODE A — remote (spike default):** `server.url` points at the live portal.
@@ -73,6 +101,40 @@ change an entitlement in an installed iOS binary. See Apple's
   base + CORS for those calls. Auth is a Bearer JWT in localStorage, so there's
   no cookie/SameSite work. Works offline and reads as a "real" native app to
   Apple review.
+
+## Offline opening (app-bound domains)
+
+In MODE A the app loads the live portal each time. iOS exposes service workers
+inside a `WKWebView` only to domains listed in the app's `WKAppBoundDomains`,
+so without that list the portal's offline copy (`client/public/sw.js`) never
+installs and the app shows a blank screen with no signal.
+
+- `bootstrap-ios.sh` writes `WKAppBoundDomains` into `Info.plist` from the
+  host of `server.url` (`portal.wavespestcontrol.com`) on every run.
+- `capacitor.config.json` sets `ios.limitsNavigationsToAppBoundDomains: true`;
+  Capacitor needs it to keep its plugin bridge working once the list exists.
+- Result: after one online open, the app opens offline from the saved copy
+  (including the tech Today page's last saved route). The first open after an
+  install still needs signal, and iOS may evict the copy when storage is low.
+- Switching to MODE B (no `server.url`) makes the bootstrap stop with an error:
+  set the bundled-mode domain list by hand then.
+
+Test on TestFlight before each submission that ships this setting. The list
+limits the app to the listed domain, so check every part that loads another
+company's page:
+
+1. Stripe card form (`client/src/lib/stripeLoader.js`). If it fails, add
+   Stripe's domain to the list (iOS allows up to 10 entries).
+2. Google address suggestions in the estimate and customer forms.
+3. Cloudflare Turnstile on public forms.
+4. Google Maps in the tech treatment-zone screen.
+5. Links to other sites open in Safari.
+6. Push, Face ID unlock, camera photos, universal links.
+7. Open once online, turn on Airplane Mode, force-quit, reopen: the app opens.
+8. Merge a small portal change: the app shows it on the next open.
+
+Rollback: remove the setting from `capacitor.config.json` and the plist step,
+rebuild and resubmit.
 
 ## Known follow-ups before submission
 

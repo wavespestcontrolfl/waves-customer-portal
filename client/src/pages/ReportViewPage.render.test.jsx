@@ -4,6 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
@@ -122,6 +124,14 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
   });
 
+  it('prints the Waves blog post picked at completion at the bottom, once (the lawn Fast Complete sheet offers one)', async () => {
+    const post = { title: 'Why Your St. Augustine Thins in Summer', url: 'https://www.wavespestcontrol.com/lawn-care/st-augustine-summer-thinning/' };
+    const { container } = renderReport({ ...lawnReportV2, blogPost: post });
+    await screen.findByText('Stable — watching thin areas');
+    expect(container.querySelectorAll('#from-the-blog')).toHaveLength(1);
+    expect(screen.getByRole('link', { name: post.title }).getAttribute('href')).toBe(post.url);
+  });
+
   it('the watering banner renders once, directly under the visit status card', async () => {
     const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
     const { container } = renderReport({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, banner } });
@@ -135,7 +145,7 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
   });
 });
 
-describe('ReportViewPage — lawn lead (GATE_LAWN_REPORT_LEAD)', () => {
+describe('ReportViewPage — lawn lead', () => {
   const lead = {
     headline: 'Stable, with thin areas to watch',
     why: 'The score is mainly pulled down by turf coverage.',
@@ -862,6 +872,115 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(within(plainProducts).queryByText('Pets & kids')).toBeNull();
   });
 
+  // Owner 2026-10-05: with approved report_copy the card says how it works,
+  // what the label covers and the pets rule, so the generic filler lines go.
+  it('hides "Why used today", "Safety & re-entry" and "Product note" when the product has report_copy, and shows them without it', async () => {
+    const fillerFacts = {
+      public_summary: 'A synthetic one-line product note.',
+      service_report_summary: 'A synthetic one-line product note.',
+      precaution_summary: 'Keep people and pets off treated areas until sprays have dried.',
+      reentry_summary: 'Re-enter once dry.',
+    };
+    const withCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    withCopy.applications = [withCopy.applications[0]];
+    Object.assign(withCopy.applications[0].product, fillerFacts, {
+      name: 'Taurus SC',
+      report_copy: {
+        how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+        also_labeled_for: 'Labeled for 25+ Bradenton pests',
+        pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+      },
+    });
+    const { container, unmount } = renderReport(withCopy);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('How it works')).toBeInTheDocument();
+    expect(within(card).queryByText('Why used today')).toBeNull();
+    expect(within(card).queryByText('Safety & re-entry')).toBeNull();
+    expect(within(card).queryByText('Product note')).toBeNull();
+    unmount();
+
+    const plain = JSON.parse(JSON.stringify(legacyLawnReport));
+    plain.applications = [plain.applications[0]];
+    Object.assign(plain.applications[0].product, fillerFacts, { name: 'Taurus SC' });
+    const { container: plainContainer } = renderReport(plain);
+    await screen.findByText('Visit Summary');
+    const plainCard = within(plainContainer.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(plainCard).getByText('Why used today')).toBeInTheDocument();
+    expect(within(plainCard).getByText('Safety & re-entry')).toBeInTheDocument();
+    expect(within(plainCard).getByText('Product note')).toBeInTheDocument();
+  });
+
+  it('keeps "Why used today" for an approved seasonal substitution even when the product has report_copy', async () => {
+    const swapped = JSON.parse(JSON.stringify(legacyLawnReport));
+    swapped.applications = [swapped.applications[0]];
+    swapped.applications[0].product.name = 'Taurus SC';
+    swapped.applications[0].product.report_copy = {
+      how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+      pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+    };
+    swapped.dynamicContext = {
+      ...(swapped.dynamicContext || {}),
+      lawnProtocol: { application: { substitutions: [{ substituteProductName: 'Taurus SC', originalProductName: 'Planned Product' }] } },
+    };
+    const { container } = renderReport(swapped);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('Why used today')).toBeInTheDocument();
+    expect(within(card).getByText(/approved seasonal equivalent/)).toBeInTheDocument();
+  });
+
+  // Owner 2026-10-05: "the areas treated needs to be removed from the report".
+  describe('treated areas on a pest report', () => {
+    const zones = [{ id: 'zone-a', label: 'Front perimeter' }, { id: 'zone-b', label: 'Kitchen' }];
+    const coverage = {
+      enabled: true,
+      title: 'Service Coverage',
+      items: [
+        { id: 'c1', areaName: 'Front perimeter', status: 'completed', customerDescription: 'Exterior perimeter service completed.' },
+        { id: 'c2', areaName: 'Kitchen', status: 'completed', customerDescription: 'Interior service completed.' },
+      ],
+      summary: { completedCount: 2 },
+    };
+    const application = {
+      id: 'app-pest-1',
+      product: { name: 'Taurus SC', epa_reg: '53883-279', active_ingredient: 'Fipronil 9.1%' },
+      method: 'broadcast_spray',
+      methodLabel: 'Broadcast spray',
+      zone_ids: ['zone-a'],
+      applicationArea: 'Front perimeter',
+      targets: ['German cockroaches'],
+      rate: '1.000',
+      rateUnit: 'fl_oz',
+    };
+    const pestWithAreas = (line) => ({
+      ...legacyLawnReport,
+      ...pestReportV2,
+      serviceLine: line,
+      applications: [application],
+      zones,
+      serviceCoverage: coverage,
+      dynamicContext: { reentry: { targets: [{ key: 'interior', label: 'Interior', readyAt: '2026-06-25T20:00:00.000Z' }] } },
+    });
+
+    it('prints no "Used in", no area count in "What Waves did today" and no areas Ask Waves suggestion', async () => {
+      const { container } = renderReport(pestWithAreas('pest'));
+      await screen.findByText('Today’s protection status');
+      expect(screen.queryByText('Used in')).toBeNull();
+      expect(container.textContent).not.toMatch(/areas? serviced/i);
+      expect(container.textContent).not.toMatch(/areas? completed/i);
+      expect(screen.queryByText('What areas were treated?')).toBeNull();
+      // The product card itself still renders.
+      expect(within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' })).toBeInTheDocument();
+    });
+
+    it('keeps the area wording on a non-pest line, whose zones are part of the work', async () => {
+      const { container } = renderReport({ ...legacyLawnReport, serviceLine: 'tree_shrub', applications: [application], zones, serviceCoverage: coverage, reportV2: null });
+      await screen.findByText('Visit Summary');
+      expect(within(container.querySelector('#products-applied')).getByText('Used in')).toBeInTheDocument();
+    });
+  });
+
   it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
     const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
     for (const payload of [
@@ -1096,6 +1215,9 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     expect(screen.getByText('Know someone who could use Waves?')).toBeInTheDocument();
     const crossSellCard = container.querySelector('[data-section="cross-sell"]');
     expect(crossSellCard.querySelector('h3')).toBeNull();
+    // Heading + one line above the button (owner 2026-10-05).
+    expect(within(crossSellCard).getByRole('heading', { level: 2, name: 'Want a quote for pest control?' })).toBeInTheDocument();
+    expect(within(crossSellCard).getByText('Tap below and we\'ll follow up with the details. Nothing is booked or charged.')).toBeInTheDocument();
     expect(crossSellCard.textContent).not.toContain('$114');
     // Cut copy stays cut: no eyebrows, no cadence line, no fine print.
     expect(screen.queryByText(/Complete your protection/i)).toBeNull();
@@ -1406,6 +1528,145 @@ describe('ReportViewPage — "Your upcoming visits" card title', () => {
   });
 });
 
+// Owner 2026-10-06: ONE "Your plan" section holding the member line, the
+// visits-completed line, the upcoming visits (each with a Reschedule link
+// when the server minted one) and the between-visits invitation.
+describe('ReportViewPage — merged "Your plan" + upcoming visits section (GATE_REPORT_PLAN_RESCHEDULE)', () => {
+  function mergedPayload() {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 3, reservicesThisYear: 0, tier: 'Gold' };
+    payload.reserviceEligible = true;
+    payload.upcomingVisitsCard = {
+      merged: true,
+      visits: [
+        { serviceType: 'Every 6 Weeks Lawn Care Service', scheduledDate: '2099-11-02', windowStart: '15:00:00', rescheduleUrl: 'https://wavespestcontrol.com/l/abc123' },
+        { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-12-01', windowStart: '09:00:00', rescheduleUrl: null },
+      ],
+    };
+    return payload;
+  }
+
+  it('gate off (no merged flag): two separate sections, no Reschedule button, today\'s markup', async () => {
+    const payload = mergedPayload();
+    delete payload.upcomingVisitsCard.merged;
+    payload.upcomingVisitsCard.visits.forEach((v) => { delete v.rescheduleUrl; });
+    const { container } = renderReport(payload);
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    const plan = container.querySelector('#your-plan');
+    expect(plan.getAttribute('data-section')).toBeNull();
+    expect(plan.querySelector('.plan-visit-row')).toBeNull();
+    expect(within(plan).queryByText('Dates and windows are subject to change')).toBeNull();
+    const card = container.querySelector('.report-card[data-section="upcoming-visits"]');
+    expect(card).not.toBeNull();
+    expect(card.querySelectorAll('.sr-cell')).toHaveLength(2);
+    expect(container.querySelectorAll('a.plan-visit-reschedule')).toHaveLength(0);
+  });
+
+  it('gate off with a rescheduleUrl in the payload still renders no button (merged flag is the switch)', async () => {
+    const payload = mergedPayload();
+    delete payload.upcomingVisitsCard.merged;
+    const { container } = renderReport(payload);
+    await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(container.querySelectorAll('a.plan-visit-reschedule')).toHaveLength(0);
+  });
+
+  it('shows one section in order: member line, completed line, visits, note, between-visits line', async () => {
+    const { container } = renderReport(mergedPayload());
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    expect(container.querySelectorAll('[data-section="upcoming-visits"]')).toHaveLength(1);
+    expect(screen.queryByRole('heading', { name: 'Your upcoming visits' })).toBeNull();
+    const section = container.querySelector('#your-plan');
+    expect(section.getAttribute('data-section')).toBe('upcoming-visits');
+    const text = section.textContent;
+    const order = [
+      "You're a WaveGuard Gold member.",
+      "We've completed 3 visits for you this year.",
+      'Every 6 Weeks Lawn Care',
+      'Quarterly Pest Control',
+      'Dates and windows are subject to change',
+      'Something come up between visits? Text us.',
+    ].map((part) => text.indexOf(part));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it('shows a Reschedule link only on the visit that carries a rescheduleUrl', async () => {
+    const { container } = renderReport(mergedPayload());
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    const links = within(section).getAllByRole('link', { name: /^Reschedule/ });
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://wavespestcontrol.com/l/abc123');
+    expect(links[0].closest('.plan-visit-row').textContent).toContain('Lawn Care');
+  });
+
+  it('plan with no upcoming visits keeps the plan-only section', async () => {
+    const payload = mergedPayload();
+    delete payload.upcomingVisitsCard;
+    const { container } = renderReport(payload);
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section.querySelector('.plan-visit-row')).toBeNull();
+    expect(within(section).queryByText('Dates and windows are subject to change')).toBeNull();
+  });
+
+  it('no plan summary but upcoming visits: neutral title, visits still listed with Reschedule', async () => {
+    const payload = mergedPayload();
+    delete payload.planSummary;
+    const { container } = renderReport(payload);
+    const heading = await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(container.querySelector('#your-plan')).toBeNull();
+    const section = heading.closest('[data-section="upcoming-visits"]');
+    expect(within(section).getAllByRole('link', { name: /^Reschedule/ })).toHaveLength(1);
+    expect(within(section).queryByText(/between visits/)).toBeNull();
+  });
+});
+
+// GATE_LAWN_REPORT_CLARITY: the server sends a lawn report's card with ONE visit,
+// or none; the page renders exactly what it is given.
+describe('ReportViewPage — lawn "Your plan" card with one visit or none (GATE_LAWN_REPORT_CLARITY)', () => {
+  function lawnPlanPayload(visits) {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 3, reservicesThisYear: 0, tier: 'Gold' };
+    payload.upcomingVisitsCard = { merged: true, visits };
+    // The report's cross-line next visit: a pest visit must not be named when the card is empty.
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-12-01', windowStart: '09:00:00' };
+    return payload;
+  }
+
+  it('one lawn visit: one row and its Reschedule button', async () => {
+    const { container } = renderReport(lawnPlanPayload([
+      { serviceType: 'Every 6 Weeks Lawn Care Service', scheduledDate: '2099-11-02', windowStart: '15:00:00', rescheduleUrl: 'https://wavespestcontrol.com/l/abc123' },
+    ]));
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section.querySelectorAll('.plan-visit-row')).toHaveLength(1);
+    expect(within(section).getAllByRole('link', { name: /^Reschedule/ })).toHaveLength(1);
+    expect(section.textContent).not.toContain('Pest');
+  });
+
+  it('no lawn visit: the plan section keeps its plan lines, no visit rows and no other line\'s next visit', async () => {
+    const { container } = renderReport(lawnPlanPayload([]));
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section.querySelector('.plan-visit-row')).toBeNull();
+    expect(within(section).queryByText('Dates and windows are subject to change')).toBeNull();
+    expect(section.textContent).toContain("We've completed 3 visits for you this year.");
+    expect(section.textContent).not.toMatch(/Your next .* visit is/);
+    expect(container.querySelector('.report-card[data-section="upcoming-visits"]')).toBeNull();
+  });
+
+  it('no lawn visit and no plan summary: neither the plan nor the upcoming-visits card shows', async () => {
+    const payload = lawnPlanPayload([]);
+    delete payload.planSummary;
+    const { container } = renderReport(payload);
+    await screen.findByText('Report Tools');
+    expect(container.querySelector('#your-plan')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Your upcoming visits' })).toBeNull();
+  });
+});
+
 // "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
 // re-service COUNTS for this year (never a price — prices only ever live on
 // estimate pages, and no "at no charge" money claim), live mode only.
@@ -1422,8 +1683,48 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     expect(section).not.toBeNull();
     expect(section.contains(heading)).toBe(true);
     expect(section.querySelector('.section-eyebrow')).toBeNull();
-    expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
+    expect(within(section).getByText("We've completed 4 visits for you this year, including 1 re-service.")).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
+  });
+
+  // Owner 2026-10-04: the bare count line "says nothing". The card also
+  // names the membership, the next visit and how to reach us between visits.
+  it('names the membership, the next visit and the between-visits line when the payload carries them', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    // The card reads the CURRENT tier sent with the counts, not the tier
+    // frozen on the visit (Codex P2 #5888).
+    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0, tier: 'Gold' };
+    payload.waveGuardTier = 'Bronze';
+    payload.reserviceEligible = true;
+    // The account-wide pick, not the property-scoped one (Codex P2 r2 #5888).
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-01-05', windowStart: null };
+    payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-03-02', windowStart: null };
+    const { container } = renderReport(payload);
+
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(within(section).getByText("You're a WaveGuard Gold member.")).toBeInTheDocument();
+    expect(within(section).getByText("We've completed 2 visits for you this year.")).toBeInTheDocument();
+    expect(within(section).getByText('Your next Quarterly Pest Control visit is Mon, Jan 5.')).toBeInTheDocument();
+    expect(within(section).getByText("Something come up between visits? Text us.")).toBeInTheDocument();
+    expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
+  });
+
+  it('leaves out a next visit that has passed, the membership line with no tier and the between-visits line for a customer who is not eligible', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0, tier: null };
+    payload.waveGuardTier = 'Bronze';
+    payload.reserviceEligible = false;
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2020-01-06', windowStart: null };
+    payload.nextSameServiceAppointment = null;
+    const { container } = renderReport(payload);
+
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(within(section).getByText("We've completed 2 visits for you this year.")).toBeInTheDocument();
+    expect(within(section).queryByText(/WaveGuard/)).toBeNull();
+    expect(within(section).queryByText(/next visit/i)).toBeNull();
+    expect(within(section).queryByText(/between visits/i)).toBeNull();
   });
 
   it('omits the re-service clause and keeps singular/plural correct when there are no re-services', async () => {
@@ -1433,7 +1734,7 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
 
     await screen.findByText('Your plan');
     const section = container.querySelector('#your-plan');
-    expect(within(section).getByText('This year: 1 visit')).toBeInTheDocument();
+    expect(within(section).getByText("We've completed 1 visit for you this year.")).toBeInTheDocument();
     // Scoped to this section — the page footer separately mentions
     // WaveGuard's free re-service perk, which is unrelated copy.
     expect(within(section).queryByText(/re-service/)).toBeNull();
@@ -1538,6 +1839,49 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
   it('a customer browser sends no Authorization header', async () => {
     const headers = await askAndReadHeaders();
     expect(headers).not.toHaveProperty('Authorization');
+  });
+});
+
+// Owner pick B (2026-10-03): on phones Ask Waves starts as the slim ask row
+// and opens to the full card on first tap; the tools keep their full names
+// as accessible names while phones show the short labels.
+describe('ReportViewPage — phone first screen (pick B)', () => {
+  it('Ask Waves starts slim and stays open after the first tap', async () => {
+    renderReport(structuredClone(pestReportV2));
+    const input = await screen.findByLabelText('Ask Waves about this service report');
+    const card = input.closest('.waves-ask-card');
+    expect(card).toHaveAttribute('data-report-ask-slim');
+    fireEvent.focus(input);
+    expect(card).not.toHaveAttribute('data-report-ask-slim');
+    fireEvent.blur(input);
+    expect(card).not.toHaveAttribute('data-report-ask-slim');
+  });
+
+  it('the phone report tools keep the 44px touch floor', () => {
+    const page = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/ReportViewPage.jsx'), 'utf8');
+    const block = page.match(/\.report-action-bar \.report-action-buttons > button \{([^}]*)\}/);
+    expect(block).not.toBeNull();
+    const [, px] = block[1].match(/min-height:\s*(\d+)px/);
+    expect(Number(px)).toBeGreaterThanOrEqual(44);
+  });
+
+  it('the slim ask row keeps the 44px touch floor on phones', () => {
+    const glassThemeCss = fs.readFileSync(path.resolve(process.cwd(), 'src/glass/glass-theme.css'), 'utf8');
+    const slim = glassThemeCss.split('\n').filter((line) => line.includes('[data-report-ask-slim]') && line.includes('min-height'));
+    expect(slim.length).toBeGreaterThan(0);
+    for (const line of slim) {
+      for (const [, px] of line.matchAll(/min-height:\s*(\d+)px/g)) expect(Number(px)).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  it('report tools keep their full names for screen readers', async () => {
+    renderReport(structuredClone(pestReportV2));
+    const tools = await screen.findByRole('region', { name: 'Report tools' });
+    // The fixture has no PDF yet, so Download PDF is the disabled button.
+    expect(within(tools).queryByRole('link', { name: 'Download PDF' })
+      || within(tools).getByRole('button', { name: 'Download PDF' })).toBeInTheDocument();
+    expect(within(tools).getByRole('link', { name: 'Portal Login' })).toBeInTheDocument();
+    expect(within(tools).getByText('PDF')).toHaveAttribute('aria-hidden', 'true');
   });
 });
 
@@ -1647,5 +1991,13 @@ describe('ReportViewPage — four-section report in the termite dashboard', () =
     expect(await screen.findByText('What we did and why')).toBeInTheDocument();
     expect(screen.getByText(/^Next visit: Termite Bait Station Monitoring · /)).toBeInTheDocument();
     expect(screen.queryByText('Next monitoring visit')).toBeNull();
+  });
+});
+
+describe('print (Codex r2 on #6088)', () => {
+  it('the per-visit Reschedule control is hidden when the live view is printed', async () => {
+    const { default: src } = await import('./ReportViewPage.jsx?raw');
+    const printBlocks = src.split('@media print').slice(1).map((b) => b.slice(0, 2500));
+    expect(printBlocks.some((b) => /\.plan-visit-reschedule\s*\{\s*display:\s*none;/.test(b))).toBe(true);
   });
 });

@@ -194,6 +194,34 @@ async function main() {
           body = { locations: [location] };
         else if (url.pathname === "/api/admin/gbp/updates")
           body = { updates: [] };
+        else if (url.pathname === "/api/admin/review-requests/tech-voice-drafts")
+          body = {
+            days: 14,
+            drafts: [
+              {
+                id: 1, customerName: "Taylor Example", step: 0, channel: "sms", outcome: "drafted", reason: null,
+                body: "It's Adam, thanks for waiting on me this morning. I flagged moisture under the kitchen sink. A Google review would really help: {review_url}",
+                sentences: [
+                  { sentence: "It's Adam, thanks for waiting on me this morning.", quotes: ["Are you coming? I need to go to work"], ask_only: false, greeting_only: false },
+                  { sentence: "I flagged moisture under the kitchen sink.", quotes: ["Moisture under the kitchen sink"], ask_only: false, greeting_only: false },
+                  { sentence: "A Google review would really help: {review_url}", quotes: [], ask_only: true, greeting_only: false },
+                ],
+                repeat: null, technicianName: "Adam", serviceType: "General Pest Control", serviceDate: "2026-09-10",
+                createdAt: "2026-09-10T15:00:00.000Z", sentAt: "2026-09-10T15:02:00.000Z",
+              },
+              {
+                id: 2, customerName: "Jordan Sample", step: 1, channel: "sms", outcome: "held", reason: "repeat",
+                body: "How are the ants doing since the visit? {review_url}", sentences: [],
+                repeat: { sentence: "How are the ants doing since the visit?", earlierQuote: "How are the ants doing", earlierStep: 0 },
+                createdAt: "2026-09-14T15:00:00.000Z", sentAt: null,
+              },
+              { id: 4, customerName: "Morgan Fixture", step: 2, channel: "email", outcome: "held", reason: "payment_hold_dropped", body: null, sentences: [], repeat: null, hold: { hold: "overdue_invoice", heldSince: "2026-09-11T14:00:00.000Z" }, createdAt: "2026-09-14T14:00:00.000Z", sentAt: null },
+              { id: 3, customerName: "Casey Demo", step: 1, channel: "sms", outcome: "fallback", reason: "fact_check_unavailable", body: null, sentences: [], repeat: null, createdAt: "2026-09-14T16:00:00.000Z" },
+            ],
+            paymentHolds: [
+              { sequenceId: "seq-9", customerName: "Riley Test", step: 1, channel: "sms", nextEvalAt: "2026-09-15T14:00:00.000Z", detail: { hold: "overdue_invoice", heldSince: "2026-09-14T14:00:00.000Z" } },
+            ],
+          };
         else if (url.pathname === "/api/admin/gbp/notifications")
           body = { preferences: { enabled: true, frequency: "realtime" } };
         if (body === undefined) {
@@ -275,6 +303,12 @@ async function main() {
       await page.getByRole("button", { name: "Requests", exact: true }).click();
       await page.getByText("Review Routing", { exact: true }).waitFor();
       await capture("outreach-dashboard");
+      await page.getByRole("button", { name: "Tech-voice texts", exact: true }).click();
+      await page.getByText("Held for payment", { exact: true }).waitFor();
+      await page.getByText(/from the record: "Moisture under the kitchen sink"/).waitFor();
+      await capture("tech-voice-texts");
+      await page.getByRole("button", { name: "Requests", exact: true }).click();
+      await page.getByText("Review Routing", { exact: true }).waitFor();
       await page
         .getByRole("button", { name: /Pipeline/ })
         .last()

@@ -507,7 +507,7 @@ describe('bellAllowed decision order', () => {
 
   test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
-    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['payment', 'payment_failed']]) {
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['schedule', 'reservice_self_booked'], ['payment', 'payment_failed']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
     }
     for (const [category, triggerKey] of [['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {

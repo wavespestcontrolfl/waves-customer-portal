@@ -10,6 +10,7 @@ const {
   withAccountPrimaryFallback,
   loadAccountPrimaryRow,
   withAccountPrimaryContact,
+  withAccountPrimaryContactStrict,
 } = require('../services/customer-contact');
 
 const primary = { id: 'p1', first_name: 'Lana', phone: '+15551110000', email: 'lana@example.com' };
@@ -88,5 +89,28 @@ describe('account-primary contact fallback', () => {
     expect(out.phone).toBe('+15551110000');
     expect(out.email).toBe('lana@example.com');
     expect(out.account_primary_fallback.fields).toEqual(['phone', 'email']);
+  });
+
+  test('a property profile carries the account primary\'s role apart from its own', async () => {
+    const managerPrimary = { ...primary, contact_role: 'property_manager' };
+    const sec = { id: 's1', account_id: 'a1', is_primary_profile: false, first_name: 'Lana', phone: '+1', email: 'x@example.com' };
+    expect(withAccountPrimaryFallback(sec, managerPrimary).account_contact_role).toBe('property_manager');
+    // The property row's own role (its contact is a tenant) stays as it is.
+    const own = withAccountPrimaryFallback({ ...sec, contact_role: 'tenant' }, managerPrimary);
+    expect(own).toMatchObject({ contact_role: 'tenant', account_contact_role: 'property_manager' });
+    expect(own.account_primary_fallback).toBeUndefined();
+
+    // Blank contact fields take the primary's, like withAccountPrimaryContact.
+    expect(await withAccountPrimaryContactStrict({ ...sec, phone: '', contact_role: 'tenant' }, { db: knexStub({ primaryRow: managerPrimary }) }))
+      .toMatchObject({ ...sec, phone: '+15551110000', contact_role: 'tenant', account_contact_role: 'property_manager' });
+    // A failed read throws: the report waits rather than reach an occupant.
+    await expect(withAccountPrimaryContactStrict(sec, { db: knexStub({ throwOnRead: true }) })).rejects.toThrow('boom');
+    // A linked property whose primary is gone (archived) is not authorized.
+    await expect(withAccountPrimaryContactStrict(sec, { db: knexStub({ primaryRow: null }) })).rejects.toThrow('account primary profile not found');
+    // A primary with no role resolves to '' (an owner account), never left unknown.
+    expect((await withAccountPrimaryContactStrict(sec, { db: knexStub() })).account_contact_role).toBe('');
+    // A primary row is never re-read.
+    const prim = { id: 'p1', account_id: 'a1', is_primary_profile: true };
+    expect(await withAccountPrimaryContactStrict(prim, { db: knexStub({ throwOnRead: true }) })).toBe(prim);
   });
 });

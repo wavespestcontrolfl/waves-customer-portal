@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary, reserviceCardView } from './ReportViewPage';
+import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -280,7 +280,16 @@ function reentryTargetLine(target) {
   return `${target.label}: ready once dry — your technician confirms timing`;
 }
 
+// The aftercare card's re-entry line for the printed record: only when something was applied, sanitized, and not
+// the very sentence the summary above already printed (a frozen lawn condition is both).
+function aftercareReentryLine(data, hasActualTreatment, reentrySummary) {
+  const line = hasActualTreatment ? sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) : '';
+  return line && line !== reentrySummary ? line : '';
+}
+
 function zoneNames(app, zones, serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS); other rows read the zones below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const byId = new Map((zones || []).map((zone) => [String(zone.id), zone]));
   const ids = Array.isArray(app.zone_ids) ? app.zone_ids : [];
   const names = ids.map((id) => byId.get(String(id))?.label).filter(Boolean);
@@ -429,11 +438,33 @@ export default function ServiceReportDocument({ data, token }) {
   // those blurbs — they over-diagnose — in favour of ONE consolidated,
   // guarded summary, so the document must not print them either (codex P1).
   const suppressPhotoCaption = (photo) => Boolean(data.reportV2) && String(photo.id || '').startsWith('lawn-');
-  const galleryPhotos = (data.photos || []).filter((photo) => photo && photo.url);
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a lawn visit with a photo set prints its
+  // photos as the labeled set, in the shot order and with the fixed customer
+  // labels the server sent, instead of the quality-ordered gallery. The set
+  // REPLACES the lawn turf photos in the gallery (`lawn-` ids, and the V2 strip
+  // copies of them below) so no photo prints twice; service photos, approved
+  // moments and the gauge shot stay. No photoSet = the gallery as it always was.
+  const photoSetPhotos = (Array.isArray(data.reportV2?.photoSet) ? data.reportV2.photoSet : [])
+    .filter((photo) => photo && photo.url)
+    .map((photo, i) => ({ id: `set-${i}`, url: photo.url, caption: photo.label || '', isMoment: true }));
+  const hasPhotoSet = photoSetPhotos.length > 0;
+  // "What the photos showed": the reviewed findings with their thumbnails, only
+  // where a set renders. The thumbnails are photos of the set; a thumbnail that
+  // fails to load drops itself like any gallery photo (and is counted by the
+  // same failure counter).
+  const photoFindings = hasPhotoSet && Array.isArray(data.reportV2?.photoFindings)
+    ? data.reportV2.photoFindings
+      .filter((f) => f && typeof f.label === 'string' && f.label)
+      .map((f) => ({ ...f, photos: (Array.isArray(f.photos) ? f.photos : []).filter((p) => p && p.url && !failedImages.has(p.url)) }))
+    : [];
+  const galleryPhotos = (data.photos || [])
+    .filter((photo) => photo && photo.url)
+    .filter((photo) => !(hasPhotoSet && String(photo.id || '').startsWith('lawn-')));
   // Tree/shrub evidence is captured in tree_shrub_assessment_photos, exposed
   // as reportV2.photos — never in data.photos — so the gallery was empty on
   // those visits (codex P1 r3). De-duped by url against the main gallery.
   const v2AssessmentPhotos = (Array.isArray(data.reportV2?.photos) ? data.reportV2.photos : [])
+    .filter(() => !hasPhotoSet)
     .filter((photo) => photo && (photo.url || photo.imageUrl))
     .map((photo) => ({
       id: photo.id ? `v2-${photo.id}` : `v2-${photo.url || photo.imageUrl}`,
@@ -468,7 +499,7 @@ export default function ServiceReportDocument({ data, token }) {
   // is permanently gone. Instead the frame stays with an explicit
   // unavailable note pointing at the online report, so the artifact is honest
   // and always available.
-  const photos = [...galleryPhotos, ...v2AssessmentPhotos, ...momentPhotos, ...gaugePhoto]
+  const photos = [...galleryPhotos, ...photoSetPhotos, ...v2AssessmentPhotos, ...momentPhotos, ...gaugePhoto]
     .filter((photo, i, all) => all.findIndex((other) => other.url === photo.url) === i)
     .map((photo) => (failedImages.has(photo.url) ? { ...photo, unavailable: true } : photo));
   const tracedMapRaw = data.treatmentMap?.traced?.snapshotUrl || null;
@@ -499,7 +530,12 @@ export default function ServiceReportDocument({ data, token }) {
   // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31): the whole pest line —
   // recurring, one-time, re-service — prints a traced map or nothing; the
   // '-ton1' PDF key suffix re-renders cached pest documents once.
-  const schematicSuppressed = callbackSchematicSuppressed || data.pestTraceOrNothing === true;
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES: a lawn visit whose coverage verdict,
+  // frozen at completion, says the zones were only schematic defaults prints no
+  // generated map or A-D legend either (the server sets lawnCoverageHidden; the
+  // ':covhide=1' PDF key stamp re-keys cached PDFs). A real traced map still prints.
+  const schematicSuppressed = callbackSchematicSuppressed || data.pestTraceOrNothing === true
+    || data.lawnCoverageHidden === true;
   const schematicSvg = schematicSuppressed
     ? null
     : (data.treatmentMap?.schematic?.svg || data.mapSvg || null);
@@ -612,7 +648,11 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
+  // The lawn Visit Summary (summarySource 'lawn_visit_summary') is fixed sentences written by
+  // code, vetted as a whole and never contradicting the watch items, so the PDF prints ALL of
+  // it. The reconciled todaysResult is only its first sentence and must not replace it.
+  const frozenVisitSummary = data.summarySource === 'lawn_visit_summary' && typeof data.summary === 'string' ? data.summary.trim() : '';
+  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (frozenVisitSummary || reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   // The four-section report carries its own "What to expect": the separate
@@ -673,10 +713,18 @@ export default function ServiceReportDocument({ data, token }) {
   const termiteV2 = suppressProgramDashboards ? null : (data.termiteReportV2 || null);
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
-  // GATE_LAWN_REPORT_LEAD: only lawn payloads ever carry `lead` (the server
+  // Only lawn payloads ever carry `lead` (the server
   // derives it for lawn alone); tree & shrub is excluded here too, so it
   // prints exactly as before.
   const v2Lead = v2 && v2.lead && typeof v2.lead === 'object' && data.serviceLine !== 'tree_shrub' ? v2.lead : null;
+  // GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the frozen "From your technician"
+  // paragraph. Lawn carries it in the lead; tree & shrub has no lead and carries it
+  // as reportV2.techParagraph. Absent key prints nothing.
+  const techParagraph = v2Lead?.techParagraph
+    || (data.serviceLine === 'tree_shrub' && typeof v2?.techParagraph === 'string' && v2.techParagraph.trim() ? v2.techParagraph : null);
+  // The lawn V2 payload's reconciled watering lines are the only watering
+  // instruction the report prints (see the Re-entry block below).
+  const lawnV2Watering = data.serviceLine === 'lawn' && Boolean(v2);
 
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
@@ -684,7 +732,7 @@ export default function ServiceReportDocument({ data, token }) {
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
-        // The lead's headline when it has one: under GATE_LAWN_REPORT_COPY_V6
+        // The lead's headline when it has one: with the v6 copy
         // that is the FROZEN headline the live report replays, which a later
         // assessment correction must not make the PDF contradict. Without the
         // v6 copy the lead headline is this same statusHeadline (or null).
@@ -803,7 +851,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stripped sentence by sentence: the banner composes a plan sentence onto a
   // frozen line (partial credit), so the frozen sentence alone must go too.
   const bannerSentences = hasActualTreatment
-    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    && ['hold', 'water_in', 'hold_then_water_in', 'water_in_by_rain'].includes(data.reportV2?.banner?.state)
     ? (data.reportV2.banner.lines || [])
       .filter((line) => typeof line === 'string' && line)
       .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
@@ -841,7 +889,10 @@ export default function ServiceReportDocument({ data, token }) {
   // document was dropping entirely.
   // ⛔ customerDescription ONLY — items also carry internalDescription,
   // which is staff copy and must never egress (same rule as technician_notes).
-  const coverageItems = (data.serviceCoverage?.enabled !== false
+  // A pest report names no treated areas (owner 2026-10-05, same rule as the
+  // web report): no "Areas serviced" section and no per-product areas line.
+  const hideAreas = hidesTreatedAreas(data);
+  const coverageItems = (data.serviceCoverage?.enabled !== false && !hideAreas
     ? (data.serviceCoverage?.items || []) : [])
     .filter((item) => item && item.areaName);
   const coverageSummary = data.serviceCoverage?.summary || null;
@@ -883,8 +934,24 @@ export default function ServiceReportDocument({ data, token }) {
   // A finding that carries structured content (detail or recommendation)
   // came from the findings pipeline; a bare title did not. Fail closed on
   // the bare titles — AGENTS.md: raw technician_notes never egress.
+  // A clean-visit "No ... observed this visit" row is dropped when the payload
+  // carries any finding, watch item or stress pattern. Lawn and tree & shrub
+  // share the reportV2 slot, so every status the V2 builders emit counts except
+  // the clear ones (healthy / strong / stable / good / tracking / unknown):
+  // watch, needs_attention and urgent. Same idea as the server's
+  // todays_result_overclaims_clear reconciliation, plus any other recorded finding.
+  // Only lawn and tree & shrub: their no_activity row speaks for the whole visit.
+  // A pest report's no_activity rows are per zone ("no entry points in the
+  // garage") and stand beside activity elsewhere.
+  const V2_CLEAR_STATUSES = ['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''];
+  const v2IssueStatus = (status) => !V2_CLEAR_STATUSES.includes(String(status || '').toLowerCase());
+  const wholeVisitLine = data.serviceLine === 'lawn' || data.serviceLine === 'tree_shrub';
+  const issueRecorded = wholeVisitLine && ((Array.isArray(data.findings) ? data.findings : []).some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
+    || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && v2IssueStatus(i.status))
+    || v2IssueStatus(v2?.snapshot?.status));
   const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
     .filter((finding) => finding && String(finding.title || '').trim())
+    .filter((finding) => !(issueRecorded && finding.category === 'no_activity'))
     .filter((finding) => String(finding.detail || '').trim() || String(finding.recommendation || '').trim());
   // Combined-service visits carry companion sections. internalOnly ones are
   // STAFF-ONLY and must never print — the same rule the web report's print
@@ -1051,6 +1118,17 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the same frozen paragraph the
+            web report prints under "What we applied today", word for word
+            (lead.techParagraph for lawn, reportV2.techParagraph for tree & shrub).
+            Absent key prints nothing. */}
+        {techParagraph ? (
+          <div className="doc-keep">
+            <SectionHeader>From your technician</SectionHeader>
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{techParagraph}</p>
+          </div>
+        ) : null}
+
         {/* Re-service card: the customer's booking words (frozen at completion,
             scrubbed server-side; quote marks only for verbatim words) and the
             performed-visit summary. The web page's "Still seeing…" button has
@@ -1100,19 +1178,9 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
-            pestV2.expectations is built server-side (pest-report-v2.js) with
-            forecastHeavyRain always false for this render (mode !== 'live'
-            in reports-public.js) — the NWS forecast piece never reaches a
-            permanent PDF; everything here is already PDF-safe as delivered. */}
-        {pestV2?.expectations?.rain?.lines?.length > 0 && (
-          <div className="doc-keep">
-            <SectionHeader>Rain and your treatment</SectionHeader>
-            {pestV2.expectations.rain.lines.map((line) => (
-              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
-            ))}
-          </div>
-        )}
+        {/* Spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) and
+            is already PDF-safe as delivered. */}
         {pestV2?.expectations?.spiders?.expectation && (
           <div className="doc-keep">
             <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
@@ -1165,7 +1233,7 @@ export default function ServiceReportDocument({ data, token }) {
                 {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
               </Bullet>
             )}
-            {/* GATE_LAWN_REPORT_COPY_V6: the approved expectation sentences the web
+            {/* Lawn v6 copy: the approved expectation sentences the web
                 lead prints. Its headline is the Overall line above, and its
                 watching line names insights this list already prints in full. */}
             {v2Lead?.whatToExpect ? (
@@ -1301,11 +1369,16 @@ export default function ServiceReportDocument({ data, token }) {
             {sanitizeReentryCopy(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
               <Bullet>{sanitizeReentryCopy(reentry?.petAdvisory || data.advisory?.pet_advisory)}</Bullet>
             )}
-            {reentry?.irrigationReadyAt && (
+            {/* A lawn report with the V2 payload gets its watering from the reconciled
+                banner / aftercare / lead (the web report prints no hold line from
+                this raw product-advisory timer), so it is withheld here too. */}
+            {reentry?.irrigationReadyAt && !lawnV2Watering && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
-              <Bullet>{sanitizeReentryCopy(data.reportV2.aftercare.reentry)}</Bullet>
+            {/* A frozen lawn re-entry condition (GATE_LAWN_REPORT_FACTS) is the summary above AND the aftercare line:
+                one sentence, printed once. */}
+            {aftercareReentryLine(data, hasActualTreatment, reentrySummary) && (
+              <Bullet>{aftercareReentryLine(data, hasActualTreatment, reentrySummary)}</Bullet>
             )}
           </div>
         )}
@@ -1372,10 +1445,16 @@ export default function ServiceReportDocument({ data, token }) {
                           <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
                             {product.active_ingredient && <div><strong style={{ color: INK, fontWeight: 600 }}>Active ingredient:</strong> {product.active_ingredient}</div>}
                             {app.methodLabel && <div><strong style={{ color: INK, fontWeight: 600 }}>Method:</strong> {app.methodLabel}</div>}
-                            {Array.isArray(app.targets) && app.targets.length > 0 && (
+                            {/* A pest product prints no per-product Target (the
+                                label line on the web card replaces the
+                                three-pest list) and no Areas line (owner
+                                2026-10-05). Other lines keep both. */}
+                            {!hideAreas && Array.isArray(app.targets) && app.targets.length > 0 && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Target:</strong> {app.targets.join(', ')}</div>
                             )}
-                            <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+                            {!hideAreas && (
+                              <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+                            )}
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
@@ -1664,6 +1743,33 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {photoFindings.length > 0 && (
+          <div className="doc-keep" data-testid="doc-photo-findings">
+            <SectionHeader>What the photos showed</SectionHeader>
+            {photoFindings.map((finding, i) => (
+              <div key={i} style={{ margin: '0 0 8px' }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: INK }}>{finding.label}</div>
+                {finding.photos.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                    {finding.photos.map((photo, j) => (
+                      <figure key={j} style={{ margin: 0, width: 90 }}>
+                        <img
+                          src={photo.url}
+                          alt={photo.label ? `${finding.label}: ${photo.label}` : finding.label}
+                          onError={() => markImageFailed(photo.url)}
+                          style={{ display: 'block', width: 90, height: 90, objectFit: 'cover', borderRadius: 8, border: `1px solid ${HAIR}` }}
+                        />
+                        {photo.label && <figcaption style={{ fontSize: 9.5, color: MUTED, lineHeight: 1.4, marginTop: 2 }}>{photo.label}</figcaption>}
+                      </figure>
+                    ))}
+                  </div>
+                )}
+                {finding.confirm && <p style={{ margin: '4px 0 0', fontSize: 11, lineHeight: 1.5, color: INK }}>{finding.confirm}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+
         {visitHistory.length > 0 && (
           <div className="doc-keep">
             <SectionHeader>{data.typedVisitTimeline.label ? `${data.typedVisitTimeline.label} — visit history` : 'Visit history'}</SectionHeader>
@@ -1770,7 +1876,9 @@ export default function ServiceReportDocument({ data, token }) {
                 non-live render, precisely so a reschedule can't fossilize a
                 stale appointment in a cached PDF. Rendering it here was dead
                 code that only ever appeared in a direct component test. */}
-            {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
+            {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
+                the pest program's re-service wording, so a lawn report prints nothing here. */}
+            {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />
             Full interactive report:{' '}

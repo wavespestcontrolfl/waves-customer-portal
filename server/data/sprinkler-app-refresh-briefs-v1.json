@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "set": "sprinkler-app-refresh-v1",
+  "owner": "adam",
+  "notes": "Sprinkler timer phone-app refreshes (owner 2026-10-06: the app setup content ships as REFRESHES of the live Rain Bird and Hunter timer posts, not a new post, because those posts own the brand entities — topic-targeting ruling 2026-08-27). Global rules for both briefs: (1) REFRESH = ADD ONLY. Keep every existing section, heading, numbered step, table, link, FAQ entry and sentence of the live post exactly as it is, and add the one new section the outline names (plus the one FAQ edit the outline allows). These posts went through many review rounds; rewording an existing control step, plan rule or caveat is a defect. Do not change the title or meta description. (2) The new section covers phone-app control only and is CONTROLS ONLY: when and how much always come from the post's existing plan and watering-rules sections — point to them, never restate or contradict them. Never write 'once a week', never say a skip means do nothing, never state allowed days, weekdays or hours, and mention the plan only as 'the weekly watering plan Waves lawn customers receive' or 'your plan'. (3) A run started from the app counts the same as any other run — say so in one sentence. (4) Every app or module mechanic must come from the brief's mechanics source; if the source does not state a step, OMIT it; never invent a screen, button or menu name. (5) Waves does not install, set up Wi-Fi on, configure, or repair irrigation or controllers; module or app trouble goes to the manufacturer's support, hardware trouble to an irrigation contractor. (6) No prices (say 'sold separately' and 'check current pricing'), no 'safe' language, no water-saving percentages or promises, no manufacturer imagery or app screenshots, no cross-brand ranking. (7) Any controller-wide pause (app delay, OFF, SYSTEM OFF) stops every zone, beds and drip included — say so wherever one appears. (8) The plan's minutes are turf-only; never apply them to bed or drip zones or prescribe a relative duration for those zones. (9) Author is Adam Benetti; do not invent work history or years of experience. (10) Rain Bird and Hunter are irrigation equipment manufacturers, not pest-control competitors: the COMPETITOR FACTS rule does not apply to them, and their manuals and support pages are linked as the manufacturer's authority, as the live posts already do.",
+  "cta_codes": {
+    "CONTACT": "contact page /contact/ (relative on-site link) — lawn has no calculator flow"
+  },
+  "briefs": [
+    {
+      "id": "SAR1",
+      "cluster": "SAR",
+      "action": "refresh_existing_page",
+      "page_url": "https://www.wavespestcontrol.com/lawn-care/rain-bird-sprinkler-timer-guide/",
+      "working_title": "Rain Bird Sprinkler Timers: How to Run Yours by Hand",
+      "primary_kw": "rain bird sprinkler timer",
+      "secondary_kws": [
+        "rain bird app setup",
+        "rain bird lnk2 wifi module setup"
+      ],
+      "intent": "add-only refresh",
+      "window": "immediate",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage",
+        "BreadcrumbList"
+      ],
+      "thesis": "A Rain Bird dial timer runs fine by hand from the dial, and the same runs can be started from the Rain Bird app once the LNK2 Wi-Fi module, sold separately, is added — with the controller left in its automatic position and the grass program's start times cleared, and with the weekly plan still setting how many runs and how long. Keep the live title unchanged; this thesis only adds the phone-app section.",
+      "sources": [
+        "https://rainbird.com/media/4145"
+      ],
+      "source_notes": [
+        "MECHANICS SOURCE, binding: Rain Bird's LNK2 WiFi Module User Guide (rainbird.com/media/4145, a fetchable PDF). It states: LNK2 is compatible with ESP-TM2, ESP-RZXe, ESP-ME3 and ESP-ME controllers manufactured after November 2, 2016, which carry the 'LNK Ready' Wi-Fi symbol on the front panel; the network must be 2.4 GHz, not 5 GHz; setup is (1) download the Rain Bird app, (2) open the controller front panel and insert the LNK2 into the accessory slot, where it starts blinking blue, (3) in the app select Add Controller (bottom left) and follow the setup wizard, with the Wi-Fi network name, Wi-Fi password, email address and ZIP code ready; the app has Manually Water Zone, a Manual Water Delay of up to 14 days, an Edit Program screen holding Seasonal Adjust, and a Wi-Fi tab whose signal reading in the -70s, -80s or -90s means a signal booster is needed; holding the module's button more than five seconds resets its Wi-Fi settings to factory default, and the guide says watering schedules are retained. Do not add any app screen, button or step the guide does not state."
+      ],
+      "internal_links": [],
+      "outline": [
+        "KEEP the whole live post exactly as it is — every section, step, table, caveat, link and FAQ entry. This refresh only adds the section below and edits the one FAQ answer named below.",
+        "ADD one H2 section titled 'Running it from your phone', placed immediately before the 'Watering habits that keep pests out of your turf' section. Content, CONTROLS ONLY: (a) the LNK2 module is sold separately and fits the ESP-TM2, ESP-Me3, ESP-Me and ESP-RZXe made after November 2, 2016 that show the 'LNK Ready' Wi-Fi symbol; (b) it needs a 2.4 GHz network, so check the band and the signal at the controller first; (c) the three setup steps from the user guide; (d) for each run your plan asks for, use Manually Water Zone for each grass zone with the plan's minutes — or, when the plan gives a full cycle by events instead of minutes, follow the plan's own wording and do not type a number it did not give — and do the post's rain check before each run; leave bed and drip zones out of the lawn run; (e) on the dial models (ESP-TM2, ESP-Me, ESP-Me3) keep the dial on AUTO while using the app, because Rain Bird's manuals say nothing waters with the dial on OFF, and therefore clear the grass program's start times first as the post's start-time check describes, keeping any bed or drip program's start times; the ESP-RZXe has buttons rather than a dial, so tell RZXe owners to check its manual from the Rain Bird support center for the setting the app needs; (f) keep Seasonal Adjust at 100% in the app's Edit Program screen when following exact minutes, and check before each run that the app shows the plan's minutes; (g) the app's delay of up to 14 days pauses every zone, beds and drip included — in a mixed yard skip only the lawn run; (h) for a house where the module was already set up, holding the module's button more than five seconds resets its Wi-Fi settings and keeps the watering schedules. Keep the section short: about 150 to 250 words, a short numbered list for the setup steps, prose for the rest.",
+        "EDIT only the FAQ answer to 'Do I need the Wi-Fi module?': keep 'No' and its existing reasons, and add one sentence pointing to the new 'Running it from your phone' section for readers who want phone control."
+      ],
+      "verify_notes": [
+        "Diff check: apart from the new section and the one FAQ sentence, the refreshed body must match the live body. Any change to an existing step, caveat, table cell or link is a defect.",
+        "Every LNK2 or app step must be stated in the LNK2 WiFi Module User Guide. Do not state whether an app-started run works with the dial on OFF.",
+        "Wherever the new section tells a reader to keep the dial on AUTO, it must carry the instruction to clear the grass program's start times first while keeping bed and drip start times.",
+        "Do not call the ESP-RZXe a dial timer or tell its owner to use a dial.",
+        "The app delay pauses every zone; say so where it appears and give the mixed-yard alternative.",
+        "No prices, no water-saving claims, no 'safe' language, no weekday, day count or hours."
+      ]
+    },
+    {
+      "id": "SAR2",
+      "cluster": "SAR",
+      "action": "refresh_existing_page",
+      "page_url": "https://www.wavespestcontrol.com/lawn-care/hunter-sprinkler-timer-guide/",
+      "working_title": "Hunter Sprinkler Timer Guide: Run Yours by Hand in SWFL",
+      "primary_kw": "hunter sprinkler timer",
+      "secondary_kws": [
+        "hunter hydrawise app setup",
+        "hunter x2 wand setup"
+      ],
+      "intent": "add-only refresh",
+      "window": "immediate",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "HowTo",
+        "FAQPage",
+        "BreadcrumbList"
+      ],
+      "thesis": "A Hunter dial timer runs fine by hand, and Hydrawise timers — plus an X2 with Hunter's WAND module, sold separately — can be run from the Hydrawise app; on an X2 with the WAND, Hydrawise takes over the schedule and the dial must stay on RUN, while the weekly plan still sets how many runs and how long. Keep the live title unchanged; this thesis only adds the phone-app section.",
+      "sources": [
+        "https://www.hunterirrigation.com/support/x2tm-wand-support"
+      ],
+      "source_notes": [
+        "MECHANICS SOURCE, binding: Hunter's site returns 403 to automated requests, so these facts from Hunter's X2 with WAND quick start guide are the ONLY Hunter app facts the new section may state: Hunter sells the WAND module for the X2; it plugs into the X2 after removing the X2's Wi-Fi cover; the WAND's serial number is entered when adding the controller to a Hydrawise account in the Hydrawise app; Hunter says to check Wi-Fi signal strength at the controller with a phone first, because a poor signal will not connect, and publishes its Wi-Fi requirements at hunter.help/wifispecs; with the WAND installed, the X2's dial and button functions, its existing schedule and its settings are disabled and Hydrawise takes over, though manual Start/Stop Station and Test All Stations still work at the controller; the dial must stay on RUN or the X2 will not operate remotely. Link the hunterirrigation.com X2 with WAND support page as the manufacturer's authority. Do not describe any Hydrawise screen, menu or feature by name, and do not state whether any other Hunter model can be upgraded to Wi-Fi."
+      ],
+      "internal_links": [],
+      "outline": [
+        "KEEP the whole live post exactly as it is — every section, step, table, caveat, link and FAQ entry. This refresh only adds the section below.",
+        "ADD one H2 section titled 'Running it from your phone', placed immediately before the 'The watering rules that apply either way' section. Content, CONTROLS ONLY: (a) Hydrawise timers (HC, Pro-HC, HPC) already work with the Hydrawise app — point to the post's existing Hydrawise section for running grass zones; (b) the X2 can join the app once Hunter's WAND module, sold separately, is plugged in; the X-Core and Pro-C stay with the post's hand-run steps; (c) the WAND setup facts from the mechanics source: check the signal at the controller first, plug the WAND in under the Wi-Fi cover, enter its serial number when adding the controller in the Hydrawise app; (d) the two changes on an X2 with the WAND: Hydrawise takes over the schedule and settings, so set grass runs in the app rather than at the dial (manual Start/Stop Station and Test All Stations still work at the box), and the dial must stay on RUN — so the post's SYSTEM OFF resting position and its dial programming steps do not apply to a WAND timer; (e) once the X2 is in Hydrawise, run grass zones the same way the post's existing Hydrawise section describes. Keep the section short: about 120 to 200 words."
+      ],
+      "verify_notes": [
+        "Diff check: apart from the new section, the refreshed body must match the live body. Any change to an existing step, caveat, table cell or link is a defect.",
+        "Hunter facts are LIMITED to the mechanics source list. Any other Hydrawise screen, menu or feature name, or any Hunter compatibility claim beyond 'Hunter sells the WAND for the X2', is a defect.",
+        "Never tell a WAND reader to rest the dial on SYSTEM OFF or to program Run Times or Start Times at the dial.",
+        "No prices, no water-saving claims, no 'safe' language, no weekday, day count or hours."
+      ]
+    }
+  ]
+}

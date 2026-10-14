@@ -1,4 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
+jest.mock('../services/package-followup-booking', () => ({ mirrorPrimaryAddressOntoPackageChildren: jest.fn().mockResolvedValue() }));
 
 const {
   parseEstimateAddress,
@@ -229,5 +231,77 @@ describe('ensureEstimateGroupId', () => {
     await expect(
       ensureEstimateGroupId(trx2, ANCHOR_ID, { customer_id: null, customer_phone: '9415559999', customer_email: 'other@example.com' }, () => MINTED),
     ).rejects.toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe('round 7: multiHomeFlipPending (the flip the Intelligence Bar card lists and pins)', () => {
+  const { multiHomeFlipPending } = require('../services/estimate-property-linkage');
+  const fakeDb = ({ count, flag }) => (table) => {
+    const q = {};
+    q.where = () => q;
+    q.count = async () => [{ count }];
+    q.first = async () => (table === 'customers' ? { has_multi_home: flag } : null);
+    return q;
+  };
+  afterEach(() => { delete process.env.GATE_CUSTOMER_PROPERTIES; });
+
+  test('true only with the gate on, two active properties and the flag still off', async () => {
+    process.env.GATE_CUSTOMER_PROPERTIES = 'true';
+    expect(await multiHomeFlipPending(fakeDb({ count: '2', flag: false }), 'cust-1')).toBe(true);
+    expect(await multiHomeFlipPending(fakeDb({ count: '1', flag: false }), 'cust-1')).toBe(false);
+    expect(await multiHomeFlipPending(fakeDb({ count: '2', flag: true }), 'cust-1')).toBe(false);
+  });
+
+  test('false with the gate off (the accept does not refresh the flag then)', async () => {
+    expect(await multiHomeFlipPending(fakeDb({ count: '2', flag: false }), 'cust-1')).toBe(false);
+  });
+});
+
+describe('round 8: approvedServiceIds (the card path touches no visit linked after approval)', () => {
+  const logger = require('../services/logger');
+  const { linkAcceptedEstimateProperty } = require('../services/estimate-property-linkage');
+
+  // Gate off, grouped estimate at an address that is not the primary: the path that stamps the
+  // estimate's visits. The fake records every scheduled_services query.
+  function fakeDb({ strays = [] } = {}) {
+    const log = [];
+    const database = (table) => {
+      const q = { table, calls: [] };
+      const rec = (name) => (...args) => { q.calls.push([name, ...args]); return q; };
+      for (const m of ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereIn', 'orderBy']) q[m] = rec(m);
+      q.modify = (fn) => { fn(q); return q; };
+      q.select = rec('select');
+      q.first = async () => {
+        if (table === 'estimates') return { source: 'admin', estimate_group_id: 'group-1', address: '123 Main St, Bradenton, FL 34205', property_id: null };
+        if (table === 'customers') return { address_line1: '9 Other Rd', city: 'Venice', zip: '34285' };
+        return null;
+      };
+      q.update = async (patch) => { log.push({ table, op: 'update', patch, calls: q.calls }); return 1; };
+      q.then = (resolve, reject) => {
+        log.push({ table, op: 'read', calls: q.calls });
+        return Promise.resolve(table === 'scheduled_services' ? strays : []).then(resolve, reject);
+      };
+      return q;
+    };
+    database.transaction = async (fn) => fn(database);
+    return { database, log };
+  }
+  const idScopes = (log) => log.filter((e) => e.op === 'update').map((e) => e.calls.filter((c) => c[0] === 'whereIn' && c[1] === 'id').map((c) => c[2]));
+  beforeEach(() => { logger.warn.mockClear(); });
+
+  test('with an approved (empty) set every visit update is scoped to those ids, and a visit linked since is logged target_changed', async () => {
+    const { database, log } = fakeDb({ strays: [{ id: 'late-visit' }] });
+    await linkAcceptedEstimateProperty({ estimateId: 'est-1', customerId: 'cust-1', database, approvedServiceIds: [] });
+    const scopes = idScopes(log);
+    expect(scopes.length).toBeGreaterThan(0);
+    expect(scopes.every((s) => s.length === 1 && Array.isArray(s[0]) && s[0].length === 0)).toBe(true);
+    expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('target_changed') && String(c[0]).includes('late-visit'))).toBe(true);
+  });
+
+  test('without the param nothing changes: no id scope and no stray check', async () => {
+    const { database, log } = fakeDb({ strays: [{ id: 'late-visit' }] });
+    await linkAcceptedEstimateProperty({ estimateId: 'est-1', customerId: 'cust-1', database });
+    expect(idScopes(log).every((s) => s.length === 0)).toBe(true);
+    expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('target_changed'))).toBe(false);
   });
 });

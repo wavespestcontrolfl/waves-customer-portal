@@ -47,7 +47,7 @@ const { normalizeSpanishSpokenText } = require('./voice-relay-spanish-numbers');
 // Same provider-usage normaliser the LLM call ledger uses (input/output/cache
 // read/cache write token columns) — reused here, not duplicated, purely for
 // its field shape; nothing here reads or writes llm_dispatch_log. Sandy's own
-// model calls never go through that ledger (see CLAUDE.md's Voice relay
+// model calls never go through that ledger (see docs/gates-and-env.md's Voice relay
 // entry), so this is the only place a replay's real token usage is captured.
 const { extractUsage } = require('../llm-dispatch-metrics');
 

@@ -32,11 +32,12 @@ const { anthropicText, geminiText } = require('./llm/call');
 // the published customer_summary (the output is scrubbed again at the public route).
 const { safeConditionLabel, scrubCustomerText, NO_VISIBLE_STRESS_FINDING } = require('./lawn-diagnostic-report');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
+const { ISSUE_ROWS } = require('../config/lawn-expectations');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const PROMPT_VERSION = 'lawn-diagnostic-v0.6';
+const PROMPT_VERSION = 'lawn-diagnostic-v0.7';
 const MAX_PROMPT_IMAGES = 5;
 
 // ── Multi-model pipeline config (env-overridable, no new SDK deps) ─────────────
@@ -54,6 +55,25 @@ const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 // Dedicated writer override — deliberately NOT chained through the global OPENAI_MODEL
 // (which other services default to a mini tier), so the lawn writer stays GPT-5.5.
 const LAWN_WRITER_MODEL = process.env.LAWN_WRITER_MODEL || 'gpt-5.5';
+
+// ── RESULT TIMING, generated from the owner-approved expectation rows ──────────
+// One source of timing truth (lawn report rebuild P16, owner 2026-10-03): only a
+// row whose window is sourced from a product label or a species-catalog
+// recovery note ('label' | 'catalog') reaches this prompt, and its customer
+// sentence is printed word for word. A prospect has had no product applied, so
+// only the condition (issue) rows apply. A day or week count that no row carries
+// (the old "weeds ~10-14 days", "color ~2-3 weeks" lines) is not stated at all.
+const SOURCED_WINDOW = new Set(['label', 'catalog']);
+function buildResultTimingBlock(issueRows = ISSUE_ROWS) {
+  const lines = Object.values(issueRows)
+    .filter((row) => row && row.approved && row.visibleChange
+      && Object.values(row.windows || {}).some((w) => w && SOURCED_WINDOW.has(w.source)))
+    .map((row) => `- ${row.appliesTo.charAt(0).toUpperCase()}${row.appliesTo.slice(1)}: ${row.visibleChange}`);
+  return `## RESULT TIMING (only these sourced timelines; use them in these words)
+${lines.join('\n')}
+- Anything not listed above (weeds, insects, feeding, iron, fungicide): state no timeline.`;
+}
+const RESULT_TIMING_BLOCK = buildResultTimingBlock();
 
 // ── Curated SWFL St. Augustine reference (selection menu, not free-write) ──────
 const CURATED_REFERENCE = `## CURATED REFERENCE — SW Florida, primarily St. Augustine turf
@@ -90,11 +110,7 @@ symptom is unclear. "Required:" is the MINIMUM evidence to name that cause.
   scalping = uniform tan after a low mow. Cultural, not pest/disease — name only
   with the stated visible cue present.
 
-## RESULT TIMING (use ranges, never exact day counts beyond these)
-- Weeds: visible response ~10-14 days, may need follow-up by weed type.
-- Color/green-up: ~2-3 weeks.
-- Density / fill-in / thickness: ~60-90 days.
-- Disease: treatment stops spread first; browned turf must regrow over time.
+${RESULT_TIMING_BLOCK}
 
 ## COMPLIANCE & WORDING (hard)
 - No product or brand names, no rates, no FRAC/IRAC/HRAC codes in customer copy.
@@ -130,7 +146,7 @@ const FALSE_PRECISION_RULE = `## FALSE-PRECISION (hard)
 - No invented quantities. Express affected area in bands ("a few spots", "one
   section", "widespread") unless a measured value is provided. Never invent
   percentages or square footage.
-- No timelines outside the curated ranges; always a range, never a single day.
+- No timelines outside the RESULT TIMING lines, and only in their words; never a single day.
 - No product-specific watering/mowing/rainfast/reentry numbers unless the injected
   label data is db_authoritative; otherwise use general guidance.
 - No brand/active-ingredient names or FRAC/IRAC/HRAC codes in customer-facing text.
@@ -779,6 +795,8 @@ async function runWriter(contract = {}, _context = {}) {
 
 module.exports = {
   PROMPT_VERSION,
+  buildResultTimingBlock,
+  RESULT_TIMING_BLOCK,
   // Shared rubric blocks — the single-call visit assessment
   // (lawn-visit-assessment.js) composes its system prompt from the same
   // safety rules (and CURATED_REFERENCE below) so the two lawn lanes cannot drift.

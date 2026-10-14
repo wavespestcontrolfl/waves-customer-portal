@@ -62,7 +62,7 @@ function staffJwt(exp = Math.floor(Date.now() / 1000) + 3600, sig = "fixture-sig
 const LIVE_TOKEN = staffJwt();
 const TECH = { id: "tech-1", name: "River Tech", role: "technician" };
 function seedOfflinePass(token, profile = TECH) {
-  localStorage.setItem("waves_tech_offline_pass", JSON.stringify({ binding: token.split(".")[2], profile }));
+  localStorage.setItem("waves_tech_offline_pass", JSON.stringify({ v: 2, binding: token.split(".")[2], profile }));
 }
 const offline = () => vi.fn(async () => { throw new TypeError("Failed to fetch"); });
 
@@ -264,6 +264,89 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(localStorage.getItem("waves_tech_route_snapshot")).toBeNull();
   });
 
+  it("a pass written before the two-step policy existed (no version) never opens Today offline", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    localStorage.setItem("waves_tech_offline_pass", JSON.stringify({ binding: LIVE_TOKEN.split(".")[2], profile: TECH }));
+    vi.stubGlobal("fetch", offline());
+    renderAt();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to verify staff access");
+    expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
+  });
+
+  it("a two-step session that must change its password keeps its token for the signed-in change page", async () => {
+    const ADMIN = { id: "admin-1", name: "Owner", role: "admin", email: "owner@example.test", mustChangePassword: true, twoStep: { enabled: true, enrollmentRequired: false } };
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, ADMIN)));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/dashboard"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/dashboard" element={<div>Admin dashboard content</div>} />
+            </Route>
+            <Route path="/admin/change-password" element={<div>Change password page</div>} />
+            <Route path="/admin/forgot-password" element={<div>Forgot password page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Change password page")).toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+  });
+
+  it("enforcement switched on under an open admin page sends the session to two-step setup", async () => {
+    const ADMIN = { id: "admin-1", name: "Owner", role: "admin" };
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    // Enforcement is switched on after the page opened.
+    let enforced = false;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).includes("/admin/auth/me") || !enforced) return response(200, String(url).includes("/admin/auth/me") ? ADMIN : {});
+      return { ...response(403, { code: "MFA_ENROLLMENT_REQUIRED" }), clone() { return { json: async () => ({ code: "MFA_ENROLLMENT_REQUIRED" }) }; } };
+    }));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/dashboard"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/dashboard" element={<div>Admin dashboard content</div>} />
+            </Route>
+            <Route path="/admin/two-step" element={<div>Two-step setup page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Admin dashboard content")).toBeInTheDocument();
+    enforced = true;
+    await act(async () => {
+      await window.fetch("/api/admin/customers", { headers: { Authorization: `Bearer ${LIVE_TOKEN}` } });
+    });
+    expect(await screen.findByText("Two-step setup page")).toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+  });
+
+  it("an admin who still owes two-step setup goes to the setup page, and the offline pass goes (GATE_ADMIN_MFA_ENFORCE)", async () => {
+    const ADMIN = { id: "admin-1", name: "Owner", role: "admin" };
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN, ADMIN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, { ...ADMIN, twoStep: { enabled: false, enrollmentRequired: true } })));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/dashboard"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/dashboard" element={<div>Admin dashboard content</div>} />
+            </Route>
+            <Route path="/admin/two-step" element={<div>Two-step setup page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Two-step setup page")).toBeInTheDocument();
+    expect(screen.queryByText("Admin dashboard content")).not.toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+    expect(localStorage.getItem("waves_tech_offline_pass")).toBeNull();
+  });
+
   it("leaving Today while its bounded check is pending restarts it unbounded, so a slow answer still verifies (Codex #5573 r12)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
@@ -459,7 +542,7 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     renderAt(path);
     expect(await screen.findByText(content)).toBeInTheDocument();
     const pass = JSON.parse(localStorage.getItem("waves_tech_offline_pass"));
-    expect(pass).toMatchObject({ binding: "fixture-signature", profile: { id: profile.id } });
+    expect(pass).toMatchObject({ v: 2, binding: "fixture-signature", profile: { id: profile.id } });
     expect(JSON.parse(localStorage.getItem("waves_admin_user"))).toMatchObject({ id: profile.id });
   });
 

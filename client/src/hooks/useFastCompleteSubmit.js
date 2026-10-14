@@ -27,26 +27,98 @@
 //                back instead makes the next completion a new request, under
 //                a new key: an earlier attempt under the old key may be on
 //                record, and the server refuses a changed body under it.
-import { useCallback, useRef, useState } from 'react';
+//
+// A prepared request is written to IndexedDB before it can reach the server,
+// then kept under the same operator, visit and idempotency key until the
+// server gives a definite answer. Reopening the sheet offers that exact
+// request as an explicit retry; it never submits during hydration. A caller
+// opts in by passing both serviceId and operatorId; without them the hook
+// keeps the in-memory submit above.
+//
+// Prepare mode (GATE_COMBO_FAST_COMPLETE, a sheet used as one part of a grouped
+// stop): a caller that passes `onPrepared` gets the body this hook WOULD have
+// posted, built the same way, handed to onPrepared(serviceId, body) instead of
+// sent. Nothing is persisted or recovered here: the stop's container owns the
+// packet that carries the body, so a prepared body is never written as a
+// saved completion attempt, never held for a retry and never offered as one.
+// Submitting again after an edit builds a new body and replaces the last.
+// Contract with the container (PR 2): onPrepared(serviceId, bodyOrNull, seq).
+//   - body: "this part is ready, here is its body".
+//   - null: "this part is NOT ready any more": an input behind the body changed after the handoff (the sheet calls
+//     revokeIfChanged on every render with the builder it would submit with; a different body, key aside, revokes).
+//     The container must drop that part's body and block "Complete stop" until the part is prepared again; the
+//     footer goes back to "Save for this stop".
+//   - seq: a number that only ever increases (one counter for every part and every mount in the page). APPLY A CALL
+//     ONLY IF its seq is greater than the last seq applied for that serviceId; ignore the rest. Then a late or
+//     out-of-order settle can never put an older body or an older null over a newer one, even if the container
+//     ignores the promise it returns.
+//   - Calls for one part are serialized by the hook: the next one starts only after the previous settled (a
+//     handoff waits behind a pending revocation), in the order the tech made the changes.
+//   - A returned promise that rejects (or a throw) means "not applied": the part stays not prepared, and shows
+//     "Could not update this stop. Try again." until a later call succeeds. A failed revocation is not swallowed.
+//   - A part that is switched away from (another service) is no longer called; a late settle touches nothing.
+// A part is prepared only while the sheet could prepare it right now: each sheet passes `{ valid }` (the same boolean
+// that enables its "Save for this stop" button) with its body builder. prepare() refuses when valid is false, and
+// revokeIfChanged revokes when the body differs OR valid is false (a stale report, an unconfirmed assessment, a
+// re-service). Prepare mode is part of the scope: switching a mounted sheet into or out of it resets recovery,
+// hydration, the signature and the queue as a service change does, and nothing in prepare mode can reach /complete.
+// Without onPrepared the hook is exactly as above.
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempotency';
+import {
+  deleteFastCompletionAttempt,
+  getFastCompletionAttempt,
+  hasFastCompletionMarker,
+  putFastCompletionAttempt,
+} from '../lib/completion-resume-store';
+
+// One counter for the whole page, so a seq only increases across parts and across remounts of the same part.
+let preparedSeq = 0;
+const UNPREPARE_FAILED = 'Could not update this stop. Try again.';
+export const PREPARE_REFUSAL = 'This visit cannot be part of a combined stop. Use the full form.';
 
 const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch']);
 const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
+const DEFINITIVE_OUTCOMES = new Set(['saved', 'correctable', 'terminal']);
 // The confirmable 409s and the body flag that sends each one through.
 const CONFIRM_FLAGS = { report_rules_review: 'reportRulesConfirmed', promise_marks_changed: 'promiseMarksConfirmed' };
+// A saved completion whose stored copy this device could not clear (the
+// delete and its retry both left it) says so: a later scan may offer it, and
+// its Retry resends the same key, so it only confirms this save.
+const SAVED_COPY_NOTICE = 'This device could not clear its saved copy. If this visit offers it again, Retry only confirms this save.';
+const savedNotice = (cleared) => (cleared ? {} : { notice: SAVED_COPY_NOTICE });
+// A request refused for good whose stored copy this device could not clear:
+// the saved-attempt view stays up with Discard, never a retry.
+const KEPT_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
+// A saved copy the server had refused, found again after a reload.
+const REFUSED_COPY_NOTICE = 'The server refused this saved completion. Discard it here to start a new one.';
+// A saved attempt this device marks but cannot read now: nothing new may be
+// sent over it, so the sheet waits for a read (GitHub Codex P2 on #6001).
+const UNREADABLE_COPY_NOTICE = 'A completion is saved on this device but can’t be read right now. Tap Try again.';
+const STORAGE_WARNING = 'This device can’t save a reload-safe copy right now. Keep this screen open. You can still send after this warning.';
+
+// A lapsed login, a timeout or a rate limit leaves the outcome open. A 403
+// that names its reason (service_not_assigned after a reassignment, an
+// admin-only override) is the server's definite refusal (GitHub Codex P2 on
+// #5967).
+function leavesOutcomeOpen(status, code) {
+  return [401, 408, 425, 429].includes(status) || (status === 403 && !code);
+}
+
 // Only a sheet that renders the prompt (`confirmable`, the report flow) gets
 // the confirm outcome; every other consumer keeps showing the server's
 // message, exactly as before it existed (codex local r19 on #5538).
-function completionFailureOutcome(err, { confirmable = false } = {}) {
+export function completionFailureOutcome(err, { confirmable = false } = {}) {
   const status = Number(err?.status);
   if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
   if (confirmable && status === 409 && CONFIRM_FLAGS[err?.code]) return 'confirm';
+  if (leavesOutcomeOpen(status, err?.code)) return 'retry';
   if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
   if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
   return 'terminal';
 }
 
-function outcomeMessage(outcome, err) {
+export function outcomeMessage(outcome, err) {
   if (outcome === 'retry') {
     return `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`;
   }
@@ -56,82 +128,463 @@ function outcomeMessage(outcome, err) {
   return err?.message || 'Completion failed';
 }
 
-function genIdempotencyKey() {
+// What a failed send shows: a correctable one sits in the form (no failure state),
+// the server's message, and its code.
+function failureView(outcome, err) {
+  return { failure: outcome === 'correctable' ? null : outcome, error: outcomeMessage(outcome, err), code: String(err?.code || '') };
+}
+
+export function genIdempotencyKey() {
   try {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   } catch { /* fall through */ }
   return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
-// One completion attempt at a time, settled into the four outcomes above.
-export default function useFastCompleteSubmit({ base, request, confirmable = false }) {
-  const keyRef = useRef(null);
-  if (!keyRef.current) keyRef.current = genIdempotencyKey();
+// A body as text without its idempotency key (the key is the hook's, not an input).
+function bodySignature(body) {
+  const { idempotencyKey: _key, ...rest } = body;
+  return JSON.stringify(rest);
+}
+
+function scopeOf(serviceId, operatorId, epoch) {
+  return { serviceId: String(serviceId || ''), operatorId: String(operatorId || ''), epoch };
+}
+
+function sameScope(left, right) {
+  return !!left && !!right
+    && left.epoch === right.epoch
+    && left.serviceId === right.serviceId
+    && left.operatorId === right.operatorId;
+}
+
+export default function useFastCompleteSubmit({
+  base, request, serviceId, operatorId, confirmable = false, sheet = '', invoiceFields = null, onPrepared,
+}) {
+  const onPreparedRef = useRef(onPrepared);
+  onPreparedRef.current = onPrepared;
+  const preparing = typeof onPrepared === 'function';
+  // The body last handed to onPrepared (null until the first, and on a scope change).
+  const [prepared, setPrepared] = useState(null);
+  // The body handed over, key aside, as text: what a later render's body is compared with.
+  const preparedSignatureRef = useRef('');
+  // Every onPrepared call of the current scope runs through this chain, one at a time.
+  const preparedQueueRef = useRef(Promise.resolve());
+  // The visit's invoice fields (lib/completion-invoice-fields.js), the same
+  // ones the full form posts. Read when a NEW body is built; a held, retried
+  // or restored body keeps the fields it was prepared with.
+  const invoiceFieldsRef = useRef(invoiceFields);
+  invoiceFieldsRef.current = invoiceFields;
+  const keyRef = useRef(genIdempotencyKey());
   const pendingBodyRef = useRef(null);
+  const pendingSummaryRef = useRef('');
+  const rejectedBodyRef = useRef(null);
+  const persistedBodyRef = useRef(null);
   const inFlight = useRef(false);
+  const scopeRef = useRef(scopeOf(serviceId, operatorId, 0));
+  const storageWarningSeenRef = useRef(false);
+  // The held body is a refused copy found on reload: discarding it opens a
+  // fresh form, since the refusal it answered is no longer on screen.
+  const reloadedRefusalRef = useRef(false);
+  const [recovering, setRecovering] = useState(true);
+  const [restored, setRestored] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  // The server's code for the last refusal (cleared as a send starts), for a sheet
+  // that must act on one (the station sheet reloads its stations).
+  const [errorCode, setErrorCode] = useState('');
   const [failure, setFailure] = useState(null);
   const [done, setDone] = useState(null);
   const [prompt, setPrompt] = useState(null);
+  const [storageWarning, setStorageWarning] = useState('');
+  // Bumped by Try again on an unreadable saved attempt: the read runs again.
+  const [readTick, setReadTick] = useState(0);
+
+  // A scope change invalidates every late read and response from the previous
+  // operator/visit. Its durable row remains available to that original scope.
+  useEffect(() => {
+    const scope = scopeOf(serviceId, operatorId, scopeRef.current.epoch + 1);
+    scopeRef.current = scope;
+    keyRef.current = genIdempotencyKey();
+    rejectedBodyRef.current = null;
+    persistedBodyRef.current = null;
+    pendingBodyRef.current = null;
+    pendingSummaryRef.current = '';
+    inFlight.current = false;
+    storageWarningSeenRef.current = false;
+    reloadedRefusalRef.current = false;
+    setRecovering(true);
+    setRestored(false);
+    setSubmitting(false);
+    setError('');
+    setFailure(null);
+    setDone(null);
+    setPrompt(null);
+    setStorageWarning('');
+    setPrepared(null);
+    preparedSignatureRef.current = '';
+    preparedQueueRef.current = Promise.resolve();
+
+    if (!scope.serviceId || !scope.operatorId || typeof onPreparedRef.current === 'function') {
+      // Existing callers opt into durable recovery by supplying both IDs.
+      // Until their UI is migrated, retain the established in-memory submit.
+      setRecovering(false);
+      return undefined;
+    }
+
+    let active = true;
+    getFastCompletionAttempt(scope.serviceId, scope.operatorId).then(({ available, attempt }) => {
+      if (!active || !sameScope(scopeRef.current, scope)) return;
+      if (!available) {
+        storageWarningSeenRef.current = true;
+        setStorageWarning(STORAGE_WARNING);
+        if (hasFastCompletionMarker(scope.serviceId, scope.operatorId)) {
+          setRestored(true);
+          setFailure('unreadable');
+          setError(UNREADABLE_COPY_NOTICE);
+        }
+      }
+      if (attempt?.body && typeof attempt.body.idempotencyKey === 'string' && attempt.body.idempotencyKey) {
+        pendingBodyRef.current = attempt.body;
+        pendingSummaryRef.current = attempt.summary || '';
+        keyRef.current = attempt.body.idempotencyKey;
+        persistedBodyRef.current = attempt.body;
+        setRestored(true);
+        if (attempt.refused === true) {
+          // Refused for good before the reload: Discard only, never Retry
+          // (GitHub Codex P2 on #5967).
+          reloadedRefusalRef.current = true;
+          setFailure('terminal');
+          setError(REFUSED_COPY_NOTICE);
+        } else {
+          setFailure('retry');
+          setError('An unfinished completion is saved on this device. Tap Retry when you’re ready to send the same completion again.');
+        }
+      }
+      setRecovering(false);
+    });
+    return () => { active = false; };
+  }, [serviceId, operatorId, readTick, preparing]);
+
+  // Removes exactly the row a send or discard stood on, captured before its
+  // network call or storage read: never whatever row is current when a late
+  // response arrives (a tech who left and reopened the visit may have saved a
+  // newer attempt by then; handoff P1 on 463069ad05).
+  const clearStored = useCallback(async (scope, storedBody) => {
+    if (scope.serviceId && scope.operatorId && storedBody) {
+      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, storedBody);
+    }
+    return true;
+  }, []);
+
+  // After a settled send (saved, or refused for good): removes the exact row
+  // the send stood on. A delete that removed nothing is re-read: another tab
+  // may have removed the row, or saved a newer revision, which stays. While
+  // this exact body is still there (or storage cannot be read), the delete
+  // runs once more; false means the row still stands, which the caller
+  // reports, so a later scan offering it is explained (GitHub Codex P2s on
+  // 0fdeda8a25 and 102b99cb1b).
+  const clearSettled = useCallback(async (scope, storedBody) => {
+    const stillStored = async () => {
+      const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
+      return !current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(storedBody);
+    };
+    if (await clearStored(scope, storedBody)) return true;
+    if (!(await stillStored())) return true;
+    if (await clearStored(scope, storedBody)) return true;
+    return !(await stillStored());
+  }, [clearStored]);
+
+  // A refused request whose copy would not delete is marked refused in place
+  // (best effort: storage that refused the delete may refuse this too), so a
+  // reload offers it to discard, never as an uncertain retry (GitHub Codex P2
+  // on #5967).
+  const markRefused = useCallback(async (scope, storedBody, summary) => {
+    if (!scope.serviceId || !scope.operatorId || !storedBody) return;
+    await putFastCompletionAttempt(scope.serviceId, scope.operatorId, {
+      body: storedBody, summary, expectedBody: storedBody, refused: true, sheet,
+    });
+  }, [sheet]);
+
+  // A definitive answer removes the send's stored copy; a refused copy that
+  // stays is marked refused. True when no copy of that answer remains.
+  const settleCopy = useCallback(async (outcome, scope, storedBody, summary) => {
+    if (!DEFINITIVE_OUTCOMES.has(outcome)) return true;
+    const removed = await clearSettled(scope, storedBody);
+    if (!removed && outcome !== 'saved') await markRefused(scope, storedBody, summary);
+    return removed;
+  }, [clearSettled, markRefused]);
+
+  const persistPrepared = useCallback(async (scope, body, summary) => {
+    if (!scope.serviceId || !scope.operatorId) return 'send';
+    const stored = await putFastCompletionAttempt(
+      scope.serviceId,
+      scope.operatorId,
+      { body, summary, expectedBody: persistedBodyRef.current, sheet },
+    );
+    if (!sameScope(scopeRef.current, scope)) return 'stale';
+    if (stored) {
+      persistedBodyRef.current = body;
+      setStorageWarning('');
+      storageWarningSeenRef.current = false;
+      if (failure === 'storage') setFailure(null);
+      return 'send';
+    }
+    // Compare the body as well as the key: another tab can confirm the same
+    // request while this tab still holds its unconfirmed revision.
+    const observed = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
+    if (!sameScope(scopeRef.current, scope)) return 'stale';
+    const observedBody = observed.attempt?.body;
+    if (observed.available && JSON.stringify(observedBody) === JSON.stringify(body)) {
+      persistedBodyRef.current = body;
+      return 'send';
+    }
+    const unchanged = observedBody && persistedBodyRef.current
+      && JSON.stringify(observedBody) === JSON.stringify(persistedBodyRef.current);
+    if (observed.available && !unchanged && (observedBody || persistedBodyRef.current)) {
+      pendingBodyRef.current = null;
+      pendingSummaryRef.current = '';
+      storageWarningSeenRef.current = false;
+      setStorageWarning('');
+      setFailure('terminal');
+      setError('This saved completion was changed or discarded in another tab. Close and reopen it from the schedule before continuing.');
+      return 'conflict';
+    }
+    setStorageWarning(STORAGE_WARNING);
+    if (storageWarningSeenRef.current) return 'send';
+    // Stop before the network the first time storage fails. The warning is
+    // now visible; the next explicit tap sends this held body unchanged.
+    storageWarningSeenRef.current = true;
+    setFailure('storage');
+    return 'warned';
+  }, [failure, sheet]);
+
+  const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
+    const outcome = completionFailureOutcome(err, { confirmable });
+    const removed = await settleCopy(outcome, scope, storedBody, summary);
+    if (!sameScope(scopeRef.current, scope)) return;
+    if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
+      rejectedBodyRef.current = persistedBodyRef.current;
+    }
+    // A request refused for good whose saved copy still stands stays in hand:
+    // the saved-attempt view says so and offers Discard, so a later scan never
+    // offers it as a retry (GitHub Codex P2 on 102b99cb1b).
+    const keptTerminal = outcome === 'terminal' && !removed;
+    pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' || keptTerminal ? body : null;
+    pendingSummaryRef.current = pendingBodyRef.current ? summary : '';
+    if (keptTerminal) {
+      setRestored(true);
+      setStorageWarning(KEPT_COPY_NOTICE);
+    } else if (outcome === 'terminal') {
+      // Its copy is gone: the saved-attempt view would say one is still here
+      // (GitHub Codex P2 on b1ebfd50ce).
+      setRestored(false);
+    }
+    if (outcome === 'correctable') {
+      if (removed) persistedBodyRef.current = null;
+      keyRef.current = genIdempotencyKey();
+      setRestored(false);
+    }
+    if (outcome === 'saved') {
+      setFailure(null);
+      setDone({ summary: 'This visit was already saved. The office will finish anything still pending.', ...savedNotice(removed) });
+      return;
+    }
+    if (outcome === 'confirm') {
+      setFailure(null);
+      setPrompt({ code: err.code, message: err?.message || '' });
+      return;
+    }
+    const shown = failureView(outcome, err);
+    setFailure(shown.failure);
+    setError(shown.error);
+    setErrorCode(shown.code);
+  }, [settleCopy, confirmable]);
 
   const submit = useCallback(async (buildBody, summary) => {
-    if (inFlight.current) return;
+    if (inFlight.current || recovering) return;
+    const scope = scopeRef.current;
+    const held = pendingBodyRef.current;
+    const body = held || { idempotencyKey: keyRef.current, ...buildBody(), ...(invoiceFieldsRef.current || {}) };
+    const heldSummary = held ? pendingSummaryRef.current : String(summary || '');
+    pendingBodyRef.current = body;
+    pendingSummaryRef.current = heldSummary;
     inFlight.current = true;
     setSubmitting(true);
     setError('');
+    setErrorCode('');
     setPrompt(null);
-    const body = pendingBodyRef.current || { idempotencyKey: keyRef.current, ...buildBody() };
+    // The row this send stands on (none when nothing was persisted): fixed
+    // again once its body is persisted.
+    let storedBody = persistedBodyRef.current;
+
     try {
+      if (rejectedBodyRef.current) {
+        const rejectedBody = rejectedBodyRef.current;
+        const removed = await clearStored(scope, rejectedBody);
+        if (!sameScope(scopeRef.current, scope)) return;
+        if (!removed) {
+          const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
+          if (!sameScope(scopeRef.current, scope)) return;
+          if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(rejectedBody)) {
+            pendingBodyRef.current = null;
+            pendingSummaryRef.current = '';
+            setError('Could not clear the rejected completion on this device. Try sending again when device storage is available.');
+            return;
+          }
+        }
+        rejectedBodyRef.current = null;
+        persistedBodyRef.current = null;
+      }
+      // Persist the exact held body, including photos, before network.
+      const persistence = await persistPrepared(scope, body, heldSummary);
+      if (persistence !== 'send') return;
+      storedBody = persistedBodyRef.current;
       const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
+      const cleared = await clearSettled(scope, storedBody);
+      if (!sameScope(scopeRef.current, scope)) return;
       pendingBodyRef.current = null;
+      pendingSummaryRef.current = '';
       setFailure(null);
       // customerText: what the server says it sent the customer (the pest
       // sheet's fixed re-service text), shown on the saved view.
-      setDone({ summary, customerText: result?.customerText || null, response: result || null });
-      // Saved: the done view can be dismissed (Close, Escape, backdrop).
-      setSubmitting(false);
-      inFlight.current = false;
+      setDone({ summary: heldSummary, customerText: result?.customerText || null, response: result || null, ...savedNotice(cleared) });
     } catch (err) {
-      const outcome = completionFailureOutcome(err, { confirmable });
-      pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
-      if (outcome === 'correctable') keyRef.current = genIdempotencyKey();
-      if (outcome === 'saved') {
-        setFailure(null);
-        setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
-      } else if (outcome === 'confirm') {
-        // Nothing saved yet: the tech sends it through or goes back.
-        setFailure(null);
-        setPrompt({ code: err.code, message: err?.message || '' });
-      } else {
-        setFailure(outcome === 'correctable' ? null : outcome);
-        setError(outcomeMessage(outcome, err));
+      await settleFailure(err, scope, body, heldSummary, storedBody);
+    } finally {
+      if (sameScope(scopeRef.current, scope)) {
+        setSubmitting(false);
+        inFlight.current = false;
       }
-      setSubmitting(false);
-      inFlight.current = false;
     }
-  }, [base, request, confirmable]);
+  }, [base, request, recovering, clearStored, clearSettled, persistPrepared, settleFailure]);
 
-  // Send the held body through with the confirmation the prompt asked for.
-  const confirm = useCallback((summary) => {
-    const held = pendingBodyRef.current;
-    const flag = CONFIRM_FLAGS[prompt?.code];
-    if (!held || !flag) return;
-    pendingBodyRef.current = { ...held, [flag]: true };
-    submit(() => ({}), summary);
-  }, [prompt, submit]);
-  // Back to the sheet: the next submit builds a fresh body under a new key
-  // (a failed attempt under this one would refuse the changed body). The
-  // server's per-visit claim still keeps an older attempt from completing
-  // twice (pre-push P1 on #5538).
-  const dismissPrompt = useCallback(() => {
-    pendingBodyRef.current = null;
-    keyRef.current = genIdempotencyKey();
-    setPrompt(null);
+  // Prepare mode (see the header): the body a send would post (key, built fields, invoice fields) goes to
+  // onPrepared instead. The same one-at-a-time rule as a send, and nothing is stored or held.
+  // One onPrepared call, queued behind the scope's earlier ones (whether they settled or failed). It is skipped when
+  // its scope has gone, and numbered when it actually starts, so the numbers follow the order of the calls.
+  const callPrepared = useCallback((scope, bodyOrNull) => {
+    const run = async () => {
+      if (!sameScope(scopeRef.current, scope)) return;
+      await onPreparedRef.current(scope.serviceId, bodyOrNull, ++preparedSeq);
+    };
+    const next = preparedQueueRef.current.then(run, run);
+    preparedQueueRef.current = next.catch(() => {});
+    return next;
   }, []);
 
+  const prepare = useCallback(async (buildBody, _summary, options) => {
+    if (inFlight.current || recovering) return;
+    const scope = scopeRef.current;
+    if (options?.valid === false) {
+      setError(PREPARE_REFUSAL);
+      return;
+    }
+    const body = { idempotencyKey: keyRef.current, ...buildBody(), ...(invoiceFieldsRef.current || {}) };
+    inFlight.current = true;
+    setSubmitting(true);
+    setError('');
+    try {
+      await callPrepared(scope, body);
+      // Every write after the await is scope-checked: a part switched away from while its handoff was in flight
+      // must not touch the next part's signature or state.
+      if (sameScope(scopeRef.current, scope)) {
+        preparedSignatureRef.current = bodySignature(body);
+        setPrepared(body);
+      }
+    } catch (err) {
+      if (sameScope(scopeRef.current, scope)) setError(err?.message || 'Could not save this part of the stop.');
+    } finally {
+      if (sameScope(scopeRef.current, scope)) {
+        setSubmitting(false);
+        inFlight.current = false;
+      }
+    }
+  }, [recovering, callPrepared]);
+
+  // Prepare mode: has anything behind the prepared body changed? Builds the body the sheet would submit now and
+  // compares it with the one handed over (structurally, whatever field moved); a change, or a body that can no
+  // longer be built, revokes the prepared state and tells the container (onPrepared(serviceId, null)).
+  const revokeIfChanged = useCallback((buildBody, options) => {
+    if (!preparedSignatureRef.current || inFlight.current) return;
+    let now = null;
+    try { now = bodySignature({ ...buildBody(), ...(invoiceFieldsRef.current || {}) }); } catch { now = null; }
+    if (now === preparedSignatureRef.current && options?.valid !== false) return;
+    const scope = scopeRef.current;
+    preparedSignatureRef.current = '';
+    setPrepared(null);
+    // A refusal is shown, never swallowed: the container may still hold the old body.
+    callPrepared(scope, null).catch(() => { if (sameScope(scopeRef.current, scope)) setError(UNPREPARE_FAILED); });
+  }, [callPrepared]);
+
+  const retry = useCallback(() => {
+    // Prepare mode never sends: the only /complete POST is in submit, and nothing reaches it from here.
+    if (!pendingBodyRef.current || typeof onPreparedRef.current === 'function') return;
+    return submit(() => ({}), pendingSummaryRef.current);
+  }, [submit]);
+
+  // Confirmation changes the held request, so submit persists the new exact
+  // body before it sends it under the original idempotency key.
+  const confirm = useCallback(() => {
+    const held = pendingBodyRef.current;
+    const flag = CONFIRM_FLAGS[prompt?.code];
+    if (!held || !flag || typeof onPreparedRef.current === 'function') return;
+    pendingBodyRef.current = { ...held, [flag]: true };
+    return submit(() => ({}), pendingSummaryRef.current);
+  }, [prompt, submit]);
+
+  // A deliberate discard (including going back from a confirmation prompt)
+  // removes the prepared attempt. Closing the sheet does not call this: an
+  // uncertain retry remains available after a reload.
+  const discard = useCallback(async () => {
+    if (inFlight.current) return;
+    const scope = scopeRef.current;
+    const body = pendingBodyRef.current;
+    const storedBody = persistedBodyRef.current || body;
+    // A request refused for good stays refused: discarding its saved copy
+    // keeps the sheet's answer and its lock.
+    const refused = failure === 'terminal' && !reloadedRefusalRef.current;
+    inFlight.current = true;
+    setSubmitting(true);
+    try {
+      const removed = await clearStored(scope, storedBody);
+      if (!sameScope(scopeRef.current, scope)) return;
+      if (!removed && persistedBodyRef.current) {
+        const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
+        if (!sameScope(scopeRef.current, scope)) return;
+        if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(storedBody)) {
+          setError('Could not discard the saved completion on this device. Keep it open and try Discard again.');
+          return;
+        }
+      }
+      pendingBodyRef.current = null;
+      pendingSummaryRef.current = '';
+      keyRef.current = genIdempotencyKey();
+      persistedBodyRef.current = null;
+      reloadedRefusalRef.current = false;
+      setRestored(false);
+      setStorageWarning((warning) => (warning === KEPT_COPY_NOTICE ? '' : warning));
+      if (!refused) {
+        setFailure(null);
+        setError('');
+      }
+      setPrompt(null);
+    } finally {
+      if (sameScope(scopeRef.current, scope)) {
+        inFlight.current = false;
+        setSubmitting(false);
+      }
+    }
+  }, [clearStored, failure]);
+
   return {
-    submitting, error, failure, done, prompt, submit, confirm, dismissPrompt,
-    retryPending: failure === 'retry', hasPendingBody: () => !!pendingBodyRef.current,
+    recovering, restored, submitting, error, errorCode, failure, done, prompt, storageWarning,
+    preparing, prepared, revokeIfChanged,
+    submit: preparing ? prepare : submit, retry, confirm, discard, dismissPrompt: discard,
+    recheck: () => setReadTick((tick) => tick + 1),
+    pendingSummary: pendingSummaryRef.current,
+    retryPending: failure === 'retry' || failure === 'storage',
+    storageBypassPending: failure === 'storage',
+    hasPendingBody: () => !!pendingBodyRef.current,
   };
 }

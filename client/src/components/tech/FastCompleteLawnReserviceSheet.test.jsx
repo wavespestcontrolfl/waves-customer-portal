@@ -63,7 +63,7 @@ const CONTEXT = {
   },
 };
 
-function makeRequest({ context = CONTEXT, completeError = null } = {}) {
+function makeRequest({ context = CONTEXT, completeError = null, completeResponse = { success: true } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -75,7 +75,7 @@ function makeRequest({ context = CONTEXT, completeError = null } = {}) {
     }
     if (path.endsWith('/complete')) {
       if (completeError) throw completeError;
-      return { success: true };
+      return completeResponse;
     }
     return {};
   });
@@ -892,4 +892,57 @@ describe('full form and blocked visits', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('button', { name: /^Celsius WG/ })).toBeTruthy();
   });
+});
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): Dispatch opens this
+// sheet for a visit already invoiced from the payment flow, and the completion
+// posts the invoice field the full form posts for it.
+describe('a visit already invoiced from the payment flow', () => {
+  const complete = async (service) => {
+    const request = makeRequest();
+    render(<FastCompleteLawnReserviceSheet service={service} request={request} onClose={() => {}} />);
+    await screen.findByRole('button', { name: /^Celsius WG/ });
+    fireEvent.click(tile('Celsius WG'));
+    fireEvent.click(issue('Dollarweed'));
+    forTarget('Celsius WG', 'Dollarweed');
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where('Celsius WG');
+    const body = await completeBody(request);
+    expect(request.calls.filter((c) => c.path.endsWith('/complete'))).toHaveLength(1);
+    return body;
+  };
+
+  test('posts invoiceAlreadySent: true with the rest of the body unchanged', async () => {
+    const plain = await complete(SERVICE);
+    cleanup();
+    const body = await complete({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    const { invoiceAlreadySent: _sent, idempotencyKey: _k1, ...rest } = body;
+    const { idempotencyKey: _k2, ...plainRest } = plain;
+    expect(rest).toEqual(plainRest);
+    expect(plain).not.toHaveProperty('invoiceAlreadySent');
+  }, 20000);
+
+  test('a visit with only a door-charge marker posts no invoice field, as the full form does', async () => {
+    const body = await complete({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' });
+    expect(body).not.toHaveProperty('invoiceAlreadySent');
+  }, 20000);
+
+  test('Next stop hands the completion response to the page, so admin Dispatch can stage the payment prompt', async () => {
+    const response = { success: true, invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoicePaymentActionRequired: true };
+    const onCompleted = vi.fn();
+    const request = makeRequest({ completeResponse: response });
+    render(<FastCompleteLawnReserviceSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+    await screen.findByRole('button', { name: /^Celsius WG/ });
+    fireEvent.click(tile('Celsius WG'));
+    fireEvent.click(issue('Dollarweed'));
+    forTarget('Celsius WG', 'Dollarweed');
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where('Celsius WG');
+    await completeBody(request);
+    fireEvent.click(await screen.findByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalledWith(response);
+  }, 20000);
 });

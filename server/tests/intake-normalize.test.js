@@ -9,6 +9,7 @@ const {
   normalizeContactZip,
   normalizeContactStreet,
   normalizeContactStateField,
+  clearSharedPhoneMarkOnPhoneChange,
 } = require('../utils/intake-normalize');
 
 describe('intake contact normalization', () => {
@@ -33,6 +34,23 @@ describe('intake contact normalization', () => {
   test('website phone storage preserves unparseable input instead of fabricating E.164', () => {
     expect(normalizeNanpPhone('12345')).toBeNull();
     expect(normalizePhoneForStorage(' 12345 ')).toBe('12345');
+  });
+
+  test('an impossible US number (area code starting 0/1) is never fabricated into E.164', () => {
+    expect(normalizeNanpPhone('1035550123')).toBeNull();
+    expect(normalizeNanpPhone('(103) 555-0123')).toBeNull();
+    expect(normalizeNanpPhone('0035550123')).toBeNull();
+    expect(normalizeNanpPhone('2031550123')).toBe('+12031550123'); // exchange is not checked
+    expect(normalizePhoneForStorage('1035550123')).toBe('1035550123');
+    expect(normalizeNanpPhone('12035550123')).toBe('+12035550123');
+    expect(normalizeNanpPhone('(203) 555-0123')).toBe('+12035550123');
+  });
+
+  test('contactPhoneProblem refuses an impossible US number and accepts the rest', () => {
+    const { contactPhoneProblem } = require('../utils/intake-normalize');
+    expect(contactPhoneProblem('1035550123')).toMatch(/not a valid US phone number/);
+    expect(contactPhoneProblem(' (203) 555-0123 ')).toBeNull();
+    expect(contactPhoneProblem('')).toBeNull();
   });
 
   test('website quote contact rejects non-string required values', () => {
@@ -302,5 +320,32 @@ describe('property-role fields (schema 1.9.0)', () => {
     const out = normalizeCallExtraction({ address_line1: '1 Main St' });
     expect(out.service_address_occupancy).toBeNull();
     expect(out.service_address_is_primary_residence).toBeNull();
+  });
+});
+
+describe('clearSharedPhoneMarkOnPhoneChange', () => {
+  const before = { phone: '+19415550100', sms_primary_for_shared_phone: true };
+  test('a new number drops the mark', () => {
+    const updates = { phone: '+19415550199' };
+    clearSharedPhoneMarkOnPhoneChange(updates, before);
+    expect(updates.sms_primary_for_shared_phone).toBe(false);
+  });
+  test('the same number in another format keeps it', () => {
+    const updates = { phone: '(941) 555-0100' };
+    clearSharedPhoneMarkOnPhoneChange(updates, before);
+    expect(updates).not.toHaveProperty('sms_primary_for_shared_phone');
+  });
+  test('a write that sets the mark itself is left alone', () => {
+    const updates = { phone: '+19415550199', sms_primary_for_shared_phone: true };
+    clearSharedPhoneMarkOnPhoneChange(updates, before);
+    expect(updates.sms_primary_for_shared_phone).toBe(true);
+  });
+  test('an unmarked row, or a write without a phone, is untouched', () => {
+    const a = { phone: '+19415550199' };
+    clearSharedPhoneMarkOnPhoneChange(a, { phone: '+19415550100', sms_primary_for_shared_phone: false });
+    expect(a).not.toHaveProperty('sms_primary_for_shared_phone');
+    const b = { email: 'x@example.com' };
+    clearSharedPhoneMarkOnPhoneChange(b, before);
+    expect(b).not.toHaveProperty('sms_primary_for_shared_phone');
   });
 });

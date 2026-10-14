@@ -1,8 +1,10 @@
 /** Normalize lawn visit evidence and keep unrated photos out of customer delivery. */
 const Ajv = require('ajv');
-const { RESPONSE_SCHEMA, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS } = require('./lawn-visit-input');
-const { normalizeFindings, safeConditionLabel } = require('./lawn-diagnostic-report');
+const { RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS } = require('./lawn-visit-input');
+const { normalizeFindings, safeConditionLabel, namesAssertedCause } = require('./lawn-diagnostic-report');
 const { normalizeGrassType } = require('./lawn-grass-context');
+const shotList = require('./lawn-photo-shots');
+const { normalizeLightRead } = require('./lawn-lighting');
 
 const UNAVAILABLE_OBSERVATIONS = 'Visual analysis unavailable';
 
@@ -44,13 +46,18 @@ function scoreOrNull(raw, min, max) {
   return Math.max(min, Math.min(max, Math.round(raw.value)));
 }
 
-function normalizePhotoQuality(list, photoCount) {
-  const rows = Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: UNRATED_QUALITY, issue: 'not rated by the model' }));
+// `lighting: true` (GATE_LAWN_LIGHTING, decided by the caller) adds the model's
+// light read to every row: { lighting, hard_shadows } with hard_shadows true,
+// false or null. An unrated photo, or an answer that gave no read, is `unknown`
+// and null. Off, the rows are exactly what they always were (no extra keys).
+function normalizePhotoQuality(list, photoCount, { lighting = false } = {}) {
+  const unread = lighting ? { lighting: 'unknown', hard_shadows: null } : {};
+  const rows = Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: UNRATED_QUALITY, issue: 'not rated by the model', ...unread }));
   for (const entry of Array.isArray(list) ? list : []) {
     const index = photoNumber(entry?.photo) - 1;
     if (!Number.isInteger(index) || index < 0 || index >= photoCount) continue;
     if (!PHOTO_QUALITY.includes(entry?.quality)) continue;
-    rows[index] = { photo: index + 1, quality: entry.quality, issue: clip(entry.issue, 200) };
+    rows[index] = { photo: index + 1, quality: entry.quality, issue: clip(entry.issue, 200), ...(lighting ? normalizeLightRead(entry) : {}) };
   }
   return rows;
 }
@@ -58,6 +65,37 @@ function normalizePhotoQuality(list, photoCount) {
 function zoneFromRefs(photoRefs, photoZones = []) {
   const zones = new Set(photoRefs.map((ref) => photoZones[ref - 1]).filter(Boolean));
   return zones.size === 1 ? [...zones][0] : 'unknown';
+}
+
+// Shot-list captures only (lawn report rebuild P19a): the two rules the prompt
+// asks for but the server does not leave to the model, applied to the
+// normalized findings. Pure, over a finding's cited photos' shot keys (null =
+// untagged, which counts as an overview).
+//   - localized: it rests on photos and every one is a detail shot (close_up,
+//     blade_crown, trouble), so it speaks for one spot, never the whole lawn.
+//   - named-cause cap: a finding naming a specific disease, insect or weed
+//     (the report lane's governed-cause lexicon, read through the naming gate's
+//     negation-aware clauses, so a ruled-out cause is not asserted) with no
+//     blade_crown or trouble photo among its evidence stays at low confidence at most; its customer
+//     label follows through the naming gate.
+// A photo counts as evidence for either rule only when the same answer rated it
+// usable (adequate or limited, the standard the per-finding poor-photo gate and
+// the customer-visible photos use). Poor, unrated, uncited and out-of-range
+// photos count for nothing; with no quality read the cap stays (fail closed).
+// A finding citing only unusable photos has no evidence, so it is not localized
+// (it is already undeterminable through that gate).
+const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
+function evidenceZones(photoRefs, photoZones, usable) {
+  return photoRefs.filter((ref) => usable.has(ref)).map((ref) => photoZones[ref - 1]);
+}
+function withShotEvidence(findings, photoZones, usable) {
+  return findings.map((finding) => {
+    const zones = evidenceZones(finding.photo_refs, photoZones, usable);
+    const localized = zones.length > 0 && zones.every(shotList.isDetailShot);
+    const capped = namesAssertedCause(finding.name) && !zones.some(shotList.supportsNamedCause) && CONFIDENCE_RANK[finding.confidence] > CONFIDENCE_RANK.low;
+    if (!capped) return { ...finding, localized };
+    return { ...finding, localized, confidence: 'low', confidence_cap: 'named_cause_without_close_up', label: safeConditionLabel(finding.name, 'low') };
+  });
 }
 
 function containerShape(schema) {
@@ -71,11 +109,16 @@ function containerShape(schema) {
 }
 
 const hasResponseShape = new Ajv().compile(containerShape(RESPONSE_SCHEMA));
+// The lighting variant's photo_quality rows carry two more keys, which the closed
+// shape above would reject, so it has its own compiled shape (compiled lazily-free
+// at load: the schema is a constant).
+const hasLightingResponseShape = new Ajv().compile(containerShape(LIGHTING_RESPONSE_SCHEMA));
 
-function validateAssessmentJson(result, photoCount) {
+// `lighting: true` validates against the lighting variant's shape (GATE_LAWN_LIGHTING).
+function validateAssessmentJson(result, photoCount, { lighting = false } = {}) {
   const json = result && result.json;
   if (!json || typeof json !== 'object' || Array.isArray(json)) return 'malformed_assessment';
-  if (!hasResponseShape(json)) return 'malformed_assessment';
+  if (!(lighting ? hasLightingResponseShape : hasResponseShape)(json)) return 'malformed_assessment';
   if (!Array.isArray(json.findings)) return 'malformed_assessment';
   if (!json.severities || typeof json.severities !== 'object') return 'malformed_assessment';
   if (!json.scores || typeof json.scores !== 'object') return 'malformed_assessment';
@@ -99,11 +142,13 @@ function ratesEveryPhoto(list, photoCount) {
   return rated.size === photoCount;
 }
 
-function normalizeAssessment(json, photoCount, photoZones = []) {
+// `shotListOn` (a shot-list capture, decided by the caller) adds the two
+// server-side evidence rules above to each finding; off, nothing is added.
+function normalizeAssessment(json, photoCount, photoZones = [], { shotList: shotListOn = false, lighting = false } = {}) {
   const rawFindings = Array.isArray(json.findings) ? json.findings : [];
-  const photoQuality = normalizePhotoQuality(json.photo_quality, photoCount);
+  const photoQuality = normalizePhotoQuality(json.photo_quality, photoCount, { lighting });
   const usable = new Set(photoQuality.filter((row) => CUSTOMER_VISIBLE_QUALITY.has(row.quality)).map((row) => row.photo));
-  const findings = normalizeFindings(rawFindings).map((finding, index) => {
+  const normalized = normalizeFindings(rawFindings).map((finding, index) => {
     const raw = rawFindings[index] || {};
     const photoRefs = uniqueInts(raw.photo_refs, photoCount);
     // A finding the model itself says the photos cannot settle carries no
@@ -143,6 +188,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       source: 'model',
     };
   });
+  const findings = shotListOn ? withShotEvidence(normalized, photoZones, usable) : normalized;
   const severities = {};
   for (const key of STRESS_SIGNALS) severities[key] = normalizeSignal(json.severities[key], SEVERITY_LEVELS);
   severities.thatch_visibility = normalizeSignal(json.severities.thatch_visibility, THATCH_LEVELS);

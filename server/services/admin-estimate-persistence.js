@@ -20,6 +20,7 @@ const {
   normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+const { nanpPhoneProblem } = require('../utils/phone');
 const { resolveStoredPestPricingVersion } = require('./estimate-pricing-bundle-utils');
 const { recordPreSendRevision } = require('./estimate-learning');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
@@ -1155,6 +1156,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
+  // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
+  // below): a browser-posted copy of either field is never honored.
+  delete v1Input.savedEstimateReplay;
+  delete v1Input.addedServiceKeys;
   v1Input.priorQualifyingServices = priorQualifyingServices;
   // Account-wide rodent setup-waiver evidence, server-derived by the caller
   // alongside the property-scoped tier list (codex #3591 r34 P1); set
@@ -1166,6 +1171,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   if (deps.recurringCustomer === true || priorQualifyingServices.length > 0) {
     v1Input.recurringCustomer = true;
   }
+  // Same rule for the area add-ons' yearly-limit history: server-read or none, never the posted copy.
+  require('./area-addon-limits').applyAreaAddOnHistory(v1Input, deps.areaAddOnHistory);
   v1Input = await withTrustedCatalogPricing(v1Input, {
     database: deps.database,
     readRodentAdditionalCheckPriceFromCatalog: deps.readRodentAdditionalCheckPriceFromCatalog,
@@ -1217,6 +1224,12 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // above, and every other save prices off freshly synced live config and
   // stamps the resulting server values afterward.
   if (deps.replaySavedPricingKnobs === true) {
+    // A persisted estimate re-priced as it was sold: the lawn pricer's v13 bahia review (new
+    // quotes only) must not park an estimate that was already issued. A service this very
+    // mutation ADDS (the customer add-service rail) was never sold, so it keeps the review:
+    // the caller names it in addedServiceKeys.
+    v1Input.savedEstimateReplay = true;
+    v1Input.addedServiceKeys = Array.isArray(deps.addedServiceKeys) ? deps.addedServiceKeys : [];
     // Lawn cost floor, lawn program minimum and pest program floor. The public
     // read path has threaded these since #2827 (savedFloorReplayOverrides);
     // this branch did not, so an authoritative recompute resolved them from
@@ -1229,6 +1242,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+    // Area add-on price knobs: the same stored-row reader the public replay uses.
+    Object.assign(v1Input, require('./estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estimateData));
     // Termite station-cost snapshot (plan 2026-09-03 §A1) — same reader the
     // public replay uses, so the authoritative recompute (membership
     // reconcile, opt-out, admin re-save) keeps a sent install at its quoted
@@ -1339,7 +1354,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1356,7 +1371,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -1670,6 +1685,10 @@ function buildEstimatePersistenceFields(body, context = {}) {
     address: body.address,
     customer_name: body.customerName,
     customer_phone: body.customerPhone,
+    // A staff save of the estimate is the office's own word for its phone (the typed-phone bell tells the office to
+    // confirm the number and put it on the estimate), so it clears the accept-card provenance, also when the number
+    // is unchanged: from here on the matcher trusts it like any office phone.
+    customer_phone_typed: null,
     customer_email: body.customerEmail,
     monthly_total: totals.monthlyTotal,
     annual_total: totals.annualTotal,
@@ -1899,8 +1918,26 @@ async function resolveEstimateWritePayload({
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
   storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
+  storedEstimateData = null, // revise only: the ROW's parsed estimate_data (the offer-tier parked state lives there)
   requireLivePricing = false,
+  priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
 }) {
+  // A US-shaped phone that can never be texted (area code or exchange starting
+  // 0/1, Twilio 21211) is refused at save, not first at Send (codex #6028 P2).
+  // Same rule as the lead/customer writers: only a number being entered or
+  // changed now is judged; a revise echoing the stored number still saves.
+  {
+    const nextPhone = typeof body.customerPhone === 'string' ? body.customerPhone.trim() : '';
+    const prior = typeof priorPhone === 'string' ? priorPhone.trim() : '';
+    if (nextPhone && nextPhone !== prior) {
+      const phoneProblem = nanpPhoneProblem(nextPhone);
+      if (phoneProblem) {
+        const err = errorWithStatus(`${phoneProblem} Correct the phone before saving.`, 400);
+        err.code = 'INVALID_PHONE';
+        throw err;
+      }
+    }
+  }
   const {
     showOneTimeOption,
     billByInvoice,
@@ -2011,6 +2048,8 @@ async function resolveEstimateWritePayload({
     priorQualifyingServices,
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
+    // The add-ons' yearly-limit history, read here from the verified customer (never from the posted data).
+    areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   const totals = pricing.totals;
@@ -2133,6 +2172,57 @@ async function resolveEstimateWritePayload({
     estimateData: trustedEstimateData,
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
+  // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the office marks a pest
+  // + lawn estimate for the tier picker. A marker only — the row stays an
+  // ordinary estimate with the one-time option OFF (the opt-out rail turns
+  // that on if the customer removes lawn). Stamped only when asked AND the
+  // stored facts qualify; anything else saves unmarked.
+  {
+    const OfferTiers = require('./estimate-offer-tiers');
+    const { isCommercialEstimateData } = require('./estimate-delivery-options');
+    // A row already in the pest-only state (lawn removed through the rail) is
+    // the model's own second state: the mark stays, and there the one-time
+    // option legitimately rides along (the rail turned it on).
+    // The V2 revision payload rebuilds estimateData from the browser (inputs,
+    // result, summary, engineRequest) and carries neither the opt-out history
+    // nor the mark, so the parked state is judged on the ROW's stored data.
+    // Read WITHOUT the gates and WITHOUT the mark: the lawn removal is a
+    // fact about the row, and it must survive every later revision even
+    // after a save dropped the mark (dark deployment, or staff declined).
+    const storedParkedHistory = OfferTiers.lawnParkedPestOnly(storedEstimateData);
+    const storedHadMark = OfferTiers.offerTiersRequested(storedEstimateData);
+    let newKeys = [];
+    try { newKeys = OfferTiers.storedRecurringKeys(trustedEstimateData); } catch (_) { newKeys = []; }
+    const newResultPestOnly = newKeys.length === 1 && newKeys[0] === 'pest_control';
+    // The revision replaces estimate_data wholesale, so a reopened parked row
+    // saved without lawn (a notes-only edit, or a re-priced pest-only result)
+    // keeps the ROW's opt-out history — the lawn removal and its add-back
+    // path on the customer's token — gates on or off. A revision whose new
+    // result carries lawn again put it back on purpose.
+    if (storedParkedHistory && newResultPestOnly && !trustedEstimateData.serviceOptOut && storedEstimateData?.serviceOptOut) {
+      trustedEstimateData.serviceOptOut = storedEstimateData.serviceOptOut;
+    }
+    const parkedNow = storedParkedHistory && newResultPestOnly && !!trustedEstimateData.serviceOptOut;
+    // The MARK is gated: a dark deployment drops it (the history above stays).
+    const markedPestOnly = parkedNow && storedHadMark
+      && OfferTiers.offerTiersMarkedPestOnlyState({ ...trustedEstimateData, offerTiersRequested: true });
+    // On a parked row the office checkbox cannot be re-derived from a fresh
+    // /calculate-estimate result (pest alone is "no_lawn" there), so the mark
+    // stays unless staff explicitly declined it (body.offerTiersDeclined);
+    // elsewhere the mark follows the checkbox as before.
+    // ... and only while the one-time option stays ON: Good on the parked
+    // row IS that option, so a staff clear of "Offer one-time option" drops
+    // the mark too (a Good tile that cannot be taken is worse than none).
+    const tiersOk = markedPestOnly
+      ? (body.offerTiersDeclined !== true && showOneTimeOption)
+      : (body.offerTiers === true && !showOneTimeOption
+        && OfferTiers.offerTiersSaveEligibility({
+          estData: trustedEstimateData,
+          commercial: isCommercialEstimateData(trustedEstimateData),
+        }).eligible === true);
+    if (tiersOk) trustedEstimateData.offerTiersRequested = true;
+    else delete trustedEstimateData.offerTiersRequested;
+  }
 
   return {
     ...buildEstimatePersistenceFields(
@@ -2296,7 +2386,9 @@ async function createOrReuseAdminEstimate({
 
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
-        if (existingEstimate?.status === 'draft') {
+        // An ARCHIVED draft is never reused: overwriting it would leave the
+        // save hidden and unsendable. It takes the non-draft path instead.
+        if (existingEstimate?.status === 'draft' && !existingEstimate.archived_at) {
           // A linked COMMERCIAL PROPOSAL draft is never reused by the generic
           // save (GH codex P2 r6 on #3750): its proposal is server-owned and
           // its totals come from the authored line items — the generic
@@ -3018,15 +3110,20 @@ async function reviseAdminEstimate({
   // stays exactly as PUT /:id/proposal left it). The browser's copy is never
   // written — see stripClientProposal.
   let storedProposal = null;
+  let storedEstimateData = null;
   try {
     const parsedPrior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     storedProposal = parsedPrior?.proposal ?? null;
+    storedEstimateData = parsedPrior && typeof parsedPrior === 'object' ? parsedPrior : null;
   } catch {
     storedProposal = null;
+    storedEstimateData = null;
   }
   const writeFields = await resolveEstimateWritePayload({
     database,
     storedProposal,
+    storedEstimateData,
+    priorPhone: estimate.customer_phone,
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,

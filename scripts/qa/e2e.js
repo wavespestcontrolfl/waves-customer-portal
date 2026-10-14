@@ -343,8 +343,9 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'tech-photos-desktop.png'), fullPage: false });
       await page.getByRole('button', { name: 'Close service photos', exact: true }).click();
       await page.getByRole('heading', { name: 'Service Photos', exact: true }).waitFor({ state: 'hidden' });
+      // The open visit lives in the URL (?visit=), so a reload lands back in it.
       await page.reload();
-      await page.getByRole('button', { name: /QA Customer/ }).click();
+      await page.getByRole('heading', { name: 'QA Customer', exact: true }).waitFor();
       await page.getByRole('button', { name: /Photos/ }).click();
       await page.getByRole('heading', { name: 'Attached (1)', exact: true }).waitFor();
       await db('scheduled_services').where({ id: fixture.appointmentId }).update({ scheduled_date: fixture.nextDate });

@@ -920,7 +920,9 @@ function sameDayOptions(now = new Date()) {
 // on this data (it can be seconds stale in either direction).
 // nameScope gates WHO gets identified, and defaults to nobody (fail
 // closed). The probe is tech-blind by design — it must see every
-// technician's rows to mirror commit — but the payload rides two very
+// technician's rows to mirror commit (with a second technician and
+// GATE_MULTI_TECH_CONFIRM on, commit probes the visit's own technician's
+// route and conflictsForTarget narrows the same way) — but the payload rides two very
 // different trust levels: `checkTarget` is admin-only (requireAdmin) and
 // passes NAME_ALL, while `getOptions` is reachable by an assigned tech
 // (GET /api/tech/services/:id/rain-out-options), so it passes its own
@@ -1204,7 +1206,7 @@ function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
   }
   const distinct = [...distinctByKey.values()];
   const probed = distinct.map((w) => conflictsForTarget(
-    occupancy, serviceId, targetDate, w, { excludeServiceIds: sweptIds },
+    occupancy, serviceId, targetDate, w, { excludeServiceIds: sweptIds, technicianId: service.technician_id },
   ));
   const byId = new Map();
   for (const conflict of probed.flat()) {
@@ -1248,6 +1250,9 @@ async function checkTarget({ serviceId, target, caller = null }) {
   }
   const conflicts = conflictsForTarget(occupancy, serviceId, targetDate, target.window, {
     routeSiblingIds: new Set(route.map((j) => String(j.id))),
+    // Commit keeps the visit's technician and probes that route (second
+    // technician, gate-scoped in conflictsForTarget), so the warning does too.
+    technicianId: service.technician_id,
   });
   // Returned alongside (not merged): the sheet shows these only while the
   // scope toggle is on "this + rest of route", the one case commit moves
@@ -1372,11 +1377,32 @@ async function getOptions(serviceId, { caller = null } = {}) {
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).
+  // Each option shows the chance for ITS hour (the same hourly forecast and
+  // window rule as New Appointment's chips, find-time-hints rainForWindow);
+  // the whole-day number is only the fallback when the hourly feed has no
+  // reading for that hour, and the header's "today" line.
   let outlook = null;
+  let hourly = null;
   try {
-    outlook = await getDailyRainOutlook(service.customer_latitude, service.customer_longitude);
+    [outlook, hourly] = await Promise.all([
+      getDailyRainOutlook(service.customer_latitude, service.customer_longitude),
+      getHourlyRainOutlook(service.customer_latitude, service.customer_longitude).catch(() => null),
+    ]);
   } catch (err) {
     logger.info(`[rain-out] outlook lookup failed for ${serviceId}: ${err.message}`);
+  }
+  // Required here, not at the top: find-time-hints loads this module.
+  const { rainForWindow } = require('./scheduling/find-time-hints');
+  const optionRain = (date, window) => {
+    const hourChance = rainForWindow(hourly, date, window.start, window.end);
+    if (hourChance != null) return { rainChance: hourChance, rainScope: 'hour' };
+    const dayChance = outlook?.[date]?.rainChance ?? null;
+    return { rainChance: dayChance, rainScope: dayChance == null ? null : 'day' };
+  };
+  // "Later today" has the header's whole-day number already: hourly or nothing.
+  for (const opt of sameDay) {
+    const rain = optionRain(opt.date, opt.window);
+    opt.rainChance = rain.rainScope === 'hour' ? rain.rainChance : null;
   }
 
   const days = (dayOptionsRaw || []).slice(0, 3).map((opt) => {
@@ -1389,7 +1415,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
       date: opt.date,
       window,
       display: `${opt.displayDate}, ${displayWindow(window)}`,
-      rainChance: outlook?.[opt.date]?.rainChance ?? null,
+      ...optionRain(opt.date, window),
       shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
     };
   });
@@ -1423,7 +1449,9 @@ async function getOptions(serviceId, { caller = null } = {}) {
     logger.info(`[rain-out] occupancy snapshot failed for ${serviceId}: ${err.message}`);
   }
   for (const opt of sameDay) {
-    opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, { routeSiblingIds });
+    opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, {
+      routeSiblingIds, technicianId: service.technician_id,
+    });
     // What the shifted rest-of-route would land on — shown only while the
     // sheet's scope toggle is on "rest of route".
     opt.routeConflicts = routeScopeConflicts({

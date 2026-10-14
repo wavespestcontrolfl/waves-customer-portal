@@ -337,8 +337,12 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     mockModel.mockReset();
     mockModel.mockResolvedValueOnce(tools('send_sms', { customer_id: customerA, message: 'Your note was updated.' }, 'sms'))
       .mockResolvedValueOnce(answer('The text is awaiting confirmation.'));
+    const proposeSpy = jest.spyOn(require('../services/intelligence-bar/pending-actions'), 'createPendingAction');
     const resumed = await api(`/tasks/${proposed.body.taskId}/resume`, { session_id: sessionId });
     expect(resumed.status).toBe(200);
+    const original = await db('ib_tasks').where('id', proposed.body.taskId).first('created_at');
+    expect(proposeSpy.mock.calls.map(([arg]) => arg.requestStartedAt)).toEqual([new Date(original.created_at).getTime()]);
+    proposeSpy.mockRestore();
     // send_sms was loaded by the checkpointed discovery, never invoked, and must not need a repeated discovery.
     expect(mockModel.mock.calls[0][0].tools.map(tool => tool.name)).toContain('send_sms');
     expect(JSON.stringify(mockModel.mock.calls)).not.toContain('capability_not_loaded');
@@ -1271,8 +1275,13 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(mockModel).not.toHaveBeenCalled();
     const selected = first.body.candidates[0].customer_id;
     proposeNote(selected, 'Selection regression');
+    const proposeSpy = jest.spyOn(require('../services/intelligence-bar/pending-actions'), 'createPendingAction');
     const resumed = await api(`/tasks/${first.body.taskId}/select-target`, { session_id: sessionId, customer_id: selected });
     expect(resumed.status).toBe(200);
+    // The resumed task's card is ordered by the task's ORIGINAL start (its created_at), not by the resume time.
+    const original = await db('ib_tasks').where('id', first.body.taskId).first('created_at');
+    expect(proposeSpy.mock.calls.map(([arg]) => arg.requestStartedAt)).toEqual([new Date(original.created_at).getTime()]);
+    proposeSpy.mockRestore();
     expect(resumed.body.taskId).toBe(first.body.taskId);
     expect(resumed.body.taskTarget.customer_id).toBe(selected);
     expect(resumed.body.pendingActions).toHaveLength(1);

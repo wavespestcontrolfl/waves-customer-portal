@@ -163,6 +163,11 @@ const {
   buildConsultationLink,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  composerOnlyLinkPresence,
+  linkOwnersInBody,
+  nestedOwnedLinkRuns,
+  linkTextUnstable,
+  wrappedOwnedLinkIn,
   buildAppointmentPageLink,
   buildCardRequestLink,
   buildPrepGuideLink,
@@ -3262,5 +3267,268 @@ describe('wrapped /l/ codes are judged by their target (SMS link wrap)', () => {
     expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/wrapabc123')).toMatchObject({ present: true });
     wire({ target: `${PORTAL}/prep/${PREP}`, kind: 'service_report' });
     expect((await bearerLinkSendCheck('See wavespest.co/l/wrapabc123', OTHER, { trustedCustomerId: 'c1' })).ok).toBe(false);
+  });
+});
+
+// Read-only presence of the composer-only kinds (the IB's send guard runs this
+// at proposal time, before any card): detection by path shape, one read of
+// appointment_card_requests to tell a visit card request from an Auto Pay
+// link, and never the card funnel (Codex r3 on #6266 P1).
+describe('composerOnlyLinkPresence', () => {
+  test('detects contract, prep, statement and project-report links without touching the funnel', async () => {
+    mockBuilders = {};
+    const body = [
+      'Sign here: portal.wavespestcontrol.com/contract/AbCdEfGhIjKlMnOpQrSt',
+      'prep: portal.wavespestcontrol.com/prep/0123456789abcdef0123456789abcdef',
+      `statement: portal.wavespestcontrol.com/pay/statement/${'a'.repeat(64)}`,
+      'report: portal.wavespestcontrol.com/report/project/pat-abc123def456',
+    ].join(' ');
+    const out = await composerOnlyLinkPresence(body);
+    expect(out.present).toBe(true);
+    expect(out.kinds.sort()).toEqual(['contract', 'prep_guide', 'project_report', 'statement']);
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a /secure link is a card request only when its row is the visit lane; plain text and Auto Pay links are not present', async () => {
+    mockBuilders = { appointment_card_requests: chainBuilder({ firstRow: { kind: 'visit' } }) };
+    const visit = await composerOnlyLinkPresence('Secure your visit: portal.wavespestcontrol.com/secure/AbCdEfGhIjKlMnOpQrStUv');
+    expect(visit).toEqual({ present: true, kinds: ['card_request'] });
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+
+    mockBuilders = { appointment_card_requests: chainBuilder({ firstRow: { kind: 'customer' } }) };
+    const autopay = await composerOnlyLinkPresence('Set up Auto Pay: portal.wavespestcontrol.com/secure/AbCdEfGhIjKlMnOpQrStUv');
+    expect(autopay).toEqual({ present: false, kinds: [] });
+
+    mockBuilders = {};
+    mockDb.mockClear();
+    expect(await composerOnlyLinkPresence('Running 15 minutes late, sorry!')).toEqual({ present: false, kinds: [] });
+    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+
+  test('includeVerifyOnly also flags appointment, report and receipt links (an email reply may carry none)', async () => {
+    mockBuilders = {};
+    const body = 'Visit: portal.wavespestcontrol.com/appointment/AbCdEfGhIjKlMnOpQrSt report: portal.wavespestcontrol.com/report/AbCdEfGhIjKlMnOpQrSt receipt: portal.wavespestcontrol.com/receipt/AbCdEfGhIjKlMnOpQrSt';
+    expect(await composerOnlyLinkPresence(body)).toEqual({ present: false, kinds: [] });
+    const flagged = await composerOnlyLinkPresence(body, { includeVerifyOnly: true });
+    expect(flagged.present).toBe(true);
+    expect(flagged.kinds.sort()).toEqual(['appointment', 'portal_link', 'receipt', 'service_report']);
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+    // Any owned portal link, an unresolvable short code included, is flagged for that sender.
+    expect(await composerOnlyLinkPresence('Pay here: portal.wavespestcontrol.com/l/zz99zz', { includeVerifyOnly: true })).toEqual({ present: true, kinds: ['portal_link'] });
+    expect(await composerOnlyLinkPresence('Pay here: portal.wavespestcontrol.com/l/zz99zz')).toEqual({ present: false, kinds: [] });
+    expect(await composerOnlyLinkPresence('See you Tuesday!', { includeVerifyOnly: true })).toEqual({ present: false, kinds: [] });
+  });
+
+  test('a third-party URL with a protected-looking path is nobody\'s bearer', async () => {
+    mockBuilders = {};
+    const body = 'See https://example.com/contract/AbCdEfGhIjKlMnOpQrSt and https://example.com/l/abc and https://example.com/secure/AbCdEfGhIjKlMnOpQrStUv';
+    expect(await composerOnlyLinkPresence(body)).toEqual({ present: false, kinds: [] });
+    expect(await composerOnlyLinkPresence(body, { includeVerifyOnly: true })).toEqual({ present: false, kinds: [] });
+    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+});
+
+// An owned-host link nested in a foreign URL's path, query or fragment reads as
+// ONE foreign-host run everywhere else; this surfaces each as its own run.
+describe('nestedOwnedLinkRuns', () => {
+  const T = 'AbCdEfGhIjKlMnOpQrSt';
+  const OWNED = `portal.wavespestcontrol.com/receipt/${T}`;
+
+  test.each([
+    ['raw in the query', `https://evil.example/?next=https://portal.wavespestcontrol.com/receipt/${T}`],
+    ['single-encoded', `https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${T}`],
+    ['double-encoded', `https://evil.example/?next=https%253A%252F%252Fportal.wavespestcontrol.com%252Freceipt%252F${T}`],
+    ['triple-encoded', `https://evil.example/?next=https%25253A%25252F%25252Fportal.wavespestcontrol.com%25252Freceipt%25252F${T}`],
+    ['in a fragment', `https://evil.example/#https://portal.wavespestcontrol.com/receipt/${T}`],
+    ['in a path segment', `https://evil.example/go/portal.wavespestcontrol.com/receipt/${T}`],
+    ['backslashed', `https://evil.example/?next=portal.wavespestcontrol.com\\receipt\\${T}`],
+    ['mixed case host', `https://evil.example/?next=HTTPS://Portal.WavesPestControl.com/receipt/${T}`],
+    // IDNA: a browser reads these stops as a dot and full-width letters as ASCII.
+    ['with ideographic full stops', `https://evil.example/?next=https://portal\u3002wavespestcontrol\u3002com/receipt/${T}`],
+    ['with full-width full stops', `https://evil.example/?next=https://portal\uFF0Ewavespestcontrol\uFF0Ecom/receipt/${T}`],
+    ['with half-width ideographic stops', `https://evil.example/?next=portal\uFF61wavespestcontrol\uFF61com/receipt/${T}`],
+    ['with a percent-encoded ideographic stop', `https://evil.example/?next=portal%E3%80%82wavespestcontrol%E3%80%82com/receipt/${T}`],
+    ['with full-width letters', `https://evil.example/?next=\uFF50ortal.wavespestcontrol.com/receipt/${T}`],
+    // IDNA drops these: the host still opens the portal.
+    ['with a soft hyphen in the host', `https://evil.example/?next=port\u00ADal.wavespestcontrol.com/receipt/${T}`],
+    ['with a zero-width space in the host', `https://evil.example/?next=portal.waves\u200Bpestcontrol.com/receipt/${T}`],
+    ['with a zero-width joiner and a word joiner', `https://evil.example/?next=por\u200Dtal.wavespestcontrol\u2060.com/receipt/${T}`],
+    ['with a variation selector and a BOM', `https://evil.example/?next=portal\uFE0F.wavespestcontrol.c\uFEFFom/receipt/${T}`],
+    ['with a percent-encoded soft hyphen', `https://evil.example/?next=port%C2%ADal.wavespestcontrol.com/receipt/${T}`],
+    // The URL parser drops TAB, CR and LF: encoded, doubly encoded, or left raw in a text the email path has not split.
+    ['with a percent-encoded tab in the host', `https://evil.example/?next=https://port%09al.wavespestcontrol.com/receipt/${T}`],
+    ['with a percent-encoded newline in the host', `https://evil.example/?next=https://port%0Aal.wavespestcontrol.com/receipt/${T}`],
+    ['with a percent-encoded carriage return in the host', `https://evil.example/?next=https://portal.waves%0Dpestcontrol.com/receipt/${T}`],
+    ['with a double-encoded tab in the host', `https://evil.example/?next=https://port%2509al.wavespestcontrol.com/receipt/${T}`],
+    ['with a raw tab in the host', `https://evil.example/?next=https://port\tal.wavespestcontrol.com/receipt/${T}`],
+    ['with a raw newline in the host', `https://evil.example/?next=https://portal.wavespestcontrol.com\n/receipt/${T}`],
+  ])('finds the owned link nested %s', (_label, text) => {
+    expect(nestedOwnedLinkRuns(text).map((run) => run.replace(/\\/g, '/').toLowerCase())).toContain(OWNED.toLowerCase());
+  });
+
+  // Decoded until stable, scanning every pass: a link encoded N times is found for any N within the cap.
+  test.each([[4], [5], [8], [12]])('finds an owned link nested and percent-encoded %i times', (times) => {
+    let link = `https://portal.wavespestcontrol.com/receipt/${T}`;
+    for (let i = 0; i < times; i += 1) link = link.replace(/%/g, '%25').replace(/:/g, '%3A').replace(/\//g, '%2F');
+    const text = `https://evil.example/?next=${link}`;
+    expect(nestedOwnedLinkRuns(text).map((run) => run.toLowerCase())).toContain(OWNED.toLowerCase());
+    expect(linkTextUnstable(text)).toBe(false);
+    expect(wrappedOwnedLinkIn(text)).toBe(true);
+  });
+
+  test('a token still decoding after the cap is reported unstable and refused as wrapped; ordinary escapes are stable', () => {
+    let link = `https://portal.wavespestcontrol.com/receipt/${T}`;
+    for (let i = 0; i < 14; i += 1) link = link.replace(/%/g, '%25').replace(/:/g, '%3A').replace(/\//g, '%2F');
+    const text = `https://evil.example/?next=${link}`;
+    expect(linkTextUnstable(`See ${text} thanks`)).toBe(true);
+    expect(wrappedOwnedLinkIn(text)).toBe(true);
+    for (const plain of ['https://example.com/a%20b', 'https://example.com/?q=100%25', 'https://example.com/?r=x%2520y', 'no links here', '']) {
+      expect(linkTextUnstable(plain)).toBe(false);
+    }
+  });
+
+  test('finds the branded short host too, and a fully-qualified (trailing dot) portal host', () => {
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https%3A%2F%2Fwavespest.co%2Fl%2Fab12cd')).toContain('wavespest.co/l/ab12cd');
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https://portal.wavespestcontrol.com./receipt/x1')).toContain('portal.wavespestcontrol.com./receipt/x1');
+  });
+
+  test('a malformed percent escape is tolerated; a foreign URL with no owned host, and look-alike hosts, yield nothing', () => {
+    expect(nestedOwnedLinkRuns('https://evil.example/?a=100%&b=%E0%A4%A&n=https://portal.wavespestcontrol.com/pay/x1')).toContain('portal.wavespestcontrol.com/pay/x1');
+    expect(nestedOwnedLinkRuns('https://evil.example/?next=https%3A%2F%2Fother.example%2Fpage#frag')).toEqual([]);
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https://portal.wavespestcontrol.com.evil.example/pay/x1')).toEqual([]);
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https://evilportal.wavespestcontrol.com/pay/x1 and https://x.portal.wavespestcontrol.com/pay/x1')).toEqual([]);
+    expect(nestedOwnedLinkRuns('Thanks, see you Tuesday.')).toEqual([]);
+    expect(nestedOwnedLinkRuns(null)).toEqual([]);
+  });
+});
+
+// A body may carry an owned-host link only as itself: it must parse, as a
+// browser would, to an owned host with no userinfo and no owned link nested in
+// its path, query or fragment.
+test('wrappedOwnedLinkIn: an IDNA-variant portal host inside a foreign URL is wrapped; as the link itself it is the portal', () => {
+  const { wrappedOwnedLinkIn } = require('../services/composer-customer-links');
+  expect(wrappedOwnedLinkIn('See https://evil.example/?next=https://portal\u3002wavespestcontrol\u3002com/pay/tok')).toBe(true);
+  expect(wrappedOwnedLinkIn('Pay: https://portal\u3002wavespestcontrol\u3002com/pay/tok')).toBe(false);
+});
+
+describe('wrappedOwnedLinkIn', () => {
+  const T = 'AbCdEfGhIjKlMnOpQrSt';
+
+  // Bodies split on whitespace before a token is scanned: the ENCODED tab / newline forms stay inside one token and are refused.
+  test.each([
+    ['%09', 'port%09al'], ['%0A', 'port%0Aal'], ['%0D', 'por%0Dtal'], ['a double-encoded %2509', 'port%2509al'],
+  ])('a portal host broken by %s inside a foreign URL is wrapped; as the whole link it does not parse and is refused', (_label, host) => {
+    expect(wrappedOwnedLinkIn(`See https://evil.example/?next=https://${host}.wavespestcontrol.com/pay/${T} ok`)).toBe(true);
+    expect(wrappedOwnedLinkIn(`Pay: https://${host}.wavespestcontrol.com/pay/${T}`)).toBe(true);
+    expect(linkTextUnstable(`See https://evil.example/?next=https://${host}.wavespestcontrol.com/pay/${T}`)).toBe(false);
+  });
+
+  test.each([
+    ['owned link in the userinfo of a foreign host', `https://portal.wavespestcontrol.com%2Fpay%2F${T}@evil.example/`],
+    ['the same with the @ percent-encoded', `https://portal.wavespestcontrol.com%2Fpay%2F${T}%40evil.example/`],
+    ['the same double-encoded', `https://portal.wavespestcontrol.com%252Fpay%252F${T}%2540evil.example/`],
+    ['a backslash before the real foreign host', `https://evil.example\\@portal.wavespestcontrol.com/pay/${T}`],
+    ['raw in a foreign query', `https://evil.example/?next=https://portal.wavespestcontrol.com/pay/${T}`],
+    ['encoded in a foreign query', `https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Fpay%2F${T}`],
+    ['in a foreign fragment', `https://evil.example/#portal.wavespestcontrol.com/pay/${T}`],
+    ['in a foreign path', `https://evil.example/portal.wavespestcontrol.com/pay/${T}`],
+    ['in an owned URL\'s query', `https://portal.wavespestcontrol.com/pay/${T}?next=https://portal.wavespestcontrol.com/pay/${T}`],
+    ['in an owned URL\'s encoded query', `https://portal.wavespestcontrol.com/pay/${T}?next=https%3A%2F%2Fwavespest.co%2Fl%2Fab12cd`],
+    ['two owned links glued with a comma', `portal.wavespestcontrol.com/pay/${T},portal.wavespestcontrol.com/pay/${T}`],
+    ['a token that does not parse', `https://portal.wavespestcontrol.com:99999999/pay/${T}`],
+    ['a non-http scheme', `ftp://portal.wavespestcontrol.com/pay/${T}`],
+  ])('refuses %s', (_label, link) => {
+    expect(wrappedOwnedLinkIn(`Pay here: ${link} thanks`)).toBe(true);
+  });
+
+  test.each([
+    ['bare', `portal.wavespestcontrol.com/pay/${T}`],
+    ['with a scheme', `https://portal.wavespestcontrol.com/pay/${T}`],
+    ['mixed case host', `HTTPS://Portal.WavesPestControl.com/pay/${T}`],
+    ['in brackets', `[portal.wavespestcontrol.com/pay/${T}]`],
+    ['in parentheses', `(portal.wavespestcontrol.com/pay/${T})`],
+    ['with a trailing period', `portal.wavespestcontrol.com/pay/${T}.`],
+    ['with a trailing slash and a query of its own', `portal.wavespestcontrol.com/pay/${T}/?ref=sms`],
+    ['the FQDN form', `https://portal.wavespestcontrol.com./pay/${T}`],
+    ['the branded short host', 'wavespest.co/l/ab12cd'],
+    ['the bare portal home page', 'portal.wavespestcontrol.com'],
+  ])('allows an owned link that is just itself: %s', (_label, link) => {
+    expect(wrappedOwnedLinkIn(`Pay here: ${link} thanks`)).toBe(false);
+  });
+
+  test('foreign URLs and look-alike hosts carry no owned link, so there is nothing wrapped', () => {
+    expect(wrappedOwnedLinkIn('See https://evil.example/page?x=1 and https://other.example/pay/x')).toBe(false);
+    expect(wrappedOwnedLinkIn(`https://portal.wavespestcontrol.com.evil.example/pay/${T}`)).toBe(false);
+    expect(wrappedOwnedLinkIn(`https://x.portal.wavespestcontrol.com/pay/${T}`)).toBe(false);
+    expect(wrappedOwnedLinkIn(`https://evilportal.wavespestcontrol.com/pay/${T}`)).toBe(false);
+    expect(wrappedOwnedLinkIn('Running late, sorry!')).toBe(false);
+    expect(wrappedOwnedLinkIn('')).toBe(false);
+    expect(wrappedOwnedLinkIn(null)).toBe(false);
+  });
+
+  test('the userinfo form is also surfaced to the email-phase presence check (an email reply is refused)', async () => {
+    mockBuilders = {};
+    const link = `https://portal.wavespestcontrol.com%2Fpay%2F${T}@evil.example/`;
+    const surfaced = nestedOwnedLinkRuns(link).join(' ');
+    expect(surfaced).toContain(`portal.wavespestcontrol.com/pay/${T}`);
+    expect((await composerOnlyLinkPresence(`${link} ${surfaced}`, { includeVerifyOnly: true })).present).toBe(true);
+  });
+});
+
+describe('linkOwnersInBody', () => {
+  test('resolves each generated bearer to its customer, owned hosts only, and reports what it cannot match', async () => {
+    mockBuilders = {
+      scheduled_services: chainBuilder({ firstRow: { customer_id: 'cust-visit' } }),
+      customers: chainBuilder({ firstRow: { id: 'cust-reservice' } }),
+      invoices: chainBuilder({ firstRow: { customer_id: 'cust-invoice' } }),
+      estimates: chainBuilder({ firstRow: null }),
+      referral_promoters: chainBuilder({ firstRow: { customer_id: 'cust-referral' } }),
+    };
+    const body = [
+      'move: portal.wavespestcontrol.com/reschedule/AbCdEfGhIjKlMnOpQrSt',
+      'again: portal.wavespestcontrol.com/reservice/AbCdEfGhIjKlMnOpQrSt',
+      'pay: portal.wavespestcontrol.com/pay/AbCdEfGhIjKlMnOpQrSt',
+      'estimate: portal.wavespestcontrol.com/estimate/AbCdEfGhIjKlMnOpQrSt',
+      'refer: portal.wavespestcontrol.com/r/WAVES123',
+      'not ours: https://example.com/pay/AbCdEfGhIjKlMnOpQrSt',
+    ].join(' ');
+    const out = await linkOwnersInBody(body);
+    expect(out.owners.map((o) => [o.kind, o.customerId])).toEqual([
+      ['reschedule', 'cust-visit'], ['reservice', 'cust-reservice'], ['pay', 'cust-invoice'], ['referral', 'cust-referral'],
+    ]);
+    expect(out.unresolved).toEqual([{ kind: 'estimate', token: 'AbCdEfGhIjKlMnOpQrSt' }]);
+    expect(await linkOwnersInBody('See you Tuesday!')).toEqual({ owners: [], unresolved: [] });
+  });
+
+  test('a referral link resolves through the public resolver\'s paths: merged-away alias to the surviving promoter, then the legacy customers.referral_code (Codex r7 P2)', async () => {
+    const aliasPath = chainBuilder();
+    aliasPath.first = jest.fn()
+      .mockResolvedValueOnce(null) // no active promoter under this code
+      .mockResolvedValueOnce({ merged_into_promoter_id: 'promoter-survivor' })
+      .mockResolvedValueOnce({ customer_id: 'cust-survivor' });
+    mockBuilders = { referral_promoters: aliasPath, customers: chainBuilder({ firstRow: { id: 'cust-legacy' } }) };
+    expect(await linkOwnersInBody('Refer a friend: portal.wavespestcontrol.com/r/WAVES-OLD1'))
+      .toEqual({ owners: [{ kind: 'referral', token: 'WAVES-OLD1', customerId: 'cust-survivor' }], unresolved: [] });
+    expect(mockDb).not.toHaveBeenCalledWith('customers');
+
+    const legacyPath = chainBuilder({ firstRow: null });
+    mockBuilders = { referral_promoters: legacyPath, customers: chainBuilder({ firstRow: { id: 'cust-legacy' } }) };
+    expect(await linkOwnersInBody('Refer a friend: portal.wavespestcontrol.com/r/LEGACY42'))
+      .toEqual({ owners: [{ kind: 'referral', token: 'LEGACY42', customerId: 'cust-legacy' }], unresolved: [] });
+
+    mockBuilders = { referral_promoters: chainBuilder({ firstRow: null }), customers: chainBuilder({ firstRow: null }) };
+    expect(await linkOwnersInBody('Refer a friend: portal.wavespestcontrol.com/r/NOBODY1'))
+      .toEqual({ owners: [], unresolved: [{ kind: 'referral', token: 'NOBODY1' }] });
+  });
+
+  test('an unpaid invoice short code is judged by its stored /pay target; a code with no row is unresolved', async () => {
+    mockBuilders = {
+      short_codes: chainBuilder({ firstRow: { code: 'py222', target_url: 'https://portal.wavespestcontrol.com/pay/AbCdEfGhIjKlMnOpQrSt' } }),
+      invoices: chainBuilder({ firstRow: { customer_id: 'cust-invoice' } }),
+    };
+    const out = await linkOwnersInBody('You can view and pay your balance securely here: portal.wavespestcontrol.com/l/py222');
+    expect(out).toEqual({ owners: [{ kind: 'pay', token: 'AbCdEfGhIjKlMnOpQrSt', customerId: 'cust-invoice' }], unresolved: [] });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await linkOwnersInBody('Pay here: portal.wavespestcontrol.com/l/gone99')).toEqual({ owners: [], unresolved: [{ kind: 'short_link', token: 'gone99' }] });
   });
 });

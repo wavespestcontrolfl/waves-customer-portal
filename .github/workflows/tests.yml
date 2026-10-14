@@ -13,7 +13,8 @@
 #      so setting DATABASE_URL globally turns them red by design, not by bug.
 #   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the `server`
 #      job) against the migrated database, serially (--runInBand: they share tables and
-#      clash under parallel workers). products-catalog-label-fields is
+#      clash under parallel workers; the job runs three serial lanes, each on
+#      its own Postgres server). products-catalog-label-fields is
 #      excluded — like the golden masters it pins prod-parity data
 #      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
 #
@@ -66,6 +67,35 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Two more servers so the two longest steps can run beside the rest (see
+      # "Three lanes" below). Separate servers, not extra databases on one
+      # server: 167 suites refuse any database not named waves_test.
+      postgres-b:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres-c:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       NODE_ENV: test
       JWT_SECRET: ci-only-test-secret
@@ -76,10 +106,48 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
-      - name: Migrate from an empty database
+      - parallel:
+          - name: Migrate from an empty database
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the second server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the third server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+      # Three lanes (2026-10-08 trial). Measured on five green runs: this job
+      # set the length of every run at 16-18 min, and two steps were 8 of
+      # those minutes. They now run as background steps, each on its own
+      # server, while every other step runs below on the first server exactly
+      # as before. Each lane is still serial against its own database. They
+      # sit here, not in their old places, so they start at once. The
+      # `wait-all` step at the end of the job fails if either one failed.
+      - name: DB-gated suites (serial, against the migrated database)
+        id: db-gated
+        background: true
+        working-directory: server
         env:
-          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx knex migrate:latest --knexfile server/knexfile.js
+          DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+        # --forceExit removed 2026-07-16: the open handle was the shared app
+        # pool (models/db) pulled at module scope by lawn-intelligence in
+        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
+        # afterAll, and the full serial run exits cleanly on its own.
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand
+      - name: Grouped closeout transaction tests
+        id: closeout
+        background: true
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
@@ -123,7 +191,8 @@ jobs:
                 run(['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],
                   { env: { ...process.env, DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
-                  'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js'],
+                  'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js',
+                  'tests/staff-mfa-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/customer-geocode-review-postgres.test.js',
@@ -167,6 +236,11 @@ jobs:
         env:
           RESCHEDULE_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/reschedule-link-promises-postgres.test.js
+      - name: Office move approval trigger tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/office-move-approval-postgres.test.js
       - name: Call booking-link text transaction tests
         working-directory: server
         env:
@@ -198,11 +272,11 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/request-app-receipts-postgres.test.js
-      - name: Grouped closeout transaction tests
+      - name: Estimate draft retire transaction tests
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/estimate-draft-retire-postgres.test.js
       - name: Invoice-issued closeout resolver transaction tests
         working-directory: server
         env:
@@ -255,6 +329,11 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/previsit-balance-authority-postgres.test.js
+      - name: Report blog search ranking and suggestion fence tests
+        working-directory: server
+        env:
+          REPORT_BLOG_SEARCH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/report-blog-post-postgres.test.js tests/blog-suggest-claim-fence-postgres.test.js tests/report-blog-suggestion-postgres.test.js
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
         # autopay, notification, and upload-validation logic. The server-unit
@@ -291,19 +370,6 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/sendgrid-webhook-attempt-fence-postgres.test.js
-      - name: DB-gated suites (serial, against the migrated database)
-        working-directory: server
-        env:
-          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        # --forceExit removed 2026-07-16: the open handle was the shared app
-        # pool (models/db) pulled at module scope by lawn-intelligence in
-        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
-        # afterAll, and the full serial run exits cleanly on its own.
-        run: |
-          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
-            | grep -v products-catalog-label-fields \
-            | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand
       - name: Service-coordinate recovery transaction tests
         working-directory: server
         env:
@@ -330,7 +396,8 @@ jobs:
         env:
           RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           RESERVATION_HOLD_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js
+          SLOT_PARK_LOCK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js tests/slot-park-lock-contention-postgres.test.js
       - name: Staff arrival-window transaction tests
         working-directory: server
         env:
@@ -355,7 +422,7 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js tests/intelligence-bar-superseded-cards-db.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
@@ -368,6 +435,8 @@ jobs:
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
+      - name: Wait for the two background lanes (fails if either failed)
+        wait-all:
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
   # (no Postgres service here, on purpose). It was the long pole of the whole
@@ -395,7 +464,10 @@ jobs:
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
-        run: npx jest --ci --silent --maxWorkers=2 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
+        # Three workers on the 4-vCPU runner: shards took 3-7 min against 5-8 with two.
+        # The default 5 s test timeout is raised to 15 s because a third worker slows
+        # cold module loads; a test that sets its own timeout keeps it.
+        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
 
   client:
     runs-on: ubuntu-latest
@@ -409,13 +481,39 @@ jobs:
       - run: npm ci
       - name: Worktree and managed startup checks
         run: npm run test:dev-workflow
-      - name: Client tests (vitest)
+      - name: Customer app coverage floor (the tests related to the gated files)
+        # The whole vitest suite runs in the `client-unit` shards. A shard sees
+        # a third of the tests, so it cannot measure the coverage floor in
+        # client/vite.config.js; this step runs every test that imports one of
+        # the gated files and checks the floor on them.
         working-directory: client
-        run: npm run test:coverage
+        run: npm run test:coverage-floor
       - name: Customer app production build
         # Vite production compilation catches chunking, CSS/import, and
         # service-worker asset failures that the jsdom test runtime cannot.
         run: npm run build
+
+  # The whole client suite (708 files, ~12 min on one runner, the longest job
+  # of the run once the server job ran in lanes) as three parallel shards.
+  # `vitest --shard` splits the test files deterministically: every file runs
+  # in exactly one shard. No coverage here; the floor is the `client` job's.
+  client-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - name: Client tests (vitest)
+        working-directory: client
+        run: npx vitest run --silent --shard=${{ matrix.shard }}/3
 
   browser-previews:
     runs-on: ubuntu-latest
@@ -510,6 +608,10 @@ jobs:
           retention-days: 7
 
   native-android:
+    # `gates` reports whether the PR touches anything the mobile builds read
+    # (see its "mobile scope" step). Fails open: no answer still builds.
+    needs: gates
+    if: ${{ !cancelled() && needs.gates.outputs.mobile != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -533,6 +635,10 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
   native-ios:
+    # Same scope rule as native-android. macOS runners are capped at 5 at a
+    # time on this plan, so a build nobody needs is the costliest one to queue.
+    needs: gates
+    if: ${{ !cancelled() && needs.gates.outputs.mobile != 'false' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -574,12 +680,48 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      mobile: ${{ steps.mobile-scope.outputs.mobile }}
     steps:
       - uses: actions/checkout@v4
         with:
           # Full history: the changed-files lint diffs against the PR base's
           # merge-base, which a shallow clone doesn't have.
           fetch-depth: 0
+      - name: Mobile scope (do the iOS and Android builds need to run?)
+        id: mobile-scope
+        # The mobile builds compile the web app (client/, shared/, the root
+        # lockfile) and scripts/mobile. They are skipped ONLY when every file
+        # the PR changes sits in a directory they never read. Anything else
+        # builds both apps: another directory, a root file, an empty or
+        # unreadable diff, a push to main. First step after checkout, so the
+        # answer exists even when a later gate fails.
+        #
+        # server/ is such a directory except for the files the bundle pulls in
+        # through shared/ or client source (today one JSON,
+        # server/services/estimate-one-time-copy.json). They are read from the
+        # code, never listed here: a change to one builds, and if the bundle
+        # ever reaches server CODE (whose own imports this step cannot
+        # follow), every server change builds.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          mobile=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # --no-renames: a rename is listed as its old path AND its new one, so
+            # moving a build input into a skip-safe directory still builds.
+            if files=$(git diff --name-only --no-renames "origin/${BASE_REF}...HEAD") && [ -n "$files" ]; then
+              inputs=$(git grep -hoE '\.\./server/[A-Za-z0-9_./-]+' -- shared client/vite.config.js client/src ':(exclude,glob)client/src/**/*.test.*' | sed -E 's#^(\.\./)+##' | sort -u || true)
+              safe='^(server|docs|\.claude|ops|video|wiki)/'
+              if printf '%s\n' "$inputs" | grep -qvE '\.json$|^$'; then safe='^(docs|\.claude|ops|video|wiki)/'; fi
+              outside=$(printf '%s\n' "$files" | grep -vE "$safe" || true)
+              hit=""
+              if [ -n "$inputs" ]; then hit=$(printf '%s\n' "$files" | grep -xF -f <(printf '%s\n' "$inputs") || true); fi
+              if [ -z "$outside" ] && [ -z "$hit" ]; then mobile=false; fi
+            fi
+          fi
+          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "mobile builds needed: $mobile"
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'

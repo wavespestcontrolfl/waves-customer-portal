@@ -73,7 +73,7 @@ jest.mock('../services/sms-reply-alert-delivery', () => ({ ringSmsReplyBell: jes
 jest.mock('../services/reschedule-sms', () => ({ handleRescheduleReply: async () => ({ handled: false }) }));
 jest.mock('../services/customer-intelligence/event-rescore', () => ({ rescoreOnInboundMessage: async () => ({}) }));
 jest.mock('../services/recruiting-inbound', () => ({ matchApplicantReply: async () => null }));
-jest.mock('../services/context-aggregator', () => ({ getFullCustomerContext: async () => ({ summary: 'synthetic', flags: [] }) }));
+jest.mock('../services/context-aggregator', () => ({ getFullCustomerContext: async () => ({ summary: 'synthetic', flags: [] }), getContextForCustomer: async () => ({ summary: 'synthetic', flags: [] }) }));
 jest.mock('../services/response-drafter', () => ({ draftResponse: jest.fn(async () => ({ draft: 'Legacy synthetic draft' })) }));
 const mockDispatch = jest.fn();
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));

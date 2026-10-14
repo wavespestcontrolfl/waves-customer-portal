@@ -330,7 +330,7 @@ test('security interrupt: spoken card number ⇒ fixed copy, model NOT consulted
   await turn(convo, 'Can I just pay now? My card is 4111 1111 1111 1111.');
   expect(spoken).toEqual([script.SECURITY_INTERRUPT]);
   expect(mockStreamCalls).toHaveLength(0);
-  const allTurns = JSON.stringify(convo._turns) + JSON.stringify(convo.messages);
+  const allTurns = storedTurns(convo) + JSON.stringify(convo.messages);
   expect(allTurns).not.toContain('4111 1111 1111 1111');
 });
 
@@ -531,6 +531,11 @@ test('hangup with no confirmation ⇒ conversation_abandoned outcome + transcrip
 });
 
 // prb-r3 pins.
+// What a conversation stored, as text to search for a value that must not be
+// there. Each turn's `at` is left out: a clock reading such as 1791031234629
+// holds "1234", and a "PIN was withheld" check then fails on the timestamp.
+const storedTurns = (convo) => JSON.stringify(convo._turns.map(({ at, ...turn }) => turn));
+
 describe('prb-r3', () => {
   test('an EMPTY verify_identity call never consumes an attempt', async () => {
     const { convo } = makeConvo();
@@ -828,7 +833,7 @@ describe('prb-r12', () => {
     expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
     expect(convo._captures.consentRevoked).toBe(true);
     expect(spoken).toContain(script.SECURITY_INTERRUPT);
-    const everything = JSON.stringify(convo._turns) + JSON.stringify(convo.messages)
+    const everything = storedTurns(convo) + JSON.stringify(convo.messages)
       + JSON.stringify(flags.revokeAutomatedVoiceConsent.mock.calls);
     expect(everything).not.toContain('123-45-6789');
   });
@@ -955,11 +960,11 @@ describe('prb-r14', () => {
     const { convo, spoken } = makeConvo();
     await turn(convo, 'my routing is 021000021');
     expect(spoken).toContain(script.SECURITY_INTERRUPT);
-    expect(JSON.stringify(convo._turns) + JSON.stringify(convo.messages)).not.toContain('021000021');
+    expect(storedTurns(convo) + JSON.stringify(convo.messages)).not.toContain('021000021');
 
     mockScriptedMessages.length = 0;
     await turn(convo, 'my checking account is 123456789');
-    expect(JSON.stringify(convo._turns) + JSON.stringify(convo.messages)).not.toContain('123456789');
+    expect(storedTurns(convo) + JSON.stringify(convo.messages)).not.toContain('123456789');
   });
 
   test('"stop these automated calls" / "stop the calls" hit the deterministic opt-out path', async () => {
@@ -1142,7 +1147,7 @@ describe('prb-r16', () => {
     const { convo, spoken } = makeConvo();
     await turn(convo, 'my PIN is 1234');
     expect(spoken).toContain(script.SECURITY_INTERRUPT);
-    expect(JSON.stringify(convo._turns)).not.toContain('1234');
+    expect(storedTurns(convo)).not.toContain('1234');
 
     setDb();
     const second = makeConvo();
@@ -1570,7 +1575,7 @@ describe('prb-r18', () => {
       mockScriptedMessages.length = 0;
       await turn(convo, '4242 4242');
       expect(spoken).toContain(script.SECURITY_INTERRUPT);
-      const everything = JSON.stringify(convo.messages) + JSON.stringify(convo._turns);
+      const everything = JSON.stringify(convo.messages) + storedTurns(convo);
       expect(everything).not.toContain('4242');
     } finally {
       jest.useRealTimers();

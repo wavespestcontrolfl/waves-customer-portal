@@ -124,7 +124,8 @@ describe('runCallPropertyLookup', () => {
 
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
     expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'], complete: true, exitedCandidateSet: true });
-    expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL 34212');
+    // The cache warm declares its scope decision (lookup-callers.js: no suite sizing), so the options are the registry's empty set.
+    expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL 34212', {});
     // Linked visits missing their coordinate pair get the same fill.
     expect(visitsBuilder.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
 
@@ -866,6 +867,45 @@ describe('sweepUnenrichedProperties', () => {
   });
 });
 
+describe('sweepUnenrichedPropertiesAfterKill (deploy-kill retry keeps the nightly budget)', () => {
+  const { sweepUnenrichedPropertiesAfterKill, _private: { backfillBudgetLeft } } = require('../services/call-property-lookup');
+  const ledgerCount = (n) => db.mockImplementation((table) => {
+    if (table !== 'property_lookups') throw new Error(`unexpected table ${table}`);
+    return { whereRaw() { return this; }, count() { return this; }, first: async () => (n instanceof Error ? Promise.reject(n) : { n: String(n) }) };
+  });
+  afterEach(() => { delete process.env.PROPERTY_BACKFILL_BATCH; });
+
+  test('what is left = the batch minus the attempts already in the ledger, never below zero', async () => {
+    ledgerCount(19);
+    expect(await backfillBudgetLeft()).toBe(1);
+    process.env.PROPERTY_BACKFILL_BATCH = '5';
+    expect(await backfillBudgetLeft()).toBe(0);
+  });
+
+  test('a killed run that spent the whole batch buys nothing more', async () => {
+    ledgerCount(20);
+    expect(await sweepUnenrichedPropertiesAfterKill()).toEqual({ skipped: 'budget_spent' });
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test('ledger writes switched off (PROPERTY_LOOKUP_CACHE_DISABLED): the retry buys nothing', async () => {
+    ledgerCount(0);
+    process.env.PROPERTY_LOOKUP_CACHE_DISABLED = '1';
+    try {
+      expect(await sweepUnenrichedPropertiesAfterKill()).toEqual({ skipped: 'budget_spent' });
+      expect(performPropertyLookup).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.PROPERTY_LOOKUP_CACHE_DISABLED;
+    }
+  });
+
+  test('an unreadable ledger throws: no budget figure, no spend', async () => {
+    ledgerCount(new Error('ledger down'));
+    await expect(sweepUnenrichedPropertiesAfterKill()).rejects.toThrow('ledger down');
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+});
+
 describe('fetchBackfillCandidates', () => {
   const { _private } = require('../services/call-property-lookup');
 
@@ -946,6 +986,15 @@ describe('recentLookupVerdict', () => {
 
     mockLedger({ last_attempt_status: 'pending', last_attempt_at: stale });
     expect(await _private.recentLookupVerdict(row)).toBe(null);
+    // The deploy-kill retry never re-buys the lookup the killed run had in
+    // flight: it may already be paid for, and the retry's budget counts
+    // ledger rows.
+    expect(await _private.recentLookupVerdict(row, { stalePendingCools: true })).toBe('cooldown');
+    // Same lookup after the stale-attempt sweep renamed it 'interrupted':
+    // a normal run tries it again, the retry does not.
+    mockLedger({ last_attempt_status: 'interrupted', last_attempt_at: stale });
+    expect(await _private.recentLookupVerdict(row, { stalePendingCools: true })).toBe('cooldown');
+    expect(await _private.recentLookupVerdict(row)).not.toBe('cooldown');
     mockLedger({ last_attempt_status: 'pending', last_attempt_at: live });
     expect(await _private.recentLookupVerdict(row)).toBe('cooldown');
     // Terminal unproductive statuses cool for the full window regardless

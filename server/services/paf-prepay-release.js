@@ -560,7 +560,11 @@ async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
   // even while the term reads payment_pending (GitHub Codex #5640 r13).
   const estimate = await conn('estimates').where({ id: term.source_estimate_id }).first('estimate_data');
   const job = parseData(estimate?.estimate_data)?.prepayAutoChargeJob;
-  if (!job || job.deferred_to_first_visit !== true || ![AWAITING, 'pending'].includes(String(job.status || ''))) return false;
+  // A termite annual plan charged after installation has no prepay job: its
+  // stamped installation visit is by construction the one held visit (owner
+  // ruling 2026-10-03 on #5816: same neutral text).
+  if (!job) return require('./termite-annual-signature-charge').installationStillAwaitsCharge(term, conn);
+  if (job.deferred_to_first_visit !== true || ![AWAITING, 'pending'].includes(String(job.status || ''))) return false;
   const invoice = job.invoice_id ? await conn('invoices').where({ id: job.invoice_id }).first('status') : null;
   const invStatus = String(invoice?.status || '');
   if (!invoice || ['processing', 'paid', 'prepaid'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return false;

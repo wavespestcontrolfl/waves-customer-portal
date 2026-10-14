@@ -50,6 +50,10 @@ V1 page components, the per-flag gates (`DashboardGate` / `DispatchGate` /
 DispatchPageV2 under tabs); `/admin/schedule` redirects to
 `/admin/dispatch?tab=schedule`. The admin shell is `AdminLayoutV2`.
 
+`KnowledgePage.jsx` and its `pages/admin/knowledge/*` slices are Tier 1 as
+well (Tailwind + `components/ui`, spec §5.7) — review a Knowledge change as
+Tier 1, and never introduce a `D` palette there.
+
 **Retained V1 modules (named-export only, no V1 page route):**
 `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`,
 `CommunicationsPage.jsx` are shared-utility modules — they export constants
@@ -58,7 +62,13 @@ and sub-components consumed by V2 (`CompletionPanel` / `RescheduleModal` /
 `STAGE_MAP` / `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` /
 `CustomerIntelligenceTab` / `STATUS_CONFIG` / `PIPELINE_FILTERS` /
 `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` /
-`detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP`). The
+`detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP` /
+`PRODUCT_DESCRIPTIONS` / `TRACK_SAFETY_RULES` / `stripLegacyBoilerplate`).
+AGENTS.md points here for this inventory, but it is NOT exhaustive —
+`SchedulePage.jsx` also exports `completionResumeOwed`/`…Key`/`…Error`,
+`ZoneMarkingStep` and `StationMarkingStep`, and `EstimatePage.jsx` exports
+`declinePayload`, all consumed by V2. Grep for real importers before
+calling any export here dead. The
 `export default function ...Page()` component is gone from each — do not
 resurrect it, and do not delete these files as "dead code".
 
@@ -106,13 +116,22 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
 ## Hard lines (both systems)
 
 - 14px minimum for readable text (Virginia uses this 8 hours a day).
-  POLICY on customer surfaces: 16px body / 14px label floors, and no raw
-  emoji in JSX source (including comments — use icon components). The
-  mechanical gate (`npm run check:portal-brand`, runs in Railway prebuild
-  — one violation kills EVERY build) enforces only a SUBSET: selected
-  customer directories (`components/estimate` excluded) and inline
-  `fontSize: 11`/`13` literals — so a passing gate is NOT proof of
-  compliance; the policy applies repo-wide regardless of gate coverage.
+  POLICY on customer surfaces: PRIMARY PROSE paragraphs are 16px
+  (`FS.bodyLg`, owner D1 2026-09-05); `FS.body` 14 stays correct for meta
+  rows, table cells, buttons, eyebrows and fine print — so flag a primary
+  or running-prose paragraph at 14px, and any off-scale size (a
+  split-the-difference 15px is not a token), not every 14px string. One
+  owner-approved exception: the lawn estimate's 15px season descriptions
+  (`docs/design/DECISIONS.md`, 2026-09-05 lawn seasons entry). The
+  scale is `docs/design/customer-doc-style-guide.md` +
+  `client/src/theme-doc.js`. New portal and billing cards are where this
+  keeps slipping. And no raw emoji in JSX source (including comments —
+  use icon components). The mechanical gate (`npm run check:portal-brand`,
+  runs in Railway prebuild — one violation kills EVERY build) looks for
+  font sizes under the 14 floor and does not catch every form of them; its
+  exact coverage lives in `scripts/check-portal-brand.js`, not here. It is
+  necessary but not sufficient: 14px is legal by design, so it cannot judge
+  the primary-prose rule above, and a pass is NOT proof of compliance.
 - Never apply customer-facing brand styling (Luckiest Guy / Baloo 2 / gold
   pill / mascot) inside `/admin/*` — admin stays monochrome.
 - **iOS PWA safe areas:** `viewport-fit=cover` is global in the standalone

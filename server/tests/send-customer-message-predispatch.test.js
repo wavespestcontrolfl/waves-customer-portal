@@ -705,6 +705,47 @@ test('promised reschedule link can use the locked SMS handoff only with its deli
   expect(sendViaTwilio).not.toHaveBeenCalled();
 });
 
+test('the Auto Pay setup link may hold the comms fence through the provider request, and only that exact shape', async () => {
+  // An Auto Pay customer text rides GATE_AUTOPAY_CUSTOMER_SMS (its own gate, unrelated to the handoff).
+  const gates = require('../config/feature-gates').gates;
+  const gateWas = gates.autopayCustomerSms;
+  gates.autopayCustomerSms = true;
+  const valid = { ...BASE_INPUT, audience: 'customer', purpose: 'card_request', customerId: 'cust-1', entryPoint: 'autopay_setup_link_send',
+    metadata: { original_message_type: 'autopay_setup_link' }, withSmsHandoff: jest.fn() };
+  try {
+  expect((await sendCustomerMessage(valid)).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
+  for (const fields of [
+    { entryPoint: 'autopay_setup_link' },
+    { entryPoint: 'admin_communications_other' },
+    { metadata: { original_message_type: 'card_request' } },
+    { purpose: 'billing' },
+    { audience: 'lead' },
+  ]) {
+    sendViaTwilio.mockClear();
+    expect(await sendCustomerMessage({ ...valid, ...fields })).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  }
+  } finally { gates.autopayCustomerSms = gateWas; }
+});
+
+test('the rate review text pointer may hold the comms fence through the provider request, and only that exact shape', async () => {
+  const valid = { ...BASE_INPUT, audience: 'customer', purpose: 'billing', customerId: 'cust-1', operatorInitiated: true,
+    metadata: { original_message_type: 'price_change_notice', rate_review_letter: true }, withSmsHandoff: jest.fn() };
+  expect((await sendCustomerMessage(valid)).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
+  for (const fields of [
+    { metadata: { original_message_type: 'price_change_notice' } },
+    { metadata: { original_message_type: 'invoice', rate_review_letter: true } },
+    { operatorInitiated: false },
+    { purpose: 'appointment' },
+  ]) {
+    sendViaTwilio.mockClear();
+    expect(await sendCustomerMessage({ ...valid, ...fields })).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  }
+});
+
 test('the deferred voicemail quote-link replay carries its provider-boundary predicate through to the provider — no locked handoff needed', async () => {
   const providerPreSendCheck = jest.fn();
   const replay = { ...BASE_INPUT, purpose: 'missed_call_followup', entryPoint: 'scheduled_sms_cron',

@@ -96,3 +96,62 @@ describe('lawn narrative — dead model outputs removed', () => {
     expect(merged.snapshot.statusHeadline).toBe('A steady lawn with one spot to watch');
   });
 });
+
+describe('lawn report seasonal-dip card — P16 routes the approved row sentence', () => {
+  const { ISSUE_ROWS } = require('../config/lawn-expectations');
+  test('a seasonally muted color card prints the seasonal-dip row, with no hand-written regrowth promise', () => {
+    const v2 = buildLawnReportV2({
+      lawnAssessment: assessment({
+        assessmentDate: '2026-01-15',
+        scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 60, stressDamage: 80, fungusControl: 95, overallScore: 70, season: 'dormant' },
+      }),
+    });
+    const color = v2.diagnosis.find((c) => c.key === 'color_vigor');
+    expect(color.seasonal).toBe(true);
+    expect(color.customerExplanation).toBe(ISSUE_ROWS.seasonal_dip.visibleChange);
+    expect(color.explanation).toBe(ISSUE_ROWS.seasonal_dip.visibleChange);
+    expect(color.customerExplanation).not.toMatch(/should green back up/i);
+  });
+
+  test('an unapproved seasonal-dip row fails closed to the sentence with no regrowth promise', () => {
+    const row = ISSUE_ROWS.seasonal_dip;
+    const was = row.approved;
+    row.approved = false;
+    try {
+      const v2 = buildLawnReportV2({
+        lawnAssessment: assessment({
+          assessmentDate: '2026-01-15',
+          scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 60, stressDamage: 80, fungusControl: 95, overallScore: 70, season: 'dormant' },
+        }),
+      });
+      const color = v2.diagnosis.find((c) => c.key === 'color_vigor');
+      expect(color.customerExplanation).toBe('Color is a little muted right now, which is normal for this cooler stretch.');
+      expect(color.customerExplanation).not.toContain(row.visibleChange);
+    } finally {
+      row.approved = was;
+    }
+  });
+
+  test('the cross-season notes on the report drop the "returns" claim while the row is not approved', () => {
+    const row = ISSUE_ROWS.seasonal_dip;
+    const was = row.approved;
+    const build = () => buildLawnReportV2({
+      lawnAssessment: assessment({
+        beforeAfter: { before: { date: '2026-07-01', photoUrl: 'a' }, after: { date: '2026-01-10', photoUrl: 'b' } },
+        trend: [{ season: 'dormant', date: '2026-01-10' }, { season: 'peak', date: '2026-07-01' }],
+      }),
+    });
+    const on = build();
+    expect(on.progressionNote).toMatch(/nights warm/);
+    expect(on.trends.seasonalNote).toMatch(/nights warm/);
+    row.approved = false;
+    try {
+      const off = build();
+      expect(off.progressionNote).toMatch(/seasonal/);
+      expect(off.trends.seasonalNote).toMatch(/seasonal/);
+      expect(`${off.progressionNote} ${off.trends.seasonalNote}`).not.toMatch(/returns|nights warm/);
+    } finally {
+      row.approved = was;
+    }
+  });
+});

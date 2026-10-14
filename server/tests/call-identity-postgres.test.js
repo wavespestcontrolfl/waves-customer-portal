@@ -34,6 +34,19 @@ jest.setTimeout(30000);
     expect(await lookup('Aisha')).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
     expect(extractedNameMatchesCustomer({ first_name: 'Aisha', last_name: 'Example' }, other)).toBe(false);
   });
+  test('a voicemail lead is reused when the callback transcript spells the first name with the other letter', async () => {
+    const voicemail = lead('Erik', 10);
+    await trx('leads').insert([voicemail, lead('Aisha', 1)]);
+    const result = await lookup('Eric');
+    expect(result).toMatchObject({ matchedVia: 'phone' });
+    expect(result.lead?.id).toBe(voicemail.id);
+    expect(extractedNameMatchesCustomer({ first_name: 'Eric', last_name: 'Example' }, result.lead)).toBe(true);
+  });
+  test('a listed pair leaves a different name on the same phone and surname separate', async () => {
+    const other = lead('Erica', 1);
+    await trx('leads').insert(other);
+    expect(await lookup('Erik')).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
+  });
   test('spelling support cannot override surname or ownership conflicts', async () => {
     await trx('leads').insert([lead('Jason', 1, { last_name: 'Different' }), lead('Jason', 5, { customer_id: randomUUID() })]);
     expect((await lookup('Jayson', { unclaimedOnly: true })).lead).toBeNull();

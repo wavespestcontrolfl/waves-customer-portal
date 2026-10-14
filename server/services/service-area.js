@@ -139,7 +139,26 @@ function isInServiceAreaBox(lat, lng, evidence = {}) {
   return !!zipToCity(zip);
 }
 
+// South Hillsborough is served by the Parrish office (config/locations.js
+// SOUTH_HILLSBOROUGH_CITIES). The ONE predicate for it: a served town named
+// by city, or by a ZIP whose city is a served town. Callers: the inspection
+// route, the call pipeline's out-of-area triage, the Intelligence Bar
+// address check.
+function isServedSouthHillsboroughTown({ cities = [], zips = [] } = {}) {
+  const { SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
+  const towns = [...cities, ...zips.map(zip => zipToCity(String(zip || '').trim().slice(0, 5)))]
+    .map(town => String(town || '').toLowerCase().trim());
+  return towns.some(town => town && SOUTH_HILLSBOROUGH_CITIES.includes(town));
+}
+
+// A Hillsborough County address in a served town is inside the service area.
+function servedSouthHillsborough(county, address) {
+  if (!/hillsborough/i.test(String(county || ''))) return false;
+  return isServedSouthHillsboroughTown({ cities: [address?.city], zips: address?.zip ? [address.zip] : [] });
+}
+
 module.exports = {
+  isServedSouthHillsboroughTown, servedSouthHillsborough,
   SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, DESOTO_LOCALITIES, DESOTO_ZIPS,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion, isDesotoLocality, isDesotoZip,
   zipFromAddressText,

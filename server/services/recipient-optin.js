@@ -18,6 +18,7 @@
 // pending row is written when the template doesn't render).
 const db = require('../models/db');
 const logger = require('./logger');
+const { commitPromiseOf } = require('../utils/trx-commit-promise');
 
 const OPTIN_TEMPLATE_KEY = 'recipient_optin_request';
 const OPTIN_TEMPLATE_VERSION = 'portal-2026-07-23';
@@ -25,6 +26,12 @@ const OPTIN_TEMPLATE_VERSION = 'portal-2026-07-23';
 function isDoubleOptinEnabled() {
   const { isEnabled } = require('../config/feature-gates');
   return isEnabled('recipientDoubleOptin');
+}
+
+// The on-site follow-up (caller demotion + confirmation replay) runs only with
+// the opt-in gate on AND its own gate (GATE_ONSITE_CALLER_DEMOTE, dark by default).
+function isOnSiteFollowUpLive() {
+  return isDoubleOptinEnabled() && require('../config/feature-gates').onSiteCallerDemoteLive?.() === true;
 }
 
 // True only when the opt-in rail can actually ASK a recipient: the double
@@ -157,12 +164,34 @@ async function onRecipientConfirmed(phoneKey, { dbh = db } = {}) {
       const stamp = await applyConfirmedPhone(h, customerId, phoneKey);
       if (stamp) outcomes.push({ customerId, stamp });
     }
+    // Dark (GATE_ONSITE_CALLER_DEMOTE off): this YES owes no follow-up. Its
+    // visit-bound rows are closed with the YES itself, so a flip at any later
+    // moment never demotes a caller or replays a confirmation for it.
+    if (!isOnSiteFollowUpLive()) {
+      await h('recipient_optin')
+        .where({ phone_key: phoneKey, status: 'confirmed' })
+        .whereNotNull('visit_id')
+        .whereNull('followup_done_at')
+        .update({ followup_done_at: new Date(), followup_claimed_at: null });
+    }
   });
   for (const { customerId, stamp } of outcomes) {
     await bestEffort(dbh, (h) => updateCaptureCard(h, phoneKey, {
       optin_result: 'confirmed',
       ...(stamp.stamped ? {} : { consent_stamp: `held:${stamp.reason}` }),
     }, customerId));
+  }
+  // The caller's demotion + the missed confirmation ride AFTER the YES commits
+  // (settleOnSiteFollowUps never throws: a failure there never touches the
+  // consent already recorded, and the sweep retries it).
+  if (outcomes.length) {
+    const settle = () => settleOnSiteFollowUps(outcomes.map((o) => o.customerId), { replyPhoneKey: phoneKey });
+    if (dbh && dbh.isTransaction) {
+      const committed = commitPromiseOf(dbh);
+      if (committed) committed.then(settle, () => {});
+    } else {
+      await settle();
+    }
   }
 }
 
@@ -174,10 +203,482 @@ async function restoreConfirmedPhone(customerId, phoneKey) {
   await bestEffort(db, (h) => applyConfirmedPhone(h, customerId, phoneKey));
 }
 
+// On-site follow-up for a visit-bound opt-in row (owner 2026-10-02), driven by
+// the confirmed row's own visit_id (the visit the ask was about; portal /
+// explicit-consent asks carry none and never come here):
+//   1. CALLER DEMOTION — once the recipient has said YES and the visit is
+//      still confirmed and ahead, the caller (account primary) stops getting
+//      appointment texts (notification_prefs.appointment_notify_primary =
+//      false, account-wide), but only when the recipient is the account's only
+//      slot phone and can actually be texted (slot + consent + no unconsented
+//      hold) — nobody is ever left with no recipient. caller_demoted_at makes
+//      it once per phone: a holder who turned texts back on is not switched
+//      off again by a repeated YES, a retry or a later booking.
+//   2. CONFIRMATION REPLAY — the booking confirmation the recipient missed
+//      (appointment-reminders sendConfirmationToServiceContact, which honors
+//      the holds deliverConfirmation honors and dedupes on sms_log).
+// A claim (followup_claimed_at, 10-minute lease) makes exactly one process act
+// per row; followup_done_at ends the obligation (sent, finally refused, the
+// visit gone, the phone no longer a slot contact, or older than the cap). A
+// held, failed or still-pending attempt releases its claim and the sweep
+// retries. Never throws.
+const FOLLOWUP_CLAIM_TTL_MS = 10 * 60 * 1000;
+// An unfinished follow-up stops being retried this long after the YES (or
+// after the later booking that re-armed it).
+const FOLLOWUP_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+// Replay outcomes that end the obligation; anything else (a held, pending or
+// failed send, a callback-number hold) is retried by the sweep. An uncertain
+// handoff is final: it may have reached the person, so it is never resent.
+const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'already_sent', 'sms_not_chosen', 'not_a_recipient', 'delivery_uncertain']);
+
+// Switch the caller's appointment texts off for this confirmed on-site phone,
+// once. `customer` is a fresh customers row. Returns 'demoted', 'already'
+// (applied before), 'not_applicable' (another slot phone exists: the caller
+// stays) or 'not_in_slot' (the contact was removed: nothing to do, ever) /
+// 'not_recipient' (in a slot but not yet textable: retry).
+async function demoteCallerForPhone(customer, phoneKey) {
+  const { SERVICE_CONTACT_SLOTS, getAppointmentContacts } = require('./customer-contact');
+  // With the caller's texts switched off, the confirmed phone must still be a
+  // recipient in its own right (prefs with the primary excluded: an account
+  // whose primary phone IS this slot phone resolves the slot as a duplicate,
+  // and demoting would leave nobody).
+  const standing = (row) => {
+    const slotKeys = SERVICE_CONTACT_SLOTS.map((slot) => recipientPhoneKey(row[slot.phone])).filter(Boolean);
+    if (!slotKeys.includes(phoneKey)) return 'not_in_slot';
+    if (slotKeys.some((k) => k !== phoneKey)) return 'not_applicable';
+    if (!getAppointmentContacts(row, { appointment_notify_primary: false }).some((c) => recipientPhoneKey(c.phone) === phoneKey)) return 'not_recipient';
+    return 'ok';
+  };
+  const before = standing(customer);
+  if (before !== 'ok') return before;
+  return db.transaction(async (trx) => {
+    // Re-read under the customer row lock: a contact edit between the check
+    // and the write must not leave the account with no recipient.
+    const locked = await trx('customers').where({ id: customer.id }).forUpdate().first();
+    const now = locked ? standing(locked) : 'not_in_slot';
+    if (now !== 'ok') return now;
+    // Already off by the holder's own choice: nothing to demote, and nothing
+    // marked. caller_demoted_at means THIS flow switched the texts off, which
+    // is what restoreDemotedCallers gives back if the contact later declines.
+    // The canonical default row first (never a bare insert: the table's legacy
+    // column defaults would mint marketing consent as a side effect).
+    await require('./customer-default-rows').createDefaultCustomerRows(trx, customer.id);
+    const prior = await trx('notification_prefs').where({ customer_id: customer.id }).forUpdate().first('appointment_notify_primary');
+    if (prior && prior.appointment_notify_primary === false) {
+      // Off already. If THIS flow switched it off for an earlier contact who
+      // was since replaced (that row still carries the marker, and the holder
+      // has not made the setting their own), the demotion's ownership moves to
+      // this contact, so the restore sweep does not switch the caller back on
+      // for the contact who left. Otherwise it is the holder's own opt-out.
+      const moved = await trx('recipient_optin')
+        .where({ customer_id: customer.id })
+        .whereNot({ phone_key: phoneKey })
+        .whereNotNull('caller_demoted_at')
+        .whereNull('caller_choice_at')
+        .update({ caller_demoted_at: null });
+      if (!moved) return 'already';
+      await trx('recipient_optin')
+        .where({ customer_id: customer.id, phone_key: phoneKey, status: 'confirmed' })
+        .update({ caller_demoted_at: new Date(), caller_choice_at: null });
+      return 'demoted';
+    }
+    const marked = await trx('recipient_optin')
+      .where({ customer_id: customer.id, phone_key: phoneKey, status: 'confirmed' })
+      .whereNull('caller_demoted_at')
+      .update({ caller_demoted_at: new Date(), caller_choice_at: null });
+    if (!marked) return 'already';
+    await trx('notification_prefs')
+      .where({ customer_id: customer.id })
+      .update({ appointment_notify_primary: false, updated_at: new Date() });
+    // Account-wide: a saved property's own "send these to me too" choice
+    // overlays the customer row (property-notification-prefs), so a chosen
+    // true there would keep texting the caller for that property. Back to
+    // "not chosen" = follows the customer row.
+    await trx('property_notification_prefs')
+      .where({ customer_id: customer.id, appointment_notify_primary: true })
+      .update({ appointment_notify_primary: null, updated_at: new Date() });
+    return 'demoted';
+  });
+}
+
+// An active suppression on the phone (a spoken opt-out on a call, a
+// wrong-number flag, a staff do-not-contact): the send policy rejects every
+// text to it, whatever the opt-in row says.
+async function phoneSuppressed(h, phoneKey) {
+  return !!(await h('messaging_suppression')
+    .whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [phoneKey])
+    .where('active', true)
+    .first('phone'));
+}
+
+// The contact this flow demoted the caller for can no longer be texted: the
+// caller's appointment texts come back on, or the account would have no
+// recipient at all. Two ways it happens:
+//   - a STOP / NO declined the row (restored with the decline itself, by phone);
+//   - the contact was removed or edited away, the account's contact consent
+//     was cleared (an office or portal edit), or the phone was suppressed
+//     another way (a spoken opt-out, a wrong-number flag, a staff
+//     do-not-contact): the row stays confirmed, so the sweep checks each
+//     marked row against the SAME resolver the senders use and the
+//     suppression list.
+// Only rows carrying caller_demoted_at (this flow switched the texts off; a
+// holder's own earlier opt-out is never marked) are restored, and the marker
+// is cleared so a later YES can demote again. A preference the holder or the
+// office set after the demotion (caller_choice_at) is theirs and is left alone.
+// Runs whatever the gates say: a rollback must still restore.
+async function restoreDemotedCallers(h, phoneKey = null) {
+  const marked = () => {
+    // caller_choice_at: the holder (or the office) set the preference after
+    // the demotion. It is theirs now and is never switched back on here.
+    const q = h('recipient_optin').whereNotNull('caller_demoted_at').whereNull('caller_choice_at').whereNotNull('customer_id');
+    if (phoneKey) q.where({ phone_key: phoneKey });
+    return q;
+  };
+  const restore = [...(await marked().whereNot({ status: 'confirmed' }).select('customer_id', 'phone_key') || [])];
+  if (!phoneKey) {
+    const { getAppointmentContacts } = require('./customer-contact');
+    for (const row of await marked().where({ status: 'confirmed' }).select('customer_id', 'phone_key') || []) {
+      const customer = await h('customers').where({ id: row.customer_id }).first();
+      const textable = !!customer && getAppointmentContacts(customer, { appointment_notify_primary: false })
+        .some((c) => recipientPhoneKey(c.phone) === row.phone_key);
+      // An active suppression on the phone (a spoken opt-out on a call, a
+      // wrong-number flag, a staff do-not-contact) leaves the row confirmed
+      // but the send policy rejects every text to it.
+      if (!textable || await phoneSuppressed(h, row.phone_key)) restore.push(row);
+    }
+  }
+  for (const row of restore) {
+    // Same lock order as a settings save (prefs row, then the opt-in row), and
+    // re-read under it: a save that just made the preference the holder's own
+    // choice (caller_choice_at) is never overwritten.
+    await h('notification_prefs').where({ customer_id: row.customer_id }).forUpdate().first('customer_id');
+    const still = await h('recipient_optin')
+      .where({ customer_id: row.customer_id, phone_key: row.phone_key })
+      .whereNotNull('caller_demoted_at')
+      .whereNull('caller_choice_at')
+      .forUpdate()
+      .first('phone_key');
+    if (!still) continue;
+    await h('notification_prefs').where({ customer_id: row.customer_id }).update({ appointment_notify_primary: true });
+    // The follow-up is owed again too: a renewed YES (or consent coming
+    // back) for a visit still ahead demotes the caller again.
+    await h('recipient_optin').where({ customer_id: row.customer_id, phone_key: row.phone_key })
+      .update({ caller_demoted_at: null, followup_done_at: null, followup_claimed_at: null });
+    logger.info(`[recipient-optin] caller's appointment texts restored: on-site contact ***${row.phone_key.slice(-4)} can no longer be texted`);
+  }
+  return restore.length;
+}
+
+// Is this customer's appointment_notify_primary = false the on-site flow's
+// doing (a contact row carries caller_demoted_at and the holder has not since
+// made the setting their own)? The demotion is about TEXTS: the email
+// resolver (appointment-email.js) reads this to keep the holder on appointment
+// emails. An unreadable row answers false (the holder's emails then follow the
+// stored setting, as before this read existed). Never throws.
+async function callerDemotedForTextsOnly(customerId, h = db) {
+  if (!customerId) return false;
+  try {
+    // The marker alone decides, whatever the row's status: a STOP declines
+    // the row before the restore clears the marker, and the holder's emails
+    // must not drop in that window.
+    const row = await h('recipient_optin')
+      .where({ customer_id: customerId })
+      .whereNotNull('caller_demoted_at')
+      .whereNull('caller_choice_at')
+      .first('phone_key');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[recipient-optin] texts-only demotion read failed (${err.code || err.name || 'error'})`);
+    return false;
+  }
+}
+
+// A settings save (portal or office) that names appointment_notify_primary
+// after this flow switched it off: from now on the value is the holder's own
+// choice, so a later STOP / removal of the contact never overwrites it. Runs in
+// the save's transaction (which already holds the prefs row) and is atomic
+// with it: the preference never commits without its marker.
+async function noteHolderSetNotifyPrimary(h, customerId) {
+  if (!customerId) return;
+  await (h || db)('recipient_optin')
+    .where({ customer_id: customerId })
+    .whereNotNull('caller_demoted_at')
+    .whereNull('caller_choice_at')
+    .update({ caller_choice_at: new Date() });
+}
+
+// Stage 1 — is this claimed row still owed anything, and is it ready now?
+// Answers 'done' (end it), 'wait' (release; the sweep retries) or
+// { customer, slot } when it is ready to settle.
+async function followUpReadiness(row, customerId) {
+  // The cap runs from the YES, or from the booking that re-armed the row.
+  const since = row.followup_armed_at || row.confirmed_at;
+  if (since && Date.now() - new Date(since).getTime() > FOLLOWUP_MAX_AGE_MS) return 'done';
+  // 'dead' ends it (nothing to demote or replay); 'wait' (an office-review
+  // hold) and an unreadable check retry.
+  const state = (await visitAskState(row.visit_id, customerId).catch(() => ({ state: 'unknown' }))).state;
+  if (state !== 'live') return state === 'dead' ? 'done' : 'wait';
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (!customer) return 'done';
+  // The caller's own booking confirmation is still pending (held for the
+  // send window or a move): wait. Demoting now would drop the caller from
+  // that send, and the owner's rule is that the caller gets it.
+  const reminder = await db('appointment_reminders').where({ scheduled_service_id: row.visit_id }).first('confirmation_sent');
+  if (reminder && reminder.confirmation_sent === false) return 'wait';
+  const { SERVICE_CONTACT_SLOTS, getAppointmentContacts } = require('./customer-contact');
+  // The contact was removed from the slots: nothing to demote or replay, ever.
+  const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === row.phone_key);
+  if (!slot) return 'done';
+  // Still in a slot but not textable yet (two new slot phones: the account's
+  // consent is stamped only at the second YES; or an unconsented hold): wait
+  // for the sweep, never end it as 'not_a_recipient'.
+  const textable = getAppointmentContacts(customer, { appointment_notify_primary: false })
+    .some((c) => recipientPhoneKey(c.phone) === row.phone_key);
+  // A suppressed phone cannot be texted either: the caller is never demoted
+  // for it (and the restore sweep gives a demoted caller back).
+  if (!textable || await phoneSuppressed(db, row.phone_key)) return 'wait';
+  return { customer, slot };
+}
+
+// The call that booked (or re-armed) this visit sends the caller's own
+// confirmation itself, shortly after the opt-in ask goes out, and only then
+// re-arms the reminder row when that send is held. Until that window has
+// passed the reminder row cannot say whether the caller's text is settled, so
+// the demotion waits (the replay does not: it is not the caller's text).
+const CALL_CONFIRMATION_SETTLE_MS = 10 * 60 * 1000;
+function callStillSettling(row) {
+  const asked = Math.max(...[row.dispatched_at, row.followup_armed_at].map((t) => (t ? new Date(t).getTime() : 0)));
+  return asked > 0 && Date.now() - asked < CALL_CONFIRMATION_SETTLE_MS;
+}
+
+// Stage 2 — the caller's demotion for a ready row: 'demoted' / 'already' /
+// 'not_applicable' (settled), 'deferred' (the booking call is still settling)
+// or 'error' (retry).
+async function demotionStage(row, customer) {
+  if (row.caller_demoted_at) return 'already';
+  if (callStillSettling(row)) return 'deferred';
+  return demoteCallerForPhone(customer, row.phone_key).catch((err) => {
+    logger.warn(`[recipient-optin] caller demotion failed (${err.code || err.name || 'error'})`);
+    return 'error';
+  });
+}
+
+// Stage 3 — the confirmation the contact missed: { final, texted, note }.
+// A visit either sender already texted (fanout_confirmed_at: stamped under
+// the shared claim, durable even where the best-effort sms_log write was
+// lost) owes no replay.
+async function replayStage(row, customerId, phone, inReplyToYes) {
+  if (row.fanout_confirmed_at) return { final: true, texted: false, note: 'already texted' };
+  const result = await require('./appointment-reminders').sendConfirmationToServiceContact({
+    customerId, scheduledServiceId: row.visit_id, phone, inReplyToYes,
+  });
+  const final = !!result.sent || REPLAY_TERMINAL_REASONS.has(result.reason);
+  return {
+    final,
+    texted: !!result.sent || result.reason === 'delivery_uncertain',
+    note: result.sent ? 'sent' : `not sent (${result.reason}${final ? '' : ', will retry'})`,
+  };
+}
+
+// `replyPhoneKey` is the phone whose YES triggered this run: only ITS replay
+// answers a message that person just sent (another contact's unfinished row
+// rides the same run but honors the send window like a sweep retry).
+async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}) {
+  // This run's claim stamp: finish() only touches a row still holding it.
+  const claimedAt = new Date();
+  const claimed = await db('recipient_optin')
+    .where({ customer_id: customerId, status: 'confirmed' })
+    .whereNotNull('visit_id')
+    .whereNull('followup_done_at')
+    .where((q) => q.whereNull('followup_claimed_at').orWhere('followup_claimed_at', '<', new Date(Date.now() - FOLLOWUP_CLAIM_TTL_MS)))
+    .update({ followup_claimed_at: claimedAt })
+    .returning(['phone_key', 'visit_id', 'confirmed_at', 'dispatched_at', 'followup_armed_at', 'caller_demoted_at', 'fanout_confirmed_at']);
+  let settled = 0;
+  for (const row of claimed || []) {
+    // End (done) or release (retry later) THIS claim; bound to its visit.
+    // `texted`: this visit's confirmation was accepted (or may have reached
+    // the person) — stamped on the row (fanout_confirmed_at holds it for
+    // either sender) so the call fan-out never sends on top of it, even where
+    // the best-effort sms_log write was lost.
+    const finish = (done, { texted = false } = {}) => db('recipient_optin')
+      // Fenced to THIS claim and a still-confirmed row: a STOP that restored
+      // the caller mid-run (it clears the claim and re-opens the follow-up), a
+      // re-arm or a newer worker's claim is never overwritten by a stale one.
+      .where({ customer_id: customerId, phone_key: row.phone_key, visit_id: row.visit_id, status: 'confirmed', followup_claimed_at: claimedAt })
+      .update({
+        followup_claimed_at: null,
+        ...(done ? { followup_done_at: new Date() } : {}),
+        ...(texted ? { fanout_confirmed_at: new Date() } : {}),
+      })
+      .catch(() => {});
+    try {
+      const ready = await followUpReadiness(row, customerId);
+      if (typeof ready === 'string') { await finish(ready === 'done'); continue; }
+      const demoted = await demotionStage(row, ready.customer);
+      const replay = await replayStage(row, customerId, ready.customer[ready.slot.phone], !!replyPhoneKey && row.phone_key === replyPhoneKey);
+      // A demotion still owed (deferred, or it errored) keeps the row open for
+      // the sweep; the replay's own evidence stops a resend.
+      await finish(replay.final && demoted !== 'error' && demoted !== 'deferred', { texted: replay.texted });
+      settled += 1;
+      logger.info(`[recipient-optin] on-site follow-up for ***${row.phone_key.slice(-4)}: caller ${demoted}, confirmation ${replay.note}`);
+    } catch (err) {
+      await finish(false);
+      logger.warn(`[recipient-optin] on-site follow-up failed (${err.code || err.name || 'error'})`);
+    }
+  }
+  return settled;
+}
+
+// Runs the follow-up for each customer (their confirmed, visit-bound, unfinished
+// rows); one customer's failure never stops the rest. No-op while the opt-in
+// gate or GATE_ONSITE_CALLER_DEMOTE is off. Returns how many rows ran.
+async function settleOnSiteFollowUps(customerIds = [], opts = {}) {
+  if (!isOnSiteFollowUpLive()) return 0;
+  let settled = 0;
+  for (const customerId of new Set(customerIds)) {
+    try {
+      settled += await settleCustomerFollowUps(customerId, opts);
+    } catch (err) {
+      logger.warn(`[recipient-optin] on-site follow-up failed (${err.code || err.name || 'error'})`);
+    }
+  }
+  return settled;
+}
+
+// Cron retry for follow-ups a YES could not finish (a send held outside the
+// window, a pending primary confirmation, an office-review hold, a failed read).
+// Random rotation so a long-waiting customer never starves later ones.
+async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
+  // Restores a caller whose demoted contact was removed or lost consent, and
+  // is the backstop for a restore the STOP's own savepoint could not finish.
+  await db.transaction((trx) => restoreDemotedCallers(trx)).catch((err) => {
+    logger.warn(`[recipient-optin] demoted-caller restore sweep failed (${err.code || err.name || 'error'})`);
+  });
+  if (!isDoubleOptinEnabled()) return { settled: 0 };
+  if (!isOnSiteFollowUpLive()) {
+    // Dark: a YES closes its own row when it is recorded (onRecipientConfirmed).
+    // This is the backstop for a row confirmed any other way, so a later flip
+    // never demotes a caller or replays a confirmation for an old YES.
+    await db('recipient_optin')
+      .where({ status: 'confirmed' })
+      .whereNotNull('visit_id')
+      .whereNull('followup_done_at')
+      .update({ followup_done_at: new Date(), followup_claimed_at: null })
+      .catch(() => {});
+    return { settled: 0 };
+  }
+  let rows = [];
+  try {
+    rows = await db('recipient_optin')
+      .where({ status: 'confirmed' })
+      .whereNotNull('visit_id')
+      .whereNull('followup_done_at')
+      .where((q) => q.whereNull('followup_claimed_at').orWhere('followup_claimed_at', '<', new Date(Date.now() - FOLLOWUP_CLAIM_TTL_MS)))
+      .select('customer_id')
+      .groupBy('customer_id')
+      .orderByRaw('random()')
+      .limit(limit);
+  } catch { return { settled: 0 }; }
+  const settled = await settleOnSiteFollowUps(rows.map((r) => r.customer_id));
+  if (settled) logger.info(`[recipient-optin] follow-up sweep settled ${settled} row(s)`);
+  return { settled };
+}
+
+// Booking site: a recipient who already said YES on this account (an earlier
+// call) gets no new ask, so no YES will ever arrive for this booking. The
+// confirmed row's follow-up is re-armed on THIS visit and the 15-minute sweep
+// settles it like a YES: the caller's demotion if it never applied, and the
+// booking confirmation when nothing else sent it (a reused booking runs no
+// fan-out; a fan-out that did send is seen by the replay's per-visit dedupe).
+// Deliberately not settled inline: the caller still gets this call's own
+// confirmation first, and an office-review hold or a failed read simply
+// retries. Best-effort; never throws.
+async function rearmOnSiteFollowUp(customerId, phoneKey, visitId) {
+  if (!customerId || !phoneKey || !visitId || !isOnSiteFollowUpLive()) return 'skipped';
+  try {
+    const armed = await db('recipient_optin')
+      .where({ customer_id: customerId, phone_key: phoneKey, status: 'confirmed' })
+      // Only for a DIFFERENT visit: a reprocess of the same visit leaves the
+      // row as it is, armed or finished (its completion and the fan-out's
+      // fanout_confirmed_at stay, so nothing is sent twice). An in-flight
+      // claim is never cleared here; an older visit's worker finishes bound
+      // to its own visit_id and cannot touch this one.
+      .whereRaw('visit_id IS DISTINCT FROM ?', [visitId])
+      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, fanout_confirmed_at: null });
+    return armed ? 'armed' : 'skipped';
+  } catch (err) {
+    logger.warn(`[recipient-optin] booking-time follow-up re-arm failed (${err.code || err.name || 'error'})`);
+    return 'error';
+  }
+}
+
+// The call pipeline's contact fan-out and the follow-up's replay can both be
+// about to text one visit's confirmation to one phone (the contact answered
+// YES while the booking was still processing). The fan-out takes the SAME row
+// claim the replay takes, so only one of them sends at a time and the other
+// then sees the send in sms_log:
+//   'claimed' — the fan-out holds it: send, then releaseFanOutFollowUpClaim.
+//   'busy'    — the replay is in flight for this visit: it owns the text; skip.
+//   'sent'    — this visit's confirmation already went to this phone; skip.
+//   'none'    — no unfinished follow-up for this phone + visit (or dark):
+//               nothing to coordinate with; send as before.
+// A claim never released (a crash) expires with the 10-minute lease. A failed
+// read answers 'none': the fan-out is never blocked by this coordination.
+async function claimFollowUpForFanOut(customerId, phone, visitId) {
+  const phoneKey = recipientPhoneKey(phone);
+  if (!customerId || !phoneKey || !visitId || !isOnSiteFollowUpLive()) return 'none';
+  try {
+    const forVisit = () => db('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId });
+    const claimed = await forVisit()
+      .where({ status: 'confirmed' })
+      .whereNull('followup_done_at')
+      .whereNull('fanout_confirmed_at')
+      .where((q) => q.whereNull('followup_claimed_at').orWhere('followup_claimed_at', '<', new Date(Date.now() - FOLLOWUP_CLAIM_TTL_MS)))
+      .update({ followup_claimed_at: new Date() });
+    if (claimed) return 'claimed';
+    // Read AFTER the claim attempt, so a replay that finished in between is seen.
+    const row = await forVisit().first('status', 'followup_done_at', 'fanout_confirmed_at');
+    if (row && row.fanout_confirmed_at) return 'sent';
+    return row && row.status === 'confirmed' && !row.followup_done_at ? 'busy' : 'none';
+  } catch (err) {
+    logger.warn(`[recipient-optin] fan-out follow-up claim failed (${err.code || err.name || 'error'})`);
+    return 'none';
+  }
+}
+
+// `confirmed`: the fan-out's send was accepted or may have reached the person.
+// Stamped with the release so the replay is never sent on top of it.
+async function releaseFanOutFollowUpClaim(customerId, phone, visitId, { confirmed = false } = {}) {
+  const phoneKey = recipientPhoneKey(phone);
+  if (!customerId || !phoneKey || !visitId) return;
+  await db('recipient_optin')
+    .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId })
+    .update({ followup_claimed_at: null, ...(confirmed ? { fanout_confirmed_at: new Date() } : {}) })
+    .catch(() => {});
+}
+
 // A NO / STOP declined this phone: the review card says so (best-effort — a
 // card outage must never roll back an opt-out). The phone stays on any
 // unconsented list (it never consented).
 async function onRecipientDeclined(phoneKey, { dbh = db } = {}) {
+  // AFTER the decline commits, in its own transaction: the restore takes the
+  // prefs row before the opt-in row (the settings-save order), which the
+  // decline's transaction, already holding the opt-in row, could not do
+  // without a deadlock. An opt-out is never rolled back by this; the sweep
+  // retries a restore that fails here.
+  const restore = async () => {
+    try {
+      await db.transaction((trx) => restoreDemotedCallers(trx, phoneKey));
+    } catch (err) {
+      logger.warn(`[recipient-optin] demoted-caller restore failed (${err.code || err.name || 'error'})`);
+    }
+  };
+  if (dbh && dbh.isTransaction) {
+    const committed = commitPromiseOf(dbh);
+    if (committed) committed.then(restore, () => {});
+  } else {
+    await restore();
+  }
   await bestEffort(dbh, (h) => updateCaptureCard(h, phoneKey, { optin_result: 'declined' }));
 }
 
@@ -318,6 +819,56 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
     logger.warn(`[recipient-optin] mark ${status} failed: ${err.message}`);
     return false;
   }
+}
+
+// Phone keys an unconfirmed opt-in row holds, per customer: Map<customerId,
+// Set<last-10 key>>. Same rule as optinBlocksSend (any status but confirmed
+// holds; no row = legacy allowed; gate off = nothing held). A missing table
+// (42P01) fails open to the row-level consent layer, as in getRecipientOptin;
+// any other error throws so the caller holds.
+async function optinHeldPhoneKeys(customerIds = [], { dbh = db } = {}) {
+  const held = new Map();
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+  if (!ids.length || !isDoubleOptinEnabled()) return held;
+  let rows;
+  try {
+    rows = await dbh('recipient_optin').whereIn('customer_id', ids).whereNot({ status: 'confirmed' }).select('customer_id', 'phone_key');
+  } catch (err) {
+    if (err && err.code === '42P01' && !(dbh && dbh.isTransaction)) {
+      logger.warn('[recipient-optin] table missing — failing open to row-level consent');
+      return held;
+    }
+    throw err;
+  }
+  for (const row of rows || []) {
+    const id = String(row.customer_id);
+    if (!held.has(id)) held.set(id, new Set());
+    held.get(id).add(row.phone_key);
+  }
+  return held;
+}
+
+// The single SMS recipient for the visit-complete text and the review ask
+// (customer-contact.js getServiceContactSmsRecipient) with the opt-in hold
+// applied: a slot-1 contact who has not replied YES to their opt-in ask does
+// not get these texts either; the account holder gets them, as for an
+// unconsented contact. Fail-CLOSED like filterRecipientsByOptin: a lookup
+// error holds the contact. On a transaction handle the error is rethrown
+// (Postgres has already aborted that transaction).
+async function resolveServiceContactSmsRecipient(customer, { dbh = db } = {}) {
+  const { getServiceContactSmsRecipient, getPrimaryContact } = require('./customer-contact');
+  if (!customer || !recipientPhoneKey(customer.service_contact_phone) || !isDoubleOptinEnabled()) {
+    return getServiceContactSmsRecipient(customer);
+  }
+  let heldPhoneKeys;
+  try {
+    heldPhoneKeys = (await optinHeldPhoneKeys([customer.id], { dbh })).get(String(customer.id)) || null;
+  } catch (err) {
+    if (dbh && dbh.isTransaction) throw err;
+    logger.warn(`[recipient-optin] single-recipient lookup failed (${err.message}) — holding the service contact`);
+    return { ...getPrimaryContact(customer), role: 'primary' };
+  }
+  return getServiceContactSmsRecipient(customer, { heldPhoneKeys });
 }
 
 // Send-path filter shared by every fanout loop (appointment reminders +
@@ -872,12 +1423,22 @@ module.exports = {
   onRecipientConfirmed,
   onRecipientDeclined,
   restoreConfirmedPhone,
+  settleOnSiteFollowUps,
+  sweepOnSiteFollowUps,
+  rearmOnSiteFollowUp,
+  noteHolderSetNotifyPrimary,
+  callerDemotedForTextsOnly,
+  isOnSiteFollowUpLive,
+  claimFollowUpForFanOut,
+  releaseFanOutFollowUpClaim,
   visitAskState,
   recipientPhoneKey,
   optinBlocksSend,
   getRecipientOptin,
   markRecipientOptin,
   filterRecipientsByOptin,
+  optinHeldPhoneKeys,
+  resolveServiceContactSmsRecipient,
   claimRecipientOptins,
   dispatchRecipientOptins,
   requestRecipientOptins,

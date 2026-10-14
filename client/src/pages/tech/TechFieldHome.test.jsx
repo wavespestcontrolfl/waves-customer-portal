@@ -12,8 +12,8 @@ it('counts grouped stops without labeling skipped members completed and opens th
   const stops = groupServicesIntoStops([row('one', 'completed', { id: 'group' }), row('two', 'skipped', { id: 'group' }), row('three', 'en_route')]);
   const onOpen = vi.fn();
   render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={onOpen} />);
-  expect(screen.getByText('0 of 2 stops complete')).toBeInTheDocument();
-  expect(screen.getByText('3 services')).toBeInTheDocument();
+  // One subtitle line under Today (approved admin mockup 2026-10-03).
+  expect(screen.getByText(/0 of 2 stops complete · 3 services/)).toBeInTheDocument();
   expect(screen.getByText('Current visit')).toBeInTheDocument();
   expect(stopStatusLabel(stops[0])).toBe('mixed');
   fireEvent.click(screen.getByRole('button', { name: 'Open visit' }));
@@ -40,4 +40,13 @@ it('keeps a failed route distinct from an empty route and offers retry', () => {
   expect(screen.queryByText(/stops complete/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Retry route' }));
   expect(onRetry).toHaveBeenCalledTimes(1);
+});
+
+it('puts the onboarding card at the top of Today, above the route, and not on Tools', () => {
+  const stops = groupServicesIntoStops([row('one', 'confirmed')]);
+  const { container, rerender } = render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={vi.fn()} onboarding={<div data-testid="onboarding-slot">Sign 1 document to finish setup</div>} />);
+  const slot = screen.getByTestId('onboarding-slot');
+  expect(slot.compareDocumentPosition(container.querySelector('.tf-today-grid')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  rerender(<TechFieldHome section="tools" stops={stops} tools={[]} onboarding={<div data-testid="onboarding-slot" />} />);
+  expect(screen.queryByTestId('onboarding-slot')).not.toBeInTheDocument();
 });

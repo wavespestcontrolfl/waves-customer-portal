@@ -5351,6 +5351,11 @@ function sinceDate(days) {
 
 module.exports = new GscOpportunityMiner();
 module.exports.GscOpportunityMiner = GscOpportunityMiner;
+// The service and specialty-topic inference, shared with a topic the
+// completion forms suggest (service-report/report-blog-suggestion.js) so its
+// queue row reads the same as a mined one.
+module.exports.inferServiceFromQuery = inferServiceFromQuery;
+module.exports.extractSpecialtyTopic = extractSpecialtyTopic;
 // Exposed for unit tests — pure functions, no DB.
 module.exports._internals = {
   arbitrateCityServiceTargets,

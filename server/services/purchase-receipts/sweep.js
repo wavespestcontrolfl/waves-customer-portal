@@ -48,9 +48,10 @@ const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates')
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
-const { processReceiptLine } = require('./receipt-processor');
+const { processReceiptLine, parseMultipack, PACK_CLAIM_RE } = require('./receipt-processor');
 const { alertUndeliveredShipments } = require('./undelivered-shipments');
 const siteOne = require('./siteone-invoices');
+const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
 const SINCE_ENV = 'PURCHASE_RECEIPT_SINCE';
@@ -145,6 +146,36 @@ function heldSubject({ receipt, item, outcome }) {
   return receipt.label;
 }
 
+// A SiteOne line no catalog product matched AND whose quantity or unit
+// couldn't be checked: it is neither held under a product nor handed to the
+// inventory agent, so without this bell nobody hears of it (three bags of a
+// stocked herbicide, a real SiteOne invoice). Raised through raiseAdminAlert
+// (docs/admin-notifications.md); the whole title rides in `detail`.
+const UNMATCHED_WHY_TAIL = 'matched no catalog product and its unit could not be checked.';
+const UNMATCHED_TITLE_CHARS = 44;
+
+function unmatchedUnverifiedWhy(receipt, item) {
+  const quantity = item.quantity ? `${Math.abs(item.quantity)} × ` : '';
+  const named = `${quantity}${cutAtWord(String(item.title || '').trim(), UNMATCHED_TITLE_CHARS)} ${UNMATCHED_WHY_TAIL}`;
+  // A title can end a sentence ("50 LB. BAG") or run long: name the invoice instead.
+  return named.length > MAX_WHY_CHARS || breaksAlertRules(named) ? `A line on ${receipt.label} ${UNMATCHED_WHY_TAIL}` : named;
+}
+
+async function ringUnmatchedUnverifiedBell({ receipt, email, item, outcome, trx }) {
+  const quantity = item.quantity ? ` ×${Math.abs(item.quantity)}` : '';
+  await raiseAdminAlert('inventory', {
+    area: 'Inventory', action: 'log a SiteOne invoice line by hand', why: unmatchedUnverifiedWhy(receipt, item),
+    severity: 'needs-you', who: 'person', link: INVENTORY_LINK,
+    subject: { type: 'check', id: `purchase-receipt:${outcome.lineId}` }, doneWhen: 'line_logged_by_hand',
+  }, {
+    bell: true,
+    dedupeKey: `purchase-receipt:${outcome.lineId}`,
+    trx,
+    detail: `${receipt.label}: "${item.title}"${quantity} wasn't added. No catalog product matches it, and its quantity, numbers or unit of measure couldn't be checked. If it's stock, log it by hand.`,
+    metadata: { emailId: email.id, productId: null, status: outcome.status, unmatchedHold: outcome.unmatchedHold },
+  });
+}
+
 async function ringHeldBell(notifyAdmin, { receipt, email, item, outcome, trx }) {
   await notifyAdmin('inventory', `${receipt.noun} not added`, `${heldSubject({ receipt, item, outcome })} wasn't added. ${HELD_REASONS[outcome.status]}`, {
     link: INVENTORY_LINK,
@@ -161,6 +192,11 @@ function lineBell(notifyAdmin, receipt, email, item) {
   return async (outcome, trx) => {
     if (outcome.status === 'logged') await ringLoggedBell(notifyAdmin, { receipt, email, item, outcome, trx });
     else if (HELD_REASONS[outcome.status]) await ringHeldBell(notifyAdmin, { receipt, email, item, outcome, trx });
+    // SiteOne only: an Amazon order is mostly not stock, and an unmatched
+    // item on one stays silent whatever its quantity read as.
+    else if (receipt.vendor === siteOne.VENDOR && outcome.status === 'unmatched' && outcome.unmatchedHold === 'unverified') {
+      await ringUnmatchedUnverifiedBell({ receipt, email, item, outcome, trx });
+    }
   };
 }
 
@@ -266,17 +302,30 @@ async function siteOneInvoiceLines(email, { now, since }) {
   // invoice that reconciles. On one that doesn't, a 0 may be the misread, so
   // every line is recorded and a stocked one still gets its bell.
   const lines = invoice.lines.filter((line) => invoice.problem || line.quantity !== 0).map(({ title, quantity, lineNo, uom }) => ({
-    item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity, uom),
+    item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity, uom, title),
   }));
   return { invoice, lines };
 }
 
 // What a stocked SiteOne line is held as instead of moving stock, if
 // anything: a return, or a line whose totals or unit (only EA — each — is a
-// container count) can't be trusted.
-function siteOneHold(problem, quantity, uom) {
+// container count) can't be trusted. BG (bag) counts containers too, but
+// only when the title itself names one bag ("... 50 LB. BAG") and carries no
+// pack or count wording at all: the size it states is then that bag's. A
+// "2-Pack 50 LB BAG" sold by the bag could be one bag or two per unit, so it
+// is held like any other unit.
+function siteOneHold(problem, quantity, uom, title) {
   if (quantity < 0) return 'returned';
-  return problem || uom !== 'EA' ? 'unverified' : undefined;
+  return problem || !countsContainers(uom, title) ? 'unverified' : undefined;
+}
+
+function countsContainers(uom, title) {
+  if (uom === 'EA') return true;
+  const text = String(title || '');
+  // A number right before the word ("2 BAG 50 LB BAG") is a bag count in a
+  // form no parser here reads, singular or not.
+  if (/\bbags\b/i.test(text) || /\d[\s-]*bag\b/i.test(text)) return false;
+  return uom === 'BG' && /\bbag\b/i.test(text) && !parseMultipack(text) && !PACK_CLAIM_RE.test(text);
 }
 
 async function processSiteOneInvoices({ floor, since, now, notifyAdmin, totals }) {

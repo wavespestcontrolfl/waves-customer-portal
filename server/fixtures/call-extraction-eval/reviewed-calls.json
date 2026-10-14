@@ -137,18 +137,18 @@
       "id": "booking-agreed-not-created-may13",
       "call_log_id": "daf65e59-0156-4e56-83ce-391b4114f15c",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Appointment was verbally agreed during the call but no scheduled service was created. Replay must classify scheduling as confirmed.",
+      "reviewed_outcome": "Appointment was verbally agreed during the call but no scheduled service was created. Replay must classify scheduling as confirmed. Re-reviewed 2026-10-09 against the current rules (owner asked): the answer is now \"offered\". Staff offered one day and time; the caller said it should work but that they must confirm with their spouse, and staff asked for a text if it works or another time if not. No slot was agreed on the call and staff committed to none, so \"confirmed\" (set 2026-08-31, before the stricter rules of 2026-09-29) no longer holds. The lost booking is a follow-up gap (the confirming text), not an extraction miss.",
       "expect": {
         "current_status": "valid",
-        "current_scheduling_status": "confirmed",
+        "current_scheduling_status": "offered",
         "legacy_scheduled_created": false
       },
-      "gold_reviewed_at": "2026-08-31",
+      "gold_reviewed_at": "2026-10-09",
       "gold": {
         "is_voicemail": false,
         "is_spam": false,
-        "scheduling_status": "confirmed",
-        "agent_committed_booking": true
+        "scheduling_status": "offered",
+        "agent_committed_booking": false
       }
     },
     {
@@ -462,7 +462,7 @@
       "id": "oosa-guard-stays",
       "call_log_id": "7313062a-a93a-422d-9e69-4f9cf9c8c2fb",
       "reviewed_at": "2026-06-02",
-      "reviewed_outcome": "Out-of-service-area gate correctly parked this ant-problem lead; operator override created the customer deliberately. The gate must keep firing.",
+      "reviewed_outcome": "Out-of-service-area gate correctly parked this ant-problem lead; operator override created the customer deliberately. The gate must keep firing. Re-reviewed 2026-10-09 (owner ruling \"key\"): lead_quality left the answer key. Nothing on the call says the town is outside the service area and the model returns no county, so every model tested read a ready-to-buy caller as \"hot\"; the server's address check owns the out-of-area decision, and the expectation above still requires its flag.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -470,13 +470,12 @@
           "out_of_service_area"
         ]
       },
-      "gold_reviewed_at": "2026-08-31",
+      "gold_reviewed_at": "2026-10-09",
       "gold": {
         "is_voicemail": false,
         "is_spam": false,
         "call_nature": "new_lead",
-        "primary_service_category": "pest_general",
-        "lead_quality": "out_of_service_area"
+        "primary_service_category": "pest_general"
       }
     },
     {
@@ -526,7 +525,7 @@
       "id": "wrong-number-robocall-stays-blocked",
       "call_log_id": "bb77c2a4-9583-43a1-a40b-06129fd8727d",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Automated school-attendance robocall left on the line (wrong number). A July 2026 mining pass mislabeled it a spam false positive; owner review confirmed the block is correct and must keep firing.",
+      "reviewed_outcome": "Automated school-attendance robocall left on the line (wrong number). A July 2026 mining pass mislabeled it a spam false positive; owner review confirmed the block is correct and must keep firing. Re-reviewed 2026-10-09: the block is the spam_or_wrong_number flag, which fires from is_spam OR lead_quality wrong_number. The call is both a robocall and a wrong number, and the extraction rules send a wrong number to is_spam=false with lead_quality wrong_number, and the message solicits nothing, so the answer key is now is_spam=false (it was true; all six models in the 2026-10-08 comparison answered false). The flag, no auto-route and call_nature expectations still pin the block.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -539,9 +538,9 @@
           "robocall"
         ]
       },
-      "gold_reviewed_at": "2026-08-31",
+      "gold_reviewed_at": "2026-10-09",
       "gold": {
-        "is_spam": true,
+        "is_spam": false,
         "call_nature": [
           "wrong_number",
           "spam_solicitation",

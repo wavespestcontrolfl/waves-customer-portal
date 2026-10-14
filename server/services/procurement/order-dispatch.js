@@ -1487,6 +1487,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 module.exports = {
   RECEIVED_SETTLES_SQL,
   settleRequestLedgerBells,
+  cancelAtClaim,
   findLiveAutoOrder,
   landedAfterReceiveFor,
   settleLandedAfterReceive,

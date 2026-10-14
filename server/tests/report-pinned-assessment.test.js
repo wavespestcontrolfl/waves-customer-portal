@@ -29,7 +29,12 @@ const SERVICE = {
 // the same equality filters the resolver builds.
 function makeKnex(rows) {
   return (table) => {
-    expect(['lawn_assessments', 'property_preferences']).toContain(table);
+    expect(['lawn_assessments', 'property_preferences', 'service_records']).toContain(table);
+    // The Visit Summary key component reads the record's notes for a partial row (none frozen here).
+    if (table === 'service_records') {
+      const recordChain = { where: () => recordChain, async first() { return { structured_notes: null }; } };
+      return recordChain;
+    }
     if (table === 'property_preferences') {
       const prefsChain = { where: () => prefsChain, orderBy: () => prefsChain, async first() { return null; } };
       return prefsChain;
@@ -393,34 +398,22 @@ describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable'
     expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'pest' }, knex)).signature).toBe('');
   });
 
-  // GATE_LAWN_REPORT_LEAD changes the lawn web report and PDF content, so the
-  // cache key must change when the lead is live and stay as it was when it is not.
-  test('the lead gate re-keys lawn PDFs only while it is live (both assessment and no-assessment keys)', async () => {
+  // The lawn report lead changes the lawn web report and PDF content. Its gate is
+  // gone, but the constant stamp stays in the key so a PDF cached before the lead
+  // went live is never served again. The key is stable, and no env var moves it.
+  test('lawn PDF keys are stable and carry the strategy prefix (both assessment and no-assessment keys); other lines stay empty', async () => {
     const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
     const withAssessment = () => makeKnex([
       { id: 'assess-A', customer_id: 'cust-1', confirmed_by_tech: true, service_record_id: 'svc-1', ai_summary: 'x' },
     ]);
-    const keyOf = async (gate, knex) => {
-      const previous = process.env.GATE_LAWN_REPORT_LEAD;
-      if (gate === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = gate;
-      try { return (await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex)).signature; } finally {
-        if (previous === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = previous;
-      }
-    };
+    const keyOf = async (knex) => (await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex)).signature;
     for (const make of [withAssessment, () => makeKnex([])]) {
-      const off = await keyOf(undefined, make());
-      const on = await keyOf('true', make());
-      expect(on).not.toBe(off);
-      expect(on.startsWith(`-la${LAWN_RENDER_STRATEGY}`)).toBe(true);
-      // Same inputs, same gate: the key is stable; an explicit false is the same as unset.
-      expect(await keyOf('true', make())).toBe(on);
-      expect(await keyOf('false', make())).toBe(off);
+      const key = await keyOf(make());
+      expect(key.startsWith(`-la${LAWN_RENDER_STRATEGY}`)).toBe(true);
+      expect(await keyOf(make())).toBe(key);
     }
     // Tree & shrub and every other line are untouched.
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
-    try {
-      expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'tree_shrub' }, withAssessment())).signature).toBe('');
-    } finally { delete process.env.GATE_LAWN_REPORT_LEAD; }
+    expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'tree_shrub' }, withAssessment())).signature).toBe('');
   });
 
   test('resolveCanonicalLawnRender: pin and signature describe the SAME row', async () => {

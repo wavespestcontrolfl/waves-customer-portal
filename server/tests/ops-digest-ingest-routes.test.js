@@ -14,7 +14,7 @@ const mockClean = { row: null, error: null };
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const b = {};
-    for (const m of ['where', 'whereRaw', 'orderBy', 'select']) b[m] = jest.fn(() => b);
+    for (const m of ['where', 'whereRaw', 'orderBy', 'orderByRaw', 'select']) b[m] = jest.fn(() => b);
     b.first = jest.fn(async () => {
       if (table === 'system_settings') {
         if (mockClean.error) throw mockClean.error;

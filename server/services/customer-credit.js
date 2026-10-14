@@ -506,6 +506,36 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
   return { restored: restore };
 }
 
+// Run `fn` once the OUTERMOST transaction has COMMITTED and ONLY if every
+// transaction from the originating handle up to it completed successfully.
+// A nested knex transaction's executionPromise settles when its SAVEPOINT is
+// released (or rolled back), before the outer transaction commits, so waiting on
+// the savepoint alone fires for work an outer rollback then discards, and waiting
+// on the outer alone fires for work whose own savepoint rolled back while the
+// outer caught the failure and committed. knex gives a nested transaction's
+// handle a `parentTransaction` (the outermost has none): each handle's
+// executionPromise is awaited from the inside out, and any rejection suppresses
+// the callback. Without a transaction handle (a bare test double) it runs inline.
+function transactionChain(trx) {
+  const chain = [];
+  for (let t = trx, hops = 0; t && hops < 32; t = t.parentTransaction, hops += 1) chain.push(t);
+  return chain;
+}
+function outermostTransaction(trx) {
+  const chain = transactionChain(trx);
+  return chain.length ? chain[chain.length - 1] : trx;
+}
+function afterCommit(trx, fn) {
+  const promises = transactionChain(trx)
+    .map((t) => t.executionPromise)
+    .filter((p) => p && typeof p.then === 'function');
+  if (promises.length) {
+    Promise.all(promises).then(fn).catch(() => {});
+  } else {
+    Promise.resolve().then(fn).catch(() => {});
+  }
+}
+
 /**
  * Settle a FULLY refunded invoice: TERMINALIZE it to 'refunded' AND (if it carried
  * account credit) return that credit to the customer's balance. The status flip runs
@@ -547,6 +577,27 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
   // only already-terminal statuses so a replayed event is a no-op and a prior
   // void/cancel isn't clobbered. (Both callers invoke this for FULL refunds only.)
   const alreadyTerminal = ['refunded', 'void', 'canceled', 'cancelled'].includes(String(inv.status || '').toLowerCase());
+  // A refund that ENDS a stamped membership-dues invoice's coverage serializes
+  // with covered completions through the dues-month lock (a completion holds it
+  // from its coverage confirmation to its commit). This transaction already
+  // holds the invoice row and the caller's other locks, so by THE LOCK RULE
+  // (billing-lane.js) it only TRIES the lock: busy means a completion is
+  // relying on this invoice right now, and the refund transition is refused
+  // retryably BEFORE anything is written (the webhook answers 5xx and Stripe
+  // redelivers; the admin refund path logs the failed restore and the
+  // charge.refunded webhook repeats it, both idempotent). Either the completion
+  // commits first (the post-commit alert then sees its visit) or this
+  // transition does (the completion's commit-time check then sees the refund).
+  if (!alreadyTerminal) {
+    const duesMonth = require('./invoice').membershipDuesStampMonth(inv.line_items);
+    if (duesMonth && inv.customer_id
+      && !(await require('./billing-lane').tryAcquireMembershipDuesMonthLock(trx, inv.customer_id, duesMonth))) {
+      throw Object.assign(
+        new Error(`Membership dues for ${duesMonth} are being completed against invoice ${inv.invoice_number || invoiceId} right now — the refund transition is retried`),
+        { statusCode: 503, code: 'MEMBERSHIP_DUES_MONTH_BUSY', isOperational: true },
+      );
+    }
+  }
   const updates = { updated_at: trx.fn.now() };
   if (!alreadyTerminal) updates.status = 'refunded';
   if (restore > 0) updates.credit_applied = 0;
@@ -565,6 +616,21 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
      
     const { restoreDepositCreditForVoidedInvoice } = require('./estimate-deposits');
     await restoreDepositCreditForVoidedInvoice({ invoice: inv, trx });
+    // A fully refunded STAMPED membership-dues invoice stops covering its month
+    // exactly like a void does: visits that completed under it are unbilled.
+    // Raise the same "rebill the month" office alert AFTER the caller's
+    // transaction commits (never on a rollback), best effort.
+    // The stamp reader accepts the row as Postgres returns it (a decoded array of
+    // objects) and as a JSON string; never a text search of the column.
+    if (require('./invoice').membershipDuesStampMonth(inv.line_items)) {
+      afterCommit(trx, async () => {
+        try {
+          await require('./invoice').alertIfMembershipDuesCoverageReleased({ ...inv, status: 'refunded' }, { releasedBy: 'refunded' });
+        } catch (e) {
+          logger.warn(`[account-credit] dues-coverage-released alert after refund failed for ${invoiceId}: ${e.message}`);
+        }
+      });
+    }
   }
   if (restore > 0) {
     await postCreditMovement({
@@ -748,6 +814,8 @@ async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null,
 }
 
 module.exports = {
+  afterCommit,
+  outermostTransaction,
   customerAutoApplyEnabled,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,

@@ -17,6 +17,16 @@ router.use((req, res, next) => (
 ));
 
 // GET /stats
+// Technician's-voice review texts (GATE_REVIEW_ASK_TECH_VOICE, build plan
+// PR 3): what the writer drafted, the record lines behind each sentence,
+// repeats it held, touches that fell back to the fixed text, and cadences
+// the payment hold is holding. Admin only (router-level requireAdmin).
+router.get('/tech-voice-drafts', async (req, res, next) => {
+  try {
+    res.json(await require('../services/review-ask-drafts').listRecent({ days: req.query.days }));
+  } catch (err) { next(err); }
+});
+
 router.get('/stats', async (req, res, next) => {
   try {
     const stats = await ReviewService.getStats();

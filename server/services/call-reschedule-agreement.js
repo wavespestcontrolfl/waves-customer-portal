@@ -1017,11 +1017,95 @@ function groundCallerProposed(ctx) {
   return verified ? { ok: true, reason: 'agreement_grounded', mode: 'caller_proposed' } : fail('agent_commitment_not_the_slot');
 }
 
+// The same turn text the hour checks read: tokens keeping clause punctuation
+// (hourExactIn's own tokenizer, kept here so that function stays untouched).
+const ABBREVIATED_MONTH_PERIOD_TOKENS_RE = /\b(jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.(?=\s*\d)/g;
+function slotTokens(text) {
+  return joinMeridiem(text).toLowerCase().replace(ABBREVIATED_MONTH_PERIOD_TOKENS_RE, '$1 ')
+    .replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
+}
+// Does this text carry an hour or a day of its own? (a bare yes / commitment says neither)
+function namesAnotherSlot(text) {
+  const toks = normalize(text).split(' ');
+  return namesAnyDay(text) || toks.some(isHourToken);
+}
+
+// The turn says exactly ONE hour (the recorded one, on the hour) and no other
+// number or hour word, no alternative and no approximation. Unlike hourExactIn
+// it needs no lead word ("How does noon on Thursday sound?"): a staff question
+// proposing the slot is not phrased like a caller's. An hour with no period is
+// still held to the exact-lead reading by statesSlotWords.
+function singleHourIn(text, words, relative = false) {
+  // "How about" / "What about" open a proposal; the bare approximation "about 10" does not.
+  const toks = slotTokens(text).filter((t, k, all) => !(t === 'about' && (all[k - 1] === 'how' || all[k - 1] === 'what')));
+  if (toks.some((t) => ALTERNATIVE_WORDS.has(t))) return false;
+  const dayIdx = new Set((typeof words.day === 'string' ? spans(toks, words.day) : [])
+    .filter(([, b]) => !/^(?:appointment|appointments|visit|visits|treatment|service|time)$/.test(toks[b] || ''))
+    .flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k)));
+  if (relative) offsetSpans(toks).forEach(({ from, to }) => { for (let k = from; k < to; k += 1) dayIdx.add(k); });
+  const at = spans(toks, words.hour).filter(([a]) => !dayIdx.has(a));
+  if (at.length !== 1 || hourHasMinutes(toks, at[0])) return false;
+  const [ha, hb] = at[0];
+  const explained = new Set(dayIdx);
+  for (let k = ha; k < hb; k += 1) explained.add(k);
+  if (toks[hb] === '00') explained.add(hb); // "2:00"
+  return toks.every((t, k) => explained.has(k) || !(/^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight'));
+}
+
+// Mode C (only when the caller of groundNewBookingAgreement opts in): STAFF
+// proposed the one exact day and on-the-hour time in a turn of its own ("How
+// does noon on Thursday sound?"), the caller's very next turn accepted it as a
+// whole ("Perfect."), and staff's very next turn after that committed in plain
+// words ("Awesome. I'll book you for that, and we'll see you then.") with no
+// slot of its own to state. The mirror of mode B, with staff and caller
+// swapped and the commitment last. Every quote is the extraction's, pinned and
+// verified here by speaker, position and the recorded slot words; the adjacent
+// turns are read by the code, never by the extraction's say-so.
+function groundAgentProposed(ctx) {
+  const fail = (reason) => ({ ok: false, reason, mode: null });
+  const { turns, words, slot, started, relative } = ctx;
+  if (!words.day || relative) return fail('agent_proposal_not_the_slot');
+  if (!wordsStateSlot(words, slot, started, null, false)) return fail('agreed_slot_words_mismatch');
+  const proposals = ctx.pinned('/scheduling/confirmed_start_at', 'agent');
+  const verified = proposals.some((pin) => turnsHolding(turns, pin.quote, 'agent').length > 0
+    && turnsHolding(turns, pin.quote, 'agent').every((proposalTurn) => {
+      // The proposal is plainly said by staff (a question is the point of it).
+      if (!plainlySaid(proposalTurn, pin.quote, { slot: true })) return false;
+      // The proposal names ONE day: any other weekday, date, "tomorrow" or ordinal in the turn
+      // ("Thursday and Friday at noon", "Thursday or the 9th") is no single agreed slot.
+      if (namesAnyDay(padded(proposalTurn.ns).replace(padded(normalize(words.day)), ' '))) return false;
+      const at = turns.indexOf(proposalTurn);
+      const acceptTurn = turns[at + 1];
+      const commitTurn = turns[at + 2];
+      if (!acceptTurn || acceptTurn.agent || !commitTurn || !commitTurn.agent) return false;
+      // The caller's acceptance: a pinned quote that is the WHOLE next turn, plain, and either
+      // names no slot of its own or states exactly this one.
+      const acceptance = ctx.acceptPinned.find((e) => isWholeTurn(acceptTurn, e.quote)
+        && isPlain(turnsHolding(turns, e.quote, 'caller'), e.quote, '/scheduling/caller_accepted_slot')
+        && (!namesAnotherSlot(e.quote) || acceptanceStatesSlot(e.quote, words, slot.hour24, turns, relative)));
+      if (!acceptance) return false;
+      // Staff's commitment: a grounded pinned quote in the turn right after the acceptance, the
+      // turn itself free of negation, hedge and open condition, naming no other slot.
+      const commitment = ctx.commitments.find((q) => turnsHolding(turns, q, 'agent').includes(commitTurn));
+      if (!commitment) return false;
+      if (!plainlySaid(commitTurn, commitTurn.raw, { commitment: true })) return false;
+      if (namesAnotherSlot(commitTurn.raw) && !commitsToSlot(commitment, words, slot.hour24, turns, relative)) return false;
+      return statesSlotWords(pin.quote, words, turns, [commitment, acceptance.quote], false)
+        && singleHourIn(proposalTurn.raw, words, false);
+    }));
+  return verified ? { ok: true, reason: 'agreement_grounded', mode: 'agent_proposed' } : fail('agent_proposal_not_confirmed');
+}
+
 function groundNewBookingAgreement(args = {}) {
   const ctx = newBookingContext(args);
   if (ctx.fail) return ctx.fail;
   const commitsSlot = ctx.commitments.filter((q) => commitsToSlot(q, ctx.words, ctx.slot.hour24, ctx.turns, ctx.relative));
-  return commitsSlot.length ? groundStaffStated(ctx, commitsSlot) : groundCallerProposed(ctx);
+  if (commitsSlot.length) return groundStaffStated(ctx, commitsSlot);
+  const callerProposed = groundCallerProposed(ctx);
+  // The agent-proposed shape is tried only when the caller opts in (the commercial
+  // assessment booking, GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING); every other
+  // caller reads exactly the two modes above.
+  return !callerProposed.ok && args.allowAgentProposed === true ? groundAgentProposed(ctx) : callerProposed;
 }
 
 // Spoken amounts in a transcript turn ("a hundred forty nine", "two hundred and
@@ -1086,8 +1170,12 @@ function evaluateSpokenRun(words) {
 // 20 too), or NaN for a malformed or ambiguous run. The typed visit reader
 // (visit-typed-facts.js) grounds a count on it; spokenFiguresIn keeps the
 // runs a price can be.
-function spokenNumbersIn(text) {
-  const tokens = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+// `lists`: a comma, semicolon, slash or ampersand ends a run, so a spoken list
+// ("two, three and five", "two/three") reads as its numbers and not as one
+// malformed run. Off, the text reads as it always has ("one thousand, two hundred").
+function spokenNumbersIn(text, { lists = false } = {}) {
+  const source = lists ? String(text || '').replace(/[,;/&]/g, ' listbreak ') : text;
+  const tokens = String(source || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
   const out = [];
   for (let i = 0; i < tokens.length;) {
     const aBeforeMultiplier = tokens[i] === 'a' && (tokens[i + 1] === 'hundred' || tokens[i + 1] === 'thousand');
@@ -1106,8 +1194,35 @@ function spokenNumbersIn(text) {
   return out;
 }
 
+// Every whole number a quote states, for a quote that names things by number
+// (a station, a bay): digits as written, number words (spokenNumbersIn), and
+// LISTS of either ("2,3", "2, 3 and 5", "2/3", "2 & 3", "two, three") and
+// digit ranges ("2-4", "2 through 4", "2 to 4": every number in them). A decimal
+// ("4.5") or an ordinal ("4th") states no whole number, and 1,000 is a thousand.
+// NaN stands for a malformed or ambiguous spoken run, which matches nothing.
+// The dash is a character class: a hyphen or any typographic dash U+2010 to U+2015
+// (hyphen, figure dash, en dash, em dash, horizontal bar).
+const NUMBER_RANGE = /\b(\d{1,3})\s*(?:[-\u2010-\u2015]|to|through|thru)\s*(\d{1,3})\b/gi;
+const MAX_RANGE = 80;
+function numbersStatedIn(text) {
+  const out = [];
+  const plain = String(text || '').replace(NUMBER_RANGE, (whole, from, to) => {
+    const [a, b] = [Number(from), Number(to)];
+    // Not a range worth expanding (backwards, or too wide): the two numbers stand as written.
+    if (!(b > a && b - a <= MAX_RANGE)) return whole;
+    for (let n = a; n <= b; n += 1) out.push(n);
+    return ' ';
+  });
+  for (const [token] of plain.matchAll(/\d+(?:[.,]\d+)*(?:st|nd|rd|th)?/gi)) {
+    if (/^\d+$/.test(token)) out.push(Number(token));
+    else if (/^\d{1,3}(?:,\d{3})+$/.test(token)) out.push(Number(token.replace(/,/g, '')));
+    else if (/^\d+(?:,\d+)+$/.test(token)) out.push(...token.split(',').map(Number));
+  }
+  return [...out, ...spokenNumbersIn(text, { lists: true })];
+}
+
 function spokenFiguresIn(text) {
   return spokenNumbersIn(text).filter((value) => Number.isNaN(value) || value >= 20);
 }
 
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn } };
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn, numbersStatedIn } };

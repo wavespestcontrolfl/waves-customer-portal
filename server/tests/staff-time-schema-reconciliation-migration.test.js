@@ -524,7 +524,12 @@ describe('Staff time schema reconciliation migration', () => {
     )?.[0];
 
     expect(startJob).toMatch(/db\.transaction\(async \(trx\)/);
-    expect(startJob).toMatch(/lockActiveShift\(trx, technicianId\)/);
+    // The shift lock moved into lockShiftForStart (auto clock-in, #6083); it
+    // still runs inside startJob's transaction and still locks the active shift.
+    expect(startJob).toMatch(/lockShiftForStart\(\s*trx,\s*technicianId/);
+    expect(service).toMatch(
+      /async function lockShiftForStart\(trx, technicianId[\s\S]*?lockActiveShift\(trx, technicianId\)/,
+    );
     expect(service).toMatch(
       /async function lockActiveShift[\s\S]*entry_type: 'shift'[\s\S]*\.forUpdate\(\)/,
     );

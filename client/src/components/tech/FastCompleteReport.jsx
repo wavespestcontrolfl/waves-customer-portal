@@ -22,14 +22,14 @@ import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
 // specific concern", stays on the full form). The writer reads the full
-// form's wording; the tiles say it shorter. Owner 2026-10-01: "not home —
-// full access" is picked every time the sheet opens.
+// form's wording; the tiles say it shorter. Owner 2026-10-04 (replaces
+// 2026-10-01): "home — spoke with them" is picked every time the sheet opens.
 export const CUSTOMER_HOME_CHOICES = [
   { value: 'tech_home_spoke_with_them', label: 'Home — spoke with them', writerLabel: 'Customer home — spoke with them' },
   { value: 'not_home_full_access', label: 'Not home — full access', writerLabel: 'Customer not home — full access' },
   { value: 'not_home_partial_access', label: 'Not home — partial access', writerLabel: 'Customer not home — partial access' },
 ];
-export const DEFAULT_CUSTOMER_HOME = 'not_home_full_access';
+export const DEFAULT_CUSTOMER_HOME = 'tech_home_spoke_with_them';
 export const customerHomeWriterLabel = (value) => CUSTOMER_HOME_CHOICES.find((choice) => choice.value === value)?.writerLabel || '';
 
 // The pest activity tracker on the full form's 0–5 scale, 1–5 here (owner
@@ -179,7 +179,7 @@ export function PhotoStripSection({ photos, locked, onOpen }) {
 // tells the sheet what holds the report meanwhile: an open description, a
 // change being saved, or a removal waiting for its answer.
 const NOTE_PHOTO_PALETTE = {
-  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#ef4444', onDanger: '#fff',
+  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#a32d2d', onDanger: '#fff',
 };
 const NOTE_PHOTO_ERRORS = {
   photo_caption_banned_copy: 'That description has wording we can’t put on a customer’s report. Describe the photo in other words.',
@@ -336,13 +336,19 @@ function BlogPostOption({ post, pressed = false, locked, onPick }) {
 // One Waves blog post for the customer, searched the way Quick Links searches
 // links. It goes at the bottom of their report as "From the Waves blog".
 // Optional; the server checks the pick is still live when the visit completes.
-export function BlogPostSection({ search, value, locked, onChange }) {
+// `quiet` (the lawn sheet): no "Search the Waves blog" label and no "Pick 1
+// (optional)" hint; the box keeps its name as an aria-label and the section keeps
+// the hint as its aria-description.
+export function BlogPostSection({ search, value, locked, onChange, quiet = false }) {
+  // The search's coverage and "Suggest a post" belong to the office form only
+  // (owner 2026-10-03: the tech screen is going away and new work goes to the
+  // admin UI), so this sheet keeps the plain list it had.
   const { query, setQuery, results, status } = useBlogPostSearch(search);
   return (
-    <section className="tech-visit-choice-section" aria-label="Blog post for the customer">
+    <section className="tech-visit-choice-section" aria-label="Blog post for the customer" {...(quiet ? { 'aria-description': 'Pick 1 (optional)' } : {})}>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Blog post for the customer</h3>
-        <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>
+        {(!quiet || value) && <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>}
       </div>
       {value ? (
         <>
@@ -355,9 +361,15 @@ export function BlogPostSection({ search, value, locked, onChange }) {
         </>
       ) : (
         <>
-          <Field label="Search the Waves blog" className="tech-visit-field">
-            <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
-          </Field>
+          {quiet ? (
+            <div className="ui-field tech-visit-field">
+              <Input className="tech-visit-control" type="search" aria-label="Search the Waves blog" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+            </div>
+          ) : (
+            <Field label="Search the Waves blog" className="tech-visit-field">
+              <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+            </Field>
+          )}
           <div className="tech-visit-tip-list">
             {results.map((post) => <BlogPostOption key={post.id} post={post} locked={locked} onPick={() => onChange(post)} />)}
             {status === 'searching' && <p className="tech-visit-muted">Searching…</p>}
@@ -439,6 +451,80 @@ export function useVisitTrace({ serviceId, request }) {
   return { ...state, saved, reload };
 }
 
+// "Same as last visit" (GATE_TRACE_REUSE): is there an earlier trace of this
+// place to copy? Asked once per sheet, and only once the visit is known to
+// have no trace of its own (`wanted`). A read that fails, or the gate being
+// off, is "not available": it never holds the sheet. Nothing is applied by
+// the read; the tech's tap on the button is the confirmation.
+function useLastTrace({ serviceId, request, wanted }) {
+  const [last, setLast] = useState({ available: false, linearFt: null });
+  const asked = useRef(false);
+  const mounted = useRef(true);
+  // Set on every setup: React.StrictMode runs setup, cleanup, setup, and a
+  // flag only cleared in cleanup would stay false and drop every answer.
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useEffect(() => {
+    if (!wanted || asked.current) return;
+    asked.current = true;
+    request(`/tech/services/${serviceId}/treatment-zone/last`)
+      .then((data) => {
+        if (!mounted.current || data?.available !== true) return;
+        const feet = Math.round(Number(data.linearFt));
+        setLast({ available: true, linearFt: Number.isFinite(feet) && feet > 0 ? feet : null });
+      })
+      .catch(() => {});
+  }, [wanted, request, serviceId]);
+  return last;
+}
+
+// The copy itself: one tap saves the last trace onto this visit and reads the
+// visit's trace again, so the hold clears as after a hand trace. The server
+// picks the trace and runs the tracer's own save checks (the property this
+// sheet loaded, a visit still open); a refusal goes to `setError` and the
+// Trace button stays usable. `plain` is a plain pest visit that can be traced
+// (a lane or typed visit is left out). `offer` is null when nothing is offered.
+export function useTraceReuse({ serviceId, request, propertyId, trace, mode, traceAvailable, writing, setError }) {
+  // A plain pest visit (no lane or typed mode) that can be traced, at rest.
+  const plain = !mode && !!traceAvailable && !writing;
+  const last = useLastTrace({ serviceId, request, wanted: plain && trace.loaded && !trace.failed && !trace.zone });
+  const [reusing, setReusing] = useState(false);
+  // A failed copy leaves its message on the sheet; once the visit has a trace
+  // by any path (a hand trace, the copy, a read that found one) it is stale
+  // (Codex P3 r4 on #6175).
+  const hasZone = !!trace.zone;
+  useEffect(() => { if (hasZone) setError(''); }, [hasZone, setError]);
+  const reuse = async () => {
+    setReusing(true);
+    setError('');
+    try {
+      const data = await request(`/tech/services/${serviceId}/treatment-zone/reuse`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...(propertyId !== undefined ? { expectedPropertyId: propertyId ?? null } : {}),
+          openVisitOnly: true,
+        }),
+      });
+      // The answer IS the saved trace, as after a hand trace: the hold clears
+      // and the button goes at once, whatever a later read does (a second tap
+      // would only meet trace_exists; Codex P2 on #6175).
+      if (data?.treatmentZone) trace.saved(data.treatmentZone);
+      else trace.reload();
+    } catch (err) {
+      // Another device traced this visit since the offer was read: the visit
+      // HAS a trace now, so it is read again and no error stays on the sheet
+      // (the hand-trace button must not open on an empty state over it;
+      // Codex P2 r3 on #6175).
+      if (err?.code === 'trace_exists') trace.reload();
+      else setError(err?.message || 'Couldn’t copy the last trace. Trace it by hand.');
+    }
+    setReusing(false);
+  };
+  return { feet: last.linearFt, reusing, offer: plain && !trace.zone && last.available ? reuse : null };
+}
+
 // The traced perimeter's length, when the saved trace is a perimeter (with
 // or without "Interior spray too", which keeps the perimeter's length): that
 // length is the perimeter spray's linear feet on the record. A lawn or yard
@@ -518,35 +604,9 @@ export function WritingView({ sources }) {
 
 // "Heard from you": the record facts read from the note (where product
 // went down, the pests named), fixed by talking again and writing again.
-// Shown once the note was read; why a read holds the send is the footer's.
+// Shown once the note was read; it never holds the send.
 const joinAnd = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items[0] || '');
 const FACTS_READ = new Set(['read', 'empty_note']);
-
-// Why the note's read holds Complete & send, or '': where product went down
-// decides the customer's re-entry wait, so it must have been heard.
-export function factsHold(facts) {
-  if (facts?.status === 'too_long') return 'Your note is too long to read where you treated. Shorten it, then write it again.';
-  if (!FACTS_READ.has(facts?.status)) return 'Couldn’t read where you treated from your note. Write it again to retry.';
-  // Heard, but the note also denies it: never recorded, never dropped.
-  const unclear = facts.unclearAreas || [];
-  if (unclear.length) {
-    return `It isn’t clear whether you treated ${joinAnd(unclear.map((area) => area.toLowerCase()))}. Say plainly where you treated, then write it again.`;
-  }
-  // A spray heard but not held up: never recorded as spot spraying.
-  if (facts.unclearSpray) {
-    return 'It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.';
-  }
-  // A pest the note treats for that was not heard: never left off the
-  // products' targets (Codex #5538).
-  const unclearPests = facts.unclearPests || [];
-  if (unclearPests.length) {
-    return `It isn’t clear whether you treated for ${joinAnd(unclearPests)}. Say plainly which pests you treated for, then write it again.`;
-  }
-  if (!facts.areas.length) return 'Say where you treated (inside, outside or garage) in your note, then write it again.';
-  // Every product goes on the record with the pests it was for, as the
-  // re-service sheet requires a pest; none heard means none would be recorded.
-  return facts.pests?.length ? '' : 'Say what pest you treated for (ants, roaches, spiders…) in your note, then write it again.';
-}
 
 const SPRAY_HEARD = { perimeter: 'perimeter spray', spot: 'spot spraying' };
 
@@ -903,6 +963,20 @@ export function TypedRecordCard({ schema, record, unclear = [], scoreUnclear = f
   );
 }
 
+// The sweep chip on the older short form, which has no note read: one tap
+// records the sweep. The report flow has none (owner 2026-10-09: the tech
+// says it in the note or it is not on the record).
+export function SweepChip({ on, locked, onToggle }) {
+  return (
+    <Chip
+      disabled={locked}
+      pressed={on === true}
+      label={on ? 'Swept eaves and webs ✕' : '+ Swept eaves'}
+      onClick={onToggle}
+    />
+  );
+}
+
 export function ReportCard({
   draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
@@ -965,14 +1039,17 @@ export function StepFooter({ reason, warn, label, onAction, busy, disabled, cove
 
 // A confirmable completion prompt (the edited-report heads-up, a promise
 // that changed after the report was written): the server's own words, then
-// send as is or go back.
-export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
+// send as is or go back. A Go back that could not discard the attempt saved
+// on this device keeps the prompt open, so its error shows here, as on the
+// recovered-completion view.
+export function ConfirmPrompt({ prompt, error, onConfirm, onBack, busy }) {
   return (
     <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
       <p className="tech-visit-section-title">Before this goes out</p>
       {String(prompt.message || '').split('\n').filter(Boolean).map((line) => (
         <p key={line} className="tech-visit-muted">{line}</p>
       ))}
+      {error && <ActionFeedback error className="tech-visit-feedback">{error}</ActionFeedback>}
       <div className="tech-visit-tile-grid">
         <Chip label="Go back" disabled={busy} onClick={onBack} />
         <Chip label="Send as is" disabled={busy} onClick={onConfirm} />

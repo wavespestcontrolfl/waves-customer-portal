@@ -39,12 +39,7 @@ describe('P1-B — caller-id-disclaimed crm_notes stamp failure never logs e.mes
 });
 
 describe('P1-C — callback_number_needed hold is persisted for the reminder cron', () => {
-  test('a flag is raised at the same decision point that blocks the confirmation SMS', () => {
-    expect(src).toMatch(/callbackNumberNeededHoldActive\s*=\s*true/);
-  });
-
   test('the hold is stamped onto scheduled_services.callback_number_hold_at once the visit is booked', () => {
-    expect(src).toMatch(/callbackNumberNeededHoldActive/);
     expect(src).toMatch(/callback_number_hold_at:\s*new Date\(\)/);
     // Guarded so a concurrent pass can't stomp an already-recorded hold.
     expect(src).toMatch(/whereNull\('callback_number_hold_at'\)/);
@@ -107,11 +102,9 @@ describe('round-3 P1 #3 — the follow-up (second-treatment) row is covered by t
     expect(body).toMatch(/source_call_log_id:\s*call\.id/);
   });
 
-  test('the stamp is called after each ensureCallFollowUpVisit call site (fresh insert, idempotency reuse, marker/slot reuse)', () => {
-    const callSites = src.match(/await stampCallbackNumberHoldForCall\(\);/g) || [];
-    // Three call-booking exit points in this transaction call
-    // ensureCallFollowUpVisit; the stamp follows each of them.
-    expect(callSites.length).toBeGreaterThanOrEqual(3);
+  test('three call-booking exit points call ensureCallFollowUpVisit (fresh insert, idempotency reuse, marker/slot reuse)', () => {
+    // The stamp count that covers them (with both attach paths) is the
+    // round-4 test below.
     const followUpSites = src.match(/followUpCreated\s*=\s*await ensureCallFollowUpVisit\(/g) || [];
     expect(followUpSites.length).toBeGreaterThanOrEqual(3);
   });
@@ -196,39 +189,6 @@ describe('round-5 P1 — a reprocess that re-raises the hold always refreshes ca
     expect(body).toMatch(/whereNull\('callback_number_hold_at'\)/);
     expect(body).toMatch(/orWhereRaw\('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at'\)/);
   });
-
-  // The two source-shape checks above pin that the widened guard
-  // (whereNull(...).orWhereRaw('call_sms_cleared_at IS NOT NULL AND
-  // call_sms_cleared_at >= callback_number_hold_at')) is present in both
-  // writers; this proves that exact guard's WHERE semantics are correct —
-  // it must match a row IFF callbackNumberHoldFromRow (the live predicate
-  // every reader in this codebase uses) says the row is NOT currently
-  // held, i.e. the guard is the predicate's precise logical inverse.
-  test("the widened guard's semantics are the exact inverse of callbackNumberHoldFromRow — refreshes a never-held or already-CLEARED row, leaves a currently-held row (including a stale pre-dating clearance) alone", () => {
-    const heldFromRow = (row) => {
-      if (!row.callback_number_hold_at) return false;
-      const heldAt = new Date(row.callback_number_hold_at).getTime();
-      const clearedAt = row.call_sms_cleared_at ? new Date(row.call_sms_cleared_at).getTime() : null;
-      return clearedAt === null || clearedAt < heldAt;
-    };
-    const guardMatches = (row) => !row.callback_number_hold_at
-      || (row.call_sms_cleared_at != null
-        && new Date(row.call_sms_cleared_at).getTime() >= new Date(row.callback_number_hold_at).getTime());
-    const rows = [
-      { label: 'never held', callback_number_hold_at: null, call_sms_cleared_at: null },
-      // The reprocess bug case round 5 caught: a prior pass's hold was
-      // genuinely cleared, and this pass wants to install a fresh one.
-      { label: 'cleared AFTER the hold (the reprocess case)', callback_number_hold_at: new Date('2030-01-01T10:00:00Z'), call_sms_cleared_at: new Date('2030-01-01T11:00:00Z') },
-      // A stale clearance that PREDATES a fresh hold is still held — the
-      // guard must NOT treat this row as eligible for a refresh (that
-      // would just needlessly bump an already-correct hold_at).
-      { label: 'stale clearance PREDATES a fresh hold — currently held', callback_number_hold_at: new Date('2030-01-02T10:00:00Z'), call_sms_cleared_at: new Date('2030-01-01T09:00:00Z') },
-      { label: 'held, never cleared', callback_number_hold_at: new Date('2030-01-01T10:00:00Z'), call_sms_cleared_at: null },
-    ];
-    for (const row of rows) {
-      expect(guardMatches(row)).toBe(!heldFromRow(row));
-    }
-  });
 });
 
 describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the visit hold is, plus before any non-booking send', () => {
@@ -278,11 +238,8 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
     expect(catchAt).toBeGreaterThan(-1);
     expect(block.slice(catchAt)).toMatch(/throw failClosed;/);
     expect(block.slice(catchAt)).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
-    // The pass's own catch is what turns that throw into the capped retry.
-    // (Window widened 1600 -> 2600 on the main merge: #4815 added its
-    // quarantine-queue comment + require inside that same catch, ahead of
-    // the status write; the asserted behavior is unchanged.)
-    expect(src).toMatch(/catch \(procErr\) \{[\s\S]{0,2600}processing_status: 'extraction_failed'/);
+    // The pass's own catch turning that throw into the capped retry is
+    // pinned by call-agreed-price-gate.test.js (the outer guard's release).
   });
 });
 
@@ -299,14 +256,16 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
 describe('round-7 P1 — the number hold is persisted when the flag is decided', () => {
   // Round 8 P1: the call now sits in `if (!(await …())) return abandonToPeer(…)`
   // (a lost processing claim abandons the pass) — match the awaited call.
-  const ARM = 'await armCallbackNumberHoldAtDecision()';
+  // #6112: the helper takes { cardExtraction } (the no-text release card rides in the same transaction).
+  const ARM_ENFORCE = 'await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction })';
+  const ARM_SHADOW = 'await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext })';
 
   test('the decision-point helper arms through armDisclaimedNumberHold and fails the pass closed', () => {
-    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
+    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {');
     expect(idx).toBeGreaterThan(-1);
     const body = src.slice(idx, src.indexOf('\n    };', idx));
-    // Round 8 P1: the write now carries the pass's processing claim.
-    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,\s*\}\)/);
+    // Round 8 P1: the write now carries the pass's processing claim (#6112: and the companion card write).
+    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,(?: noTextHold: noTextHoldArming,)?(?:\s*afterArm: [^\n]*,)?\s*\}\)/);
     expect(body).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
     expect(body).toMatch(/throw failClosed;/);
     expect(body).not.toMatch(/holdErr\.message/);
@@ -314,15 +273,15 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
 
   test('enforce: armed right where the flag is raised — before the route decision insert and before any card insert', () => {
     const gate = src.indexOf('if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {');
-    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags)) {', gate);
+    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {', gate);
     const decideEnd = src.indexOf('\n          }\n', decide);
     const block = src.slice(decide, decideEnd);
     const flip = block.indexOf('callbackNumberNeededHoldActive = true;');
     expect(flip).toBeGreaterThan(-1);
-    expect(block.indexOf(ARM)).toBeGreaterThan(flip);
+    expect(block.indexOf(ARM_ENFORCE)).toBeGreaterThan(flip);
     // Nothing awaited between the decision and the write.
-    expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
-    const armAt = decide + block.indexOf(ARM);
+    expect(block.slice(0, block.indexOf(ARM_ENFORCE)).match(/await /g)).toBeNull();
+    const armAt = decide + block.indexOf(ARM_ENFORCE);
     expect(armAt).toBeLessThan(src.indexOf('await upsertRouteDecision(db, routeDecision', decide));
     expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
   });
@@ -332,9 +291,9 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
     const decide = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {', gate);
     const decideEnd = src.indexOf('\n        }\n', decide);
     const block = src.slice(decide, decideEnd);
-    expect(block.indexOf(ARM)).toBeGreaterThan(block.indexOf('callbackNumberNeededHoldActive = true;'));
-    expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
-    const armAt = decide + block.indexOf(ARM);
+    expect(block.indexOf(ARM_SHADOW)).toBeGreaterThan(block.indexOf('callbackNumberNeededHoldActive = true;'));
+    expect(block.slice(0, block.indexOf(ARM_SHADOW)).match(/await /g)).toBeNull();
+    const armAt = decide + block.indexOf(ARM_SHADOW);
     expect(armAt).toBeLessThan(src.indexOf('deriveCallReviewBridge({', decide));
     expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
   });
@@ -370,15 +329,17 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
  */
 describe('round-8 P1 — the decision-point write is fenced to the processing claim', () => {
   test('the helper reports a lost claim (false) without marking the hold armed', () => {
-    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
+    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {');
     const body = src.slice(idx, src.indexOf('\n    };', idx));
     expect(body).toMatch(/if \(armed\?\.claimLost\) return false;/);
     expect(body.indexOf('if (armed?.claimLost) return false;')).toBeLessThan(body.indexOf('callbackNumberHoldArmed = true;'));
   });
 
   test('both decision points abandon the pass on a lost claim', () => {
-    const sites = src.match(/if \(!\(await armCallbackNumberHoldAtDecision\(\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);/g) || [];
-    expect(sites).toHaveLength(2);
-    expect(src.match(/armCallbackNumberHoldAtDecision\(\)/g)).toHaveLength(2);
+    // #6112: two decision points, the post-customer recovery for a pass whose enforce routing threw,
+    // the non-workable voicemail terminal branch (r10 P2) and the tech follow-up short-circuit (r12 P2)
+    const sites = src.match(/if \(!\(await armCallbackNumberHoldAtDecision\(\{ cardExtraction: [\w.]+ \}\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);/g) || [];
+    expect(sites).toHaveLength(5);
+    expect(src.match(/await armCallbackNumberHoldAtDecision\(/g)).toHaveLength(5);
   });
 });

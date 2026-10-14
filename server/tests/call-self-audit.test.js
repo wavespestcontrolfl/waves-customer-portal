@@ -18,18 +18,21 @@ const { recordDecisions } = require('../services/typed-decisions/shadow-recorder
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails } = require('../services/call-self-audit');
 
-// Each sampled call is asked call_judge.v2 and call_gate_checks.v1; these
+// Each sampled call is asked call_judge.v4 and call_gate_checks.v1; these
 // read one package's asks, records and tally.
 const asksFor = (id) => askPackage.mock.calls.filter((c) => c[0] === id);
 const recordsFor = (id) => recordDecisions.mock.calls.filter(([a]) => a.pkg.id === id);
-const judgeAsks = () => asksFor('call_judge.v2');
-const judgeRecords = () => recordsFor('call_judge.v2');
+const judgeAsks = () => asksFor('call_judge.v4');
+const judgeRecords = () => recordsFor('call_judge.v4');
 const judgeTally = ({ gateChecks, ...rest }) => rest;
 
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
   transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(8),
-  ai_extraction: JSON.stringify({ is_lead: true }), disposition: null, ...over,
+  ai_extraction: JSON.stringify({ is_lead: true, v2_primary_adopted: true }), disposition: null,
+  // The adoption stamp plus a valid V2 extraction with a decisive status: the V2 extractor wrote the
+  // baseline, so the call is graded by the V2 contract (call_judge.v4).
+  v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling: { status: 'none' } }), ...over,
 });
 
 function mockDb({ calls, onInsert = () => {}, whereCalls = [], promiseCallIds = [], whereInCalls = [] }) {
@@ -198,15 +201,15 @@ describe('Jev shadow', () => {
     expect(judgeTally(res.jev)).toEqual({ asked: 0, recorded: 0, failed: 0 });
   });
 
-  test('gate on: asks call_judge.v2 with the transcript and direction, records both baselines and the transcript digest', async () => {
+  test('gate on: asks call_judge.v4 with the transcript and direction, records both baselines and the transcript digest', async () => {
     typedDecisionsLive.mockReturnValue(true);
-    const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false }) });
+    const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false, v2_primary_adopted: true }) });
     mockDb({ calls: [prodCall] });
     const res = await runSelfAudit({ createMessage: async () => VERDICT });
 
     expect(judgeAsks()).toHaveLength(1);
     const [packageId, state] = judgeAsks()[0];
-    expect(packageId).toBe('call_judge.v2');
+    expect(packageId).toBe('call_judge.v4');
     expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
     expect(state.duration_seconds).toBe(88);
     expect(state.call_direction).toMatch(/^INBOUND/);
@@ -216,7 +219,7 @@ describe('Jev shadow', () => {
     const args = judgeRecords()[0][0];
     expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, subjectHash: callSubjectHash(prodCall.transcription) });
     expect(args).not.toHaveProperty('outcomeEvidence');
-    expect(args.pkg.id).toBe('call_judge.v2');
+    expect(args.pkg.id).toBe('call_judge.v4');
     // production and deep judge side by side for the five shared fields
     expect(args.baselines.appointment_agreed).toEqual({ production: false, deep_judge: true });
     expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: true });
@@ -228,7 +231,7 @@ describe('Jev shadow', () => {
 
   test('a failed deep audit still asks Jev, recorded against production only', async () => {
     typedDecisionsLive.mockReturnValue(true);
-    mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true }) })] });
+    mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true, v2_primary_adopted: true }) })] });
     const res = await runSelfAudit({ createMessage: async () => { throw new Error('deep judge down'); } });
     expect(judgeAsks()).toHaveLength(1);
     const args = judgeRecords()[0][0];
@@ -284,7 +287,7 @@ describe('Clef shadow leg (second provider)', () => {
     mockDb({ calls: [SAMPLE()] });
     const res = await runSelfAudit({ createMessage: OK_DEEP });
     expect(judgeAsks()).toHaveLength(2);
-    expect(judgeAsks()[0][0]).toBe('call_judge.v2');
+    expect(judgeAsks()[0][0]).toBe('call_judge.v4');
     expect(judgeAsks()[0][1]).toEqual(judgeAsks()[1][1]); // identical state
     expect(judgeAsks()[1][2]).toEqual({ provider: 'cloudflare' });
     expect(judgeRecords()).toHaveLength(2);
@@ -365,7 +368,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [long] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
     expect(asksFor('call_gate_checks.v1')).toHaveLength(0);
-    expect(asksFor('call_judge.v2')).toHaveLength(1); // call_judge unchanged
+    expect(asksFor('call_judge.v4')).toHaveLength(1); // call_judge unchanged
     expect(res.jev.gateChecks).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
   });
 
@@ -379,9 +382,11 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [call], promiseCallIds: ['call-7'] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
 
-    const [judge] = asksFor('call_judge.v2');
+    // This fixture's enriched extraction is not V2-shaped, so V1 wrote the stored answer: v3 is asked.
+    const [judge] = asksFor('call_judge.v3');
     const [gates] = asksFor('call_gate_checks.v1');
     expect(gates[1]).toEqual(judge[1]); // identical call state
+    expect(gates[1]).not.toHaveProperty('call_started_et');
     const [args] = recordsFor('call_gate_checks.v1')[0];
     expect(args).toMatchObject({ capability: 'call_gate_checks', provider: 'typesafe', subjectType: 'call_log', subjectId: 'call-7', result: JEV });
     expect(args.baselines).toEqual({ service_unclear: { production: true }, reschedule_committed: { production: true }, promise_open: { production: true } });
@@ -633,5 +638,139 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   test('a read failure is logged, never thrown', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
+  });
+});
+
+// Codex #6294 r2, r3, r4: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
+describe('the contract follows the extractor that wrote the stored answer', () => {
+  const { baselineFromV2, auditPromptFor, auditInputHash, AUDIT_PROMPT, AUDIT_PROMPT_V1 } = require('../services/call-self-audit');
+  const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE } = require('../services/prompts/appointment-confirmed-rules');
+  const v2With = (scheduling) => JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling });
+  const confirmedV2 = v2With({ status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' });
+  const noneV2 = v2With({ status: 'none' });
+  const row = (over = {}) => ({ direction: 'inbound', transcription: 'Agent: Waves. Caller: hi.', created_at: '2026-10-09T19:49:00Z', ...over });
+  // `stored` as the processor saves it after V2-primary adoption ran (the stamp).
+  const valid = (enriched, stored) => row({ v2_extraction_status: 'valid', ai_extraction_enriched: enriched, ai_extraction: JSON.stringify({ v2_primary_adopted: true, ...stored }) });
+
+  test('V2 wrote it: the adoption stamp, a valid V2 extraction with a decisive status, and the stored answer adoption writes', () => {
+    expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true }))).toBe(true);
+    expect(baselineFromV2(valid(noneV2, {}))).toBe(true);
+    expect(baselineFromV2(valid(v2With({ status: 'requested' }), { appointment_confirmed: false }))).toBe(true);
+  });
+  test('V1 wrote it: no valid V2 extraction, not the V2 shape, or a stored answer adoption would not have written', () => {
+    expect(baselineFromV2(row({ ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(false);
+    expect(baselineFromV2({ ...valid(confirmedV2, { appointment_confirmed: true }), v2_extraction_status: 'parse_failed' })).toBe(false);
+    expect(baselineFromV2(valid(null, {}))).toBe(false);
+    expect(baselineFromV2(valid(JSON.stringify({ scheduling: { status: 'none' } }), {}))).toBe(false);
+    expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: false }))).toBe(false);
+    expect(baselineFromV2(valid(noneV2, { appointment_confirmed: true }))).toBe(false);
+  });
+  test('V1 wrote it: an ambiguous or missing V2 status leaves V1\'s answer, even when the two answers are equal (r3)', () => {
+    expect(baselineFromV2(valid(v2With({ status: 'ambiguous' }), { appointment_confirmed: false }))).toBe(false);
+    expect(baselineFromV2(valid(v2With({ status: 'ambiguous' }), { appointment_confirmed: true }))).toBe(false);
+    expect(baselineFromV2(valid(v2With({}), {}))).toBe(false);
+    // V2 confirmed with no parseable start: adoption does not write "confirmed".
+    expect(baselineFromV2(valid(v2With({ status: 'confirmed', confirmed_start_at: null }), { appointment_confirmed: true }))).toBe(false);
+    expect(baselineFromV2(valid(v2With({ status: 'confirmed' }), { appointment_confirmed: false }))).toBe(false);
+  });
+  test('V1 wrote it: no adoption stamp (a shadow-mode run, or a row from before the stamp), even when the two answers are equal (r3, r4)', () => {
+    expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true, v2_primary_adopted: undefined }))).toBe(false);
+    expect(baselineFromV2(valid(noneV2, { v2_primary_adopted: false }))).toBe(false);
+    expect(baselineFromV2(valid(noneV2, { v2_primary_adopted: 'true' }))).toBe(false);
+  });
+  test('an approved V2 booking stamps the answer too, with V2-primary adoption off (r6)', () => {
+    const approved = (enriched, stored) => valid(enriched, { v2_primary_adopted: undefined, v2_appointment_written: true, ...stored });
+    expect(baselineFromV2(approved(confirmedV2, { appointment_confirmed: true }))).toBe(true);
+    expect(baselineFromV2(approved(confirmedV2, { appointment_confirmed: false }))).toBe(false);
+    expect(baselineFromV2(approved(v2With({ status: 'ambiguous' }), { appointment_confirmed: false }))).toBe(true);
+    expect(baselineFromV2({ ...approved(confirmedV2, { appointment_confirmed: true }), v2_extraction_status: 'parse_failed' })).toBe(false);
+    const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = processor.indexOf('extracted.appointment_confirmed = v2Flat.appointment_confirmed;');
+    expect(at).toBeGreaterThan(0);
+    expect(processor.slice(at - 400, at)).toContain('if (v2ApprovedExtraction) {');
+    expect(processor.slice(at, at + 500)).toContain('extracted.v2_appointment_written = true;');
+  });
+  test('the processor stamps the stored extraction where V2-primary adoption runs, and the audit never reads the live mode', () => {
+    const fs = require('fs');
+    const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = processor.indexOf('const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {');
+    expect(at).toBeGreaterThan(0);
+    expect(processor.slice(at - 200, at)).toContain('if (callExtractionV2PrimaryEnabled() && v2Result?.status === \'valid\' && isV2Extraction(v2Result.extraction)) {');
+    expect(processor.slice(at, at + 900)).toContain('extracted = { ...adoption.merged, v2_primary_adopted: true };');
+    const audit = fs.readFileSync(require.resolve('../services/call-self-audit'), 'utf8');
+    expect(audit).not.toContain('process.env.CALL_EXTRACTION_V2');
+  });
+  test('the V1 prompt keeps the shared rules and carries none of the V2-only ones; the hash follows the prompt', () => {
+    expect(AUDIT_PROMPT_V1).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(AUDIT_PROMPT_V1).not.toContain(CALLER_PROPOSED_TIME_RULE);
+    expect(AUDIT_PROMPT_V1).not.toContain(STAFF_HEDGE_RULE);
+    const v1 = row({ ai_extraction: '{}' });
+    expect(AUDIT_PROMPT).toContain(CALLER_PROPOSED_TIME_RULE);
+    const v2 = valid(noneV2, {});
+    expect(auditPromptFor(v1)).toBe(AUDIT_PROMPT_V1);
+    expect(auditPromptFor(v2)).toBe(AUDIT_PROMPT);
+    expect(auditInputHash(v1)).not.toBe(auditInputHash(v2));
+  });
+  test('the frozen v3 package is exactly the V1-baseline contract', () => {
+    const { PACKAGES } = require('../services/typed-decisions/packages');
+    const { auditAppointmentContract } = require('../services/prompts/appointment-confirmed-rules');
+    expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions)
+      .toContain(auditAppointmentContract('the date the call took place', { v2OnlyRules: false }));
+  });
+});
+
+describe('AUDIT_PROMPT appointment definition', () => {
+  // The auditor grades production's appointment_confirmed, so it reads the
+  // extractor's own rule text, not a paraphrase (10-05 #5994: a paraphrase
+  // counted promised callbacks and existing-visit ETAs as appointments).
+  const { AUDIT_PROMPT } = require('../services/call-self-audit');
+  const {
+    auditAppointmentContract, EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE,
+    bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE,
+  } = require('../services/prompts/appointment-confirmed-rules');
+  const { PACKAGES } = require('../services/typed-decisions/packages');
+  test('carries the production appointment_confirmed rules verbatim', () => {
+    expect(AUDIT_PROMPT).toContain(auditAppointmentContract('the date the call took place'));
+  });
+  test('the typed judge asks the same contract (call_judge.v4)', () => {
+    // v4 is a frozen snapshot. If this fails, the production rules changed:
+    // publish call_judge.v5 with a new snapshot and point the self-audit at it.
+    expect(PACKAGES['call_judge.v4'].questions.appointment_agreed.instructions)
+      .toContain(auditAppointmentContract('the date the call took place'));
+  });
+  test('v4 snapshot is the audit contract with the three clock-free V2-only rules; v3 stays frozen without them', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '..', 'services', 'typed-decisions');
+    const v3 = fs.readFileSync(path.join(dir, 'call-judge-v3-appointment-contract.txt'), 'utf8');
+    const v4 = fs.readFileSync(path.join(dir, 'call-judge-v4-appointment-contract.txt'), 'utf8');
+    expect(v4).toBe(auditAppointmentContract('the date the call took place'));
+    for (const heading of ['A MISSING AM/PM IS NEVER A REASON TO HOLD A SETTLED HOUR', 'STAFF HEDGES DO NOT UNCONFIRM A NEW BOOKING', 'CALLER-PROPOSED TIME THAT STAFF ACCEPTED']) {
+      expect(v4).toContain(heading);
+      expect(v3).not.toContain(heading);
+    }
+    // The bare-time rule needs the call's clock, which no judge is given: it is in neither.
+    expect(v4).not.toContain('BARE TIME WITH NO DAY');
+    expect(v3).not.toContain('BARE TIME WITH NO DAY');
+    expect(PACKAGES['call_judge.v4'].stateShape).toEqual(PACKAGES['call_judge.v3'].stateShape);
+    expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions).toContain(v3);
+    expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions).not.toContain('CALLER-PROPOSED TIME');
+    expect(PACKAGES['call_judge.v4'].questions.appointment_agreed.instructions).toContain(v4);
+  });
+  test('the audit prompt carries the three clock-free V2-only rules, and not the bare-time rule', () => {
+    expect(AUDIT_PROMPT).not.toContain(bareTimeNoDayRule('the date the call took place'));
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(AUDIT_PROMPT).toContain(rule);
+  });
+  test('the extractor renders the shared rules, not its own copy', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('${appointmentConfirmedRules(callDateET)}');
+    expect(src).not.toContain('- Only set appointment_confirmed to true if BOTH');
+  });
+  test('the contract keeps an existing visit out, with the V2 extractor\'s own lines', () => {
+    const v2 = require('../services/prompts/call-extraction-v1').buildExtractionPrompt('', '', '2026-10-05');
+    expect(v2).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(v2).toContain(RESCHEDULE_RULE);
+    expect(AUDIT_PROMPT).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(AUDIT_PROMPT).toContain(RESCHEDULE_RULE);
   });
 });

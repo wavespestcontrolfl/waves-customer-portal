@@ -43,7 +43,7 @@ import {
   Suspense,
 } from "react";
 import { createPortal } from "react-dom";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
 import {
   CompletionPanel,
@@ -65,6 +65,8 @@ import MobileDispatchList from "../../components/schedule/MobileDispatchList";
 import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
+import { onSiteTimeOf } from "../../lib/on-site-time";
+import { completionBillingFacts, wrapUpSheetFields } from "../../lib/completion-billing-facts";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
@@ -72,6 +74,7 @@ import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
+import HeldVisitsStrip, { heldVisitFormDefaults } from "./HeldVisitsStrip";
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
@@ -88,12 +91,27 @@ import {
   isETToday as isETTodayStr,
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../lib/pest-fast-complete";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
+import FastCompleteComboSheet from '../../components/tech/FastCompleteComboSheet';
+import { comboMembersFor } from '../../lib/combo-fast-complete';
+import { comboDraftId, operatorScope } from '../../lib/visit-closeout-packet';
+import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import {
   mergePostPaymentService,
+  fastCompleteSheetFor,
+  invoicedSheetResponse,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
+import FastCompleteTreeShrubSheet from "../../components/tech/FastCompleteTreeShrubSheet";
+import FastCompleteLawnSheet from "../../components/tech/FastCompleteLawnSheet";
+import FastCompleteAssessmentSheet from "../../components/tech/FastCompleteAssessmentSheet";
+import FastCompleteLawnReserviceSheet from "../../components/tech/FastCompleteLawnReserviceSheet";
+import FastCompleteSheet from "../../components/tech/FastCompleteSheet";
+import { shortAddress } from "../tech/visitBrief";
+import { serviceWindowLabel } from "../tech/routeStops";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const TechMatchPanel = lazy(
@@ -367,6 +385,55 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   );
 }
 
+// The signed-in user scopes the Fast Complete attempts this device saves, as
+// Tech Home scopes them (staffIdForDevice), so either page finds them: the
+// profile AdminLayout verified, the stored copy only as a fallback (a failed
+// cache write can leave it missing; GitHub Codex P2 on #6001).
+// What the lawn re-service sheet reads from the schedule row: its labels, and
+// the visit the user opened, checked against the live context (the same fields
+// TechHomePage routes the sheet with).
+function lawnReserviceSheetService(row) {
+  return {
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    ...wrapUpSheetFields(row),
+    id: row.id,
+    customerName: row.customer_name || row.customerName,
+    serviceType: row.service_type || row.serviceType,
+    address: shortAddress(row.address) || row.address || "",
+    timeLabel: serviceWindowLabel(row) || "",
+    routedCustomerId: row.customerId || row.customer_id || null,
+    routedScheduledDate: row.scheduledDate || row.scheduled_date || null,
+    routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
+    routedAddress: typeof row.address === "string" ? row.address : null,
+    // Already invoiced from the payment flow: the sheet posts the full form's
+    // invoiceAlreadySent (lib/completion-invoice-fields.js).
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+  };
+}
+
+function fastCompleteOperatorOf(outlet) {
+  const verified = outlet?.user;
+  const user = verified?.id ? verified : getAdminUser();
+  return String(user?.id || "");
+}
+
+// The customer shape CreateAppointmentModal's defaultCustomer takes, from a
+// GET /admin/customers/:id record.
+function modalCustomerFrom(record) {
+  const c = record || {};
+  const address = c.address || {};
+  return {
+    id: c.id,
+    firstName: c.firstName || "",
+    lastName: c.lastName || "",
+    phone: c.phone || "",
+    address: address.line1 || "",
+    city: address.city || "",
+    zip: address.zip || "",
+    tier: c.tier || null,
+  };
+}
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -436,7 +503,34 @@ export default function DispatchPageV2({
   const [error, setError] = useState(null);
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
+  // Tree & Shrub Fast Complete (GATE_TS_FAST_COMPLETE): the one-screen sheet
+  // an eligible visit opens instead of CompletionPanel.
+  const [treeShrubFastService, setTreeShrubFastService] = useState(null);
+  const [lawnFastService, setLawnFastService] = useState(null);
+  // The Waves Assessment's one-screen sheet (GATE_ASSESSMENT_FAST_COMPLETE).
+  const [assessmentFastService, setAssessmentFastService] = useState(null);
+  // The lawn re-service's own sheet (GATE_LAWN_RESERVICE_FAST_COMPLETE, owner
+  // 2026-10-08), as the technician home opens it.
+  const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
+  // Pest Fast Complete (GATE_FAST_COMPLETE_REPORT, owner 2026-10-05): the
+  // one-screen report-flow sheet a regular pest visit opens here, as it does
+  // on the technician home page.
+  const [pestFastService, setPestFastService] = useState(null);
+  // The station map: a station visit opens the sheet only once the server has
+  // said the flag is off (isTypedReportEligible), as on the technician home.
+  const stationMap = useFeatureFlagReady("station-map-v1");
+  const stationMapOff = stationMapKnownOff(stationMap);
+  // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
+  // station visit also opens the sheet, which carries the station checks.
+  const stationSheetOn = stationMapKnownOn(stationMap);
+  const outlet = useOutletContext();
+  const fastCompleteOperatorId = fastCompleteOperatorOf(outlet);
+  // The role AdminLayout verified; the stored copy only as a fallback (a failed
+  // cache write can leave it missing or stale), as fastCompleteOperatorOf reads.
+  const verifiedRole = (outlet?.user?.id ? outlet.user : getAdminUser())?.role || null;
   const [closingVisitId, setClosingVisitId] = useState(null);
+  // A stop of one regular pest visit and one lawn visit, on the one-screen container (GATE_COMBO_FAST_COMPLETE).
+  const [comboStop, setComboStop] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
   // report opens right here in the schedule — the same interaction as the
@@ -604,7 +698,7 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
-  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || continueProjectService;
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnReserviceFastService || lawnFastService || pestFastService || continueProjectService;
   usePublishIntelligenceBarPageData({
     viewed_date: date,
     appointment_id: ibSelectedService?.id,
@@ -612,6 +706,11 @@ export default function DispatchPageV2({
   });
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
+  const [heldVisits, setHeldVisits] = useState([]);
+  // Only the newest Book it click opens the form, and only while its day is still on
+  // screen: a slower customer lookup from an earlier click, or from a day the operator
+  // has left, must not open it.
+  const bookHeldSeq = useRef(0);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
   // The visit the Edit / prepay modal last saved (fresh object per save):
   // the list view re-verifies that row on the refresh it triggers, unlike
@@ -718,6 +817,31 @@ export default function DispatchPageV2({
     fetchSchedule(date);
   }, [date, fetchSchedule]);
 
+  // "From calls, not on the calendar" strip (GATE_CALL_HELD_VISIT). Fail-soft:
+  // any error or an off gate leaves the list empty and the page unchanged.
+  // A new date, view or tab drops any pending Book it lookup with the old rows
+  // (a plain refresh of the same day does not).
+  useEffect(() => { bookHeldSeq.current += 1; }, [date, viewMode, activeTab]);
+  useEffect(() => {
+    if (viewMode !== "day" || activeTab !== "board") {
+      setHeldVisits([]);
+      return undefined;
+    }
+    let cancelled = false;
+    // Rows belong to the date that produced them: drop the last list before the
+    // new request, so a slow response never shows one day's rows under another.
+    setHeldVisits([]);
+    (async () => {
+      try {
+        const res = await adminFetch(`/admin/schedule/held-visits?date=${date}`);
+        if (!cancelled) setHeldVisits(Array.isArray(res?.heldVisits) ? res.heldVisits : []);
+      } catch {
+        if (!cancelled) setHeldVisits([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [date, viewMode, activeTab, scheduleRefreshKey]);
+
   // Auto-Dispatch audit links open the existing appointment detail sheet.
   // Inspecting a move must never enter the completion or new-booking flows.
   useEffect(() => {
@@ -754,20 +878,7 @@ export default function DispatchPageV2({
       try {
         const res = await adminFetch(`/admin/customers/${customerId}`);
         if (cancelled) return;
-        const c = res.customer || {};
-        const address = c.address || {};
-        setNewApptDefaults({
-          customer: {
-            id: c.id,
-            firstName: c.firstName || "",
-            lastName: c.lastName || "",
-            phone: c.phone || "",
-            address: address.line1 || "",
-            city: address.city || "",
-            zip: address.zip || "",
-            tier: c.tier || null,
-          },
-        });
+        setNewApptDefaults({ customer: modalCustomerFrom(res.customer) });
         setShowNewAppt(true);
       } catch (err) {
         console.error("Failed to preload schedule customer:", err);
@@ -783,6 +894,26 @@ export default function DispatchPageV2({
       cancelled = true;
     };
   }, [searchParams, setSearchParams]);
+
+  // Book it: open the New appointment modal on the held day and time. The
+  // customer is preloaded only when the call is linked to one; if that lookup
+  // fails the modal still opens and the person picks the customer.
+  const bookHeldVisit = useCallback(async (row) => {
+    const seq = ++bookHeldSeq.current;
+    let customer;
+    if (row.customer_id) {
+      try {
+        const res = await adminFetch(`/admin/customers/${row.customer_id}`);
+        if (res?.customer?.id) customer = modalCustomerFrom(res.customer);
+      } catch (err) {
+        console.error("Failed to preload held-visit customer:", err);
+      }
+    }
+    if (seq !== bookHeldSeq.current) return;
+    // What the form opens on is decided by the row alone (heldVisitFormDefaults).
+    setNewApptDefaults({ ...heldVisitFormDefaults(row), customer });
+    setShowNewAppt(true);
+  }, []);
 
   // Mobile only exposes Day + Week. Snap back if user loaded with 5day/month.
   useEffect(() => {
@@ -854,13 +985,115 @@ export default function DispatchPageV2({
     });
   }, []);
 
-  const handleComplete = useCallback((service) => {
+  // `fullForm` skips the Tree & Shrub sheet: the ?completeService deep link is
+  // where TechHomePage's own sheet sends its "Full form" escape, and the sheet
+  // mounted here uses it for the same escape.
+  // A Fast Complete sheet's own close: put the sheet away, and refresh the
+  // schedule when the sheet says its row may be stale.
+  // A fast sheet left mounted (suspended) behind the appointment details sheet
+  // (owner 2026-10-09). Plain Close returns to it; any action that changes the
+  // visit or leaves for another screen (move, cancel, billing, edit, checkout,
+  // treatment plan, book next) closes it too, so it never completes a stale row.
+  const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
+    || lawnReserviceFastService || lawnFastService || assessmentFastService || comboStop));
+  const closeFastSheetsBehindDetails = () => {
+    // The combo container keeps its parts' forms on the device for a reload; the visit changed, so those forms must not
+    // come back as ready when the stop is reopened.
+    if (comboStop) void deleteVisitCompletionDraft(comboDraftId(comboStop.visitId), operatorScope(fastCompleteOperatorId));
+    setComboStop(null);
+    setPestFastService(null);
+    setTreeShrubFastService(null);
+    setLawnReserviceFastService(null);
+    setLawnFastService(null);
+    setAssessmentFastService(null);
+  };
+  const closeFastSheet = (setSheetService) => (options) => {
+    setSheetService(null);
+    if (options?.refresh) {
+      setScheduleRefreshKey((k) => k + 1);
+      void fetchSchedule(date, { silent: true });
+    }
+  };
+  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet, shared by the sheet opened
+  // on its own and by the same sheet as a part of a pest + lawn stop (FastCompleteComboSheet).
+  // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
+  const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
+  const lawnSheetService = (row) => ({
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads to know whether the visit invoices and who pays.
+    ...completionBillingFacts(row),
+    id: row.id,
+    customerName: pickOf(row, 'customer_name', 'customerName'),
+    serviceType: pickOf(row, 'service_type', 'serviceType'),
+    address: shortAddress(row.address) || row.address || "",
+    // The customer block under the title (name link, directions, call).
+    customerId: pickOf(row, 'customerId', 'customer_id') || null,
+    fullAddress: typeof row.address === "string" ? row.address : "",
+    customerPhone: pickOf(row, 'customerPhone', 'customer_phone') || "",
+    // When the technician checked in (the Time on-site clock), by the full
+    // form's own rule: the on-site status-log entry, else checkInTime.
+    onSiteAt: onSiteTimeOf(row) || null,
+    timeLabel: serviceWindowLabel(row) || "",
+    // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
+    // treatment-zone row, since the save route would refuse the trace.
+    traceEligible: row.traceEligible,
+    // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
+    waveguardTier: row.waveguardTier || null,
+    // The visit the user opened, checked against the live context.
+    routedCustomerId: pickOf(row, 'customerId', 'customer_id') || null,
+    routedScheduledDate: pickOf(row, 'scheduledDate', 'scheduled_date') || null,
+    routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
+    routedAddress: typeof row.address === "string" ? row.address : null,
+    // Checked against the live visit: the office may have changed the service since.
+    routedServiceType: row.serviceTypeRaw || null,
+    routedCatalogServiceId: row.catalogServiceId || null,
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+  });
+  const pestSheetService = (row) => ({
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    ...wrapUpSheetFields(row),
+    id: row.id,
+    customerName: pickOf(row, 'customer_name', 'customerName'),
+    serviceType: pickOf(row, 'service_type', 'serviceType'),
+    address: shortAddress(row.address) || row.address || "",
+    timeLabel: serviceWindowLabel(row) || "",
+    // The visit the user opened, checked against the live context
+    // (same fields TechHomePage routes the sheet with).
+    routedCustomerId: pickOf(row, 'customerId', 'customer_id') || null,
+    routedScheduledDate: pickOf(row, 'scheduledDate', 'scheduled_date') || null,
+    routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
+    routedAddress: typeof row.address === "string" ? row.address : null,
+    routedServiceType: row.serviceTypeRaw ?? null,
+    routedServiceKey: row.completionProfile?.serviceKey || null,
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+    // Only an exact true turns the customer recap on (see the sheet).
+    recapEnabled: row.fastCompleteRecapEnabled === true,
+    // The report flow, with what the sheet reads of it from the row
+    // (a lane visit's lane, a typed visit's form, the trace step), as
+    // TechHomePage passes it. Never forced on: a station visit whose
+    // station map turns on or unread while the sheet is open drops
+    // out of the report flow, and the sheet then blocks and points
+    // to the full form (Codex P2 on #6140).
+    ...reportFlowFields(row, { stationMapOff, stationSheetOn }),
+    noteBoxPhotosEnabled: row.noteBoxPhotosEnabled === true,
+    technicianName: pickOf(row, 'technicianName', 'technician_name') || null,
+    lat: row.lat ?? null,
+    lng: row.lng ?? null,
+  });
+
+  const handleComplete = useCallback((service, { fullForm = false } = {}) => {
     // A durable resume marker means CompletionPanel already committed this
     // closeout and owes a replay — it bypasses the project-backed guard (a
     // cut-over typed visit can still carry a leftover linked project, and
     // the guard would otherwise strand the committed side effects).
     if (completionResumeMarked(service)) {
       setCompletingService(service);
+      return;
+    }
+    // A grouped stop that is exactly one regular pest visit and one lawn visit (the gate rides the row): the short screen,
+    // before the long visit closeout below. Anything else, or the sheet's own "Full form", falls through unchanged.
+    const comboPair = comboMembersFor(service, fullForm ? null : data?.services);
+    if (comboPair) {
+      setComboStop({ visitId: service.visitId, row: service, ...comboPair });
       return;
     }
     if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
@@ -878,8 +1111,23 @@ export default function DispatchPageV2({
       setProjectService(service);
       return;
     }
+    // The one-screen sheet this visit opens, if any (fastCompleteSheetFor: a
+    // lawn re-service, tree & shrub, lawn, then pest and the specialty visits,
+    // owner 2026-10-05 and 2026-10-08). A sheet's "Full form" button comes
+    // back here with fullForm: true.
+    const openSheet = fullForm ? null : {
+      lawn_reservice: setLawnReserviceFastService,
+      tree_shrub: setTreeShrubFastService,
+      lawn: setLawnFastService,
+      assessment: setAssessmentFastService,
+      pest: setPestFastService,
+    }[fastCompleteSheetFor(service, { stationMapOff, stationSheetOn })];
+    if (openSheet) {
+      openSheet(service);
+      return;
+    }
     setCompletingService(service);
-  }, [data?.visitCloseout]);
+  }, [data?.visitCloseout, data?.services, stationMapOff, stationSheetOn]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -903,7 +1151,7 @@ export default function DispatchPageV2({
       // idempotency machinery replays it instead of double-submitting.
       alert(`That visit is already ${svc.status} — nothing to complete.`);
     } else {
-      handleComplete(svc);
+      handleComplete(svc, { fullForm: true });
     }
   }, [data, handleComplete]);
 
@@ -929,7 +1177,10 @@ export default function DispatchPageV2({
   // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
   // invalidate the mobile week cache, and stage the payment handoff.
   const applyCompletionResult = useCallback(
-    (serviceId, r, body) => {
+    // `fallbackService`: the visit a caller other than CompletionPanel
+    // completed (the Tree & Shrub sheet), for a week-view row that is not in
+    // the selected day's list.
+    (serviceId, r, body, fallbackService = null) => {
       handleStatusChange(serviceId, "completed");
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
@@ -940,9 +1191,12 @@ export default function DispatchPageV2({
         ["service_complete_with_invoice", "service_report_v1_with_invoice"].includes(r?.completionSmsType) &&
         r?.completionSmsStatus === "sent";
       const invoiceWasAlreadyPaid = r?.invoiceStatus === "paid";
+      // A Fast Complete sheet passes the visit it completed as fallbackService
+      // (and no body): its invoice was already sent on the same terms.
       const invoiceWasAlreadySent =
         !!body?.invoiceAlreadySent ||
-        !!completingService?.completionInvoiceAlreadySent;
+        !!completingService?.completionInvoiceAlreadySent ||
+        !!fallbackService?.completionInvoiceAlreadySent;
       if (
         isMobile &&
         r?.invoiceId &&
@@ -955,6 +1209,7 @@ export default function DispatchPageV2({
       ) {
         const completedService =
           (data?.services || []).find((s) => s.id === serviceId) ||
+          fallbackService ||
           completingService;
         const handoff = {
           service: completedService,
@@ -1385,6 +1640,8 @@ export default function DispatchPageV2({
           defaultDurationMinutes={newApptDefaults?.durationMinutes}
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
+          defaultInternalNotes={newApptDefaults?.internalNotes || ""}
+          requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);
             setNewApptDefaults(null);
@@ -1428,6 +1685,11 @@ export default function DispatchPageV2({
           }}
           onEnRoute={handleEnRoute}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          // Open-hour rows book; POST /admin/schedule is admin-only.
+          onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, techId });
+            setShowNewAppt(true);
+          } : undefined}
         />
       )}
       {viewMode === "week" && !isMobile && (
@@ -1730,6 +1992,7 @@ export default function DispatchPageV2({
               </div>
             );
           })()}
+          <HeldVisitsStrip heldVisits={heldVisits} onBook={bookHeldVisit} />
           {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
               so dispatchers can drag jobs between tech lanes and create a
               slot pre-bound to a specific tech — the core same-day
@@ -1766,6 +2029,8 @@ export default function DispatchPageV2({
               }
               onChange={() => fetchSchedule(date)}
               onDateChange={setDate}
+              showOpenHours={getAdminUser()?.role === "admin"}
+              bookingHours={safeData.bookingHours || null}
               onCreateSlot={({ date: slotDate, windowStart, techId }) => {
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
@@ -1778,6 +2043,12 @@ export default function DispatchPageV2({
             <MobileDispatchList
               mode="day"
               date={date}
+              bookingHours={safeData.bookingHours || null}
+              // Open-hour rows book; POST /admin/schedule is admin-only.
+              onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
+                setShowNewAppt(true);
+              } : undefined}
               services={services}
               rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
@@ -1812,6 +2083,28 @@ export default function DispatchPageV2({
           setScheduleRefreshKey((value) => value + 1);
           void fetchSchedule(date, { silent: true });
         }}
+      />}
+      {comboStop && <FastCompleteComboSheet
+        key={comboStop.visitId}
+        visitId={comboStop.visitId}
+        pest={{ service: pestSheetService(comboStop.pest), voiceFillEnabled: comboStop.pest.fastCompleteVoiceFillEnabled === true }}
+        lawn={{ service: lawnSheetService(comboStop.lawn) }}
+        request={adminFetch}
+        operatorId={fastCompleteOperatorId}
+        catalog={products}
+        onClose={() => setComboStop(null)}
+        onSaved={() => {
+          setScheduleRefreshKey((value) => value + 1);
+          void fetchSchedule(date, { silent: true });
+        }}
+        onFullForm={() => {
+          const visitId = comboStop.visitId;
+          setComboStop(null);
+          setClosingVisitId(visitId);
+        }}
+        // The live row for the member the tech opened, from the stop's own load.
+        onViewDetails={(rows) => setDetailService(rows.find((row) => row.id === comboStop.row.id))}
+        suspended={!!detailService}
       />}
       {completingService && (
         <CompletionPanel
@@ -1863,6 +2156,185 @@ export default function DispatchPageV2({
                 }
               : undefined
           }
+        />
+      )}
+      {treeShrubFastService && (
+        <FastCompleteTreeShrubSheet
+          key={treeShrubFastService.id}
+          service={{
+            id: treeShrubFastService.id,
+            customerName: treeShrubFastService.customer_name || treeShrubFastService.customerName,
+            serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
+            address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || "",
+            timeLabel: serviceWindowLabel(treeShrubFastService) || "",
+            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
+            ...completionBillingFacts(treeShrubFastService),
+            // The visit the user opened, checked against the live context
+            // (same fields TechHomePage routes the sheet with).
+            routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            routedScheduledDate: treeShrubFastService.scheduledDate || treeShrubFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in treeShrubFastService ? treeShrubFastService.propertyId : undefined,
+            routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
+            completionInvoiceAlreadySent: !!treeShrubFastService.completionInvoiceAlreadySent,
+          }}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          onClose={closeFastSheet(setTreeShrubFastService)}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, stage the
+            // payment handoff for an unpaid invoice, refetch.
+            const service = treeShrubFastService;
+            setTreeShrubFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = treeShrubFastService;
+            setTreeShrubFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(treeShrubFastService)}
+          suspended={!!detailService}
+        />
+      )}
+      {lawnReserviceFastService && (
+        <FastCompleteLawnReserviceSheet
+          key={lawnReserviceFastService.id}
+          service={lawnReserviceSheetService(lawnReserviceFastService)}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
+          onClose={closeFastSheet(setLawnReserviceFastService)}
+          onCompleted={(response) => {
+            // As the lawn sheet below: flip the row to completed, invalidate
+            // the mobile week cache, stage the payment handoff for an unpaid
+            // invoice, refetch.
+            const service = lawnReserviceFastService;
+            setLawnReserviceFastService(null);
+            applyCompletionResult(service.id, invoicedSheetResponse(service, response), null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          // The sheet's "Full form" button: the long form for this visit.
+          onFullForm={() => {
+            const service = lawnReserviceFastService;
+            setLawnReserviceFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
+        />
+      )}
+      {lawnFastService && (
+        <FastCompleteLawnSheet
+          key={lawnFastService.id}
+          service={lawnSheetService(lawnFastService)}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          catalog={products}
+          onClose={closeFastSheet(setLawnFastService)}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, stage the
+            // payment handoff for an unpaid invoice, refetch.
+            const service = lawnFastService;
+            setLawnFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = lawnFastService;
+            setLawnFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnFastService)}
+          suspended={!!detailService}
+        />
+      )}
+      {assessmentFastService && (
+        <FastCompleteAssessmentSheet
+          key={assessmentFastService.id}
+          service={{
+            id: assessmentFastService.id,
+            customerName: assessmentFastService.customer_name || assessmentFastService.customerName,
+            serviceType: assessmentFastService.service_type || assessmentFastService.serviceType,
+            address: shortAddress(assessmentFastService.address) || assessmentFastService.address || "",
+            // The whole address, for the "Create estimate" prefill (the line above is display only).
+            fullAddress: assessmentFastService.address || "",
+            timeLabel: serviceWindowLabel(assessmentFastService) || "",
+            // The visit the user opened. The sheet sends it with the completion
+            // for the server to check against the live visit.
+            routedCustomerId: assessmentFastService.customerId || assessmentFastService.customer_id || null,
+            routedScheduledDate: assessmentFastService.scheduledDate || assessmentFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in assessmentFastService ? assessmentFastService.propertyId : undefined,
+            routedServiceType: assessmentFastService.serviceTypeRaw || null,
+            // What decides whether the sheet shows the inspection credit.
+            completionProfile: assessmentFastService.completionProfile || null,
+            inspectionCreditAvailable: assessmentFastService.inspectionCreditAvailable === true,
+          }}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          onClose={closeFastSheet(setAssessmentFastService)}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, refetch.
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(assessmentFastService)}
+          suspended={!!detailService}
+        />
+      )}
+      {pestFastService && (
+        <FastCompleteSheet
+          key={pestFastService.id}
+          service={pestSheetService(pestFastService)}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          voiceFillEnabled={pestFastService.fastCompleteVoiceFillEnabled === true}
+          onClose={closeFastSheet(setPestFastService)}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the row
+            // to completed, invalidate the mobile week cache, stage the payment
+            // handoff for an unpaid invoice (the lane and typed flows too),
+            // refetch.
+            const service = pestFastService;
+            setPestFastService(null);
+            applyCompletionResult(service.id, invoicedSheetResponse(service, response), null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          // The sheet's "Full form" button: the long form for this visit.
+          onFullForm={() => {
+            const service = pestFastService;
+            setPestFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(pestFastService)}
+          suspended={!!detailService}
         />
       )}
       {projectService && (
@@ -2120,12 +2592,17 @@ export default function DispatchPageV2({
       {detailService && (
         <MobileAppointmentDetailSheet
           service={detailService}
+          // A technician login (the tech portal's Edit / Book next hand-off
+          // lands here too) sees no office-only controls the server refuses.
+          adminActions={verifiedRole === "admin"}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => {
+            closeFastSheetsBehindDetails();
             setDetailService(null);
             setEditingService(svc);
           }}
           onTreatmentPlan={(svc) => {
+            closeFastSheetsBehindDetails();
             // Same trap as onReviewCheckout: TreatmentPlanPanel renders inline
             // (fixed z-1000) and would mount behind this body-level portaled
             // detail sheet. Close the detail sheet first. (Only this in-detail
@@ -2135,6 +2612,7 @@ export default function DispatchPageV2({
             setTreatmentPlanService(svc);
           }}
           onReviewCheckout={(svc) => {
+            closeFastSheetsBehindDetails();
             // Close the detail sheet before opening checkout. The detail sheet
             // portals to document.body (z-100), while the checkout sheet renders
             // inline in this tree (z-105) where an ancestor stacking context
@@ -2146,12 +2624,19 @@ export default function DispatchPageV2({
             setCheckoutService(svc);
           }}
           onCompleteService={(svc) => {
+            // Complete from Details over an open fast sheet: back to that sheet,
+            // its entries intact, rather than opening a second completion.
+            if (fastSheetBehindDetails) {
+              setDetailService(null);
+              return;
+            }
             setDetailService(null);
             if (shouldReopenCompletionAfterPayment(svc)) {
               handleComplete(svc);
             }
           }}
           onBookNext={(svc) => {
+            closeFastSheetsBehindDetails();
             setDetailService(null);
             setNewApptDefaults({
               customer: {
@@ -2170,6 +2655,7 @@ export default function DispatchPageV2({
             setShowNewAppt(true);
           }}
           onBillingChanged={() => {
+            closeFastSheetsBehindDetails();
             // The annual-prepay switch rewrote this visit's money state (lane,
             // attached invoice — possibly under a NEW invoice id after an
             // abort's restore). The open sheet still holds the pre-switch
@@ -2181,6 +2667,7 @@ export default function DispatchPageV2({
             setScheduleRefreshKey((k) => k + 1);
           }}
           onCancelled={() => {
+            closeFastSheetsBehindDetails();
             // Silent only while the project editor is mounted underneath —
             // ordinary day-row sheets keep the loud gate so a failed
             // refresh can't quietly leave the pre-mutation row active
@@ -2202,6 +2689,7 @@ export default function DispatchPageV2({
             );
           }}
           onRescheduled={async () => {
+            closeFastSheetsBehindDetails();
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);

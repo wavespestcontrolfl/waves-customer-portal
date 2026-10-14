@@ -35,7 +35,12 @@ jest.mock('../services/autopay-log', () => ({
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendAutopayEnabled: jest.fn(), sendAutopayDisabled: jest.fn(), sendPaymentMethodUpdated: jest.fn(),
 }));
-jest.mock('../services/billing-lane', () => ({ resolveBillingLane: () => ({ mode: 'monthly_membership' }) }));
+let mockLane = 'monthly_membership';
+jest.mock('../services/billing-lane', () => ({ resolveBillingLane: () => ({ mode: mockLane }) }));
+const mockUpcomingRateChanges = jest.fn(async () => []);
+const mockPrepayPendingIds = jest.fn(async () => new Set());
+jest.mock('../services/annual-prepay-renewals', () => ({ getPaymentPendingCustomerIds: (...a) => mockPrepayPendingIds(...a) }));
+jest.mock('../services/rate-review-comms', () => ({ upcomingRateChanges: (...a) => mockUpcomingRateChanges(...a) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -141,11 +146,102 @@ test('a cancelled (C4) session gets status scalars only — no saved-method deta
   // session through this payload (codex GH r5 P2 — the same details the
   // /billing/cards exclusion keeps unreadable).
   mockCancelledSession = true;
+  mockUpcomingRateChanges.mockClear();
   const { status, body } = await getAutopay();
   expect(status).toBe(200);
+  expect(body.rate_changes).toBeUndefined(); // no upcoming rate for an ended service
+  expect(mockUpcomingRateChanges).not.toHaveBeenCalled();
   expect(body.payment_methods).toEqual([]);
   expect(body.autopay_selected_method_ids).toEqual([]);
   expect(body.autopay_payment_method_id).toBeNull();
   expect(body.recent_events).toEqual([]);
   expect(body.state).toBe('disabled');
+});
+
+describe('annual rate review upcoming rate (rate_changes)', () => {
+  const change = { service: 'Lawn care', unit: 'month', current: '$40', next: '$44', chargeCents: 10400, chargeDate: '2027-01-01', effectiveDate: '2026-12-15', noticePath: '/price-change/x' };
+
+  test('nothing pending: no rate_changes field (byte-identical payload)', async () => {
+    const { body } = await getAutopay();
+    expect(body).not.toHaveProperty('rate_changes');
+  });
+
+  test('the next charge at the new rate comes from computeChargeAmount for the Auto Pay method', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    const { computeChargeAmount } = require('../services/stripe-pricing');
+    const expected = computeChargeAmount(104, 'card', { funding: 'credit' });
+    const { body } = await getAutopay();
+    expect(body.rate_changes).toEqual([{
+      service: 'Lawn care', unit: 'month', current: '$40', next: '$44', effectiveDate: '2026-12-15', noticePath: '/price-change/x',
+      nextCharge: { total: expected.total, base: expected.base, surcharge: expected.surcharge, date: '2027-01-01' },
+    }]);
+  });
+
+  test('a lane with no automatic charge (prepaid renewal) announces none', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([{ ...change, unit: 'year', chargeCents: null, chargeDate: null }]);
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('an annual-prepay invoice awaiting payment announces no charge (the cron skips the account); an unreadable check announces none either', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    mockPrepayPendingIds.mockResolvedValueOnce(new Set(['cust-1']));
+    expect((await getAutopay()).body.rate_changes[0].nextCharge).toBeNull();
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    mockPrepayPendingIds.mockRejectedValueOnce(new Error('db down'));
+    expect((await getAutopay()).body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('service paused after failed payments announces no charge (the cron skips service_paused_at)', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.customers[0].service_paused_at = '2026-12-20T12:00:00Z';
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+    delete state.customers[0].service_paused_at;
+  });
+
+  test('a pause covering the effective date announces no charge (the cron skips it)', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.customers[0].autopay_paused_until = '2027-01-05';
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('an account no longer on monthly dues announces no monthly charge', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    mockLane = 'annual_prepay';
+    try {
+      const { body } = await getAutopay();
+      expect(body.rate_changes[0].nextCharge).toBeNull();
+    } finally { mockLane = 'monthly_membership'; }
+  });
+
+  test('a card expired by the charge date announces no charge', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.payment_methods.forEach((p) => { p.exp_month = 12; p.exp_year = 2026; });
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('the card\'s own next charge on the same date states the new amount too', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.customers[0].next_charge_date = new Date('2027-01-01T00:00:00Z'); // pg DATE → Date
+    const { body } = await getAutopay();
+    expect(body.next_charge_amount).toBe(body.rate_changes[0].nextCharge.total);
+    expect(body.next_charge_base_amount).toBe(104);
+  });
+
+  test('Auto Pay off: no charge is announced', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.customers[0].autopay_enabled = false;
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('a read failure omits the field, never the card', async () => {
+    mockUpcomingRateChanges.mockRejectedValueOnce(new Error('boom'));
+    const { status, body } = await getAutopay();
+    expect(status).toBe(200);
+    expect(body).not.toHaveProperty('rate_changes');
+  });
 });

@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { propertyStreetAddress } = require('../utils/property-display');
-const { invoiceCustomerAddress } = require('./invoice-address');
+const { invoiceCustomerAddress, correctedInvoiceAddress } = require('./invoice-address');
 const { formatDateOnly } = require('../utils/date-only');
 const { parseRawAddress } = require('../utils/address-normalizer');
 const featureGates = require('../config/feature-gates');
@@ -265,6 +265,11 @@ async function invoicePropertyAddress(invoice, customer) {
   try {
     const customerId = invoice?.customer_id;
     if (!customerId) return '';
+    // A staff correction of this invoice's address (Invoices → Edit address)
+    // outranks every link below, so a resent receipt email agrees with its
+    // receipt page and PDF. A correction always carries a street line.
+    const corrected = correctedInvoiceAddress(invoice);
+    if (corrected) return propertyStreetAddress(corrected);
     if (invoice.visit_completion_packet_id) {
       // A combined-visit invoice: every verified member must name the SAME
       // street address; a member that cannot be resolved omits the row. This
@@ -281,8 +286,9 @@ async function invoicePropertyAddress(invoice, customer) {
     if (conflict) return '';
     if (linked) {
       // A visit / record pointer is present: only the visit it resolves to may
-      // name the property. Foreign or unresolvable → omit, never primary.
-      if (unresolved || !visit) return '';
+      // name the property. Foreign or unresolvable → omit, never primary
+      // (visitPropertyAddress itself answers '' for a missing visit).
+      if (unresolved) return '';
       return await visitPropertyAddress(visit, customerId);
     }
     // NO link at all: the address frozen on the invoice, else the customer's.

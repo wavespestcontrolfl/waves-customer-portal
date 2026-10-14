@@ -55,8 +55,8 @@
  *
  * Post-commit (inside createSelfBooking, best-effort): the standard
  * appointment confirmation SMS/email — which carries the NEW visit's
- * /reschedule link, closing the loop with the rescheduler — plus the office
- * internal alert ("🔁 Free re-service self-booked"). This route additionally
+ * /reschedule link, closing the loop with the rescheduler. This route then
+ * rings the owner's reservice_self_booked bell (keyed per booking) and
  * returns the new visit's rescheduleUrl so the success card can offer
  * "need to move it?" immediately.
  */
@@ -73,6 +73,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const {
   RESERVICE_LANES,
+  OPEN_CALLBACK_STATUSES,
   reserviceSelfServeEnabled,
   laneForCallbackRow,
   reserviceLanesForCustomer,
@@ -150,8 +151,8 @@ const findSlotsLimiter = rateLimit({
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
-async function loadByToken(token) {
-  return db('customers')
+async function loadByToken(token, database = db) {
+  return database('customers')
     .where('reservice_token', token)
     .whereNull('deleted_at')
     .first(
@@ -165,7 +166,7 @@ async function loadByToken(token) {
 // boundary on this surface: a matching permanent review block must not be
 // turned into another list of slots that commit will refuse, while a complete
 // stored pair and the dark review gate retain the existing flow.
-async function reserviceLocationReviewRequired(customer) {
+async function reserviceLocationReviewRequired(customer, database = db) {
   const hasStoredPair = ['latitude', 'longitude'].every((field) => customer?.[field] != null
     && String(customer[field]).trim() !== ''
     && Number.isFinite(Number(customer[field]))
@@ -178,7 +179,7 @@ async function reserviceLocationReviewRequired(customer) {
     service_address_city: customer.city || null,
     service_address_state: customer.state || null,
     service_address_zip: customer.zip || null,
-  });
+  }, database);
   return reviewed?.permanent === true
     && !reviewed.location
     && reviewed.reason === 'address_review_required';
@@ -223,9 +224,9 @@ function searchParseOpts(config, now = new Date()) {
 
 // Catalog rows for the two lanes, keyed by lane. A missing row (partial
 // seed) simply drops that lane — the office lane still exists by phone.
-async function loadLaneCatalog() {
+async function loadLaneCatalog(database = db) {
   const keys = Object.values(RESERVICE_LANES).map((l) => l.serviceKey);
-  const rows = await db('services')
+  const rows = await database('services')
     .whereIn('service_key', keys)
     .select('id', 'service_key', 'name', 'default_duration_minutes');
   const byLane = {};
@@ -324,12 +325,14 @@ function reserviceAvailabilityPayload(availability, range) {
 // Lane state for the payload: which lanes the customer holds, and per lane
 // whether an open callback already blocks it (with the tie-in reschedule
 // link). Returns { lanes: [...payload rows], bookableLanes: ['pest',...] }.
-async function resolveLaneState(customer, laneCatalog) {
+async function resolveLaneState(customer, laneCatalog, database = db) {
   // Churned/deactivated rows keep their token but lose eligibility — the
   // page renders the friendly not-eligible state with the office contacts.
   // Codex round-11 P2 (PR #5336): the SAME shared computation the SMS promise
   // validators use (reservice-scheduler.reserviceLaneAvailability).
-  const { eligible, open } = await reserviceLaneAvailability(customer);
+  // A coordinated read must propagate cancellation before the transaction
+  // becomes unusable. The public page keeps its existing fail-soft verdict.
+  const { eligible, open } = await reserviceLaneAvailability(customer, database, { strict: database !== db });
   const lanes = eligible
     .filter((lane) => laneCatalog[lane])
     .map((lane) => ({
@@ -347,11 +350,11 @@ async function resolveLaneState(customer, laneCatalog) {
 // catalog, and which lanes are held, booked or bookable. null for an unknown
 // token. The GET below and the portal assistant's re-service offer both read
 // it, so the chat never offers what this page would refuse.
-async function pageLaneState(token) {
-  const customer = await loadByToken(token);
+async function pageLaneState(token, database = db) {
+  const customer = await loadByToken(token, database);
   if (!customer) return null;
-  const laneCatalog = await loadLaneCatalog();
-  return { customer, laneCatalog, ...await resolveLaneState(customer, laneCatalog) };
+  const laneCatalog = await loadLaneCatalog(database);
+  return { customer, laneCatalog, ...await resolveLaneState(customer, laneCatalog, database) };
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -536,6 +539,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (!bookableLanes.includes(lane)) {
       // Fresh dedupe hit — hand back the existing visit's reschedule link so
       // the page pivots to "you're already booked — move it instead".
+      ringReserviceBookedLater(customer);
       return res.status(409).json({
         error: 'You already have a re-service visit on the books.',
         code: 'ALREADY_BOOKED',
@@ -633,6 +637,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           const open = await openReserviceCallbacks(customer.id);
           booked = open[lane] || null;
         } catch { /* answer without the visit details */ }
+        ringReserviceBookedLater(customer);
         return res.status(409).json({
           error: result.error,
           code: 'ALREADY_BOOKED',
@@ -700,6 +705,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.warn(`[reservice-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
     }
 
+    ringReserviceBookedLater(customer);
+
     return res.json({
       success: true,
       replayed: !!result.body?.replayed,
@@ -718,6 +725,91 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     next(err);
   }
 });
+
+// ── Owner bell for a self-booked re-service (owner 2026-10-05) ────────────
+// A customer's re-service request used to reach nobody (the internal text
+// createSelfBooking sent is silenced by the bell policy). The bell is built
+// from the COMMITTED visit row (its stored request and pests, never the
+// HTTP body that happened to reach here) and keyed per visit, so every path
+// that sees the booking can call this: the commit response (fresh or an
+// idempotent replay) and both ALREADY_BOOKED answers. A bell a crashed
+// request never wrote is rung by the customer's next submit; one that landed
+// is a dedupe no-op (no second row, no second push). Only this link's own
+// bookings, still open, made in the last RESERVICE_BELL_RECOVERY_DAYS.
+const RESERVICE_BELL_RECOVERY_DAYS = 2;
+
+function timeLabel12(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
+  if (!m) return null;
+  const h = Number(m[1]);
+  return `${((h + 11) % 12) + 1}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
+// Delivery identity, independent of the bell row (Codex r3/r4 on #6021): a
+// push-only admin setup writes no bell row, so the bell dedupe alone cannot
+// tell a recovery dispatch whether the phone already buzzed. One
+// activity_log row per visit records that the bell or a push went out; the
+// check, the dispatch and the record run under a per-visit advisory lock
+// (its own namespace, never notifyAdmin's admin:<key> lock). A recovery with
+// no record dispatches in full (push included); with a record it only
+// re-offers the bell to its dedupe (no push).
+const RESERVICE_BELL_ACTION = 'reservice_bell_delivered';
+
+async function ringReserviceBooked(customer, conn = db) {
+  const rows = await conn('scheduled_services as s')
+    .join('self_booked_appointments as sba', 'sba.id', 's.self_booking_id')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customer.id)
+    .where('sba.source', 'reservice_link')
+    .whereIn('s.status', OPEN_CALLBACK_STATUSES)
+    .where('s.created_at', '>=', conn.raw(`now() - interval '${RESERVICE_BELL_RECOVERY_DAYS} days'`))
+    .select('s.id', 's.service_type', 'sv.service_key', 's.window_start', 's.customer_request', 's.customer_request_pests',
+      conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as service_date"));
+  const { triggerNotification } = require('../services/notification-triggers');
+  const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null;
+  for (const row of rows) {
+    const lane = laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type });
+    const pests = Array.isArray(row.customer_request_pests) ? pestLabels(row.customer_request_pests, lane) : [];
+    const day = row.service_date
+      ? new Date(`${row.service_date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+      : null;
+    const at = timeLabel12(row.window_start);
+    await conn.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`reservice-bell:${row.id}`]);
+      const delivered = await trx('activity_log')
+        .where({ action: RESERVICE_BELL_ACTION, customer_id: customer.id })
+        .whereRaw("metadata->>'scheduledServiceId' = ?", [String(row.id)])
+        .first('id');
+      const stats = await triggerNotification('reservice_self_booked', {
+        customerId: customer.id,
+        scheduledServiceId: row.id,
+        serviceDate: row.service_date || null,
+        name,
+        when: day && at ? `${day} at ${at}` : day,
+        pests: pests.length ? pests.join(', ') : null,
+        request: row.customer_request || null,
+      }, {
+        dedupeKey: `reservice-booked:${row.id}`,
+        beforePush: () => !delivered,
+      });
+      if (!delivered && (stats?.bellWritten || Number(stats?.push?.sent) > 0)) {
+        await trx('activity_log').insert({
+          customer_id: customer.id,
+          action: RESERVICE_BELL_ACTION,
+          description: 'Owner alerted: self-booked re-service',
+          metadata: JSON.stringify({ scheduledServiceId: row.id }),
+        });
+      }
+    });
+  }
+}
+
+// Fire-and-forget from a handler: the customer's answer never waits on it.
+function ringReserviceBookedLater(customer) {
+  // Through router._internals so the handler tests can observe the call.
+  void Promise.resolve().then(() => router._internals.ringReserviceBooked(customer))
+    .catch((err) => logger.warn(`[reservice-public] re-service bell failed for customer ${customer.id}: ${err.message}`));
+}
 
 // ── Re-service photos (GATE_RESERVICE_PHOTOS) ──────────────────────────────
 // Optional photos for the re-service visit the customer just booked (owner
@@ -889,7 +981,7 @@ router.post(
 );
 
 // For the portal assistant's re-service offer: the page's own verdict.
-router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired };
+router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired, ringReserviceBooked };
 
 router._test = {
   TOKEN_RE,

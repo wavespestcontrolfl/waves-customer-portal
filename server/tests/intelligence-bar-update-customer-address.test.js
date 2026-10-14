@@ -17,6 +17,10 @@ jest.mock('../models/db', () => {
   // #3140 implied-monthly lane stamp. Empty = no rate changes, no stamps.
   qb.select = jest.fn(() => Promise.resolve([]));
   qb.update = jest.fn(() => Promise.resolve(1));
+  // A bulk phone change counts the marked rows whose number identity changes
+  // (shared-phone mark receipt, #6268): whereRaw + count on the same chain.
+  qb.whereRaw = jest.fn(() => qb);
+  qb.count = jest.fn(() => Promise.resolve([{ n: 0 }]));
   const db = jest.fn(() => qb);
   // trx behaves like db() — the executor only uses trx('customers').where().update()
   db.transaction = jest.fn(async (cb) => cb(db));
@@ -505,4 +509,38 @@ test('a bulk NON-address edit skips per-customer fanout (one transaction, no add
   expect(addressFanout.propagateCustomerAddressChange).not.toHaveBeenCalled();
   expect(geocoder.regeocodeCustomerAddressGuarded).not.toHaveBeenCalled();
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+});
+
+test('update_customer refuses an impossible US phone before any write', async () => {
+  db.__qb.first.mockResolvedValueOnce({ ...baseRow, phone: '+12035550123' }); // before
+
+  const result = await executeTool('update_customer', {
+    customer_id: CUSTOMER_ID,
+    updates: { phone: '(103) 555-0123' },
+  });
+
+  expect(result.error).toMatch(/not a valid US phone number/);
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(db.__qb.update).not.toHaveBeenCalled();
+});
+
+test('bulk_update_customers refuses an impossible US phone before any row is touched', async () => {
+  const result = await executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a', 'cust-b'],
+    updates: { phone: '(103) 555-0123' },
+  });
+  expect(result.error).toMatch(/not a valid US phone number/);
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(db.__qb.update).not.toHaveBeenCalled();
+  expect(db.__qb.first).not.toHaveBeenCalled();
+});
+
+test('bulk_update_customers with a valid phone still runs', async () => {
+  db.__qb.select.mockResolvedValueOnce([{ id: 'cust-a' }]);
+  const result = await executeTool('bulk_update_customers', {
+    customer_ids: ['cust-a'],
+    updates: { phone: '(203) 555-0123' },
+  });
+  expect(result.success).toBe(true);
+  expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ phone: '+12035550123' }));
 });

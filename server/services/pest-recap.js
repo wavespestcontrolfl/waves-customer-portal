@@ -25,6 +25,7 @@ const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -98,10 +99,13 @@ async function loadServiceWithCustomer(serviceId, knex = db) {
  * category is pest_control. The category is services-table backed (the
  * authoritative signal) — not the broad detectServiceCategory fallback.
  */
-async function resolveEligibility(serviceId, knex = db) {
+async function resolveEligibility(serviceId, knex = db, { strict = false } = {}) {
   const svc = await loadServiceWithCustomer(serviceId, knex);
   if (!svc) return { ok: false, reason: 'not_found' };
-  const profile = await resolveCompletionProfileForScheduledService(svc, knex).catch((err) => {
+  // strict (lawn Fast Complete): the resolver rethrows a failed availability probe
+  // or lookup instead of synthesizing a profile that has lost its project-backed
+  // and companion flags. A failure is still a null profile here, but a null one.
+  const profile = await resolveCompletionProfileForScheduledService(svc, knex, { strict }).catch((err) => {
     logger.warn(`[pest-recap] profile lookup failed for ${serviceId}: ${err.message}`);
     return null;
   });
@@ -112,11 +116,26 @@ async function resolveEligibility(serviceId, knex = db) {
   // profiles (project_required / special_project) are likewise excluded:
   // those services must close through their project, and the recap would
   // skip that billing/artifact path entirely.
-  const eligible = profile?.category === PEST_CONTROL_CATEGORY
+  // A visit that carries an area add-on row has work the lightweight flows cannot
+  // record (its product and treated area): it keeps the generic completion form.
+  // A failed read is "has rows" (the full form), never an eligible verdict.
+  const hasAreaAddOnRows = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(knex, serviceId)
+    .catch((err) => {
+      logger.warn(`[pest-recap] area add-on row lookup failed for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+      return true;
+    });
+  // The flag rides on the visit (svc.hasAreaAddOnRows) so every sheet's own ineligible-reason check reads it.
+  return { ok: true, svc: { ...svc, hasAreaAddOnRows }, profile, eligible: !hasAreaAddOnRows && recapEligibleProfile(profile) };
+}
+
+// An area add-on (the web sweep is pest control by family) is generic one-time
+// work: it keeps the generic completion form, never the pest recap.
+function recapEligibleProfile(profile) {
+  return profile?.category === PEST_CONTROL_CATEGORY
     && !profile?.findingsType
     && !profile?.projectBacked
-    && !profile?.requiresProject;
-  return { ok: true, svc, profile, eligible };
+    && !profile?.requiresProject
+    && !isAreaAddOnCatalogKey(profile?.serviceKey);
 }
 
 // "Used most on <line> visits" in the Fast Complete product picker: the
@@ -149,6 +168,8 @@ const COMMON_PRODUCTS_SQL = `
       JOIN products_catalog pc ON pc.id = sp.product_id
      WHERE pc.active = true
        AND sr.status = 'completed'
+       -- An area add-on's product row rides its host's record: it is the add-on's work, never the host line's usual product.
+       AND sp.area_addon_key IS NULL
        AND sr.service_line = ?
        AND sr.service_date BETWEEN ?::date AND ?::date
   ),
@@ -336,14 +357,21 @@ async function sheetRecordFor(profile, svc, knex) {
     typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
   };
   if (!record.lane && !record.typedType) return record;
+  return (await serviceHasLinkedProject(svc.id, knex)) ? none : record;
+}
+
+// Is a project linked to this visit, directly (projects.scheduled_service_id) or only through its service record
+// (the legacy link)? The admin-projects create guard's own lookup. A read that fails counts as linked (fail closed).
+// Used by the sheet record above and by the combo stop check (combo-fast-complete.js), on the caller's connection.
+async function serviceHasLinkedProject(serviceId, knex = db) {
   const linked = await knex('projects')
     .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
     .where((q) => q
-      .where('projects.scheduled_service_id', svc.id)
-      .orWhere('service_records.scheduled_service_id', svc.id))
+      .where('projects.scheduled_service_id', serviceId)
+      .orWhere('service_records.scheduled_service_id', serviceId))
     .first('projects.id')
     .catch(() => ({}));
-  return linked ? none : record;
+  return !!linked;
 }
 
 async function visitTraceOnReport(svc, profile, lane, knex) {
@@ -367,7 +395,7 @@ async function visitTraceOnReport(svc, profile, lane, knex) {
 // The same verdict for a visit row the caller already holds (the completion
 // re-judges it under the visit lock).
 async function traceOnReportForVisit(svc, profile, knex = db) {
-  const { lane } = sheetRecordFor(profile, svc);
+  const { lane } = await sheetRecordFor(profile, svc, knex);
   return visitTraceOnReport(svc, profile, lane, knex);
 }
 
@@ -453,6 +481,10 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     // flea, cockroach and the knockdowns), as the office's Schedule
     // follow-up does.
     followupBooking: require('../config/feature-gates').typedVoiceFillLive(),
+    // Whether the sheet's report flow is live now. A plain pest visit reads
+    // no lane and no typed form, so `eligible` alone cannot tell a phone's
+    // cached report-flow row that GATE_FAST_COMPLETE_REPORT went off.
+    reportFlow: require('../config/feature-gates').fastCompleteReportLive(),
     lane,
     existingRecordLoadFailed,
     catalogLoadFailed,
@@ -524,6 +556,16 @@ const sameIdentityKey = (a, b) => String(a ?? '') === String(b ?? '');
 // serializes a driver Date as ISO, the lock reads the same driver value.
 const dateIdentity = (v) => (v == null ? '' : (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10));
 
+// The identity keys recapVisitIdentityChanged compares (each only when the client
+// sent it). They are all fields recapServiceIdentity returns, so a sheet that
+// echoes the identity object it was given sends every one. A caller that must
+// not accept a partial identity (lawn Fast Complete) requires this whole list;
+// a drift test pins that each key is returned by recapServiceIdentity and moves
+// the verdict.
+const RECAP_COMPARED_IDENTITY_KEYS = Object.freeze([
+  'propertyId', 'customerId', 'catalogServiceId', 'serviceType', 'scheduledDate', 'isCallback', 'address',
+]);
+
 // True when the client's expected ownership identity no longer matches the
 // locked visit row. Only keys the client sent are compared (ownership,
 // catalog service, service type, calendar day); the address is
@@ -535,6 +577,8 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('customerId' in expected && !sameIdentityKey(expected.customerId, locked.customer_id)) return true;
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
+  // The assigned technician, sent only by the lawn Fast Complete sheet.
+  if ('technicianId' in expected && !sameIdentityKey(expected.technicianId, locked.technician_id)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
   // Whether it is a free callback decides the pay link and the review ask
   // the client sends, so a change to it is a changed visit.
@@ -690,6 +734,15 @@ async function submitRecap({
     //     written (no transition, no record, no products, no SMS).
     if (NON_COMPLETABLE_STATUSES.has(lockedStatus)) {
       rejectReason = `service_${lockedStatus}`;
+      return;
+    }
+
+    // 0b2. An area add-on attached after the unlocked eligibility read (Update Details) is work the recap cannot record
+    //      (its product, rate and treated area) or bill through the normal completion: read again UNDER the visit lock,
+    //      and refuse the stale recap as a changed visit. A failed read is "has rows" (the full form), as before the lock.
+    const addOnAttachedUnderLock = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(trx, serviceId).catch(() => true);
+    if (addOnAttachedUnderLock) {
+      rejectReason = 'visit_identity_changed';
       return;
     }
 
@@ -1175,6 +1228,10 @@ async function submitRecap({
       && Array.isArray(products)
       && !createdRecord;
     if (productRows.length || confirmedEmptyReplace) {
+      // GATE_LAWN_BERMUDA_REMOVAL: a record that already carries Recognition (recorded through
+      // /complete) cannot have its products replaced here: the replace would retract the row the
+      // bermuda removal caps count. Checked BEFORE anything is deleted or retracted.
+      await require('./lawn-bermuda-removal').refuseStepSprayOnRecap(trx, recordId, { existing: true });
       // Resolve each submitted catalog id to a REAL catalog row before
       // anything is persisted (codex P1 r9): the exact id keys the
       // compliance ledger identity, so a name-pattern fallback ("Advion
@@ -1477,6 +1534,11 @@ async function submitRecap({
       if (productRows.length) {
         const ComplianceService = require('./compliance');
         await ComplianceService.createComplianceRecords(recordId, { trx });
+        // GATE_LAWN_BERMUDA_REMOVAL: the pest recap never records Recognition, the bermuda removal
+        // step's counted herbicide. It is judged on the ledger rows just written, so a product sent
+        // by id, by a legacy name or with no rate is caught the same way; the refusal rolls the
+        // whole recap back. Gate off, or no Recognition row: nothing.
+        await require('./lawn-bermuda-removal').refuseStepSprayOnRecap(trx, recordId);
       }
     }
 
@@ -1714,6 +1776,11 @@ async function submitRecap({
 module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
+  recapEligibleProfile,
+  sheetRecordFor,
+  serviceHasLinkedProject,
+  loadServiceWithCustomer,
+  RECAP_COMPARED_IDENTITY_KEYS,
   buildRecapContext,
   traceOnReportForVisit,
   draftRecapMessage,

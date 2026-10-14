@@ -936,6 +936,90 @@ function ownedPortalLinkSpans(body) {
   }
   return spans;
 }
+// Owned-host links NESTED inside another URL — the portal bearer sitting in a
+// foreign URL's path, query or fragment ("https://evil.example/?next=https://
+// portal…/receipt/<tok>", raw or percent-encoded, even twice): every run
+// reader above parses that as ONE evil.example link, so the bearer inside is
+// invisible to it. This reads the FULL text, raw and then percent-decoded
+// until it stops changing (a malformed escape is left as typed), scanning every
+// pass including the last, and returns each owned-host occurrence — host plus
+// whatever follows it — as its own run, for a caller (the email-reply guard)
+// to judge like any top-level owned link. A text still changing after the
+// NESTED_DECODE_CAP loop guard is reported `unstable`: no scan can vouch for
+// it, so callers refuse it (linkTextUnstable).
+// Hosts come from ownedPortalHosts (never a second list); the host must not
+// be the tail of a longer name ("evilportal…", "x.portal…") nor the head of a
+// look-alike ("portal….evil.example"). Over-reports on purpose (fail closed).
+const NESTED_DECODE_CAP = 12;
+// A browser's URL parser (IDNA) reads full-width letters as ASCII and the
+// ideographic / full-width / half-width full stops as a dot, so
+// "portal。wavespestcontrol。com" opens the portal. The scan reads the text
+// the same way (in every decode pass: the stop can arrive percent-encoded).
+const IDNA_DOTS_RE = /[\u3002\uFF0E\uFF61]/g;
+// IDNA also DROPS the default-ignorable code points (soft hyphen, zero-width
+// space / joiners, word joiner, variation selectors, BOM): "port\u00ADal.…"
+// opens the portal too. The whole Unicode class goes, not a list of them.
+const IDNA_IGNORED_RE = /\p{Default_Ignorable_Code_Point}/gu;
+// The WHATWG URL parser also drops TAB, CR and LF anywhere in its input, so
+// "port%09al.…" (and a raw tab or newline left in a host) opens the portal too;
+// removed in every decode pass, the percent-encoded forms arriving as late as
+// the last one. (Bodies are split on whitespace BEFORE the SMS checks scan a
+// token, so a RAW tab there ends the token — no client links across it; only
+// the encoded forms reach this scan inside one token.)
+const URL_DROPPED_RE = /[\t\r\n]/g;
+const asciiHostText = (text) => text.normalize('NFKC').replace(IDNA_IGNORED_RE, '').replace(URL_DROPPED_RE, '').replace(IDNA_DOTS_RE, '.');
+function scanNestedOwnedLinks(text) {
+  const hostAlt = ownedPortalHosts().map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const hostRe = new RegExp(`(?<![A-Za-z0-9.-])(?:${hostAlt})(?![A-Za-z0-9-]|\\.[A-Za-z0-9-])\\.?(?::\\d+)?(?:[/?#][^\\s"'<>]*)?`, 'gi');
+  const found = new Set();
+  let view = asciiHostText(String(text || ''));
+  let unstable = false;
+  for (let pass = 0; ; pass += 1) {
+    for (const match of view.matchAll(hostRe)) found.add(match[0]);
+    const next = asciiHostText(decodeLinkText(view));
+    if (next === view) break;
+    if (pass >= NESTED_DECODE_CAP) {
+      unstable = true;
+      break;
+    }
+    view = next;
+  }
+  return { runs: [...found], unstable };
+}
+const nestedOwnedLinkRuns = (text) => scanNestedOwnedLinks(text).runs;
+// True when some whitespace token of a body is still percent-decoding past the
+// cap: nothing can be said about what it opens, so the senders refuse it.
+function linkTextUnstable(body) {
+  return String(body || '').split(/\s+/).some((token) => scanNestedOwnedLinks(token).unstable);
+}
+// True when a body carries an owned-host link that is NOT a plain owned link:
+// any whitespace token holding an owned-host run (nestedOwnedLinkRuns) must
+// itself PARSE, as a browser would, to an http(s) URL whose real host is an
+// owned host, with no userinfo, and with no owned-host run left in its path,
+// query or fragment. So "https://evil.example/?next=<portal link>", a portal
+// link in the userinfo ("https://portal…%2Fpay%2F<tok>@evil.example/"), a
+// portal link inside another portal URL's query, or a token that does not
+// parse at all are all "wrapped" (fail closed); a bare, schemed, bracketed or
+// period-ended owned link, and the branded short host, are not.
+function wrappedOwnedLinkIn(body) {
+  const hosts = ownedPortalHosts();
+  return String(body || '').split(/\s+/).some((token) => {
+    const scan = scanNestedOwnedLinks(token);
+    if (scan.unstable) return true;
+    if (!scan.runs.length) return false;
+    const core = shedLinkRun(token);
+    let url;
+    try {
+      url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(core) ? core : `https://${core}`);
+    } catch {
+      return true;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return true;
+    if (!hosts.includes(url.hostname.toLowerCase().replace(/\.$/, ''))) return true;
+    if (url.username || url.password) return true;
+    return nestedOwnedLinkRuns(`${url.pathname}${url.search}${url.hash}`).length > 0;
+  });
+}
 // ONE resolver for every owned /l/<code> in a body (the SMS link wrap's
 // wrapper codes — messaging/sms-link-wrap.js — are kind 'other' and carry a
 // bearer page as their target, e.g. /prep/, /secure/, /contract/,
@@ -1893,6 +1977,140 @@ async function checkCardLinks(ctx, cards) {
 // would pass ownership and even adopt that customer while the provider
 // texts the other country (GH Codex #3844 r10 P1) — a bearer never goes to
 // a non-US destination.
+/**
+ * READ-ONLY presence of the links only the composer's /sms route may send —
+ * the kinds whose send-time bookkeeping lives in that route (a card request's
+ * one-text-ever claim, a prepared contract's activation, prep-guide and
+ * statement sent marks, a project report's delivery claim, a consultation's
+ * lead binding). Detection only: the same path shapes the per-kind checks
+ * above match, plus a read of appointment_card_requests to tell a visit-lane
+ * card request from a customer-kind Auto Pay link (the Auto Pay seam judges
+ * those). Never calls the card funnel or any other stateful service, so it is
+ * safe at proposal time, before any card is offered (Codex r3 on #6266 P1:
+ * bearerLinkSendCheck's card branch runs requestCardForAppointment, which can
+ * auto-enroll a consented card). Returns { present, kinds }.
+ *
+ * includeVerifyOnly: also flag the bearers the seam only verifies against the
+ * recipient's phone (appointment page, service report, receipt) — for a
+ * sender with no phone to bind to (an email reply goes to the sender's
+ * address, which attribution does not prove is the customer's; Codex
+ * security review on #6266), where no customer bearer may go at all.
+ */
+// The composer-only kinds by path shape, owned hosts only (a third-party URL
+// whose path happens to contain /contract/ is nobody's bearer — Codex r4 on
+// #6266 P2), and the verify-only bearers flagged for a sender with no phone
+// to bind to. [kind, run fragment, canonical path RE]. Built on call: the
+// path REs are declared further down this module.
+const composerOnlyLinkShapes = () => [
+  ['contract', /\/contract\//i, /^\/contract\/([A-Za-z0-9_-]{16,})$/i],
+  ['prep_guide', /\/prep\//i, PREP_PATH_RE],
+  ['statement', /\/pay\/statement\//i, /^\/pay\/statement\/([0-9a-f]{64})$/i],
+  ['project_report', PROJECT_REPORT_RUN_RE, PROJECT_REPORT_PATH_RE],
+];
+const verifyOnlyLinkShapes = () => [
+  ['portal_link', /\/l\//i, SHORT_CODE_PATH_RE],
+  ['receipt', /\/receipt\//i, RECEIPT_TOKEN_PATH_RE],
+  ['receipt', /\/pay\//i, RECEIPT_PAY_TARGET_RE],
+];
+async function composerOnlyLinkPresence(body, { includeVerifyOnly = false } = {}, conn = db) {
+  const runs = await expandedRuns(body, conn);
+  const hosts = ownedPortalHosts();
+  const present = (fragment, pathRe) => linkRuns(runs, fragment).some((run) => canonicalPortalToken(run, hosts, pathRe, ANY_SCHEME));
+  const shapes = includeVerifyOnly ? [...composerOnlyLinkShapes(), ...verifyOnlyLinkShapes()] : composerOnlyLinkShapes();
+  const kinds = new Set(shapes.filter(([, fragment, pathRe]) => present(fragment, pathRe)).map(([kind]) => kind));
+  if (includeVerifyOnly) {
+    // No portal link of any shape rides such a sender: every owned-host link
+    // with a path, whatever kind its short code resolves to.
+    const shortRows = await shortCodeRows(runs, ANY_SCHEME);
+    if (ownedPortalLinkSpans(String(body || '')).length) kinds.add('portal_link');
+    if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) kinds.add('appointment');
+    if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) kinds.add('service_report');
+    if (shortRows.some((row) => row.kind === 'receipt')) kinds.add('receipt');
+  }
+  if (await visitCardRequestLinked(runs, hosts, conn)) kinds.add('card_request');
+  if ((await consultationLinkRows(body, conn)).length) kinds.add('consultation');
+  return { present: kinds.size > 0, kinds: [...kinds] };
+}
+// An owned /secure link whose row is the visit lane. A customer-kind row is an
+// Auto Pay link (the Auto Pay seam judges those); an unparsable /secure run is
+// not an owned link at all.
+async function visitCardRequestLinked(runs, hosts, conn) {
+  for (const run of secureLinkRuns(runs)) {
+    const token = canonicalSecureToken(run, hosts);
+    if (!token) continue;
+    const row = await conn('appointment_card_requests').where({ token }).first('kind');
+    if (row?.kind === 'visit') return true;
+  }
+  return false;
+}
+
+/**
+ * READ-ONLY owner of every generated bearer the composer's seam does not
+ * itself verify: reschedule and track (scheduled_services tokens), re-service
+ * (customers.reservice_token), pay (invoices.token), estimate
+ * (estimates.token) and referral (the public /r/ resolver's three paths), owned-host
+ * links only. Short codes are judged by their stored target as well as by the
+ * in-place expansion (which leaves an unpaid invoice's /pay target wrapped —
+ * Codex r5 on #6266 P1), and a code with no row is unresolved. The
+ * Intelligence Bar's generic senders use it to refuse a link built for one
+ * customer in a text to another (Codex r4 P1). Returns
+ * { owners: [{ kind, token, customerId }], unresolved: [{ kind, token }] } —
+ * an owned-host link of these shapes that matches no row is `unresolved`
+ * (the caller fails closed).
+ */
+const ownedBearerShapes = () => [
+  ['reschedule', /\/reschedule\//i, RESCHEDULE_PATH_RE,
+    async (conn, t) => (await conn('scheduled_services').where({ reschedule_token: t }).first('customer_id'))?.customer_id],
+  ['track', /\/track\//i, TRACK_PATH_RE,
+    async (conn, t) => (await conn('scheduled_services').where({ track_view_token: t }).first('customer_id'))?.customer_id],
+  ['reservice', /\/reservice\//i, /^\/reservice\/([A-Za-z0-9_-]{8,})$/i,
+    async (conn, t) => (await conn('customers').where({ reservice_token: t }).whereNull('deleted_at').first('id'))?.id],
+  ['pay', /\/pay\//i, RECEIPT_PAY_TARGET_RE,
+    async (conn, t) => (await conn('invoices').where({ token: t }).first('customer_id'))?.customer_id],
+  ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
+    async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
+  ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
+];
+// The public /r/:code resolver's own three paths (routes/referral-links.js):
+// an active promoter, a merged-away promoter whose code survives as an alias
+// of the surviving row (customer_id intentionally null on the alias), and the
+// legacy customers.referral_code — a still-valid referral link is never
+// unresolved here when the public route honors it (Codex r7 on #6266 P2).
+async function referralLinkOwner(conn, code) {
+  const active = await conn('referral_promoters').where({ referral_code: code, status: 'active' }).first('customer_id');
+  if (active?.customer_id) return active.customer_id;
+  const alias = await conn('referral_promoters').where({ referral_code: code, status: 'merged' })
+    .whereNotNull('merged_into_promoter_id').first('merged_into_promoter_id');
+  if (alias?.merged_into_promoter_id) {
+    const survivor = await conn('referral_promoters').where({ id: alias.merged_into_promoter_id, status: 'active' }).first('customer_id');
+    if (survivor?.customer_id) return survivor.customer_id;
+  }
+  return (await conn('customers').where({ referral_code: code }).whereNull('deleted_at').first('id'))?.id;
+}
+async function linkOwnersInBody(body, conn = db) {
+  const hosts = ownedPortalHosts();
+  const runs = [...await expandedRuns(body, conn)];
+  const unresolved = [];
+  for (const run of linkRuns(runs, /\/l\//i)) {
+    const code = canonicalPortalToken(run, hosts, SHORT_CODE_PATH_RE, ANY_SCHEME);
+    if (!code) continue;
+    const row = await conn('short_codes').where({ code: code.toLowerCase() }).first('code', 'target_url');
+    if (row?.target_url) runs.push(decodeLinkText(String(row.target_url).trim()));
+    else unresolved.push({ kind: 'short_link', token: code });
+  }
+  const tokensFor = (fragment, pathRe) => [...new Set(linkRuns(runs, fragment)
+    .map((run) => canonicalPortalToken(run, hosts, pathRe, ANY_SCHEME)).filter(Boolean))];
+  const owners = [];
+  for (const [kind, fragment, pathRe, lookup] of ownedBearerShapes()) {
+    for (const token of tokensFor(fragment, pathRe)) {
+      const customerId = await lookup(conn, token);
+      if (customerId) owners.push({ kind, token, customerId: String(customerId) });
+      else unresolved.push({ kind, token });
+    }
+  }
+  return { owners, unresolved };
+}
+
 async function bearerLinkSendCheck(body, toLast10, {
   trustedCustomerId, usDestination = true, contractId = null, expectedLeadId = null,
 } = {}) {
@@ -2947,6 +3165,11 @@ module.exports = {
   autopayLinkSendCheck,
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
+  composerOnlyLinkPresence,
+  linkOwnersInBody,
+  nestedOwnedLinkRuns,
+  linkTextUnstable,
+  wrappedOwnedLinkIn,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,
   consultationLinkRows,

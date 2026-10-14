@@ -130,12 +130,18 @@ export function applyTankDose(row) {
   };
 }
 
+// The identity of a selected-product row: the product AND the area add-on it is recorded for. The host's
+// Snapshot and the Bed Pre-Emergent add-on's Snapshot are two rows of one product; nothing may merge them.
+export function productRowId(row) {
+  return row && row.areaAddOnKey ? `${row.productId}::${row.areaAddOnKey}` : row?.productId;
+}
+
 // Gallons entered on the tank's owner (or on any row while nobody owns it)
 // travel; a detached row's edits are its own.
-export function tankPropagates(rows, productId, field) {
+export function tankPropagates(rows, rowId, field) {
   if (field !== "carrierGallons") return false;
   const owner = tankOwnerRow(rows);
-  return !owner || owner.productId === productId;
+  return !owner || productRowId(owner) === rowId;
 }
 
 // One tank, one carrier volume: a row still following the tank takes the new
@@ -154,7 +160,7 @@ export function markTankEntry(row, owner) {
   // owner happens to be edited again would block the closeout on a missing
   // actual (Codex r4 P2). The owner clearing its OWN gallons is the other
   // case — that clear has already travelled to the followers.
-  if (!hasVolume && owner && owner.productId !== row.productId) {
+  if (!hasVolume && owner && productRowId(owner) !== productRowId(row)) {
     return applyTankDose({
       ...row, carrierGallons: owner.carrierGallons, carrierGallonsManual: false, tankOwner: false,
     });
@@ -167,7 +173,7 @@ export function markTankEntry(row, owner) {
     carrierGallonsManual: hasVolume,
     // Claim the tank only with a volume to share, and give it up when that
     // volume is cleared.
-    tankOwner: hasVolume && (!owner || owner.productId === row.productId),
+    tankOwner: hasVolume && (!owner || productRowId(owner) === productRowId(row)),
   };
 }
 

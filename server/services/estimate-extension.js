@@ -588,6 +588,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         });
         if (!body) {
           smsResult = { sent: false, reason: 'template_missing' };
+        } else if (require('./estimate-contact-gaps').typedPhoneBlocksPreAcceptSms(estimate)) {
+          // A phone the customer typed on the accept card gets no automated text before acceptance.
+          smsResult = { sent: false, reason: 'typed_phone_pre_accept' };
         } else {
           smsResult = await sendCustomerMessage({
             to: estimate.customer_phone,

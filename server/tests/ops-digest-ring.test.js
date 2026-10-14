@@ -92,7 +92,7 @@ function makeConn(firstResult) {
   const builder = {
     where: jest.fn((...args) => { calls.where.push(args); return builder; }),
     whereRaw: jest.fn((...args) => { calls.whereRaw.push(args); return builder; }),
-    orderBy: jest.fn(() => builder),
+    orderByRaw: jest.fn(() => builder),
     first: jest.fn(async () => firstResult),
   };
   const conn = jest.fn(() => builder);
@@ -129,10 +129,10 @@ describe('findPriorRungRow — query shape', () => {
     // Age baseline: the 7-day window and ordering read rungAt (falling back
     // to created_at), not created_at alone.
     expect(whereRawSql.some((sql) => /rungAt/.test(sql))).toBe(true);
-    expect(builder.orderBy).toHaveBeenCalledTimes(1);
-    const [orderArg] = builder.orderBy.mock.calls[0];
-    expect(orderArg.sql).toMatch(/rungAt/);
-    expect(orderArg.sql).toMatch(/DESC/);
+    expect(builder.orderByRaw).toHaveBeenCalledTimes(1);
+    const [orderSql] = builder.orderByRaw.mock.calls[0];
+    expect(orderSql).toMatch(/rungAt/);
+    expect(orderSql).toMatch(/DESC$/);
     expect(builder.first).toHaveBeenCalledWith('metadata');
   });
 

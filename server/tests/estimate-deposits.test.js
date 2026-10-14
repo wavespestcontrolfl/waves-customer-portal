@@ -288,6 +288,24 @@ describe('webhook + invoice credit', () => {
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
   });
 
+  // Owner 2026-10-04 (accept-card phone capture): a phone the customer typed on the estimate page gets no automated
+  // text before acceptance, so an unlinked estimate's deposit receipt does not text it.
+  it('an unlinked estimate whose phone was typed by the customer gets no receipt text before acceptance', async () => {
+    forceRecordableViaFailOpen();
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received — applied toward your first visit.');
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: null, customer_phone: '+19415550142', customer_phone_typed: '+19415550142', customer_name: 'Sam Customer' },
+    });
+    mockDbHandler = handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   it('texts the deposit receipt exactly once — first record only, never on replay', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');

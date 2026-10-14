@@ -15,9 +15,6 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../config/models', () => ({
-  TEXT_POLICIES: { visitBrief: { name: 'visitBrief' } },
-}));
 jest.mock('../services/llm/call', () => ({
   dispatchWithFallback: jest.fn(),
 }));

@@ -1,6 +1,6 @@
 /** Lawn visit provenance, review/confirmation transactions, and delivery ownership. */
 const { randomUUID } = require('crypto');
-const { SCORE_KEYS, confirmScores, runAiScores } = require('./lawn-visit-scores');
+const { SCORE_KEYS, confirmScores, runAiScores, calibrationScores } = require('./lawn-visit-scores');
 const lawnAssessment = require('./lawn-assessment');
 const { validateReview } = require('./lawn-visit-review-input');
 const { buildReview } = require('./lawn-visit-review-evidence');
@@ -112,6 +112,19 @@ async function priorAssessmentCount(customerId, knex) {
   }
 }
 
+// The photo quality rows the technician's screen gets. The stored rows carry the
+// model's light read too (GATE_LAWN_LIGHTING); that is for the report's color
+// comparison, not something the technician reads or must act on, so it stays off
+// the staff response. Rows from before the gate have no such keys and pass through.
+function staffPhotoQuality(value) {
+  const rows = Array.isArray(value) ? value : [];
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object' || !('lighting' in row || 'hard_shadows' in row)) return row;
+    const { lighting, hard_shadows: hardShadows, ...rest } = row; // eslint-disable-line no-unused-vars
+    return rest;
+  });
+}
+
 // Staff response from the persisted run. Raw provider output, input hashes,
 // token accounting and prompt context remain internal to the run store.
 function responseForRun(run) {
@@ -121,16 +134,14 @@ function responseForRun(run) {
     runId: run.id, status: run.status, unavailableReason: run.unavailable_reason || null,
     provider: run.provider, model: run.requested_model, fallbackUsed: !!run.fallback_used,
     promptVersion: run.prompt_version, findings: array(run.findings), severities: parseObject(run.severities),
-    photoQuality: array(run.photo_quality), observations: run.observations,
+    photoQuality: staffPhotoQuality(run.photo_quality), observations: run.observations,
     reviewedFindings: run.reviewed_findings == null ? null : array(run.reviewed_findings),
     addedDetails: run.added_details == null ? null : array(run.added_details),
     reconciliation: parseObject(run.reconciliation), reviewedAt: run.reviewed_at || null,
-    // The run's immutable AI read (owner ruling 2026-09-24: lawn scores are
-    // read-only from photos). A client uses THIS, never the mutable
-    // assessment row, to decide which metrics stay editable — the assessment
-    // row can already hold a technician's earlier fill of a genuinely blank
-    // metric from a prior partial save, which must not look "AI-known" on
-    // reload just because it now has a value (Codex P1 2026-09-24).
+    // The run's immutable AI read. The technician may change a score before
+    // confirming (owner ruling 2026-10-04); a client shows THIS beside a
+    // changed score, never the mutable assessment row, which a partial save
+    // may already have overwritten with the technician's entry.
     aiScores: runAiScores(run),
   };
 }
@@ -222,11 +233,11 @@ async function confirmLockedRun(args, customerId, trx) {
     ...(decision.confirmed ? { confirmed_at: trx.fn.now() } : {}),
     // Both existing clients also read observations from this JSON snapshot.
     // A copied adjustedScores.observations is not evidence of an explicit edit.
-    // stress_damage_explicit persists ONLY whether Stress was ever explicitly
-    // entered by a technician while AI-blank — confirmScores reads it back on
-    // the next partial save so an auto-derived (never explicit) Stress keeps
+    // stress_damage_explicit persists the technician's own Condition entry —
+    // confirmScores reads it back on the next partial save, so an entry
+    // sticks while an auto-derived (never entered) Condition keeps
     // re-deriving from current components instead of freezing stale (Codex
-    // P1 2026-09-24); inert once Stress is AI-known.
+    // P1 2026-09-24).
     adjusted_scores: JSON.stringify({
       ...parseObject(assessment.adjusted_scores), ...decision.finalScores,
       stress_damage_explicit: decision.stressExplicit, observations: assessment.observations,
@@ -253,6 +264,8 @@ async function confirmLockedRun(args, customerId, trx) {
         confirmation: {
           final_scores: decision.finalScores, ai_scores: decision.aiScores,
           calibration_eligible: decision.calibrationEligible,
+          // Fungus/Thatch keys that hold no reading (alignWithCondition).
+          synthetic_sub_scores: decision.syntheticSubScores,
           technician_id: technicianId,
         },
       }),
@@ -467,7 +480,7 @@ function calibrationForRun(assessment, run) {
   const snapshot = parseObject(run?.reconciliation)?.confirmation;
   const technicianId = snapshot?.technician_id || assessment?.technician_id;
   if (snapshot?.calibration_eligible !== true || !technicianId) return null;
-  return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
+  return { aiScores: snapshot.ai_scores, finalScores: calibrationScores(snapshot.final_scores, snapshot.synthetic_sub_scores), technicianId };
 }
 
 // A confirmation snapshot is the only record of what the technician changed. A

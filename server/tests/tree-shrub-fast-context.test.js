@@ -9,8 +9,14 @@ jest.mock('../services/photos', () => ({
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
+// The live recurring rows the joint mosquito flag reads; the ownership classifier stays real.
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  loadLiveRecurringObligationRows: jest.fn(async () => []),
+}));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
 const PhotoService = require('../services/photos');
 const logger = require('../services/logger');
 const {
@@ -37,7 +43,7 @@ function fakeKnex(tables) {
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'whereNotExists', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
     const settle = () => (data instanceof Error ? Promise.reject(data) : Promise.resolve(Array.isArray(data) ? data : []));
     chain.first = async () => {
       if (data instanceof Error) throw data;
@@ -330,6 +336,28 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.products.find((p) => p.id === 'palm').tsFlags.npBlackout).toBe(false);
   });
 
+  test('due rules hold a Snapshot applied under 60 days ago; the palm feed still suggests', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': [
+        { application_date: '2026-09-05', property_id: 'prop-1', product_name: 'Snapshot 2.5TG', application_rate: 2.3, rate_unit: 'lb' },
+      ],
+    }));
+    expect(ctx.monthProducts).toEqual([{ productId: 'palm', method: 'granular_broadcast' }]);
+    expect(ctx.monthProductHolds).toEqual([{ name: 'Snapshot 2.5TG', reason: 'Snapshot was applied less than 60 days ago.' }]);
+  });
+
+  test('an unreadable application history holds Snapshot and the palm feed instead of suggesting them', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': new Error('db down'),
+    }));
+    expect(ctx.monthProducts).toEqual([]);
+    expect(ctx.monthProductHolds.map((h) => h.name)).toEqual(['Snapshot 2.5TG', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)']);
+  });
+
   test('a summer visit in a blackout zone flags N/P fertilizer on the catalog rows', async () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({ scheduled_date: '2026-07-10' }), products_catalog: catalog,
@@ -516,5 +544,301 @@ describe('buildTreeShrubFastContext', () => {
       const { ctx } = await run([photo('p1', 'front_beds')], { 'service_records as sr': new Error('boom') });
       expect(ctx.lastVisitPhotos).toEqual({});
     });
+  });
+});
+
+describe('GATE_TS_WATCH_LIST: the fast-context watchList', () => {
+  const saved = process.env.GATE_TS_WATCH_LIST;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_WATCH_LIST; else process.env.GATE_TS_WATCH_LIST = saved;
+  });
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = (scheduledDate) => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: scheduledDate }), products_catalog: catalog,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_TS_WATCH_LIST;
+    const ctx = await build('2026-10-01');
+    expect(ctx.eligible).toBe(true);
+    expect('watchList' in ctx).toBe(false);
+  });
+
+  test('gate on: the visit month items, in order, as key / label / signal / referOnly', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    const ctx = await build('2026-12-03');
+    expect(ctx.watchList.map((item) => item.key)).toEqual([
+      'scale', 'cold_freeze_damage', 'declining_palms', 'sooty_mold',
+      'palm_potassium_deficiency', 'palm_magnesium_deficiency', 'palm_fronds_dying_one_side', 'trunk_conk_base',
+    ]);
+    expect(ctx.watchList[0]).toEqual({ key: 'scale', label: 'Scale', signal: 'Possible scale', referOnly: false });
+    expect(ctx.watchList.find((item) => item.key === 'declining_palms').referOnly).toBe(true);
+    expect(Object.keys(ctx.watchList[0]).sort()).toEqual(['key', 'label', 'referOnly', 'signal']);
+  });
+
+  test('gate on: the month is the New York month of the visit date', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    expect((await build('2026-03-31')).watchList[0].key).toBe('whitefly');
+    expect((await build('2026-04-01')).watchList.map((item) => item.key)).toContain('caterpillars');
+  });
+
+  test('an ineligible visit carries no watch list even with the gate on', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build('2026-10-01');
+    expect(ctx.eligible).toBe(false);
+    expect('watchList' in ctx).toBe(false);
+  });
+});
+
+describe('GATE_FAST_COMPLETE_WRAP_UP: the fast-context wrapUp', () => {
+  const saved = process.env.GATE_FAST_COMPLETE_WRAP_UP;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = saved;
+  });
+  const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit(), products_catalog: [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })],
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+    const ctx = await build();
+    expect(ctx.eligible).toBe(true);
+    expect('wrapUp' in ctx).toBe(false);
+  });
+
+  test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
+    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+    expect((await build()).wrapUp).toBe(true);
+    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'on';
+    expect('wrapUp' in await build()).toBe(false);
+  });
+
+  test('an ineligible visit carries no wrapUp even with the gate on', async () => {
+    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build();
+    expect(ctx.eligible).toBe(false);
+    expect('wrapUp' in ctx).toBe(false);
+  });
+});
+
+describe('GATE_TS_PEST_CHECK: the fast-context pestCheck', () => {
+  const saved = process.env.GATE_TS_PEST_CHECK;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_PEST_CHECK; else process.env.GATE_TS_PEST_CHECK = saved;
+  });
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: '2026-10-01' }), products_catalog: catalog,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_TS_PEST_CHECK;
+    const ctx = await build();
+    expect(ctx.eligible).toBe(true);
+    expect('pestCheck' in ctx).toBe(false);
+  });
+
+  test('gate on: the six insect types, key and label', async () => {
+    process.env.GATE_TS_PEST_CHECK = 'true';
+    const ctx = await build();
+    expect(ctx.pestCheck.insectTypes.map((type) => type.key)).toEqual([
+      'armored_scale', 'soft_scale', 'whitefly', 'caterpillars', 'mites', 'other',
+    ]);
+    expect(ctx.pestCheck.insectTypes[0]).toEqual({ key: 'armored_scale', label: 'Armored scale' });
+  });
+
+  test('an ineligible visit carries no pestCheck even with the gate on', async () => {
+    process.env.GATE_TS_PEST_CHECK = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build();
+    expect(ctx.eligible).toBe(false);
+    expect('pestCheck' in ctx).toBe(false);
+  });
+});
+
+describe('the fast-context jointMosquitoAccount flag', () => {
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog }));
+  const row = (extra = {}) => ({ id: 'ss-9', service_type: 'Mosquito Control', status: 'pending', property_id: 'prop-1', ...extra });
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+    loadLiveRecurringObligationRows.mockReset();
+    logger.warn.mockClear();
+  });
+
+  test('a live recurring mosquito row at this property is true', async () => {
+    loadLiveRecurringObligationRows.mockResolvedValue([row()]);
+    expect((await build()).jointMosquitoAccount).toBe(true);
+    expect(loadLiveRecurringObligationRows).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+  });
+
+  test('a row with no property link falls back to the customer level', async () => {
+    loadLiveRecurringObligationRows.mockResolvedValue([row({ property_id: null })]);
+    expect((await build()).jointMosquitoAccount).toBe(true);
+  });
+
+  test('no rows, other service lines, a one-time mosquito row, or another property are false', async () => {
+    for (const rows of [
+      [],
+      [row({ service_type: 'Pest Control' }), row({ id: 'ss-8', service_type: 'Lawn Care' })],
+      [row({ service_type: 'Mosquito One-Time' })],
+      [row({ property_id: 'prop-2' })],
+    ]) {
+      loadLiveRecurringObligationRows.mockResolvedValue(rows);
+      expect((await build()).jointMosquitoAccount).toBe(false);
+    }
+  });
+
+  // Mosquito sold as a plan add-on line on another live recurring visit (Codex r1 #6200).
+  describe('mosquito as an add-on line', () => {
+    const ADDONS = 'scheduled_service_addons';
+    // A program visit is recurring; a one-time visit passes { is_recurring: false }.
+    const withAddons = (addons, extra = { is_recurring: true }) => fakeKnex({ scheduled_services: visit(extra), products_catalog: catalog, [ADDONS]: addons });
+    const pest = () => row({ service_type: 'Pest Control' });
+
+    test('a plan add-on line on a live row at this property is true, by key snapshot, catalog or line name', async () => {
+      for (const line of [
+        { addon_name: 'Add-on', service_key_snapshot: 'mosquito_monthly' },
+        { addon_name: 'Add-on', service_key: 'mosquito_monthly', catalog_name: 'Mosquito Control' },
+        { addon_name: 'Mosquito Barrier Treatment' },
+      ]) {
+        loadLiveRecurringObligationRows.mockResolvedValue([pest()]);
+        const knex = withAddons([line]);
+        expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(true);
+        const calls = knex.calls.filter(([table]) => table === ADDONS);
+        expect(calls).toContainEqual([ADDONS, 'whereIn', 'scheduled_service_addons.scheduled_service_id', ['ss-9', 'visit-1']]);
+        // The one plan add-on predicate, not a copy of its SQL (Codex r2 #6200).
+        expect(calls).toContainEqual([ADDONS, 'whereRaw', require('../services/service-library').ADDON_LINE_IS_PLAN_SQL]);
+      }
+    });
+
+    test('no mosquito add-on, or a live row at another property, is false', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([pest()]);
+      expect((await buildTreeShrubFastContext('visit-1', withAddons([{ addon_name: 'Rodent Bait Stations' }]))).jointMosquitoAccount).toBe(false);
+      loadLiveRecurringObligationRows.mockResolvedValue([row({ service_type: 'Pest Control', property_id: 'prop-2' })]);
+      // A row at another property is never read for add-ons; only this visit's own lines are.
+      const knex = withAddons([{ addon_name: 'Rodent Bait Stations' }]);
+      expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(false);
+      expect(knex.calls.filter(([table]) => table === ADDONS)).toContainEqual([ADDONS, 'whereIn', 'scheduled_service_addons.scheduled_service_id', ['visit-1']]);
+    });
+
+    test('an overdue visit the lifecycle loader left out still reads its own add-on lines (Codex r5 #6200)', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([]);
+      const knex = withAddons([{ addon_name: 'Mosquito Barrier Treatment' }]);
+      expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(true);
+      expect(knex.calls.filter(([table]) => table === ADDONS)).toContainEqual([ADDONS, 'whereIn', 'scheduled_service_addons.scheduled_service_id', ['visit-1']]);
+    });
+
+    test('a one-time visit never counts its own add-on lines: a NULL cadence there is one-off work (Codex r6 #6200)', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([]);
+      const knex = withAddons([{ addon_name: 'Mosquito Barrier Treatment' }], { is_recurring: false });
+      expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(false);
+      expect(knex.calls.some(([table]) => table === ADDONS)).toBe(false);
+    });
+
+    test('an add-on read failure is false and logged', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([pest()]);
+      const ctx = await buildTreeShrubFastContext('visit-1', withAddons(Object.assign(new Error('boom'), { code: '42P01' })));
+      expect(ctx).toMatchObject({ ok: true, eligible: true, jointMosquitoAccount: false });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mosquito account check unavailable'));
+    });
+  });
+
+  test('a lookup failure is false, logged without the driver message, and the sheet still loads', async () => {
+    loadLiveRecurringObligationRows.mockRejectedValue(Object.assign(new Error('select * from secret'), { code: 'ECONNRESET' }));
+    const ctx = await build();
+    expect(ctx).toMatchObject({ ok: true, eligible: true, jointMosquitoAccount: false });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mosquito account check unavailable'));
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('secret');
+  });
+
+  test('an ineligible visit carries no flag', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    loadLiveRecurringObligationRows.mockResolvedValue([row()]);
+    expect('jointMosquitoAccount' in await build()).toBe(false);
+  });
+});
+
+describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
+  const saved = process.env.GATE_TS_NEONIC_CAP;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_NEONIC_CAP; else process.env.GATE_TS_NEONIC_CAP = saved;
+  });
+  const catalog = [
+    cat('zylam', 'Zylam Insecticide', { category: 'insecticide', active_ingredient: 'Dinotefuran' }),
+    cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' }),
+  ];
+  const ledgerRow = { product_name: 'Zylam Insecticide', active_ingredient: 'Dinotefuran', quantity_applied: 9.8625, quantity_unit: 'fl_oz', service_line: 'tree_shrub' };
+  const build = (tables = {}) => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: '2026-10-01' }),
+    products_catalog: catalog,
+    customer_properties: { bed_sqft: 10890 },
+    'property_application_history as pah': [ledgerRow, { product_name: 'Merit 2F', active_ingredient: 'Imidacloprid', quantity_applied: 50, quantity_unit: 'fl_oz', service_line: 'lawn' }],
+    ...tables,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent and the ledger is never read', async () => {
+    delete process.env.GATE_TS_NEONIC_CAP;
+    const knex = fakeKnex({ scheduled_services: visit({ scheduled_date: '2026-10-01' }), products_catalog: catalog });
+    const ctx = await buildTreeShrubFastContext('visit-1', knex);
+    expect(ctx.eligible).toBe(true);
+    expect('neonicCap' in ctx).toBe(false);
+    expect(knex.calls.some(([table]) => table === 'customer_properties')).toBe(false);
+  });
+
+  test('gate on: what is left of Zylam at this property, a lawn visit\'s imidacloprid left out', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ctx = await build();
+    // The year is today's (ET), the day a completion records, not the scheduled day.
+    const thisYear = Number(require('../utils/datetime-et').etDateString().slice(0, 4));
+    expect(ctx.neonicCap).toMatchObject({ available: true, year: thisYear, bedSqft: 10890 });
+    const lastDecember = await build({ scheduled_services: visit({ scheduled_date: `${thisYear - 1}-12-30` }) });
+    expect(lastDecember.neonicCap.year).toBe(thisYear);
+    expect(ctx.neonicCap.ingredients.find((entry) => entry.key === 'imidacloprid').usedShare).toBe(0);
+    const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
+    expect(dino.usedShare).toBeCloseTo(0.5, 6);
+    expect(dino.capByProduct).toEqual([{ productId: 'zylam', name: 'Zylam', unit: 'fl_oz', yearlyAmount: 19.725, remainingAmount: 9.8625, maxApplications: 3, applicationsUsed: 1 }]);
+  });
+
+  test('gate on, no bed area: the reason rides the payload and no amount does', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ctx = await build({ customer_properties: { bed_sqft: null } });
+    const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
+    expect(dino).toMatchObject({ usedShare: null, reason: 'bed_area_needed' });
+    expect(dino.capByProduct[0]).toMatchObject({ productId: 'zylam', yearlyAmount: null, remainingAmount: null });
+  });
+
+  test('gate on, a failed ledger read: available:false and the sheet still loads', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ctx = await build({ 'property_application_history as pah': new Error('boom') });
+    expect(ctx.eligible).toBe(true);
+    expect(ctx.neonicCap).toMatchObject({ available: false, reason: 'ledger_unavailable' });
+  });
+
+  test('an ineligible visit carries no neonicCap even with the gate on', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build();
+    expect(ctx.eligible).toBe(false);
+    expect('neonicCap' in ctx).toBe(false);
   });
 });

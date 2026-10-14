@@ -9,6 +9,9 @@ const {
   sanitizeContactLastName,
   sanitizeContactFirstName,
   sanitizeContactEmail,
+  sanitizeContactPhone,
+  saveAcceptContactPhone,
+  phoneTypedByCustomer,
   CONTACT_LAST_NAME_MAX,
   CONTACT_EMAIL_MAX,
 } = require('../services/estimate-contact-gaps');
@@ -16,14 +19,14 @@ const {
 describe('computeContactGaps', () => {
   test('unlinked estimate, single-token name, no email: both gaps true', () => {
     const gaps = computeContactGaps({ estimate: { customer_name: 'Testy', customer_email: null } });
-    expect(gaps).toEqual({ firstName: false, lastName: true, email: true });
+    expect(gaps).toMatchObject({ firstName: false, lastName: true, email: true });
   });
 
   test('unlinked estimate with a full two-token name and an email: no gaps', () => {
     const gaps = computeContactGaps({
       estimate: { customer_name: 'Testy Sample', customer_email: 'testy@example.com' },
     });
-    expect(gaps).toEqual({ firstName: false, lastName: false, email: false });
+    expect(gaps).toMatchObject({ firstName: false, lastName: false, email: false });
   });
 
   test('the legacy "Testy undefined" concatenation artifact still reads as a lastName gap', () => {
@@ -36,7 +39,7 @@ describe('computeContactGaps', () => {
       estimate: { customer_name: 'Testy', customer_email: null },
       linkedCustomer: { last_name: 'Sample', email: 'testy@example.com' },
     });
-    expect(gaps).toEqual({ firstName: false, lastName: false, email: false });
+    expect(gaps).toMatchObject({ firstName: false, lastName: false, email: false });
   });
 
   test('the "Customer" placeholder on the linked customer does NOT close the lastName gap', () => {
@@ -44,7 +47,7 @@ describe('computeContactGaps', () => {
       estimate: { customer_name: 'Testy', customer_email: null },
       linkedCustomer: { last_name: 'Customer', email: null },
     });
-    expect(gaps).toEqual({ firstName: false, lastName: true, email: true });
+    expect(gaps).toMatchObject({ firstName: false, lastName: true, email: true });
   });
 
   test('a blank/null linked customer last_name or email still gaps', () => {
@@ -52,14 +55,14 @@ describe('computeContactGaps', () => {
       estimate: { customer_name: 'Testy', customer_email: '' },
       linkedCustomer: { last_name: '', email: null },
     });
-    expect(gaps).toEqual({ firstName: false, lastName: true, email: true });
+    expect(gaps).toMatchObject({ firstName: false, lastName: true, email: true });
   });
 
   test('nothing to ask when the estimate already carries both fields, even unlinked', () => {
     const gaps = computeContactGaps({
       estimate: { customer_name: 'Testy Sample', customer_email: 'testy@example.com' },
     });
-    expect(gaps).toEqual({ firstName: false, lastName: false, email: false });
+    expect(gaps).toMatchObject({ firstName: false, lastName: false, email: false });
   });
 });
 
@@ -184,5 +187,161 @@ describe('minted artifacts still count as missing (codex r13)', () => {
   test.each(['undefined', 'NULL'])('a linked %p surname counts as missing', (last) => {
     const gaps = computeContactGaps({ estimate: { customer_name: 'Pat', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Pat', last_name: last, email: 'x@example.com' } });
     expect(gaps.lastName).toBe(true);
+  });
+});
+
+// Owner 2026-10-04: a missing phone is asked for at accept and logged.
+describe('phone gap', () => {
+  test('only an unlinked estimate with no usable phone has the gap', () => {
+    const named = { customer_name: 'Dana Sample', customer_email: 'dana.sample@example.com' };
+    expect(computeContactGaps({ estimate: named }).phone).toBe(true);
+    expect(computeContactGaps({ estimate: { ...named, customer_phone: '   ' } }).phone).toBe(true);
+    expect(computeContactGaps({ estimate: { ...named, customer_phone: '555' } }).phone).toBe(true);
+    expect(computeContactGaps({ estimate: { ...named, customer_phone: '(941) 555-0142' } }).phone).toBe(false);
+    // A linked customer always has a phone (customers.phone is NOT NULL).
+    expect(computeContactGaps({ estimate: { ...named, customer_id: 'cust-1' } }).phone).toBe(false);
+    expect(computeContactGaps({
+      estimate: { ...named, customer_id: 'cust-1' },
+      linkedCustomer: { first_name: 'Dana', last_name: 'Sample', email: null },
+    }).phone).toBe(false);
+  });
+});
+
+describe('sanitizeContactPhone', () => {
+  test('a 10-digit US number in any common format becomes E.164', () => {
+    for (const raw of ['(941) 555-0142', '941.555.0142', '941 555 0142', '1 941 555 0142', '+19415550142']) {
+      expect(sanitizeContactPhone(raw)).toEqual({ value: '+19415550142', error: null });
+    }
+  });
+  test('nothing typed is not an error', () => {
+    for (const raw of ['', '   ', undefined, null, 9415550142, {}, []]) {
+      expect(sanitizeContactPhone(raw)).toEqual({ value: null, error: null });
+    }
+  });
+  test('a near-miss is refused, never stored', () => {
+    for (const raw of ['555-0142', '941-555-014', '141-555-0142', '941-155-0142', '2 941 555 0142', 'call me', '941-555-0142 ext 9', '9'.repeat(40)]) {
+      expect(sanitizeContactPhone(raw)).toMatchObject({ value: null, error: { code: 'CONTACT_PHONE_INVALID' } });
+    }
+  });
+});
+
+describe('saveAcceptContactPhone', () => {
+  function harness({ updated = 1, stillOpen = true } = {}) {
+    const calls = { where: [], whereRaw: [], update: [], first: 0 };
+    const qb = {
+      where: (arg) => { calls.where.push(arg); return qb; },
+      whereNull: (col) => { calls.where.push({ null: col }); return qb; },
+      whereRaw: (sql) => { calls.whereRaw.push(sql); return qb; },
+      modify: (fn) => { fn(qb); return qb; },
+      first: async () => { calls.first += 1; return stillOpen ? { id: 'est-1' } : null; },
+      update: async (row) => { calls.update.push(row); return updated; },
+    };
+    const database = (table) => { calls.table = table; return qb; };
+    database.fn = { now: () => 'NOW' };
+    return { database, calls };
+  }
+  const ESTIMATE = { id: 'est-1', customer_id: null, customer_phone: null, customer_name: 'Dana Sample' };
+
+  test('a new number is saved on the estimate, guarded on unlinked + phone-less', async () => {
+    const { database, calls } = harness();
+    const onExistingCustomerPhone = jest.fn();
+    const out = await saveAcceptContactPhone({
+      estimate: ESTIMATE, rawPhone: '(941) 555-0142', database,
+      countCustomersWithPhone: async () => 0, onExistingCustomerPhone,
+    });
+    expect(out).toEqual({ status: 200, body: { saved: true } });
+    expect(calls.table).toBe('estimates');
+    expect(calls.where).toEqual([{ id: 'est-1' }, { null: 'customer_id' }]);
+    expect(calls.whereRaw[0]).toMatch(/customer_phone/);
+    // The phone, its provenance and updated_at are written by ONE statement.
+    expect(calls.update).toEqual([{ customer_phone: '+19415550142', customer_phone_typed: '+19415550142', updated_at: 'NOW' }]);
+    expect(onExistingCustomerPhone).not.toHaveBeenCalled();
+  });
+
+  test('a number that belongs to a customer is never written: office alert + call-the-office refusal', async () => {
+    const { database, calls } = harness();
+    const onExistingCustomerPhone = jest.fn();
+    const out = await saveAcceptContactPhone({
+      estimate: ESTIMATE, rawPhone: '941-555-0142', database,
+      countCustomersWithPhone: async (phone) => (phone === '+19415550142' ? 2 : 0), onExistingCustomerPhone,
+    });
+    expect(out.status).toBe(409);
+    expect(out.body.code).toBe('CUSTOMER_CONTACT_REQUIRED');
+    expect(calls.update).toEqual([]);
+    expect(onExistingCustomerPhone).toHaveBeenCalledWith({ typedPhone: '+19415550142', candidateCount: 2 });
+  });
+
+  test('a matched number on an estimate that stopped being open: zero-row answer, no bell, no 409', async () => {
+    const { database, calls } = harness({ stillOpen: false });
+    const onExistingCustomerPhone = jest.fn();
+    const guardUpdate = jest.fn((qb) => qb.whereRaw('ELIGIBLE'));
+    const out = await saveAcceptContactPhone({
+      estimate: ESTIMATE, rawPhone: '941-555-0142', database,
+      countCustomersWithPhone: async () => 1, onExistingCustomerPhone, guardUpdate,
+    });
+    expect(out).toMatchObject({ zeroRows: true });
+    expect(out.status).not.toBe(409);
+    expect(onExistingCustomerPhone).not.toHaveBeenCalled();
+    // The recheck ran under the same guard as the write would have.
+    expect(calls.first).toBe(1);
+    expect(guardUpdate).toHaveBeenCalledTimes(1);
+    expect(calls.update).toEqual([]);
+  });
+
+  test('an estimate that already has a phone or a customer ignores the field entirely', async () => {
+    const countCustomersWithPhone = jest.fn();
+    for (const estimate of [{ ...ESTIMATE, customer_phone: '+19415550199' }, { ...ESTIMATE, customer_id: 'cust-1' }]) {
+      const { database, calls } = harness();
+      const out = await saveAcceptContactPhone({ estimate, rawPhone: 'not a phone', database, countCustomersWithPhone });
+      expect(out).toEqual({ status: 200, body: { saved: false, alreadyOnFile: true } });
+      expect(calls.update).toEqual([]);
+    }
+    expect(countCustomersWithPhone).not.toHaveBeenCalled();
+  });
+
+  test('a blank or malformed number is a 400 and looks nothing up', async () => {
+    const countCustomersWithPhone = jest.fn();
+    for (const rawPhone of ['', undefined, '555-0142', {}]) {
+      const { database, calls } = harness();
+      const out = await saveAcceptContactPhone({ estimate: ESTIMATE, rawPhone, database, countCustomersWithPhone });
+      expect(out.status).toBe(400);
+      expect(out.body.code).toBe('CONTACT_PHONE_INVALID');
+      expect(calls.update).toEqual([]);
+    }
+    expect(countCustomersWithPhone).not.toHaveBeenCalled();
+  });
+
+  test('zero rows is reported as such, so the route can tell a closed gap from a lost eligibility', async () => {
+    const { database } = harness({ updated: 0 });
+    const out = await saveAcceptContactPhone({ estimate: ESTIMATE, rawPhone: '9415550142', database, countCustomersWithPhone: async () => 0 });
+    expect(out).toMatchObject({ zeroRows: true });
+  });
+
+  test('the caller\'s eligibility guard is applied to the UPDATE itself', async () => {
+    const { database, calls } = harness();
+    const guardUpdate = jest.fn((qb) => qb.whereRaw('ELIGIBLE'));
+    await saveAcceptContactPhone({ estimate: ESTIMATE, rawPhone: '9415550142', database, countCustomersWithPhone: async () => 0, guardUpdate });
+    expect(guardUpdate).toHaveBeenCalledTimes(1);
+    expect(calls.whereRaw).toContain('ELIGIBLE');
+  });
+});
+
+describe('phoneTypedByCustomer', () => {
+  test('true only while the estimate still carries the typed number', () => {
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142', customer_phone_typed: '+19415550142' })).toBe(true);
+    expect(phoneTypedByCustomer({ customer_phone: '(941) 555-0142', customer_phone_typed: '+19415550142' })).toBe(true);
+    // The office put a different number on the estimate: that one is the office's.
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550199', customer_phone_typed: '+19415550142' })).toBe(false);
+    expect(phoneTypedByCustomer({ customer_phone: null, customer_phone_typed: '+19415550142' })).toBe(false);
+  });
+  test('false without the column value', () => {
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142' })).toBe(false);
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142', customer_phone_typed: null })).toBe(false);
+    expect(phoneTypedByCustomer(null)).toBe(false);
+  });
+  test('it never reads estimate_data, so a whole-blob rewrite cannot erase it', () => {
+    const estimate = { customer_phone: '+19415550142', customer_phone_typed: '+19415550142' };
+    Object.defineProperty(estimate, 'estimate_data', { get() { throw new Error('must not be read'); } });
+    expect(phoneTypedByCustomer(estimate)).toBe(true);
   });
 });

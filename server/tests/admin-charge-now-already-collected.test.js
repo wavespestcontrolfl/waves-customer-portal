@@ -89,6 +89,7 @@ describe('charge-now already-collected guard', () => {
   let chargeMock;
   let chargeOneTimeMock;
   let paymentsQB;
+  let invoicesQB;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -98,9 +99,13 @@ describe('charge-now already-collected guard', () => {
     chargeMock = StripeService.charge.mockResolvedValue({ id: 'pay-new', metadata: null });
     chargeOneTimeMock = StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', metadata: null });
     paymentsQB = makeQB({ first: null });
+    invoicesQB = makeQB({ first: null });
     db.mockImplementation((table) => {
       if (table === 'customers') return makeQB({ first: CUSTOMER });
       if (table === 'payments') return paymentsQB;
+      // B08: the live completion-minted membership-dues invoice lookup
+      // (billing-lane findLiveStampedDuesInvoice).
+      if (table === 'invoices') return invoicesQB;
       // The sibling-unresolved-outcome check (retry-collectibility.js)
       // reads this table too — no fixtures here, so it always clears.
       if (table === 'stripe_orphan_charges') return makeQB({ first: null });
@@ -217,6 +222,68 @@ describe('charge-now already-collected guard', () => {
       expect(res.status).toBe(200);
       expect(chargeMock).toHaveBeenCalledWith('cust-1', 89, expect.any(String), expect.any(Object),
         expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/), CHARGE_NOW_OVERRIDE);
+    });
+  });
+
+  // B08: a completion-minted dues invoice (membership_dues_month) is the
+  // month's bill. Its payment carries invoice_id, not billed_month, so the
+  // payments check cannot see it — the shared stamped-invoice lookup does.
+  test.each([
+    ['sent', /still open — collect that invoice instead/],
+    ['paid', /which is paid — nothing is owed/],
+  ])('409s an amount-less charge when a %s stamped dues invoice already bills the month (no Stripe call)', async (status, message) => {
+    invoicesQB.first.mockResolvedValue({ id: 'inv-dues', status, invoice_number: 'WPC-2026-0042', scheduled_service_id: 'visit-1' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ already_collected: true, payment_id: null, dues_invoice_id: 'inv-dues' });
+      expect(body.error).toContain('WPC-2026-0042');
+      expect(body.error).toMatch(message);
+      expect(chargeMock).not.toHaveBeenCalled();
+      expect(chargeOneTimeMock).not.toHaveBeenCalled();
+      expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_already_paid', expect.objectContaining({
+        details: expect.objectContaining({ source: 'manual_charge', dues_invoice_id: 'inv-dues' }),
+      }));
+    });
+  });
+
+  test('the stamped-invoice lookup excludes void / refunded / canceled invoices, so a voided dues invoice charges', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(200);
+      expect(chargeMock).toHaveBeenCalled();
+      const statusClause = invoicesQB.whereRaw.mock.calls.find(([sql]) => /status NOT IN/.test(sql));
+      expect(statusClause[1]).toEqual(expect.arrayContaining(['void', 'refunded', 'canceled', 'cancelled']));
+    });
+  });
+
+  test('an explicit amount never consults the dues invoice (intentional extra charge)', async () => {
+    invoicesQB.first.mockResolvedValue({ id: 'inv-dues', status: 'sent', invoice_number: 'WPC-2026-0042' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: 25 }),
+      });
+      expect(res.status).toBe(200);
+      expect(chargeOneTimeMock).toHaveBeenCalled();
+      expect(invoicesQB.first).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the payments-based already-collected response is unchanged and wins before the invoice lookup', async () => {
+    paymentsQB.first.mockResolvedValue({ id: 'pay-cron' });
+    invoicesQB.first.mockResolvedValue({ id: 'inv-dues', status: 'sent', invoice_number: 'WPC-2026-0042' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ already_collected: true, payment_id: 'pay-cron' });
+      expect(invoicesQB.first).not.toHaveBeenCalled();
     });
   });
 

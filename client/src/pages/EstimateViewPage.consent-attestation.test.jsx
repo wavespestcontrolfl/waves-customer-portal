@@ -70,6 +70,78 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });
 
+  it('B18: ALL THREE call sites (accept, card-hold-intent, recurring-card-intent) take an ACCEPT_NEEDS_OFFICE_REVIEW 409 through the ONE transition', () => {
+    // The accept handler's 409 branch and both intent responses call the same function.
+    expect(src.match(/throw new Error\(await enterContactReviewRef\.current\(body\)\);/g)).toHaveLength(3);
+    expect(src).toMatch(/if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*throw new Error\(await enterContactReviewRef\.current\(body\)\);/);
+    expect(src).toMatch(/\/card-hold-intent`[\s\S]{0,700}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*throw new Error\(await enterContactReviewRef\.current\(body\)\);/);
+    expect(src).toMatch(/\/recurring-card-intent`[\s\S]{0,700}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*throw new Error\(await enterContactReviewRef\.current\(body\)\);/);
+  });
+
+  it('B18: EVERY client fetch of an endpoint that can answer ACCEPT_NEEDS_OFFICE_REVIEW is accounted for - a new caller fails here until it handles the code', () => {
+    const slotPicker = fs.readFileSync(path.join(here, '../components/estimate/SlotPicker.jsx'), 'utf8');
+    const count = (text, re) => (text.match(re) || []).length;
+    // The estimate page's callers, by endpoint, and how many of each there are (a new one changes the count).
+    const endpoint = (name) => new RegExp(String.raw`fetch\(\`\$\{API_BASE\}/(?:public/)?estimates/\$\{token\}/${name}\``, 'g');
+    expect(count(src, endpoint('accept'))).toBe(1);
+    expect(count(src, endpoint('card-hold-intent'))).toBe(1);
+    expect(count(src, endpoint('recurring-card-intent'))).toBe(3); // modal mint, replace-payment-method, inline pre-mint
+    expect(count(src, endpoint('reserve'))).toBe(1);
+    // ...and each one handles the code through the ONE transition: accept + card-hold + 3 recurring + reserve + extend.
+    expect(count(src, /code === 'ACCEPT_NEEDS_OFFICE_REVIEW'/g)).toBe(7);
+    // (+1: the SlotPicker's onContactReview callback, asserted below.)
+    expect(count(src, /enterContactReviewRef\.current\(body\)/g)).toBe(8);
+    // The hold-extend call takes the code through the ONE transition too (not the generic no-booking recovery, which
+    // discards the body): recognised BEFORE the generic reviewBeforeBooking branch below.
+    expect(src).toMatch(/body\.code === 'SLOT_UNAVAILABLE'\) return 'slot_unavailable';[\s\S]{0,900}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return 'contact_review';\s*\}[\s\S]{0,1400}body\.reviewBeforeBooking/);
+    expect(count(src, /\/reserve\/\$\{encodeURIComponent\(scheduledServiceId\)\}\/extend`/g)).toBe(1);
+    expect(src).toMatch(/body\.reviewBeforeBooking[\s\S]{0,400}return 'no_booking';/);
+    // The slot reads live in SlotPicker (3 fetches: default window, AI find, picked date), each hands the review shape up.
+    expect(count(slotPicker, /\/public\/estimates\/\$\{token\}\/(?:available-slots|find-slots)/g)).toBe(3);
+    expect(count(slotPicker, /isContactReview\(body\)/g)).toBe(3);
+    expect(src).toMatch(/onContactReview=\{\(body\) => enterContactReviewRef\.current\(body\)\.catch\(\(\) => \{\}\)\}/);
+  });
+
+  it('B18: the replace-payment-method call and the inline pre-mint effect take the park through the transition too (not silently ignored)', () => {
+    // replace-payment-method: transitions, then reports "no new intent".
+    expect(src).toMatch(/replaceSetupIntentId: setupIntentId \}\),\s*\}\);\s*const body = await r\.json\(\)\.catch\(\(\) => \(\{\}\)\);\s*if \(r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return false;\s*\}/);
+    // inline pre-mint: transitions BEFORE its resolve-time staleness check (a stale tab still leaves checkout).
+    expect(src).toMatch(/if \(r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*\/\/ Staleness re-check at RESOLVE time/);
+    // reserve: leaves the booking UI before the generic 409 handling.
+    expect(src).toMatch(/if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{[^}]*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*const message = body\.error \|\| 'Unable to reserve this slot\.';/);
+  });
+
+  it('B18: a failed hold release in the transition keeps the hold id in the existing pending-recovery ref (after one retry), never drops it', () => {
+    expect(src).toMatch(
+      /let released = await releaseHeldReservation\(heldId\);\s*if \(!released\) released = await releaseHeldReservation\(heldId\);\s*if \(!released && heldId\) pendingRecoveryHoldRef\.current = heldId;[\s\S]{0,300}try \{ await loadEstimate\(\{ preserveSelection: true \}\); \} catch/,
+    );
+    // The ref it uses is the recovery's own: set before recoverFromDeadHold's release and its retry fallback.
+    expect(src).toMatch(/pendingRecoveryHoldRef\.current = deadHoldId;/);
+    expect(src).toMatch(/reservationRef\.current\?\.scheduledServiceId\s*\|\| pendingRecoveryHoldRef\.current/);
+  });
+
+  it('B18: a CUSTOMER_BUSY_RETRY on reserve is retryable with the server sentence - the picked slot and payment choice are KEPT', () => {
+    expect(src).toMatch(
+      /if \(body\.code === 'CUSTOMER_BUSY_RETRY'\) \{[^}]*setError\(message\);\s*setCtaPhase\('configure'\);\s*return;\s*\}\s*setPaymentPreference\(null\);\s*setSelectedSlotId\(null\);/,
+    );
+  });
+
+  it('B18: the one transition drops every captured/minted card, releases the slot hold and refetches /data (the review state)', () => {
+    expect(src).toMatch(
+      /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,2000}await releaseHeldReservation\(heldId\);[\s\S]{0,400}await loadEstimate\(\{ preserveSelection: true \}\)/,
+    );
+  });
+
+  it('r5 P2: the review state is committed locally from the 409 body BEFORE any network call, and the refetch is best effort (caught)', () => {
+    const transition = src.slice(src.indexOf('enterContactReviewRef.current = async (body) => {'), src.indexOf('// The ONE recovery for a hold that is definitively gone'));
+    const commit = transition.indexOf("reviewReason: 'contact_review'");
+    expect(transition).toMatch(/canAccept: false, reviewBeforeBooking: true, reviewReason: 'contact_review', reviewMessage: sentence/);
+    expect(commit).toBeGreaterThan(0);
+    expect(commit).toBeLessThan(transition.indexOf('await releaseHeldReservation(heldId)'));
+    expect(commit).toBeLessThan(transition.indexOf('loadEstimate('));
+    expect(transition).toMatch(/try \{ await loadEstimate\(\{ preserveSelection: true \}\); \} catch \{[^}]*\}\s*return sentence;/);
+  });
+
   it('a CONSENT_VARIANT_STALE / ACCEPT_BILLING_CHANGED 409 drops the captured intent and refetches /data so the UI re-renders what the server will record', () => {
     expect(src).toMatch(
       /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2000}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,

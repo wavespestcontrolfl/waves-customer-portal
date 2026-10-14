@@ -95,20 +95,20 @@ function callbackNumberCoachingNote(v2Extraction, contactPhone) {
 // (total_score: 999, rescue_score: -4, warmth_score: 100) persisted into CSR
 // averages; r14 found totals that are not core + rescue; r15 found point
 // details that disagree with the scores and invented follow-up types.
-// Required: the nine rubric scores within their ranges (integers where the
-// column is INTEGER), total_score === core_score + rescue_score, point_details
-// that add up to them (normalizePointDetails), a call_outcome from the
+// Required: the six rubric scores within their ranges (integers where the
+// column is INTEGER), complete point_details (normalizePointDetails), a call_outcome from the
 // rubric's list (canonicalized — call_outcome === 'booked' drives the booking
 // rate and the follow-up gate, so "Booked" must not read as a loss), and a
 // follow_up_task that is absent or on-contract. The descriptive optional
 // fields are canonicalized, and an absent or off-contract value becomes
 // null / [] — the score itself is still usable — instead of a varchar
 // overflow or a non-numeric decimal failing the insert after the leg was
-// accepted. Pure/testable; returns the normalized score or null.
+// accepted. core_score, rescue_score and total_score are NOT read from the
+// model: a prod-ledger read (2026-10-04) showed 31% of answers rejected as
+// schema_invalid because the model's own arithmetic disagreed with its points,
+// so normalizeCsrScore sums them from point_details. Pure/testable; returns
+// the normalized score or null.
 const CSR_SCORE_RANGES = {
-  total_score: [0, 15, true],
-  core_score: [0, 10, true],
-  rescue_score: [0, 5, true],
   control_score: [1, 5, false],
   warmth_score: [1, 5, false],
   clarity_score: [1, 5, false],
@@ -161,10 +161,11 @@ function normalizeFollowUpTask(task) {
 
 // The rubric's fifteen 0/1 points. All ten core points always apply, so each
 // must be present; rescue points only count "when the situation arose", so
-// an absent one is 0. The points must add up to core_score / rescue_score —
-// `point_details: {}` beside core_score: 10 used to be stored, and the weekly
-// insight reads a missing point as missed (Codex r15 on #4884). Returns the
-// normalized details (0/1 numbers, known keys only) or null.
+// an absent one is 0. `point_details: {}` beside core_score: 10 used to be
+// stored, and the weekly insight reads a missing point as missed (Codex r15
+// on #4884), so a missing core point rejects the answer. The scores are summed
+// from these points, never trusted from the model. Returns the normalized
+// details (0/1 numbers, known keys only) or null.
 const CSR_CORE_POINTS = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
 const CSR_RESCUE_POINTS = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
 function csrPoint(v) {
@@ -172,7 +173,7 @@ function csrPoint(v) {
   if (v === 0 || v === false || v === '0') return 0;
   return null;
 }
-function normalizePointDetails(raw, coreScore, rescueScore) {
+function normalizePointDetails(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   // A prototype-less map: the keys come from the model's JSON, where an own
   // "__proto__" key would otherwise re-parent a plain object and let every
@@ -180,23 +181,21 @@ function normalizePointDetails(raw, coreScore, rescueScore) {
   const details = Object.create(null);
   for (const [key, value] of Object.entries(raw)) details[key.trim().toLowerCase().replace(/[\s-]+/g, '_')] = value;
   const out = {};
-  let core = 0;
   for (const key of CSR_CORE_POINTS) {
     const p = csrPoint(details[key]);
     if (p === null) return null;
     out[key] = p;
-    core += p;
   }
-  let rescue = 0;
   for (const key of CSR_RESCUE_POINTS) {
     if (details[key] === undefined || details[key] === null) { out[key] = 0; continue; }
     const p = csrPoint(details[key]);
     if (p === null) return null;
     out[key] = p;
-    rescue += p;
   }
-  return core === coreScore && rescue === rescueScore ? out : null;
+  return out;
 }
+
+const sumPoints = (details, keys) => keys.reduce((n, key) => n + details[key], 0);
 
 function normalizeCsrScore(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -206,14 +205,15 @@ function normalizeCsrScore(raw) {
     if (n === null || n < min || n > max || (integer && !Number.isInteger(n))) return null;
     score[field] = n;
   }
-  // The rubric's 15-point total IS the 10-point core plus the 5-point rescue;
-  // an answer that breaks that equation (e.g. 15 = 0 + 0) is inconsistent,
-  // not a score to average (Codex r14 on #4884).
-  if (score.total_score !== score.core_score + score.rescue_score) return null;
   score.call_outcome = csrEnum(raw.call_outcome, CSR_CALL_OUTCOMES);
   if (!score.call_outcome) return null;
-  score.point_details = normalizePointDetails(raw.point_details, score.core_score, score.rescue_score);
+  score.point_details = normalizePointDetails(raw.point_details);
   if (!score.point_details) return null;
+  // The rubric's 15-point total IS the 10-point core plus the 5-point rescue
+  // (Codex r14 on #4884); summed here from the points, so it cannot disagree.
+  score.core_score = sumPoints(score.point_details, CSR_CORE_POINTS);
+  score.rescue_score = sumPoints(score.point_details, CSR_RESCUE_POINTS);
+  score.total_score = score.core_score + score.rescue_score;
   score.call_summary = csrText(raw.call_summary);
   score.coaching_notes = csrText(raw.coaching_notes);
   score.better_phrasings = Array.isArray(raw.better_phrasings)
@@ -232,6 +232,54 @@ function normalizeCsrScore(raw) {
 function isUsableCsrScore(score) {
   return normalizeCsrScore(score) !== null;
 }
+
+// Structured-output contract (llm/call.js jsonSchema): all 15 points are
+// required 0/1 so a reply cannot omit one. Numeric ranges are outside the
+// provider subset (Anthropic 400s on minimum/maximum), so the ranges are
+// enforced by normalizeCsrScore. core_score / rescue_score / total_score are
+// not asked for: they are summed from point_details.
+const nullable = (type) => ({ type: [type, 'null'] });
+const CSR_SCORE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['point_details', ...Object.keys(CSR_SCORE_RANGES), 'call_outcome', 'call_summary', 'coaching_notes', 'better_phrasings', 'lead_intent', 'lead_source_quality', 'loss_reason', 'estimated_job_value', 'follow_up_task'],
+  properties: {
+    point_details: {
+      type: 'object',
+      additionalProperties: false,
+      required: [...CSR_CORE_POINTS, ...CSR_RESCUE_POINTS],
+      properties: Object.fromEntries([...CSR_CORE_POINTS, ...CSR_RESCUE_POINTS].map((key) => [key, { type: 'integer', enum: [0, 1] }])),
+    },
+    ...Object.fromEntries(Object.entries(CSR_SCORE_RANGES).map(([field, [min, max]]) => [field, { type: 'number', description: `${min} to ${max}` }])),
+    call_outcome: { type: 'string', enum: [...CSR_CALL_OUTCOMES] },
+    call_summary: { type: 'string' },
+    coaching_notes: { type: 'string' },
+    better_phrasings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['original', 'better', 'why'],
+        properties: { original: { type: 'string' }, better: { type: 'string' }, why: { type: 'string' } },
+      },
+    },
+    lead_intent: { type: 'string', enum: [...CSR_LEAD_INTENTS] },
+    lead_source_quality: { type: 'string', enum: [...CSR_SOURCE_QUALITIES] },
+    loss_reason: { type: ['string', 'null'], enum: [...CSR_LOSS_REASONS, null] },
+    estimated_job_value: nullable('number'),
+    follow_up_task: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['type', 'recommended_action', 'deadline_hours', 'priority'],
+      properties: {
+        type: { type: 'string', enum: [...CSR_TASK_TYPES] },
+        recommended_action: { type: 'string' },
+        deadline_hours: { type: 'number' },
+        priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+      },
+    },
+  },
+};
 
 class CSRCoach {
 
@@ -320,6 +368,7 @@ class CSRCoach {
       laneId: 'csr_coach',
       maxTokens: 3000,
       jsonMode: true,
+      jsonSchema: CSR_SCORE_SCHEMA,
       timeoutMs: CSR_SCORE_TIMEOUT_MS,
       system: `You score customer service calls for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
@@ -375,10 +424,7 @@ Generate a specific follow-up with script and deadline.
 
 Return JSON:
 {
-  "total_score": 0-15,
-  "core_score": 0-10,
-  "rescue_score": 0-5,
-  "point_details": { "greeting": 0/1, "empathy": 0/1, ... },
+  "point_details": { all 15 points above, each 0 or 1 },
   "control_score": 1-5,
   "warmth_score": 1-5,
   "clarity_score": 1-5,

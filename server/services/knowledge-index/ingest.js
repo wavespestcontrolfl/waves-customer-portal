@@ -28,7 +28,15 @@ const DEFAULT_MAX_EMBEDS_PER_RUN = 2000;
 const hashChunk = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 const toVectorLiteral = (vector) => `[${vector.join(',')}]`;
 
+// The two corpora the lawn program feeds: each keeps a marker of the program its chunks hold.
+const LAWN_PROGRAM_CORPORA = new Set(['protocol', 'kb']);
+
 async function syncCorpus(connector) {
+  // The lawn program this corpus is about to load, read before the load. The marker is
+  // written below, by whoever runs the sync (nightly or the lawn reconcile), and only after
+  // a sync that really ran.
+  const lawnKnowledge = LAWN_PROGRAM_CORPORA.has(connector.source) ? require('../knowledge-base') : null;
+  const lawnProgram = lawnKnowledge ? await lawnKnowledge.lawnCorpusProgram(connector.source) : null;
   const docs = await loadCorpus(connector);
   if (docs === null) return { source: connector.source, skipped: true };
 
@@ -94,6 +102,7 @@ async function syncCorpus(connector) {
     stats.deleted = staleIds.length;
   }
 
+  if (lawnKnowledge) await lawnKnowledge.recordLawnCorpusProgram(connector.source, lawnProgram);
   return stats;
 }
 

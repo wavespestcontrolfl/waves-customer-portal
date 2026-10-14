@@ -206,7 +206,9 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db, { throwOnE
 // the transaction's resolution order (see resolveGroupedEstimateOwnerId).
 // `lookupFailed` lets fail-closed callers refuse rather than assume "new
 // customer" when the match itself errored.
-async function resolveProspectiveAcceptCustomer(estimate, database = db) {
+// `authoritative` bypasses the phone matcher's read cache (the service
+// opt-out write and the tier picker judge a member on a fresh read).
+async function resolveProspectiveAcceptCustomer(estimate, database = db, { authoritative = false } = {}) {
   let customerId = estimate?.customer_id || null;
   let lookupFailed = false;
   if (!customerId) {
@@ -226,7 +228,9 @@ async function resolveProspectiveAcceptCustomer(estimate, database = db) {
       if (typeof gates.matchAcceptCustomerByPhone === 'function') {
         // Same handle as the caller (GitHub Codex #4144 r4 P2): under the
         // replacement's row lock this must not wait on the pool.
-        const { match } = await gates.matchAcceptCustomerByPhone(estimate, database);
+        const { match } = authoritative
+          ? await gates.matchAcceptCustomerByPhone(estimate, database, { authoritative: true })
+          : await gates.matchAcceptCustomerByPhone(estimate, database);
         customerId = match?.id || null;
       }
     } catch (err) {
@@ -2312,6 +2316,7 @@ module.exports = {
   applyCommercialManualBillingExemption,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,
+  resolveProspectiveAcceptCustomer,
   resolvePrepayChargeMethod,
   prepayChargeMethodKey,
   isAmbiguousSavedMethodChargeError,

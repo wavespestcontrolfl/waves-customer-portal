@@ -152,20 +152,24 @@ CASES['W5-dev-05'] = async (ctx, h, cast, c) => {
 };
 
 CASES['W5-dev-06'] = async (ctx, h, cast, c) => {
-  const s = await seedBookSet(cast);
-  const date = clockDate('2026-10-12');
+  // Owner 2026-10-05: the staff member typing the price in the bar is staff dictating, so a commercial account is
+  // booked on it like any other (the commercial-booking ruling is about the call agent, where a caller agreeing is not).
+  const seeded = await seedBookSet(cast);
+  const s = { ...seeded, pellham: seeded.commercial, pellhamHome: seeded.commercialProp }; // the shared checks read the booked customer as `pellham`
+  const date = clockDate(c.call.input.scheduled_date);
   const page = { customerId: s.commercial.id };
   const est = await ctx.establish({ prompt: c.request, page, customer: s.commercial });
-  // A naive model asks the tool to book it; the domain must stop a commercial account being auto-booked.
-  const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: [{ tools: [['create_appointment', { customer_id: s.commercial.id, scheduled_date: date, service_type: SERVICE, time_window: '8:00 AM', price: 149 }]] }] });
-  // The contract is no card: a commercial account is stopped before anything is proposed, not after the operator confirms.
-  ctx.expectRefusal(turn, 'create_appointment', { error: /commercial/i }, 'commercial_refusal_not_specific');
-  ctx.check(turn.cards.length === 0, 'proposal', 'commercial_booking_carded', `${turn.cards.length} card(s) offered to book a commercial account: ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
-  let confirmed;
-  if (turn.card) confirmed = await h.confirm(h.actors.owner, turn.card);
-  await h.settle();
-  const rows = await h.db('scheduled_services').where({ customer_id: s.commercial.id }).count('* as n').first();
-  ctx.check(Number(rows.n) === 0, 'domain_rule', 'commercial_account_booked_on_price', `${rows.n} visit(s) booked for a commercial account; card ${turn.cards.length}; confirm ${confirmed && confirmed.status}`);
+  const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: bookRounds(s.commercial.id, date, '8:00 AM', { price: 149 }) });
+  checkCard(ctx, turn, { priceText: '149' });
+  const before = await newRows(h, s.commercial.id, seeded.existing.id);
+  ctx.check(before.length === 0, 'side_effect', 'booked_before_confirm', `${before.length} rows existed before the card was confirmed`);
+  if (turn.card) {
+    const confirmed = await h.confirm(h.actors.owner, turn.card);
+    ctx.check(confirmed.status === 200 && confirmed.body && confirmed.body.success === true && confirmed.body.outcome === 'completed', 'confirm', 'confirm_not_completed', `confirm ${confirmed.status} ${JSON.stringify(confirmed.body).slice(0, 240)}`);
+    const receipt = await h.receipt(h.actors.owner, turn.card);
+    ctx.check(receipt.status === 200 && receipt.body && receipt.body.success === true, 'receipt', 'receipt_missing', `receipt ${receipt.status}`);
+  }
+  await checkBooked(ctx, h, s, { date, start: '08:00', end: '09:00', expectPrice: 149 });
   ctx.markCompleted();
 };
 
@@ -270,6 +274,5 @@ CASES['W5-dev-10'] = async (ctx, h, cast, c) => {
 
 // A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
 CASES['W5-dev-03'].undeclaredWrites = { tools: ['create_appointment'], reason: 'the naive 2:30 PM booking the tool must refuse' };
-CASES['W5-dev-06'].undeclaredWrites = { tools: ['create_appointment'], reason: 'the naive booking of a commercial account on a stated price, which the domain must stop' };
 
 module.exports = { CASES };

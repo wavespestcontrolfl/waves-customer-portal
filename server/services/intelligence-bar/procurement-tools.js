@@ -18,6 +18,8 @@ const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
+const { analysesIn } = require('../../utils/fertilizer-analysis');
+const { isToolFailure } = require('./outcomes');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -203,7 +205,7 @@ Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought toda
         movement_type: { type: 'string', enum: ['restock', 'correction', 'damaged_lost'], description: 'restock = stock purchased/added; correction = physical count fix (signed quantity or set_total); damaged_lost = write-off' },
         quantity: { type: 'number', description: 'Amount to add (restock), remove (damaged_lost), or signed delta (correction)' },
         set_total: { type: 'number', description: 'Correction only: set the absolute on-hand amount (what is physically on the shelf). Pass this OR quantity, not both.' },
-        unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Defaults to the product inventory unit; required for a first count.' },
+        unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Required: pass the unit the operator actually said and never invent or default one. If the operator gave an amount with no unit, ask them which unit before calling.' },
         lot_number: { type: 'string' },
         reason: { type: 'string', description: 'Why the physical stock count changed' },
         note: { type: 'string' },
@@ -904,18 +906,19 @@ function stockFields(p) {
 async function resolveProduct(input) {
   if (input.product_id) {
     const product = await db('products_catalog').where('id', input.product_id).first();
-    return product ? { product } : { error: 'Product not found' };
+    return product ? { product } : { error: 'Product not found', code: 'product_not_found' };
   }
   const name = String(input.product_name || '').trim();
-  if (!name) return { error: 'product_name or product_id is required' };
+  if (!name) return { error: 'product_name or product_id is required', code: 'product_unspecified' };
   const exact = await db('products_catalog').whereRaw('lower(btrim(name)) = ?', [name.toLowerCase()]).limit(2);
   if (exact.length === 1) return { product: exact[0] };
   const literal = name.replace(/[\\%_]/g, '\\$&');
   const matches = exact.length ? exact : await db('products_catalog').whereILike('name', `%${literal}%`).limit(6);
-  if (!matches.length) return { error: `Product "${name}" not found in catalog` };
+  if (!matches.length) return { error: `Product "${name}" not found in catalog`, code: 'product_not_found' };
   if (matches.length > 1) {
     return {
       error: `Multiple products match "${name}" — retry with product_id`,
+      code: 'product_ambiguous',
       candidates: matches.map(inventory.productIdentity),
     };
   }
@@ -1119,49 +1122,7 @@ function qualifiersPreceding(rawText, toIndex) {
 // a qualifier in any of them is part of the product's identity ("Velista
 // WDG" is a registered alias of "Velista").
 //
-// An N-P-K fertilizer analysis (three 1-2 digit numbers, each with an
-// optional one-decimal fraction, joined by -, –, —, or / with optional
-// spaces around the separators) is an identity qualifier exactly like a
-// concentration or formulation code — a seeded alias "K-Flow" mapping to
-// "LESCO K-Flow 0-0-25" must not ground "We bought K-Flow 0-0-20". Checked
-// over the WHOLE raw text, not just adjacent to a matched span, because the
-// analysis reads as the product's own identity wherever it sits in the
-// sentence ("K-Flow — we bought 0-0-20 of it" is still a mismatch).
-//
-// A REAL analysis uses the SAME separator twice ("0-0-25", "0/0/20") — a
-// mixed number like "1-1/2" (gallons) uses TWO DIFFERENT separators ("-"
-// then "/") and must never read as one (Codex round-13 P2: "We bought
-// Taurus SC, 1-1/2 gallons" misread "1-1/2" as an analysis and refused a
-// product with no analysis in its identity at all). \1 backreferences the
-// first separator so the second must match it exactly. –/— are normalized
-// to a plain "-" first (each is one code unit, same as "-", so match
-// indices against the original text are unaffected) so "0–0—25" still
-// reads as one analysis with the separator repeated, rather than as two
-// different separators that would now fail the backreference.
-const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*([-/])\s*\d{1,2}(?:\.\d)?\s*\1\s*\d{1,2}(?:\.\d)?\b/g;
-function normalizeAnalysis(raw) {
-  return String(raw).replace(/\s+/g, '').replace(/[–—/]/g, '-');
-}
-// A deadline date is not an analysis (Codex round-12 P2: "Please buy two
-// bottles of Taurus SC by 9/27/26" refused as an 9-27-26 mismatch). A triple
-// counts as a date only when a date word introduces it AND it reads as a
-// real month/day — "10-10-10" is a common fertilizer grade, so a bare
-// date-shaped triple ("Lesco, the 10-10-10") stays an identity qualifier.
-const DATE_CUE_BEFORE_RE = /\b(?:by|on|for|before|after|until|till|due|from|since|dated)\s+$/i;
-function isCuedDate(text, match) {
-  const [month, day] = match[0].split(/\s*[-–—/]\s*/).map(Number);
-  const realMonthDay = Number.isInteger(month) && Number.isInteger(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31;
-  return realMonthDay && DATE_CUE_BEFORE_RE.test(text.slice(0, match.index));
-}
-function analysesIn(text) {
-  const raw = String(text);
-  // Normalize –/— to a plain "-" (same code-unit length, so match.index
-  // still lines up with `raw` for isCuedDate's look-back) before matching,
-  // so the backreference reads a triple that mixes dash STYLES ("0–0—25")
-  // as one repeated separator rather than two different ones.
-  const normalized = raw.replace(/[–—]/g, '-');
-  return [...normalized.matchAll(ANALYSIS_RE)].filter((m) => !isCuedDate(raw, m)).map((m) => normalizeAnalysis(m[0]));
-}
+// N-P-K analysis parsing (separators, mixed dashes, cued dates) lives in utils/fertilizer-analysis.js.
 function qualifierConflict(rawText, phrases, identityNames) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
   const nameTokens = new Set(identityNames.flatMap((name) => normalizeForMatch(name).split(' ')));
@@ -1695,6 +1656,193 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   return { productId: resolved.product.id };
 }
 
+// ─── PRODUCT PICKER (owner 2026-10-07) ─────────────────────────
+//
+// When adjust_stock cannot tell which product the operator meant, the bar
+// never guesses: it shows a card that lists the possible products and the
+// operator picks one. Free-text guessing did not converge (#6097, four Codex
+// rounds), so this list is only a SHORTLIST. The operator's click is what
+// names the product, and the server accepts only an id it listed here.
+//
+// WHETHER a picker is offered depends only on the OPERATOR's text, never on
+// model-supplied words (Codex #6111 r1; #5941 and #6097 showed that letting
+// model text steer the grounding never converges):
+//   - the text is an instruction, not a question (isNotAnInstruction);
+//   - it asks for a receipt of a restock, the same operationMatches check the
+//     exact-name grounding uses ("Order 78 oz of X" gets no picker);
+//   - once every word that belongs to an ACTIVE catalog product name or alias
+//     is removed, the rest is stock vocabulary (CLOSED_VOCAB). The removed
+//     words come from the server's catalog, not the model, so a note or
+//     message body ("Add notes for this customer: ...") still refuses.
+// The SEARCH may use the model's product_name too: the operator picks from
+// the list and then confirms a second card that names one exact product.
+const PRODUCT_CHOICE_LIMIT = 8;
+
+function adjustmentFields(input) {
+  return { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
+    unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
+}
+
+// Active catalog identity words (product names and aliases), normalized.
+async function catalogIdentityWords() {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  const aliases = await db('product_aliases as pa').join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true).select('pa.alias_name');
+  const words = new Set([...products.map((p) => p.name), ...aliases.map((a) => a.alias_name)]
+    .flatMap((name) => normalizeForMatch(name).split(' ')).filter(Boolean));
+  return { products, words };
+}
+
+// Spans of the operator's words that are catalog identity words.
+function identitySpans(text, words) {
+  return [...text.matchAll(/[A-Za-z0-9]+/g)].filter((m) => words.has(m[0].toLowerCase()))
+    .map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
+// The product ids to list, best first, or null when the operator's text does
+// not qualify for a picker (see the note above). Products the text names
+// outright come first, then active products ranked by how many distinctive
+// operator-typed catalog words (x2) and model phrase words they share.
+async function operatorShortlist(prompt, input, phraseSource) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const text = String(prompt);
+  if (!text.trim() || isNotAnInstruction(text)) return null;
+  if (!operationMatches('adjust_stock', [text], { movement_type: input.movement_type ?? null })) return null;
+  const { products, words } = await catalogIdentityWords();
+  if (!isClosedVocabResidual(text, identitySpans(text, words))) return null;
+  const operatorTokens = [...new Set(normalizeForMatch(text).split(' '))].filter((w) => words.has(w) && isCandidateToken(w));
+  const modelTokens = [...new Set(normalizeForMatch(phraseSource).split(' '))].filter(isCandidateToken);
+  const ids = [...(await productsNamedIn(text)).named].map((id) => String(id).toLowerCase());
+  products
+    .map((p) => {
+      const nameWords = new Set(normalizeForMatch(p.name).split(' '));
+      const score = 2 * operatorTokens.filter((t) => nameWords.has(t)).length + modelTokens.filter((t) => nameWords.has(t)).length;
+      return { id: String(p.id).toLowerCase(), name: p.name, score };
+    })
+    .filter((p) => p.score > 0)
+    .sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name))
+    .forEach((p) => ids.push(p.id));
+  return { phrase: phraseSource || operatorTokens.join(' '), ids };
+}
+
+// One shortlist row with this amount's fresh before -> after. A product the
+// amount cannot fit (a unit it cannot convert, an unchanged count) is shown
+// with the reason and cannot be picked.
+async function productChoiceRow(row, fields) {
+  const base = { product_id: String(row.id).toLowerCase(), name: row.name, container_size: row.container_size || null };
+  try {
+    const preview = await inventory.previewStockAdjustment(row.id, fields);
+    return { ...base, unit: preview.unit || null, on_hand: preview.was_untracked ? null : toNumber(preview.stock_before),
+      stock_after: toNumber(preview.stock_after), selectable: true };
+  } catch (err) {
+    if (!err.isOperational) throw err;
+    return { ...base, unit: row.inventory_unit || null, on_hand: toNumber(row.inventory_on_hand),
+      stock_after: null, selectable: false, reason: String(err.message || 'This amount does not fit this product.') };
+  }
+}
+
+const MISSING_AMOUNT_REFUSAL = Object.freeze({ success: false, code: 'unit_required',
+  error: 'The amount or the unit is missing, so no stock was changed and no card was made. Ask the operator one short question for the amount and its unit, then call again with what they say. Never guess either.' });
+
+// Returns null (no picker: the caller keeps its refusal), { error, code } (a
+// refusal that names what is missing), or { phrase, choices }. `seedIds` are
+// ids a previous card already listed (Show again re-lists them with fresh
+// on-hand numbers); with seeds and no prompt, no new products are searched.
+async function productChoicesFor({ input = {}, prompt = null, previewProductName = null, seedIds = [] } = {}) {
+  let phrase = String(input.product_name || previewProductName || '').trim();
+  const ids = seedIds.map((id) => String(id).toLowerCase());
+  if (prompt != null) {
+    const found = await operatorShortlist(prompt, input, phrase);
+    if (!found) return null;
+    phrase = found.phrase;
+    ids.push(...found.ids);
+  }
+  const shortlist = [...new Set(ids)].slice(0, PRODUCT_CHOICE_LIMIT);
+  if (!shortlist.length) return null;
+  // The picker never builds on an assumed amount or unit (the same rule as adjustStock's own refusal).
+  if (!String(input.unit ?? '').trim() || (input.quantity == null && input.set_total == null)) return { ...MISSING_AMOUNT_REFUSAL };
+  const rows = await db('products_catalog').whereIn('id', shortlist).where({ active: true });
+  const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
+  const fields = adjustmentFields(input);
+  const choices = [];
+  for (const id of shortlist.filter((candidate) => byId.has(candidate))) choices.push(await productChoiceRow(byId.get(id), fields));
+  return choices.some((choice) => choice.selectable) ? { phrase, choices } : null;
+}
+
+// ─── STOCK PROPOSAL TARGET (the route's one call per stock card) ───
+
+const NOT_WRITTEN = ' Nothing was written and no confirmation card was created.';
+// Refusals that mean "which product?" — the only ones the picker replaces.
+const PRODUCT_IDENTITY_REFUSALS = new Set(['product_ambiguous', 'product_not_found', 'product_unspecified',
+  'target_clarification_required', 'target_relationship_mismatch']);
+const PICKER_NOTE = 'Nothing was written. The card lists the products that could match and the operator picks one, then confirms a second card that shows the exact before and after. Do NOT retry this tool, do NOT pick a product yourself, and do NOT claim stock changed; tell the operator to pick the product on the card.';
+
+// The "choose the product" card body: its stored params (the shortlist is
+// pinned in _ib_product_choices), its preview, its display line and the
+// model note. null when the operator's words give no shortlist (the caller
+// keeps its refusal), or a { failed } refusal.
+async function productChoiceCard({ params, prompt = null, previewProductName = null, seedIds = [] }) {
+  const picked = await productChoicesFor({ input: params, prompt, previewProductName, seedIds });
+  if (!picked) return null;
+  if (picked.error) return { failed: true, modelResult: picked };
+  const stored = {};
+  for (const key of ['product_name', 'movement_type', 'quantity', 'set_total', 'unit', 'lot_number', 'reason', 'note']) {
+    if (params[key] !== undefined) stored[key] = params[key];
+  }
+  if (!stored.product_name && picked.phrase) stored.product_name = picked.phrase;
+  // Only the products the card lets the operator pick can ever be chosen.
+  stored._ib_product_choices = picked.choices.filter((choice) => choice.selectable).map((choice) => choice.product_id);
+  return {
+    params: stored,
+    preview: { preview: true, choose_product: true, tool: 'adjust_stock', movement_type: params.movement_type || null,
+      entered_quantity: params.set_total ?? params.quantity ?? null, entered_unit: params.unit || null,
+      product_choices: picked.choices },
+    displayParams: { product_words: picked.phrase || '(not stated)' },
+    note: PICKER_NOTE,
+  };
+}
+
+// Whether a product may still be picked: the same active filter the
+// shortlist is built with, read again at the moment of the choice.
+async function productIsActive(productId, q = db) {
+  return !!(await q('products_catalog').where({ id: productId, active: true }).first('id'));
+}
+
+// A product-identity refusal of adjust_stock becomes a picker card when the
+// operator's words qualify (productChoicesFor); otherwise null.
+async function offerProductChoice(toolName, refusal, params, prompt, previewProductName = null) {
+  if (toolName !== 'adjust_stock' || !PRODUCT_IDENTITY_REFUSALS.has(refusal.code)) return null;
+  const card = await productChoiceCard({ params, prompt, previewProductName });
+  if (!card) return null;
+  return card.failed ? card : { productChoice: card };
+}
+
+// A re-proposed adjust_stock card's product is the one the server stored or
+// listed (a picked product, a Show again card): the fresh preview must
+// resolve to exactly that product.
+function groundedStockTarget(preview, grounded) {
+  const previewId = preview?.product?.id;
+  if (previewId && grounded.productId && String(previewId).toLowerCase() === String(grounded.productId).toLowerCase()) return { productId: previewId };
+  return { failed: true, modelResult: { error: `This product no longer matches the earlier card.${NOT_WRITTEN}`, code: 'target_relationship_mismatch' } };
+}
+
+// What a stock write proposal acts on, from its (possibly failed) preview:
+//   { productId, requestId? }  the target to pin;
+//   { productChoice }          a "choose the product" card instead (adjust_stock);
+//   { failed, modelResult }    a refusal: no card, nothing written.
+// `grounded` (a re-proposal) skips every reading of operator text.
+async function stockProposalTarget({ toolName, params, preview, prompt, pageData, actorId, threadId, threadSeq, grounded = null }) {
+  if (grounded) return isToolFailure(preview) ? { failed: true, modelResult: preview } : groundedStockTarget(preview, grounded);
+  if (isToolFailure(preview)) return (await offerProductChoice(toolName, preview, params, prompt)) || { failed: true, modelResult: preview };
+  const target = await resolveInventoryWriteTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq });
+  if (!target.error) return target;
+  // A refused target leaves no card and writes nothing; the model is told so
+  // in plain words, so its reply can never read as a recorded change.
+  return (await offerProductChoice(toolName, target, params, prompt, preview?.product?.name || null))
+    || { failed: true, modelResult: { ...target, error: `${target.error}${NOT_WRITTEN}` } };
+}
+
 async function queryStock(input) {
   const { search, category, low_stock_only, untracked_only, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 50, 200);
@@ -1790,7 +1938,7 @@ async function getStockMovements(input) {
 async function getRestockQueue(input, actionContext) {
   const status = input.status || 'active';
   const { requests } = await require('../inventory-restock-queue').listRestockRequests({
-    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, requestId: input.request_id,
+    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, officeDetail: actionContext.isAdmin === true, requestId: input.request_id,
   });
   return { requests: requests.map(row => ({
     id: row.id, product_id: row.productId, product: row.productName, category: row.productCategory,
@@ -1814,11 +1962,38 @@ function inventoryWriteOptions(input, actionContext, source) {
 async function adjustStock(input, actionContext) {
   const resolved = await resolveProduct(input);
   if (resolved.error) return resolved;
+  // A quantity with no stated unit never changes stock: the writer would read it in the product's own inventory unit
+  // (fl oz), so "2 jugs" became 2 fl oz. Refused at the preview too, so no card and no owner-direct write is ever built
+  // on an assumed unit; the model asks the operator one short question and calls again with the unit they said.
+  if (!String(input.unit ?? '').trim()) {
+    const { name, inventory_unit: inventoryUnit, container_size: containerSize } = resolved.product;
+    const unitFact = inventoryUnit
+      ? ` ${name} is counted in ${inventoryUnit}${containerSize ? ` (container size ${containerSize})` : ''}.`
+      : containerSize ? ` ${name} has a container size of ${containerSize}.` : '';
+    // A call missing the amount as well asks for both in one refusal, so the operator is not asked twice.
+    if (input.quantity == null && input.set_total == null) {
+      return { success: false, code: 'unit_and_amount_required',
+        error: `The amount and the unit are missing, so no stock was changed.${unitFact} Ask the operator one short question for both the amount and its unit (for example "how much, and in what unit: gallons, fl oz?"), then call again with what they say. Never guess either.` };
+    }
+    return { success: false, code: 'unit_required',
+      error: `The unit is missing, so no stock was changed.${unitFact} Ask the operator one short question about the unit of the amount (for example "2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+  }
   const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
   if (!actionContext.confirmed) return inventory.previewStockAdjustment(resolved.product.id, fields);
-  const result = await inventory.adjustStock(resolved.product.id, fields,
-    inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  let result;
+  try {
+    result = await inventory.adjustStock(resolved.product.id, fields,
+      inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  } catch (err) {
+    // A refusal the writer raised itself (stale preview, missing approval,
+    // bad unit, saved count mismatch) rolled its transaction back, so the
+    // receipt says the stock was not written: a confirmed card that changed
+    // nothing must never read as done. Any other error keeps the generic path.
+    if (!err.isOperational && err.code !== 'approval_required') throw err;
+    return { success: false, written: false, code: err.code, preview_changed: err.code === 'preview_changed',
+      error: `${err.message} Stock was not written.` };
+  }
   return { success: true, state: 'completed', product: inventory.productIdentity(result.product),
     movement_type: result.movement.movement_type, stock_before: toNumber(result.movement.stock_before),
     stock_after: toNumber(result.movement.stock_after), change: toNumber(result.movement.metadata.delta),
@@ -1847,6 +2022,23 @@ async function createRestockRequest(input, actionContext) {
 }
 
 async function updateRestockRequest(input, actionContext) {
+  // A received amount with no stated unit never changes stock: the writer would read it in the request's saved unit
+  // (or the product's inventory unit), so "received 3" became 3 of whatever the request said. Refused at the preview too,
+  // so no card and no owner-direct write is built on an assumed unit; the model asks the operator one short question and
+  // calls again with the unit they said. Receive with NO amount stays as it is: it takes the ordered or requested amount
+  // in the request's own unit, which is the recorded fact and not a guess.
+  if (input.action === 'receive' && input.quantity != null && !String(input.unit ?? '').trim()) {
+    const request = await db('product_restock_requests').where({ id: input.request_id }).first('requested_quantity', 'unit');
+    // No request found: let the writer report the normal request_not_found error.
+    if (request) {
+      const requested = toNumber(request.requested_quantity);
+      const requestFact = requested != null && requested > 0
+        ? ` The request is for ${requested}${request.unit ? ` ${request.unit}` : ''}.`
+        : request.unit ? ` The request is in ${request.unit}.` : '';
+      return { success: false, code: 'unit_required',
+        error: `The unit is missing, so no stock was changed.${requestFact} Ask the operator one short question about the unit of the amount received (for example "received 2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+    }
+  }
   const fields = { action: input.action, quantity: input.quantity, unit: input.unit, note: input.note };
   if (!actionContext.confirmed) return inventory.previewRestockAction(input.request_id, fields);
   const result = await inventory.updateRestockRequest(input.request_id, fields,
@@ -1862,4 +2054,5 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT,
+  productChoiceCard, stockProposalTarget, productIsActive };

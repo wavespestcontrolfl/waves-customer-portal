@@ -1030,6 +1030,14 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
     try {
       const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
       impact = await buildCancellationImpact(req.customer.id, families);
+      // The scheduled-visit fee the commit WILL charge on a pulled visit that
+      // is already inside its late-cancellation window (card hold or /secure
+      // appointment card) — the same preview the office cancel dialog shows,
+      // so the customer sees it BEFORE confirming, not after.
+      if (impact) {
+        const { customerLateFeeFacts } = require('../services/cancellation-resolution/visit-fees');
+        Object.assign(impact, await customerLateFeeFacts(impact.pulledVisitKeys));
+      }
     } catch (impactErr) {
       logger.warn(`[cancel-resolution] impact build failed for ${req.customer.id}: ${impactErr.message}`);
     }

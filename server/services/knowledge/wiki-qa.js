@@ -67,7 +67,17 @@ const ROUTING_SCHEMA = {
 // with GATE_KB_SPECIES_QA off the prompt is byte-identical to before.
 const SPECIES_RULE = ' Articles titled "SPECIES CATALOG" are the owner-approved species catalog: where they disagree with another article about what an organism is, how serious it is, or its safety, the catalog wins.';
 
-// NOTE: WikiQA.query stays on FLAGSHIP, not DEEP — it serves interactive
+// Staff callers (STAFF_SOURCES) ride the ROUTINE tier (owner 2026-10-04);
+// every customer-facing or unknown source stays on highStakes / FLAGSHIP,
+// because the portal assistant and the lead agent repeat this answer to a
+// customer. Two lane ids so the ledger and the Models tab show both.
+function qaLaneFor(source) {
+  return STAFF_SOURCES.has(source)
+    ? { policy: MODELS.TEXT_POLICIES.routineAnswer, laneId: 'wiki_qa_staff' }
+    : { policy: MODELS.TEXT_POLICIES.highStakes, laneId: 'wiki_qa' };
+}
+
+// NOTE: WikiQA.query stays off DEEP — it serves interactive
 // surfaces (tech field lookup, admin Q&A, assistant tools) where a
 // minutes-long DEEP turn is unacceptable. The DEEP tier writes/audits the
 // wiki content offline; this path just reads it back fast.
@@ -97,6 +107,7 @@ class WikiQA {
     // GATE_KB_CUSTOMER_AUDIENCE: a customer-facing caller reads only the
     // customer-safe categories, on every knowledge_base read below.
     const customerOnly = this.customerAudienceOnly(context.source);
+    const lane = qaLaneFor(context.source);
 
     // Build live index directly from knowledge_base (not the compiled _summaries.md)
     const indexQuery = db('knowledge_base')
@@ -128,15 +139,15 @@ class WikiQA {
     // (GATE_KB_SPECIES_QA; [] when off).
     const species = await this.speciesContext(question, context.source, execution);
 
-    // Step 1: Route to relevant articles (FLAGSHIP first, Sol on a miss)
+    // Step 1: Route to relevant articles (the lane's Claude tier first, Sol on a miss)
     const knownPaths = new Set(indexRows.map((r) => r.path));
     let paths = [];
     // Nothing to route over (customer caller, empty allowlist): skip the call.
     const routable = indexRows.length > 0;
     try {
       if (!routable) throw new Error('empty_index');
-      const routing = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
-        laneId: 'wiki_qa',
+      const routing = await dispatchWithFallback(lane.policy, {
+        laneId: lane.laneId,
         text: `Given this question about Waves Pest Control, which wiki articles should I read? List the file paths (max 8).
 
 Question: ${question}
@@ -201,10 +212,10 @@ ${liveIndex}`,
     const articles = [...kbArticles, ...species];
     const refs = [...paths, ...species.map((a) => a.path)];
 
-    // Step 3: Answer with full context (FLAGSHIP first, Sol on a miss; a
+    // Step 3: Answer with full context (the lane's Claude tier first, Sol on a miss; a
     // two-leg miss throws like the SDK path did)
-    const answered = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
-      laneId: 'wiki_qa',
+    const answered = await dispatchWithFallback(lane.policy, {
+      laneId: lane.laneId,
       system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.${species.length ? SPECIES_RULE : ''}${COVERAGE_RULE}`,
       text: `Question: ${question}
 

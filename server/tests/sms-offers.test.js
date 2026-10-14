@@ -60,6 +60,24 @@ describe('label resolution', () => {
   });
 });
 
+describe('website-engine offers (GATE_MULTI_TECH_TEXT_TIMES, Codex r3 on #6073)', () => {
+  test('the ledger kind for every offer source, read from the shared constants: the website engine is a book_new offer, never "unknown"', () => {
+    const S = require('../services/sms-offer-sources');
+    expect(offers.KIND_BY_SOURCE).toEqual({
+      [S.SCHEDULER_OFFER_SOURCE]: 'move_visit',
+      [S.ESTIMATE_OFFER_SOURCE]: 'book_estimate',
+      [S.BOOK_OFFER_SOURCE]: 'book_new',
+      [S.WEBSITE_OFFER_SOURCE]: 'book_new',
+    });
+  });
+
+  test('a website-engine offer records its funnel service (and its estimate, when linked), no visit', () => {
+    const snapshot = { lookup: { source: 'website_engine', serviceKey: 'lawn_care', estimateId: 'est-1', customerId: CUSTOMER_ID, city: 'Bradenton' }, quotedWindows: TWO_WINDOWS };
+    const { row } = offers.buildOfferRow({ decision: decision(snapshot, BODY), outgoingBody: BODY, providerMessageId: 'SM1', to: '+1 (941) 555-0100', sentAt: SENT_AT, drafter });
+    expect(row).toMatchObject({ kind: 'book_new', scheduled_service_id: null, estimate_id: 'est-1', service_key: 'lawn_care', status: 'open' });
+  });
+});
+
 describe('buildOfferRow', () => {
   test('a visit offer records the visit and every slot the sent text carried', () => {
     const snapshot = { lookup: { source: 'scheduler', scheduledServiceId: VISIT_ID, customerId: CUSTOMER_ID, city: 'Bradenton' }, quotedWindows: TWO_WINDOWS };

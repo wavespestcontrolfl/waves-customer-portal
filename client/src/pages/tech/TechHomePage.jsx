@@ -24,9 +24,8 @@
 //   pending -> en_route -> on_site -> completed
 //                                \--> skipped (with reason)
 //
-// The shell's tech-field-workspace flag selects the approved light field
-// surface. Existing embedded forms retain their own dark palette; the
-// flag-off route remains available during the staged integration.
+// Renders inside TechFieldShell (the field workspace in the Waves Admin
+// look).
 //
 // Audit focus:
 // - State transitions: confirm a tech can't accidentally skip an
@@ -44,8 +43,10 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useR
 import { useFieldPortalClass } from '../../components/tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
-import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import TechFieldHome from './TechFieldHome';
+import TechHeldVisits from './TechHeldVisits';
+import TechScheduleChanges from './TechScheduleChanges';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
@@ -54,10 +55,17 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
+import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
+import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
+import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
+import { onSiteTimeOf } from '../../lib/on-site-time';
+import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
+import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
+import useSavedFastCompletions, { projectReportTool, savedAtLabel, withSavedCompletions } from '../../hooks/useSavedFastCompletions';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -68,11 +76,14 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
-import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
-import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
+import {
+  closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
+  stationMapKnownOff,
+} from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
-import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
+import OnboardingCard from '../../components/staffDocuments/OnboardingCard';
+import { recordlessVisitNeedsCloseout, shortAddress } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
@@ -83,23 +94,18 @@ const ProjectDetail = lazy(() =>
   import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
 );
 
-const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
+// The Waves Admin field palette (tech-field.css values) for the inline-styled
+// timecard card, Quick Move sheet and project picker below.
+const FIELD = {
+  bg: '#fafaf9',
+  card: '#ffffff',
+  border: '#d6d3d1',
+  ink: '#1c1917',
+  text: '#1c1917',
+  muted: '#57534e',
 };
 
 const API = import.meta.env.VITE_API_URL || '';
-
-// Pest control services get the lightweight ServiceRecapModal instead of
-// the heavy CreateProjectModal. completionProfile.category is the
-// services-table backed signal (the schedule API attaches it).
-function isPestControlService(service) {
-  return service?.completionProfile?.category === 'pest_control';
-}
 
 // Fast Complete (PR C, GATE_RESERVICE_FAST_COMPLETE): a pest re-service
 // (free between-visit callback, completionProfile.serviceKey ===
@@ -110,6 +116,7 @@ function isPestControlService(service) {
 // Gate off, or any other service, is byte-identical to today's routing.
 function isReserviceFastCompleteEligible(service) {
   return service?.reserviceFastCompleteEnabled === true
+    && !carriesAreaAddOnWork(service)
     && service?.completionProfile?.serviceKey === 'pest_re_service'
     // A completed (or otherwise closed) re-service stays on the recap
     // editor, which updates an existing record; /complete would only
@@ -117,127 +124,16 @@ function isReserviceFastCompleteEligible(service) {
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
-// Fast Complete report flow (GATE_FAST_COMPLETE_REPORT, owner "ok go"
-// 2026-10-01): with `fastCompleteReportEnabled` on the schedule row, every
-// open untyped pest visit, a re-service or a regular visit, opens the
-// one-screen sheet in its report flow (talk, generate the AI report, read
-// it, trace, send; billed and texted as the full form). Off, pest visits
-// route exactly as before.
-function isFastCompleteReportEligible(service) {
-  return service?.fastCompleteReportEnabled === true
-    && isPestControlService(service)
-    // The report flow traces a perimeter: a visit traced as an outline (a
-    // yard treatment such as tick control, under trace eligibility) keeps its
-    // existing path, whose tracer draws that outline (codex local r15).
-    && service?.traceVariant !== 'outline'
-    // A linked-project lookup that failed is not "no project": the visit
-    // keeps its existing path (a lane visit filed under pest control would
-    // otherwise fall through to here and complete on its own record).
-    && service?.linkedProjectLookupFailed !== true
-    // A closed visit stays on the recap editor, which updates the existing
-    // record (/complete would answer service_already_completed).
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
+// Fast Complete report flow (GATE_FAST_COMPLETE_REPORT): isFastCompleteReportEligible
+// lives in lib/pest-fast-complete.js, shared with admin Dispatch (owner 2026-10-05).
 
-// Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
-// visit whose lane the reader reads (bed bug, fire ant, tick, bee & wasp,
-// mud dauber, mosquito; the schedule row's `laneVoiceFillEnabled`) opens the
-// one-screen sheet in the report flow, its own record read from the note,
-// while the report flow is on. Off, it opens the project editor as before,
-// and so does a visit that completes through a project (its profile says
-// so, a project is already linked, or the profile could not be read).
-function isLaneReportEligible(service) {
-  return service?.laneVoiceFillEnabled === true
-    && service?.fastCompleteReportEnabled === true
-    && completesOnOwnRecord(service);
-}
-// A visit the report-flow sheet may complete on its own record: open, its
-// profile and linked-project reads answered, and not completing through a
-// project.
-function completesOnOwnRecord(service) {
-  const profile = service?.completionProfile;
-  return service?.completionProfileLookupFailed !== true
-    && service?.linkedProjectLookupFailed !== true
-    && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
-// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
-// visit whose form the reader reads (cockroach, the roach knockdowns, flea,
-// pest inspection, mosquito event, wildlife trapping, rodent exclusion,
-// sanitation and inspection; the schedule row's `typedReportFlowEnabled`)
-// opens the one-screen sheet in the report flow, its own record read from
-// the note, in place of the Dispatch typed form. Off, it opens the typed
-// form as before, and so does a visit closed out as a whole visit (its
-// packet completes every service on it), a visit that completes through a
-// project, a row whose profile or form could not be read, or a closed visit.
-// A station visit (termite or rodent bait stations, a trap check) opens the
-// sheet only once the tech's station map (station-map-v1) is known to be off:
-// with it on, the typed form records a check for every station and the sheet
-// carries no map (Codex P1 on #5638).
-function isTypedReportEligible(service, { stationMapOff = false } = {}) {
-  const type = service?.completionProfile?.findingsType;
-  return service?.typedReportFlowEnabled === true
-    && !!type && service?.findingsSchema?.type === type
-    && (stationMapOff || !Object.hasOwn(STATION_TYPE_PROGRAM, type))
-    && !service?.visitCloseoutPacket && !closesOutAsVisit(service)
-    && completesOnOwnRecord(service);
-}
-// The inspection credit a typed inspection visit offers on the sheet, as the
-// office form offers it (SchedulePage isInspectionVisit): an inspection
-// profile, or the typed rodent and termite inspection keys, while the
-// schedule row says a credit is available. The server re-checks.
-function offersInspectionCredit(service) {
-  const profile = service?.completionProfile;
-  return (profile?.category === 'inspection' || ['rodent_inspection', 'termite_inspection'].includes(profile?.serviceKey))
-    && service?.inspectionCreditAvailable === true;
-}
-const laneKeyOf = (service) => resolveSpecialtyServiceKey({
-  serviceKey: service?.completionProfile?.serviceKey,
-  serviceType: service?.serviceTypeRaw || service?.serviceType || service?.service_type,
-});
-
-// What the sheet reads of the report flow from the row: whether it runs, for
-// a lane visit its lane and for a typed visit its form (each read from the
-// note), and no trace on the sheet for either (a trace stays on the full
-// form).
-function reportFlowFields(service, { stationMapOff = false } = {}) {
-  const laneFlow = isLaneReportEligible(service);
-  const typedFlow = isTypedReportEligible(service, { stationMapOff });
-  return {
-    reportFlow: isFastCompleteReportEligible(service) || laneFlow || typedFlow,
-    laneFlow,
-    laneKey: laneFlow ? laneKeyOf(service) : null,
-    typedFlow,
-    typedType: typedFlow ? service.completionProfile.findingsType : null,
-    typedSchema: typedFlow ? service.findingsSchema : null,
-    inspectionCredit: typedFlow && offersInspectionCredit(service),
-    traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
-  };
-}
-
-// Fast Complete for Tree & Shrub (GATE_TS_FAST_COMPLETE plus the per-tech
-// flag): `treeShrubFastCompleteEnabled` rides the schedule payload per
-// service, true only when the gate is live AND this tech has the flag. An
-// open tree & shrub visit then opens the one-screen sheet instead of the
-// Dispatch typed-completion deep link. Flag off, or any other service, routes
-// exactly as before.
-function isTreeShrubFastCompleteEligible(service) {
-  return service?.treeShrubFastCompleteEnabled === true
-    && service?.completionProfile?.findingsType === 'tree_shrub'
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
+// The lane (GATE_LANE_VOICE_FILL) and typed (GATE_TYPED_VOICE_FILL) report-flow
+// rules, and the fields the sheet reads from the row, live in
+// lib/pest-fast-complete.js too, shared with admin Dispatch (owner 2026-10-08).
 
 // Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
-// `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
-// open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
-// TYPED one_time_lawn_treatment visit) then opens the one-screen sheet instead
-// of the Dispatch typed-completion deep link. Gate off, or any other service,
-// routes exactly as before.
-function isLawnReserviceFastCompleteEligible(service) {
-  return service?.lawnReserviceFastCompleteEnabled === true
-    && service?.completionProfile?.serviceKey === 'lawn_re_service'
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
+// isLawnReserviceFastCompleteEligible lives in lib/lawn-fast-complete.js, shared
+// with admin Dispatch (owner 2026-10-08).
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
 // findings schema) complete through the Dispatch completion form — neither
@@ -245,10 +141,6 @@ function isLawnReserviceFastCompleteEligible(service) {
 // 422s appointment-managed types) is the right surface.
 function usesDispatchCompletion(service) {
   return !!service?.completionProfile?.findingsType || closesOutAsVisit(service);
-}
-// A visit closed out as a whole (every service on it in one packet).
-function closesOutAsVisit(service) {
-  return !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
 }
 
 // C4 (universal one-time services, ratified Q9): instead of an alert telling
@@ -267,6 +159,15 @@ function openTypedCompletion(service) {
     return;
   }
   window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
+}
+
+// The appointment details sheet's Dispatch-only destinations (edit, checkout,
+// treatment plan, book next) reopen the same sheet on Dispatch, which carries
+// them: ?appointment= is the detail-sheet deep link DispatchPageV2 consumes,
+// on the visit's own day.
+function openDispatchDetails(service) {
+  const date = String(service?.scheduledDate || '').split('T')[0] || etDateString();
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(date)}&appointment=${encodeURIComponent(service.id)}`);
 }
 
 // adminFetch-style helper for the tech portal: bearer-token fetch against
@@ -301,7 +202,8 @@ async function techRequest(path, options = {}) {
   const res = await fetch(`${API}/api${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      // A FormData body (a recorded clip) sets its own multipart boundary.
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `Bearer ${token}`,
       ...(options.headers || {}),
     },
@@ -328,13 +230,6 @@ function socketOrigin() {
   } catch {
     return undefined;
   }
-}
-
-function getGreeting() {
-  const h = new Date().getHours();
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
 }
 
 // Only a payload that actually carries a route may be rendered as one or
@@ -370,34 +265,13 @@ function serviceTechnicianId(service) {
   return service?.technicianId || service?.technician_id || service?.tech_id || '';
 }
 
-// Mirrors server-side PRE_EN_ROUTE in tech-track.js. Tapping outside
-// these states is guaranteed to 409, so disable the button rather
-// than letting it look tappable. Re-tap on en_route is also locked
-// (server treats it idempotently, but no point looking enabled).
-import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, stopHasCustomerSentPhotos, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
-
-const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
-const ON_SITE_ELIGIBLE = new Set(['en_route']);
-
-// /tech/messages and /tech/quick-invoice are both dead — neither has
-// an underlying feature. Dropped from QUICK_ACTIONS until those
-// surfaces actually exist (matches the /tech/messages drop in #355).
-const QUICK_ACTIONS = [
-  { icon: '📅', label: "Today's Route", path: '' },
-  // Estimator routes into the admin pipeline builder — owner-only under the
-  // 2026-08-25 role lockdown, hidden for technician logins.
-  { icon: '📋', label: 'Field Estimator', path: '/estimate', adminOnly: true },
-  { icon: '🌱', label: 'Lawn Diagnostic', path: '/lawn-diagnostic' },
-  { icon: '📸', label: 'Social Post', path: '/social-post' },
-  { icon: '📖', label: 'Protocols & SOPs', path: '/protocols' },
-  { icon: '🗂️', label: 'Project Report', action: 'create-project' },
-];
+import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 export default function TechHomePage({ section = 'today' }) {
   const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
   const base = useTechBasePath();
-  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
+  const { documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null, techRole = null } = useOutletContext() || {};
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
   const staff = staffProfile?.id ? staffProfile : getAdminUser();
@@ -405,7 +279,9 @@ export default function TechHomePage({ section = 'today' }) {
   const staffRef = useRef(staff);
   staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
-  const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
+  const selectedVisitKey = searchParams.get('visit');
+  // The inline schedule-change feed has loaded (TechScheduleChanges onReady).
+  const [scheduleFeedReady, setScheduleFeedReady] = useState(false);
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
   const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
@@ -468,16 +344,26 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
+  // The appointment details sheet (quick move, cancel, reschedule, price
+  // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
+  // the same sheet Dispatch opens, over the same /admin/schedule row.
+  const [detailService, setDetailService] = useState(null);
+  // A fast sheet left mounted (suspended) behind the details sheet; plain
+  // Close returns to it, a change to the visit closes it (owner 2026-10-09).
+  const fastSheetBehindDetails = !!(detailService && (fastCompleteService || treeShrubFastService || lawnReserviceFastService));
+  const closeFastSheetsBehindDetails = () => {
+    setFastCompleteService(null);
+    setTreeShrubFastService(null);
+    setLawnReserviceFastService(null);
+  };
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
   const [rainChance, setRainChance] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rainChance : null));
-  // Visit Brief accordion: one stop expanded at a time (keyed by the
-  // stop's primary service id) + a per-stop session cache of the two
-  // detail fetches (estimate-source + visit-brief).
-  const [expandedStopId, setExpandedStopId] = useState(null);
+  // Per-stop session cache of the open visit's two detail fetches
+  // (estimate-source + visit-brief), keyed by the stop's primary service id.
   const [stopDetail, setStopDetail] = useState({});
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
@@ -485,11 +371,10 @@ export default function TechHomePage({ section = 'today' }) {
   // The tech's station map: a station visit opens the sheet only once the
   // flag has loaded and is off (isTypedReportEligible).
   const stationMap = useFeatureFlagReady('station-map-v1');
-  const stationMapOff = stationMap.ready && !stationMap.enabled;
-  // The verified profile's name first: the greeting and the timecard
-  // signature pre-fill must not fall back to a stale or missing stored copy.
+  const stationMapOff = stationMapKnownOff(stationMap);
+  // The verified profile's name first: the timecard signature pre-fill must
+  // not fall back to a stale or missing stored copy.
   const techName = staff?.name || getAdminDisplayName('Tech');
-  const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
   // Use it to scope `schedule` to this tech's own jobs — /api/admin/schedule
   // returns the whole route board (not tech-filtered), so without this
@@ -686,8 +571,12 @@ export default function TechHomePage({ section = 'today' }) {
   const myServices = currentTechId
     ? schedule.filter((s) => String(serviceTechnicianId(s)) === String(currentTechId))
     : [];
-  const completed = myServices.filter((s) => s.status === 'completed').length;
-  const total = myServices.length;
+  // This device's saved Fast Complete attempts (useSavedFastCompletions).
+  const saved = useSavedFastCompletions({
+    operatorId: staffIdForDevice,
+    schedule,
+    openSheets: [fastCompleteService, treeShrubFastService, lawnReserviceFastService],
+  });
   // "Next Stop" = first non-terminal service in the day's route.
   // Skipping past completed/skipped/cancelled/no_show means a tech with
   // an earlier dead job (skipped or no-showed) sees the actual upcoming
@@ -703,27 +592,6 @@ export default function TechHomePage({ section = 'today' }) {
   const fieldNextStop = stops.find((stop) => stop.services.some((service) => service.status === 'on_site'))
     || stops.find((stop) => stop.services.some((service) => service.status === 'en_route'))
     || nextVisitStop;
-  const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
-  const nextStopSummary = stopSummaryLabel(nextVisitStop);
-  // Grouped stop: window = union of members; alerts = every member's, deduped.
-  const nextStopWindowLabel = nextVisitStop && nextVisitStop.isVisit
-    ? serviceWindowLabel(stopWindow(nextVisitStop))
-    : serviceWindowLabel(nextStop);
-  const nextStopAlerts = nextVisitStop ? stopPropertyAlerts(nextVisitStop) : [];
-  // A grouped stop whose live members are not all at the primary's status
-  // (a fan-out that did not finish — codex #3603 r2): offer Sync Stop,
-  // which re-runs the primary's own transition; the server's fan-out is
-  // idempotent, so the lagging siblings catch up. Divergence-driven, so it
-  // survives reloads and does not depend on having seen the 409.
-  const stopOutOfSync = Boolean(
-    nextVisitStop && nextVisitStop.isVisit && nextStop
-      && nextVisitStop.services.some((s) => ['en_route', 'on_site'].includes(s.status))
-      && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status)
-        && (s.status !== nextStop.status
-          // Status matches but the customer-visible tracker lags (a sibling
-          // tracker write failed after the status commit — codex r3).
-          || (s.trackState && nextStop.trackState && s.trackState !== nextStop.trackState))),
-  );
   // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
   // that an admin/GPS signal already put on site pulls the whole stop to
   // on_site; the server's on-site path accepts an en_route primary.
@@ -800,16 +668,6 @@ export default function TechHomePage({ section = 'today' }) {
   const onStopBusyChange = useCallback((stop, busy) => {
     setBusyStopId((cur) => (busy ? stop.primary.id : (cur === stop.primary.id ? null : cur)));
   }, []);
-  const toggleStop = useCallback((stop) => {
-    if (busyStopId) return;
-    const id = stop.primary.id;
-    const expanding = expandedStopId !== id;
-    setExpandedStopId(expanding ? id : null);
-    // Refetch on EVERY expand (not just the first): a gate code change, a
-    // settled payment, or a billing-posture change mid-day must show on
-    // reopen — the previous data stays rendered while the refresh loads.
-    if (expanding) loadStopDetail(stop);
-  }, [busyStopId, expandedStopId, loadStopDetail]);
   useEffect(() => {
     if (section === 'today' && selectedVisit && !scheduleError) void loadStopDetail(selectedVisit);
   }, [section, selectedVisitKey, schedule, scheduleError, loadStopDetail]);
@@ -880,13 +738,12 @@ export default function TechHomePage({ section = 'today' }) {
     if (isLaneReportEligible(service)) setFastCompleteService(service);
     else openProjectOrContinue(service);
   }, [openProjectOrContinue]);
-  const projectServices = fieldWorkspace
-    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
-        !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
-        || (!TERMINAL_STATUSES_VISIT.has(service.status)
-          && !['sent', 'closed'].includes(service.linkedProject?.status))
-      ))
-    : myServices;
+  const projectServices = withSavedCompletions((selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
+    !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
+    || saved.serviceIds.has(String(service.id))
+    || (!TERMINAL_STATUSES_VISIT.has(service.status)
+      && !['sent', 'closed'].includes(service.linkedProject?.status))
+  )), { saved, myServices, scheduleError, selectedVisitKey });
   // Shared by every entry point that would otherwise call setRecapService
   // directly: a pest re-service under the gate opens the one-screen Fast
   // Complete sheet instead of the full recap modal. Everything else routes
@@ -907,22 +764,36 @@ export default function TechHomePage({ section = 'today' }) {
     else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
     else openTypedCompletion(service);
   }, [stationMapOff]);
+  // A saved attempt on this device opens the sheet that made it, before any
+  // normal eligibility decision: a successful /complete may already have made
+  // the row terminal while its saved body still needs the same-key retry.
+  const { resolveTap } = saved;
+  const openServiceReport = useCallback(async (service) => {
+    const tap = await resolveTap(service);
+    if (!tap) return;
+    if (tap.kind) {
+      const savedSheet = { tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService }[tap.kind] || setFastCompleteService;
+      savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
+      return;
+    }
+    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
+    // Same routing for the row, the picker and the quick action: a cut-over
+    // typed job must not open CreateProjectModal.
+    if (usesDispatchCompletion(service)) openTypedVisit(service);
+    else if (isPestControlService(service)) openPestCompletion(service);
+    else openProjectOrLane(service);
+  }, [resolveTap, openTypedVisit, openPestCompletion, openProjectOrLane]);
+  const { rescanIfUnread } = saved;
   const handleProjectQuickAction = useCallback(() => {
+    rescanIfUnread();
+    // With nothing to open, a tap after a failed read only scans again.
+    if (projectServices.length === 0) return;
     if (projectServices.length === 1) {
-      const only = projectServices[0];
-      // Same routing as the row/picker handlers — a cut-over typed job must
-      // not open CreateProjectModal through the quick action either.
-      if (usesDispatchCompletion(only)) {
-        openTypedVisit(only);
-      } else if (isPestControlService(only)) {
-        openPestCompletion(only);
-      } else {
-        openProjectOrLane(only);
-      }
+      openServiceReport(projectServices[0]);
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrLane, openPestCompletion, openTypedVisit]);
+  }, [projectServices, openServiceReport, rescanIfUnread]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -932,24 +803,25 @@ export default function TechHomePage({ section = 'today' }) {
     if (navigationBusy) return;
     setSearchParams((params) => { params.delete('visit'); return params; });
   };
-  const openServiceReport = (service) => {
-    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
-    if (usesDispatchCompletion(service)) openTypedVisit(service);
-    else if (isPestControlService(service)) openPestCompletion(service);
-    else openProjectOrLane(service);
-  };
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
-    { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
+    projectReportTool({ saved, projectServices, loading, onClick: handleProjectQuickAction }),
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
     ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
-  if (!fieldWorkspace && section !== 'today') return <Navigate to={base} replace />;
-
   return (
-    <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
+    <div style={{ margin: '0 auto' }}>
       <GeofenceArrivalPrompt
+        // The field workspace's Today overview shows schedule changes in the
+        // page (TechScheduleChanges) once its feed has loaded; a feed that has
+        // not loaded keeps the visit cards in the flow (pre-push audit P1,
+        // Codex #5786 P2). The cards sit in the page on Today; on Tools, More
+        // and an open visit only the arrival cards float and one line points
+        // to Today (owner 2026-10-05).
+        inlineScheduleChanges={section === 'today' && !selectedVisitKey && scheduleFeedReady}
+        placement={section === 'today' && !selectedVisitKey ? 'page' : 'elsewhere'}
+        navigationBusy={navigationBusy}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
@@ -963,15 +835,18 @@ export default function TechHomePage({ section = 'today' }) {
           });
         }}
       />
-      {fieldWorkspace ? (
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={[routeNotice, saved.readNotice].filter(Boolean).join(' ')} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
-          followThrough={<TechFollowThroughCards fieldWorkspace />}
+          followThrough={<TechFollowThroughCards />}
+          scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
+          heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
+          timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
+          onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
           timekeeping={<>
-            <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
+            <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/documents${visitSearch}`}>Staff documents</Link></div>}
             {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
@@ -992,6 +867,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
                 onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
+                onGateChanged={fetchSchedule}
               /></div>}
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
@@ -1004,311 +880,6 @@ export default function TechHomePage({ section = 'today' }) {
             </TechFieldVisit>
           ) : null}
         />
-      ) : <>
-      {/* Greeting */}
-      <h1 style={{
-        fontSize: 22, fontWeight: 700, margin: '0 0 4px',
-        fontFamily: "'Montserrat', sans-serif",
-        color: DARK.text,
-      }}>
-        {getGreeting()}, {firstName}
-      </h1>
-      <p style={{ fontSize: 14, color: DARK.muted, margin: '0 0 20px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-        {/* Exception-based rain chip: renders only at ≥40% (amber), ≥50 red.
-            Same 🌧 badge language as the RainOutSheet's per-option badges. */}
-        {rainChance != null && rainChance >= 40 && (
-          <span style={{
-            fontSize: 14, fontWeight: 700, padding: '3px 10px', borderRadius: 12,
-            color: rainChance >= 50 ? '#ef4444' : '#f59e0b',
-            border: `1px solid ${rainChance >= 50 ? '#ef4444' : '#f59e0b'}`,
-            background: rainChance >= 50 ? '#ef44441a' : '#f59e0b1a',
-          }}>
-            🌧 {rainChance}% rain today
-          </span>
-        )}
-      </p>
-
-      {/* Today's Stats */}
-      <div style={{
-        display: 'flex', gap: 12, marginBottom: 20,
-      }}>
-        <StatCard label="Services" value={total} />
-        <StatCard label="Completed" value={completed} color="#22c55e" />
-      </div>
-
-      {/* Field Assistant */}
-      <TechIntelligenceBar />
-
-      <TechTimeTrackingCard nextStop={nextStop} />
-      <TechFollowThroughCards />
-
-      {routeNotice && !scheduleError && (
-        <div role="status" style={{
-          background: '#f59e0b22', border: '1px solid #f59e0b', color: '#fbbf24',
-          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
-        }}>
-          <div style={{ marginBottom: 8 }}>{routeNotice}</div>
-          <button type="button" onClick={fetchSchedule} disabled={refreshing} style={{
-            border: '1px solid #f59e0b', background: 'transparent', color: '#fbbf24',
-            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: refreshing ? 'default' : 'pointer', opacity: refreshing ? 0.6 : 1,
-          }}>Try again</button>
-        </div>
-      )}
-      {scheduleError && (
-        <div role="alert" style={{
-          background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
-          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
-        }}>
-          <div style={{ marginBottom: 8 }}>{scheduleError}</div>
-          <button type="button" onClick={fetchSchedule} style={{
-            border: '1px solid #ef4444', background: 'transparent', color: '#ef4444',
-            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: 'pointer',
-          }}>Retry route</button>
-        </div>
-      )}
-
-      {/* Quick Actions */}
-      <h2 style={{
-        fontSize: 14, fontWeight: 700, color: DARK.muted, margin: '0 0 10px',
-        fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
-      }}>Quick Actions</h2>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr 1fr',
-        gap: 10,
-        marginBottom: 20,
-      }}>
-        {QUICK_ACTIONS
-          .filter((action) => action.path !== '/social-post' || socialPostEnabled)
-          .filter((action) => !action.adminOnly || currentRole === 'admin')
-          .map((action) => (
-          <button
-            key={action.label}
-            onClick={() => {
-              if (action.action === 'create-project') {
-                handleProjectQuickAction();
-              }
-              else if (action.path !== undefined) navigate(`${base}${action.path}`);
-            }}
-            style={{
-              background: DARK.card,
-              border: `1px solid ${DARK.border}`,
-              borderRadius: 12,
-              padding: '16px 8px',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: 6,
-              cursor: 'pointer',
-              transition: 'border-color 0.2s',
-            }}
-          >
-            <span style={{ fontSize: 26 }}>{action.icon}</span>
-            <span style={{
-              fontSize: 14, fontWeight: 600, color: DARK.text, textAlign: 'center',
-              fontFamily: "'Nunito Sans', sans-serif",
-            }}>{action.label}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Next Stop */}
-      <h2 style={{
-        fontSize: 14, fontWeight: 700, color: DARK.muted, margin: '0 0 10px',
-        fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
-      }}>Next Stop</h2>
-
-      {loading ? (
-        <div style={{
-          background: DARK.card, borderRadius: 12, padding: 24,
-          border: `1px solid ${DARK.border}`, textAlign: 'center', color: DARK.muted,
-        }}>Loading schedule...</div>
-      ) : nextStop ? (
-        <>
-        <div style={{
-          background: DARK.card,
-          borderRadius: 12,
-          border: `1px solid ${DARK.border}`,
-          padding: 16,
-          marginBottom: 16,
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
-            <div>
-              <p style={{ fontSize: 16, fontWeight: 700, color: DARK.text, margin: 0 }}>
-                {nextStop.customer_name || nextStop.customerName || 'Customer'}
-              </p>
-              <p style={{ fontSize: 14, color: DARK.muted, margin: '4px 0 0' }}>
-                {nextStop.address || nextStop.service_type || 'Service'}
-              </p>
-              {nextStopSummary && (
-                <div data-testid="visit-stop-summary" style={{ marginTop: 6 }}>
-                  <p style={{ fontSize: 14, fontWeight: 600, color: DARK.teal, margin: 0 }}>{nextStopSummary}</p>
-                  {nextVisitStop.services.map((s) => (
-                    <p key={s.id} style={{ fontSize: 14, color: DARK.text, margin: '2px 0 0' }}>
-                      • {s.serviceType || s.service_type || 'Service'}
-                      {TERMINAL_STATUSES_VISIT.has(s.status) ? <span style={{ color: DARK.muted }}> · {String(s.status).replace(/_/g, ' ')}</span> : null}
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
-            <span style={{
-              fontSize: 14, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-              background: '#0ea5e920', color: DARK.teal,
-            }}>
-              {nextStopWindowLabel || 'Pending'}
-            </span>
-          </div>
-          {/* Property alerts — the server compiles gate codes, pets, chemical
-              sensitivities, access/parking notes, and the appointment note
-              into propertyAlerts (admin-schedule.js day view). Same data the
-              dispatch board chips show; without this the tech had to ask the
-              Intelligence Bar for the gate code. Objects here ({type, text});
-              tolerate plain strings for the dispatch-shaped payload. */}
-          {nextStopAlerts.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              {nextStopAlerts.map((a, i) => {
-                const text = typeof a === 'string' ? a : a?.text;
-                if (!text) return null;
-                const isChemical = a?.type === 'chemical';
-                // Money flag: nothing chargeable behind this customer, so
-                // payment must be collected before leaving the property.
-                const isNoCard = a?.type === 'no_card_on_file';
-                const accent = isChemical ? '#ef4444' : isNoCard ? '#f59e0b' : null;
-                return (
-                  <div key={i} style={{
-                    fontSize: 14,
-                    color: accent || DARK.text,
-                    fontWeight: isNoCard ? 600 : undefined,
-                    marginBottom: 3,
-                    paddingLeft: 8,
-                    borderLeft: `2px solid ${accent || DARK.teal}`,
-                  }}>
-                    {text}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            <ActionBtn label="Navigate" icon="🗺️" onClick={() => {
-              const addr = nextStop.address;
-              if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
-            }} />
-            <ActionBtn label="Protocol" icon="📖" onClick={() => navigate(`${base}/protocols`)} />
-            <ActionBtn label="Quick Move" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
-            <ActionBtn
-              label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
-              icon="🚗"
-              primary
-              disabled={enRouteState.pendingId === nextStop.id || !EN_ROUTE_ELIGIBLE.has(nextStop.status || 'pending')}
-              onClick={() => handleEnRoute(nextStop.id)}
-            />
-            {ON_SITE_ELIGIBLE.has(nextStop.status || 'pending') && (
-              <ActionBtn
-                label={onSiteState.pendingId === nextStop.id ? 'Marking…' : 'On Site'}
-                icon="📍"
-                primary
-                disabled={onSiteState.pendingId === nextStop.id}
-                onClick={() => handleOnSite(nextStop.id)}
-              />
-            )}
-            {stopOutOfSync && (
-              <ActionBtn
-                label={(onSiteState.pendingId || enRouteState.pendingId) === nextStop.id ? 'Syncing…' : 'Sync Stop'}
-                icon="🔁"
-                primary
-                disabled={Boolean(onSiteState.pendingId || enRouteState.pendingId)}
-                onClick={() => handleSyncStop(nextVisitStop)}
-              />
-            )}
-          </div>
-          {(enRouteState.message || onSiteState.message) && (
-            <div style={{
-              marginTop: 10, fontSize: 14, padding: '6px 10px', borderRadius: 6,
-              background: (enRouteState.isError || onSiteState.isError) ? '#ef444422' : '#22c55e22',
-              border: `1px solid ${(enRouteState.isError || onSiteState.isError) ? '#ef4444' : '#22c55e'}`,
-              color: (enRouteState.isError || onSiteState.isError) ? '#ef4444' : '#22c55e',
-            }}>
-              {onSiteState.message || enRouteState.message}
-            </div>
-          )}
-        </div>
-        {visualServiceNotesEnabled && nextStop.status === 'on_site' && (
-          <VisualNotesPanel service={nextStop} />
-        )}
-        {/* During-visit recap clip capture (P4b) — active pest job only, flag-gated. */}
-        {recapCaptureEnabled && nextStop.status === 'on_site' && isPestControlService(nextStop) && (
-          <TechRecapCapture
-            service={nextStop} request={techRequest} staffId={staffIdForDevice}
-            recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
-            onRecoveryChange={notifyRecapRecoveryChange}
-          />
-        )}
-        </>
-      ) : (
-        <div style={{
-          background: DARK.card, borderRadius: 12, padding: 24,
-          border: `1px solid ${DARK.border}`, textAlign: 'center',
-        }}>
-          <p style={{ fontSize: 14, color: DARK.muted, margin: 0 }}>
-            {/* Only celebrate when every stop actually completed — a route
-                that ended on a no-show/cancelled/skipped stop has no next
-                stop but isn't a clean sweep, so don't flash the 🎉. */}
-            {scheduleError
-              ? 'Route unavailable — retry above.'
-              : total === 0
-              ? 'No services scheduled today'
-              : completed === total
-                ? 'All services completed! 🎉'
-                : "That's all your stops for today."}
-          </p>
-        </div>
-      )}
-
-      {/* Today's Services — photos captured before completion are staged and
-          attached to the service record atomically when the visit closes. */}
-      {!loading && myServices.length > 0 && (
-        <>
-          <h2 style={{
-            fontSize: 14, fontWeight: 700, color: DARK.muted, margin: '20px 0 10px',
-            fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
-          }}>Today's Services</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {/* One row per STOP (visit-group siblings collapse — same
-                grouping as the Next Stop card); tap expands the Visit
-                Brief with the per-service action buttons inside. */}
-            {stops.map((stop) => (
-              <StopRow
-                key={stop.key}
-                stop={stop}
-                expanded={expandedStopId === stop.primary.id}
-                detail={stopDetail[stop.primary.id]}
-                onToggle={() => toggleStop(stop)}
-                onBusyChange={(busy) => onStopBusyChange(stop, busy)}
-                onRetryDetail={() => loadStopDetail(stop)}
-                onProject={(s) => (
-                  usesDispatchCompletion(s)
-                    ? openTypedVisit(s)
-                    : isPestControlService(s) ? openPestCompletion(s) : openProjectOrLane(s)
-                )}
-                onPhotos={(s) => setPhotoTarget({
-                  id: s.id,
-                  customerName: s.customer_name || s.customerName || 'Customer',
-                })}
-                onZone={(s) => setZoneTarget(s)}
-                onLead={(s) => setLeadTarget(s)}
-                onOutcome={(s) => setOutcomeTarget(s)}
-                techLine={techLine}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      <TimecardSignoffCard techName={techName} />
-      </>}
 
       {showCreateProject && (
         <CreateProjectModal
@@ -1375,12 +946,11 @@ export default function TechHomePage({ section = 'today' }) {
       {showProjectPicker && (
         <ProjectServicePicker
           services={projectServices}
+          recoveryServiceIds={saved.serviceIds}
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (usesDispatchCompletion(service)) openTypedVisit(service);
-            else if (isPestControlService(service)) openPestCompletion(service);
-            else openProjectOrLane(service);
+            openServiceReport(service);
           }}
         />
       )}
@@ -1408,6 +978,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteSheet
           key={fastCompleteService.id}
           service={{
+            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            ...wrapUpSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
             serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
@@ -1446,6 +1018,7 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
           // exact true shows the mic, the Check chips and the office note.
           voiceFillEnabled={fastCompleteService.fastCompleteVoiceFillEnabled === true}
@@ -1468,6 +1041,10 @@ export default function TechHomePage({ section = 'today' }) {
             // form is retired (codex local r1 on #5629).
             openTypedCompletion(raw);
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(fastCompleteService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1480,6 +1057,10 @@ export default function TechHomePage({ section = 'today' }) {
             serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
             address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || '',
             timeLabel: serviceWindowLabel(treeShrubFastService) || '',
+            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
+            ...completionBillingFacts(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
@@ -1488,6 +1069,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof treeShrubFastService.address === 'string' ? treeShrubFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) fetchSchedule();
@@ -1500,6 +1082,10 @@ export default function TechHomePage({ section = 'today' }) {
             setTreeShrubFastService(null);
             openTypedCompletion(raw);
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(treeShrubFastService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1507,6 +1093,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteLawnReserviceSheet
           key={lawnReserviceFastService.id}
           service={{
+            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            ...wrapUpSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
             serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,
@@ -1520,6 +1108,9 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
+          // One gate for every sheet's voice fill: only an exact true turns it on.
+          voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
             setLawnReserviceFastService(null);
             if (options?.refresh) fetchSchedule();
@@ -1532,6 +1123,42 @@ export default function TechHomePage({ section = 'today' }) {
             setLawnReserviceFastService(null);
             openTypedCompletion(raw);
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
+        />
+      )}
+
+      {detailService && (
+        <MobileAppointmentDetailSheet
+          service={detailService}
+          onClose={() => setDetailService(null)}
+          // Office-only controls stay hidden for a technician login: the
+          // server refuses series cancels, whole-route moves and card sends.
+          adminActions={staff?.role === 'admin'}
+          // A move, cancel or billing change here lands on the route at once.
+          // A move only refreshes: the sheet closes itself after a clean move
+          // and keeps Quick Move open on a partial, not-texted or overlap
+          // result so its warning stays readable (as Dispatch does).
+          // A move, cancel or billing change also closes the fast sheet behind
+          // Details: that visit changed, so its entries must not complete it.
+          onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
+          onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          // Complete from the details sheet: back to the fast sheet behind it,
+          // entries intact, or into this visit's own sheet when none is open.
+          onCompleteService={(svc) => {
+            setDetailService(null);
+            if (!fastSheetBehindDetails) openServiceReport(svc);
+          }}
+          // Edit, checkout, treatment plan and book-next live on Dispatch;
+          // the sheet reopens there (?appointment=, DispatchPageV2) with
+          // those destinations, as the typed-completion deep link does.
+          onEdit={openDispatchDetails}
+          onReviewCheckout={openDispatchDetails}
+          onTreatmentPlan={openDispatchDetails}
+          onBookNext={openDispatchDetails}
         />
       )}
 
@@ -1608,8 +1235,8 @@ export default function TechHomePage({ section = 'today' }) {
       {rainOutResult && (
         <div style={{
           position: 'fixed', bottom: 16, left: 16, right: 16, zIndex: 1100,
-          padding: '10px 14px', borderRadius: 10, fontSize: 14, fontWeight: 600,
-          background: '#22c55e22', border: '1px solid #22c55e', color: '#22c55e',
+          padding: '10px 14px', borderRadius: 6, fontSize: 14, fontWeight: 500,
+          background: '#f5f5f4', border: '1px solid #1c1917', color: '#1c1917',
         }}>
           {rainOutResult}
         </div>
@@ -1618,7 +1245,7 @@ export default function TechHomePage({ section = 'today' }) {
   );
 }
 
-function ProjectServicePicker({ services, onClose, onSelect }) {
+function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect }) {
   return (
     <div
       role="dialog"
@@ -1632,8 +1259,8 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
     >
       <div style={{
         width: '100%', maxWidth: 460, margin: '0 12px',
-        background: DARK.card, border: `1px solid ${DARK.border}`,
-        borderRadius: 12, padding: 14,
+        background: FIELD.card, border: `1px solid ${FIELD.border}`,
+        borderRadius: 6, padding: 14,
       }}>
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1641,12 +1268,11 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
         }}>
           <div>
             <div style={{
-              fontSize: 16, fontWeight: 800, color: DARK.text,
-              fontFamily: "'Montserrat', sans-serif",
+              fontSize: 16, fontWeight: 500, color: FIELD.text,
             }}>
               Select service
             </div>
-            <div style={{ fontSize: 12, color: DARK.muted, marginTop: 2 }}>
+            <div style={{ fontSize: 14, color: FIELD.muted, marginTop: 2 }}>
               Link the report to the visit it documents.
             </div>
           </div>
@@ -1655,15 +1281,15 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
             onClick={onClose}
             aria-label="Close"
             style={{
-              background: 'transparent', border: 'none', color: DARK.muted,
+              background: 'transparent', border: 'none', color: FIELD.muted,
               fontSize: 24, cursor: 'pointer', padding: '4px 10px',
             }}
           >×</button>
         </div>
         {services.length === 0 ? (
           <div style={{
-            padding: 16, border: `1px solid ${DARK.border}`, borderRadius: 8,
-            color: DARK.muted, fontSize: 13,
+            padding: 16, border: `1px solid ${FIELD.border}`, borderRadius: 4,
+            color: FIELD.muted, fontSize: 14,
           }}>
             No services scheduled today.
           </div>
@@ -1677,17 +1303,20 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
                   type="button"
                   onClick={() => onSelect(service)}
                   style={{
-                    textAlign: 'left', padding: '10px 12px', borderRadius: 8,
-                    border: `1px solid ${DARK.border}`, background: DARK.bg,
-                    color: DARK.text, cursor: 'pointer',
+                    textAlign: 'left', padding: '10px 12px', borderRadius: 4,
+                    border: `1px solid ${FIELD.border}`, background: FIELD.bg,
+                    color: FIELD.text, cursor: 'pointer',
                   }}
                 >
-                  <div style={{ fontSize: 14, fontWeight: 700 }}>
-                    {service.customer_name || service.customerName || 'Customer'}
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>
+                    {service.fastCompletionRecoveryOnly
+                      ? [service.customerName, savedAtLabel(service.savedAt)].filter(Boolean).join(' · ')
+                      : service.customer_name || service.customerName || 'Customer'}
                   </div>
-                  <div style={{ fontSize: 12, color: DARK.muted, marginTop: 3 }}>
-                    {status.replace(/_/g, ' ')}
+                  <div style={{ fontSize: 14, color: FIELD.muted, marginTop: 3 }}>
+                    {service.fastCompletionRecoveryOnly ? `saved on this device · ${service.serviceType}` : status.replace(/_/g, ' ')}
                     {serviceWindowLabel(service) ? ` · ${serviceWindowLabel(service)}` : ''}
+                    {recoveryServiceIds?.has(String(service.id)) ? ' · saved completion on this device' : ''}
                   </div>
                 </button>
               );
@@ -1768,9 +1397,9 @@ function TimecardSignoffCard({ techName }) {
     if (weekly.tech_signed_at) {
       return (
         <div style={{
-          background: DARK.card, border: `1px solid #22c55e44`, borderRadius: 12,
+          background: FIELD.card, border: `1px solid #d6d3d1`, borderRadius: 6,
           padding: 12, margin: '20px 0',
-          fontSize: 12, color: '#22c55e',
+          fontSize: 14, color: '#1c1917',
         }}>
           ✓ Last week signed{weekly.tech_signature ? ` as "${weekly.tech_signature}"` : ''} — awaiting admin approval.
         </div>
@@ -1812,21 +1441,21 @@ function TimecardSignoffCard({ techName }) {
 
   return (
     <div style={{
-      background: DARK.card, borderRadius: 12, border: `1px solid #f59e0b66`,
+      background: FIELD.card, borderRadius: 6, border: `1px solid #d6d3d1`,
       padding: 16, margin: '20px 0',
     }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: '#f59e0b', marginBottom: 4, fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1 }}>
+      <div style={{ fontSize: 14, fontWeight: 500, color: '#854d0e', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
         Sign Last Week's Timecard
       </div>
-      <div style={{ fontSize: 12, color: DARK.muted, marginBottom: 10 }}>
+      <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 10 }}>
         Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : weekStart} — review and attest these hours.
       </div>
-      <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13, color: DARK.text }}>
-        <div><strong style={{ color: DARK.text }}>{hours}h</strong> <span style={{ color: DARK.muted }}>total</span></div>
-        <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#f59e0b' : DARK.text }}>{otHrs}h</strong> <span style={{ color: DARK.muted }}>OT</span></div>
-        <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: DARK.muted }}>jobs</span></div>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 14, color: FIELD.text }}>
+        <div><strong style={{ color: FIELD.text }}>{hours}h</strong> <span style={{ color: FIELD.muted }}>total</span></div>
+        <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#854d0e' : FIELD.text }}>{otHrs}h</strong> <span style={{ color: FIELD.muted }}>OT</span></div>
+        <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: FIELD.muted }}>jobs</span></div>
       </div>
-      <div style={{ fontSize: 11, color: DARK.muted, marginBottom: 4 }}>Type your name to sign:</div>
+      <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 4 }}>Type your name to sign:</div>
       <input
         value={signature}
         onChange={(e) => setSignature(e.target.value)}
@@ -1834,8 +1463,8 @@ function TimecardSignoffCard({ techName }) {
         style={{
           width: '100%', boxSizing: 'border-box',
           padding: '8px 10px', fontSize: 14,
-          background: '#0f1923', color: DARK.text,
-          border: `1px solid ${DARK.border}`, borderRadius: 6,
+          background: FIELD.card, color: FIELD.text,
+          border: `1px solid ${FIELD.border}`, borderRadius: 6,
           marginBottom: 10,
         }}
       />
@@ -1843,153 +1472,22 @@ function TimecardSignoffCard({ techName }) {
         onClick={handleSign}
         disabled={submitting || !signature.trim()}
         style={{
-          width: '100%', padding: '10px', fontSize: 14, fontWeight: 700,
-          background: '#22c55e', color: '#fff', border: 'none', borderRadius: 8,
+          width: '100%', padding: '10px', fontSize: 14, fontWeight: 500,
+          background: '#1c1917', color: '#fff', border: 'none', borderRadius: 4,
           cursor: submitting || !signature.trim() ? 'wait' : 'pointer',
           opacity: submitting || !signature.trim() ? 0.6 : 1,
-          fontFamily: "'Montserrat', sans-serif",
         }}
       >
         {submitting ? 'Signing…' : 'Sign Timecard'}
       </button>
       {feedback && (
         <div style={{
-          marginTop: 10, fontSize: 12, padding: '6px 10px', borderRadius: 6,
-          background: feedback.isError ? '#ef444422' : '#22c55e22',
-          border: `1px solid ${feedback.isError ? '#ef4444' : '#22c55e'}`,
-          color: feedback.isError ? '#ef4444' : '#22c55e',
+          marginTop: 10, fontSize: 14, padding: '6px 10px', borderRadius: 6,
+          background: feedback.isError ? '#fcebeb' : '#f5f5f4',
+          border: `1px solid ${feedback.isError ? '#a32d2d' : '#1c1917'}`,
+          color: feedback.isError ? '#a32d2d' : '#1c1917',
         }}>{feedback.message}</div>
       )}
-    </div>
-  );
-}
-
-// One route stop (visit-group siblings collapse into one row). Collapsed:
-// name, status·window, service label + short address, exception chips
-// (access alerts / collect-needed). Tap anywhere expands the Visit Brief
-// — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine }) {
-  // The busy guard lives in the list's toggleStop (any header, not only
-  // this row's, must leave a panel with a text or bridge in flight mounted).
-  const toggle = () => onToggle();
-  const service = stop.primary;
-  const status = service.status || 'pending';
-  // A grouped transition that only partially fanned out leaves live
-  // members on DIFFERENT statuses — labeling the whole stop with the
-  // primary's would hide the divergence, so the row says "mixed" (each
-  // member's own status shows in the expanded Actions rows).
-  const liveStatuses = new Set(
-    stop.services
-      .filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status))
-      .map((s) => s.status || 'pending'),
-  );
-  const mixedStatus = liveStatuses.size > 1;
-  const statusColor = mixedStatus ? '#f59e0b' : {
-    completed: '#22c55e',
-    on_site: DARK.teal,
-    en_route: '#f59e0b',
-    skipped: '#94a3b8',
-  }[status] || DARK.muted;
-  const statusLabel = mixedStatus ? 'mixed' : status.replace(/_/g, ' ');
-  const windowLabel = stop.isVisit ? serviceWindowLabel(stopWindow(stop)) : serviceWindowLabel(service);
-  const indicator = stopAccessIndicator(stopPropertyAlerts(stop));
-  // Aggregated across every member service — grouped siblings keep
-  // separate invoices, so a prepaid primary must not hide a sibling's
-  // amount due.
-  const money = stopCollectSummary(stop);
-  const customerSentPhotos = stopHasCustomerSentPhotos(stop);
-  const street = shortAddress(service.address);
-  const serviceLabel = stopSummaryLabel(stop)
-    || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
-  const chipStyle = (color) => ({
-    fontSize: 14, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
-    border: `1px solid ${color}`, color, background: `${color}1a`,
-  });
-  return (
-    <div style={{
-      background: DARK.card, border: `1px solid ${DARK.border}`,
-      borderRadius: 10, padding: '10px 12px',
-    }}>
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
-        onClick={toggle}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-        }}
-        style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 48 }}
-      >
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
-            <p style={{
-              margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            }}>
-              {service.customer_name || service.customerName || 'Customer'}
-            </p>
-            <span style={{ fontSize: 14, fontWeight: 600, color: statusColor, textTransform: 'capitalize', flexShrink: 0 }}>
-              {statusLabel}
-              {windowLabel && <span style={{ color: DARK.muted, textTransform: 'none' }}> · {windowLabel}</span>}
-            </span>
-          </div>
-          <p style={{
-            margin: '3px 0 0', fontSize: 14, color: DARK.muted,
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-          }}>
-            {serviceLabel}{street ? ` · ${street}` : ''}
-          </p>
-          {(indicator.hasAlerts || money.collectNeeded || customerSentPhotos) && (
-            <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
-              {indicator.hasAlerts && (
-                <span style={chipStyle(indicator.hasChemical ? '#ef4444' : DARK.teal)}>
-                  🔑 {indicator.count} alert{indicator.count === 1 ? '' : 's'}
-                </span>
-              )}
-              {money.collectNeeded && (
-                <span style={chipStyle('#f59e0b')}>💵 Collect {fmtMoney(money.amount)}</span>
-              )}
-              {customerSentPhotos && (
-                <span style={chipStyle(DARK.teal)}>📷 Customer sent photos</span>
-              )}
-            </div>
-          )}
-        </div>
-        <span aria-hidden="true" style={{ color: DARK.muted, fontSize: 14, flexShrink: 0 }}>
-          {expanded ? '▾' : '▸'}
-        </span>
-      </div>
-      {expanded && (
-        <VisitBriefPanel
-          stop={stop}
-          detail={detail}
-          onRetry={onRetryDetail}
-          onPhotos={onPhotos}
-          onProject={onProject}
-          onZone={onZone}
-          onLead={onLead}
-          onOutcome={onOutcome}
-          techLine={techLine}
-          onBusyChange={onBusyChange}
-          request={techRequest}
-        />
-      )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, color }) {
-  return (
-    <div style={{
-      flex: 1,
-      background: DARK.card,
-      borderRadius: 12,
-      padding: '14px 16px',
-      border: `1px solid ${DARK.border}`,
-    }}>
-      <p style={{ fontSize: 24, fontWeight: 800, color: color || DARK.teal, margin: 0,
-        fontFamily: "'Montserrat', sans-serif" }}>{value}</p>
-      <p style={{ fontSize: 14, color: DARK.muted, margin: '2px 0 0' }}>{label}</p>
     </div>
   );
 }
@@ -2179,10 +1677,10 @@ function RainOutSheet({ service, onClose, onDone }) {
   };
 
   const chip = (active) => ({
-    padding: '7px 12px', borderRadius: 16, fontSize: 13, fontWeight: 600,
-    border: `1px solid ${active ? DARK.teal : DARK.border}`,
-    background: active ? '#0ea5e922' : 'transparent',
-    color: active ? DARK.teal : DARK.text, cursor: 'pointer',
+    padding: '7px 12px', borderRadius: 4, fontSize: 14, fontWeight: 500,
+    border: `1px solid ${active ? FIELD.ink : FIELD.border}`,
+    background: active ? 'rgba(28, 25, 23, .06)' : 'transparent',
+    color: active ? FIELD.ink : FIELD.text, cursor: 'pointer',
   });
 
   return (
@@ -2198,40 +1696,40 @@ function RainOutSheet({ service, onClose, onDone }) {
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: DARK.card, borderRadius: '16px 16px 0 0', width: '100%',
+          background: FIELD.card, borderRadius: '6px 6px 0 0', width: '100%',
           maxWidth: 560, boxSizing: 'border-box', maxHeight: '85vh', overflowY: 'auto', padding: 20, paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
-          border: `1px solid ${DARK.border}`, borderBottom: 'none',
+          border: `1px solid ${FIELD.border}`, borderBottom: 'none',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <div style={{ fontSize: 17, fontWeight: 800, color: DARK.text, fontFamily: "'Montserrat', sans-serif" }}>
+          <div style={{ fontSize: 17, fontWeight: 500, color: FIELD.text }}>
             ⛈️ Quick Move Appointment
           </div>
           <button type="button" onClick={onClose} aria-label="Close" style={{
-            background: 'transparent', border: 'none', color: DARK.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
+            background: 'transparent', border: 'none', color: FIELD.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
           }}>×</button>
         </div>
-        <div style={{ fontSize: 13, color: DARK.muted, marginBottom: 14 }}>
+        <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 14 }}>
           {(service.customer_name || service.customerName || 'Customer')}
           {options?.today?.rainChance != null && ` · today ${options.today.rainChance}% rain`}
         </div>
 
         {error && (
           <div style={{
-            marginBottom: 12, fontSize: 13, padding: '8px 10px', borderRadius: 8,
-            background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
+            marginBottom: 12, fontSize: 14, padding: '8px 10px', borderRadius: 4,
+            background: '#fcebeb', border: '1px solid #a32d2d', color: '#a32d2d',
           }}>
             {error}
           </div>
         )}
 
         {!options && !error && (
-          <div style={{ color: DARK.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>Loading options…</div>
+          <div style={{ color: FIELD.muted, fontSize: 14, padding: 20, textAlign: 'center' }}>Loading options…</div>
         )}
 
         {options && (
           <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>REASON</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
               {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
                 <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chip(reason === r.code)}>
@@ -2240,10 +1738,10 @@ function RainOutSheet({ service, onClose, onDone }) {
               ))}
             </div>
 
-            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>MOVE TO</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
               {visibleOptions.length === 0 && (
-                <div style={{ fontSize: 13, color: DARK.muted }}>No slots available — call dispatch.</div>
+                <div style={{ fontSize: 14, color: FIELD.muted }}>No slots available — call dispatch.</div>
               )}
               {visibleOptions.map((opt) => {
                 const key = keyOf(opt);
@@ -2254,29 +1752,29 @@ function RainOutSheet({ service, onClose, onDone }) {
                     type="button"
                     onClick={() => setSelectedKey(key)}
                     style={{
-                      textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14,
-                      border: `1px solid ${active ? DARK.teal : DARK.border}`,
-                      background: active ? '#0ea5e91a' : 'transparent', color: DARK.text,
+                      textAlign: 'left', padding: '11px 13px', borderRadius: 6, fontSize: 14,
+                      border: `1px solid ${active ? FIELD.ink : FIELD.border}`,
+                      background: active ? 'rgba(28, 25, 23, .06)' : 'transparent', color: FIELD.text,
                       cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}
                   >
                     <span>
                       {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
                       {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
-                        <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
+                        <span style={{ color: FIELD.muted, fontSize: 14 }}> — storm may pass</span>
                       )}
                     </span>
                     {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
                         {conflictsFor(opt).length > 0 && (
-                          <span style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b' }}>overlaps</span>
+                          <span style={{ fontSize: 14, fontWeight: 500, color: '#854d0e' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (
                           <span style={{
-                            fontSize: 12, fontWeight: 700,
-                            color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
+                            fontSize: 14, fontWeight: 500,
+                            color: opt.rainChance >= 50 ? '#854d0e' : '#1c1917',
                           }}>
-                            {opt.rainChance}% 🌧
+                            {opt.rainChance}% 🌧{opt.rainScope === 'day' ? ' day' : ''}
                           </span>
                         )}
                       </span>
@@ -2290,8 +1788,8 @@ function RainOutSheet({ service, onClose, onDone }) {
                 server's locked occupancy check rejects real overlaps. */}
             {selectedConflicts.length > 0 && (
               <div style={{
-                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 16,
-                background: '#f59e0b1a', border: '1px solid #f59e0b', color: '#f59e0b',
+                fontSize: 14, padding: '8px 10px', borderRadius: 4, marginTop: -8, marginBottom: 16,
+                background: 'rgba(133, 77, 14, .1)', border: '1px solid #854d0e', color: '#854d0e',
               }}>
                 {`⚠️ This time overlaps ${conflictLabel(selectedConflicts[0])}`}
                 {selectedConflicts.length > 1 && ` and ${selectedConflicts.length - 1} more`}
@@ -2301,7 +1799,7 @@ function RainOutSheet({ service, onClose, onDone }) {
 
             {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && (
               <>
-                <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>APPLY TO</div>
+                <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                   <button type="button" onClick={() => setScope('job')} style={chip(scope === 'job')}>
                     This stop only
@@ -2313,7 +1811,7 @@ function RainOutSheet({ service, onClose, onDone }) {
               </>
             )}
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: DARK.text, marginBottom: 16, cursor: 'pointer' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: FIELD.text, marginBottom: 16, cursor: 'pointer' }}>
               <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
               Text customer{scope === 'route' ? 's' : ''} (includes reschedule + local forecast links)
             </label>
@@ -2323,8 +1821,8 @@ function RainOutSheet({ service, onClose, onDone }) {
               onClick={handleCommit}
               disabled={!selected || busy}
               style={{
-                width: '100%', padding: '13px 0', borderRadius: 10, border: 'none',
-                background: DARK.teal, color: '#fff', fontSize: 15, fontWeight: 700,
+                width: '100%', padding: '13px 0', borderRadius: 6, border: 'none',
+                background: FIELD.ink, color: '#fff', fontSize: 15, fontWeight: 500,
                 cursor: busy ? 'wait' : 'pointer', opacity: (!selected || busy) ? 0.6 : 1,
               }}
             >
@@ -2337,26 +1835,3 @@ function RainOutSheet({ service, onClose, onDone }) {
   );
 }
 
-function ActionBtn({ label, icon, primary, onClick, disabled }) {
-  return (
-    <button onClick={onClick} disabled={disabled} style={{
-      flex: '1 1 120px',
-      minHeight: 48,
-      padding: '8px 4px',
-      borderRadius: 8,
-      border: primary ? 'none' : `1px solid ${DARK.border}`,
-      background: primary ? DARK.teal : 'transparent',
-      color: primary ? '#fff' : DARK.text,
-      fontSize: 14,
-      fontWeight: 600,
-      cursor: disabled ? 'wait' : 'pointer',
-      opacity: disabled ? 0.6 : 1,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 4,
-    }}>
-      <span style={{ fontSize: 14 }}>{icon}</span> {label}
-    </button>
-  );
-}

@@ -168,6 +168,51 @@ describe('confirmBooking — lunch block commit mirror (GATE_BOOKING_LUNCH_BLOCK
   });
 });
 
+describe('assistant engine — last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling 2026-10-09)', () => {
+  const ENV_KEY = 'GATE_CUSTOMER_LAST_START_16';
+  let previous;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockResolvedValue([]);
+    previous = process.env[ENV_KEY];
+  });
+  afterEach(() => {
+    if (previous === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = previous;
+  });
+
+  test('gate on: a 17:00 option (quoted before the flip) is refused SLOT_TAKEN before any insert', async () => {
+    process.env[ENV_KEY] = 'true';
+    const { scheduledQueries } = wireConfirm({ zones: [] });
+    await expect(
+      Availability.confirmBooking(null, 'cust-1', DATE, '17:00', null),
+    ).rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.stringMatching(/no longer offered/i) });
+    expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('gate on: 16:00 is the last start and still commits', async () => {
+    process.env[ENV_KEY] = 'true';
+    wireConfirm({ zones: [] });
+    const result = await Availability.confirmBooking(null, 'cust-1', DATE, '16:00', null);
+    expect(result.confirmationCode).toBeTruthy();
+  });
+
+  test('gate unset (default): the same 17:00 option commits', async () => {
+    delete process.env[ENV_KEY];
+    wireConfirm({ zones: [] });
+    const result = await Availability.confirmBooking(null, 'cust-1', DATE, '17:00', null);
+    expect(result.confirmationCode).toBeTruthy();
+  });
+
+  test('the offer filter applies the same rule: accept() rejects a start past the last customer start', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/availability'), 'utf8');
+    const accept = src.slice(src.indexOf('const accept = (g) => {'));
+    const body = accept.slice(0, accept.indexOf('return true;'));
+    expect(body).toMatch(/if \(pastCustomerLastStart\(g\.start\)\) return false;/);
+  });
+});
+
 describe('confirmBooking — zone-null occupancy fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();

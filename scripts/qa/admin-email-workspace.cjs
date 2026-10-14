@@ -91,6 +91,8 @@ async function main() {
       else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/communications/blocked-numbers') body = { blocked: [] };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
+      // The SMS composer's mic asks whether server dictation is on (GATE_SERVER_DICTATION, off here).
+      else if (api === '/tech/dictation/availability') body = { available: false };
       else { report.unmatched.push(record); body = { error: 'Unmatched synthetic request' }; status = 500; }
       if (state.fail.has(api)) { status = 503; body = { error: 'Synthetic service unavailable' }; }
       await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });

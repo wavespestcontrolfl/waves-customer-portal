@@ -80,7 +80,8 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   where product went down, the pests named and how the sprays went down
  *   are read from the note (services/visit-voice-facts.js) and sent as the
  *   visit's areas serviced (a product's area only when one place was
- *   heard), each product's targets and the sprays' method. Every other 'voice' fact is
+ *   heard), each product's targets and the sprays' method; a web sweep heard
+ *   there is sent as the pest protocol's sweep action. Every other 'voice' fact is
  *   still filled by tap; 'voice' marks the fact voice fill must write into
  *   (the tap path stays behind "Show all fields").
  * - prefill: defaulted from the protocol / product label / service config;
@@ -513,16 +514,17 @@ function genericCompletionFacts(opts = {}) {
         { file: REPORT_VIEW_PAGE, section: 'From the Waves blog card', readerSymbol: 'blogPost' },
       ],
       whenMissing: 'hidden',
-      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, lawn and tree, shrub & palm (report-blog-post.js blogPostAllowedFor).',
+      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, and tree, shrub & palm (report-blog-post.js blogPostAllowedFor; lawn allowed 2026-10-04).',
     },
     {
       key: 'protocol_actions_completed',
       label: 'Protocol actions completed',
-      capture: ['prefill', 'tap'],
+      capture: ['prefill', 'voice', 'tap'],
       storage: 'structured_notes.protocolActionsCompleted',
       writers: [COMPLETE_SERVICE],
       readers: withExtra('protocol_actions_completed', [{ file: REPORT_DATA, section: 'What we did (protocol action list)' }]),
       whenMissing: 'hidden',
+      notes: 'On the Fast Complete report flow the pest protocol\'s sweep action ("Swept eaves, window frames, door frames, and lanai") comes from the note, never a box (owner 2026-10-08): visit-voice-facts.js reads whether the technician swept webs today and the sheet sends the action with its exterior scope. The full form keeps its checkbox.',
     },
     {
       key: 'protocol_action_scopes_completed',
@@ -1175,6 +1177,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
+  servicePhotoVisit: 'Frozen visit identity for binding recovered photo uploads and report reconciliation to their original completion record; internal ownership/revision bookkeeping, not a customer report fact.',
   propertyServiceArea: 'Frozen job-coverage bookkeeping (area treated vs the reviewed property area at completion) for job quantities and product-area math; not rendered on the customer report.',
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
@@ -1439,7 +1442,7 @@ const VISIT_FACTS_CONTRACT = {
   cockroach: {
     label: 'Cockroach (typed cockroach form: control + German roach packages)',
     typedForm: 'cockroach',
-    catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial'],
+    catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial', 'vehicle_german_roach'],
     voiceFill: true,
     facts: [
       ...typedFormFacts('cockroach', {

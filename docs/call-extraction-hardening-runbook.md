@@ -74,6 +74,118 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   also appends a deterministic coaching line ("Caller said this number isn't
   theirs — ask for a cell before ending the call") when the call ends with
   the flag set and no cell captured.
+- **Line that cannot get texts** (schema 1.25.0, owner ruling 2026-10-08, CARD-ONLY) —
+  `caller.ani_cannot_text` + `caller.text_phone_e164`. A deaf relay service, an office
+  landline, "you can't text this one". It is NOT `caller_id_disclaimed`: the caller still
+  owns that line for calls, so the disclaimed consumers (crm_notes stamp, CSR coaching,
+  the booking-link `caller_id_disclaimed` skip) never read it. **Automation never uses the
+  dictated text number**: no `customers.phone`/`secondary_phone` write, no confirmation or
+  booking-link text to it (a caller can name any third party's mobile, and a text number in
+  `customers.phone` would make callbacks and collections dial it). Instead:
+  `computeDeterministicTriageFlags` raises `callback_number_needed` for the call, which arms
+  the existing number-keyed SMS hold on the calling line (confirmation, reminders and every
+  other sender skip it; a customer whose `customers.phone` is that line is held with it).
+  The booking-link lane skips (`ani_cannot_text`). The processor files one advisory
+  `text_number_differs` card for a new or an existing customer (payload `ani_phone`,
+  `text_phone` only when dialable, `customer_phone`, `note`: "caller said this line cannot
+  get texts — texts go to X, calls to Y; update the customer's phones"). The
+  `callback_number_needed` card is dropped for this case (same ask), kept if the caller also
+  disclaimed the number. `text_number_differs` has its own Resolve; a call verdict on a
+  sibling card does not sweep it. RESOLVE ("Resolve when the phones are updated — the calling line stays blocked for texts") keeps the
+  number-keyed SMS hold on the calling line and lifts only the visits' clearance; DISMISS just closes
+  the card (nothing changes). Exactly ONE action releases the hold: the card's own "Line can get texts"
+  button (confirm copy "Texts to <number> will resume"; `PUT /:id/resolve` with `line_can_get_texts: true`),
+  so a line wrongly marked no-text is never held forever (the button stays on a card already closed by Resolve or Dismiss: version-checked, the card stays closed). Both cards of a no-text hold carry
+  `payload.no_text_hold` (stamped in `call-routing-gates.js`): closing `callback_number_needed` on a
+  marked card never releases it, in either close order and whatever the text card's state; the
+  explicit action also defers to a plain disclaimed `callback_number_needed` card that is still open.
+  The card is version-bound (`expected_updated_at`). Same tech-or-admin access as the
+  `callback_number_needed` card. A call
+  vetoed for spam, out-of-area or do-not-contact gets neither the hold nor the card in ENFORCE mode;
+  in SHADOW mode the legacy pipeline still runs, so the hold is armed regardless, and the
+  `text_number_differs` release card is filed WITH it in the same transaction (a hold never exists
+  without the card that releases it). A non-workable voicemail that says the line cannot get texts
+  arms the hold and card too; spam does not. The model sets `ani_cannot_text` whenever the caller says the
+  line cannot get texts, with or without another number; it is independent of `caller_id_disclaimed`
+  (both are set for a borrowed line that cannot get texts) (prompt v30). "Line can get texts" while
+  this call's "not my number" card is still open closes the text card but keeps the hold, and the
+  inbox says so. The inbox shows
+  the customer's live phone, with the phone at the time of the call only when it differs. The appointment-contact backfill never saves a no-text
+  line into a blank `customers.phone`. The office updates the phones by hand.
+  **Held lines.** The Resolved and Dismissed tabs show only the newest 100 cards, but the number-wide hold
+  outlives its card, so the inbox has a "Held lines" panel (chip next to the status tabs) backed by
+  `GET /admin/triage/held-lines`: every active hold row whose call has a `text_number_differs` card, newest
+  first (limit 500), with the newest such card per call. One row per line; its "Line can get texts" button and
+  confirm are the card's, and it calls `PUT /admin/triage/:id/resolve` with `line_can_get_texts: true`
+  on that card, then reloads. **Lock order for every line release** (`releaseNoTextHold`, shared by the open-card
+  and closed-card paths): the per-call `lockTriageCall`, then a phone-wide
+  `pg_advisory_xact_lock(hashtext('no_text_line:' || E.164))` for each line the call holds (sorted), and only then
+  the hold rows and visit rows. The ARMING path takes the same lock in the same order: `armDisclaimedNumberHold`
+  (the one writer that arms or re-arms a no-text hold, and the card write it carries) takes `lockTriageCall`, then
+  `lockNoTextLines` for its line, then the claim fence and the hold upsert. So a release of line L that began first
+  cannot clear a hold another call arms on L after it (the arm waits for the release to commit), and a release that
+  starts after the arm sees the new hold with its card. Two staff releasing one shared line from cards on different
+  calls queue on the phone lock instead of taking row locks in opposite orders. **Which lines:** a call can hold several lines. The
+  panel sends `line_e164` with the request: only that line is released, on the call and on every other call that holds
+  it, and a line the call does not actively hold is a 409 `NO_TEXT_LINE_NOT_HELD`. The inbox card sends no line and
+  releases EVERY line the call ACTIVELY holds (each under its own phone lock, sorted), never "the newest" and never a line the call already released (that line may have been re-held by another call); with none active the card still resolves and `lines_released` is empty; for the usual
+  one-line call that is the same single line. The reply lists `lines_released`.
+  **Visits:** releasing some lines of a call stamps the call-wide clearance (`call_sms_cleared_at`) only on visits whose
+  customer phone is not a line the call still actively holds (the visit evidence helper reads "stamped, not cleared,
+  active hold on the customer's phone" as held); those visits clear when their line is released. **Shared lines:** the
+  release checks the LINE, not only the clicked call: if ANY active hold on the line (a no-text hold, or a call that
+  only disclaimed the number) belongs to a call with an unresolved "not my number" card, that line is not released on
+  any call, the card still resolves, and the reply says `release: 'deferred'` with `lines_blocked`. **Sibling calls:** when a release clears a hold on ANOTHER call, that call's card for the line is settled in the same
+  transaction (`settleSiblingTextCards`): a legacy card is bound to the hold being cleared first (its provenance is then
+  immutable), then the call's open `text_number_differs` card is closed (resolved, note `line released from ***1234 via
+  call <id>`) unless it is still bound to another active line of that call, and `call_log.review_status` follows. Both writes pick
+  their rows with `FOR UPDATE SKIP LOCKED`: a transition locks its own card row first and the line lock after, so waiting
+  here on a card row a sibling's transition holds would deadlock against it. A locked card is being transitioned by its
+  owner right now; that owner's release then finds its hold already cleared and resolves its own card normally. If that
+  release names the line (`line_e164`, the panel), a line this call held and no longer holds is treated as already
+  released: no lock, no propagation, reply `release: 'ok'`, `lines_released: []`, `already_released: [line]`, and the
+  card resolves. Only a line the call never held (or still holds as ownership-only) is a 409 `NO_TEXT_LINE_NOT_HELD`.
+  `call_log.review_status` for the sibling is recomputed by locking the `call_log` row first and running the UPDATE as a
+  new statement (`recomputeCallReviewStatus`): under READ COMMITTED a single UPDATE with a subquery counts cards from the
+  snapshot taken before it waited for the row lock, so two concurrent resolutions could both write `open`; the same lock
+  is taken by the transition's own review-status sync. A later
+  ownership-only re-arm of that call is then neither listed nor cleared by that card. **Access:** `GET /held-lines` and a
+  resolve that names a line (`line_e164`) are admin-only (403 for technicians); the inbox-card release with no line
+  keeps its existing reach. The panel shows
+  the same warning when any call on the line is blocked.
+  **What counts as a no-text hold:** a hold row (one per line and call) with a `text_number_differs` card bound to its
+  CURRENT arming. The binding is exact per (line, arming): the card carries
+  `payload.hold_bindings = [{ line_e164, held_at }, ...]`, the hold row's own canonical `phone_e164` and full-precision
+  `held_at`. A call can hold several lines but has one open text card, so `stampOpenNoTextCards` APPENDS one binding per
+  card write: the line and arming that write is for (`afterArm` hands in the `held_at` the arm returned), never every
+  active hold of the call. An ownership-only hold on another line of the same call stays unbound, so a card filed for
+  Y cannot release X. A card write for an arming it already lists appends nothing; a refresh keeps the list via
+  `refreshedCardPayload`. The card is built before the hold row gets `held_at = now()`, so no `created_at`
+  comparison can bind them, and no phone matching is involved for stamped cards (the hold row names the line). A hold
+  released and re-armed later (ownership-only, or a new no-text pass) has a new `held_at`, so an older closed card no
+  longer binds: the hold is not listed and "Line can get texts" does not clear it. One predicate
+  (`NO_TEXT_CARD_FOR_HOLD_SQL`) drives the list, the cross-call release, the lines a release may touch and the closed-card
+  version check: a card is superseded when a newer card is bound to the same line. The list has one row per line (the
+  newest hold, with `calls_on_line` and `line_since`) and the 500 cap applies to lines; its blocked flag is the whole
+  line's (`lineOwnershipBlockSql`, the same predicate as the release check).
+  **Legacy cards** (filed before the bindings, no `hold_bindings`): a legacy card binds only when the match is
+  unambiguous. The hold is of the same call, on the card's line, armed within 5 minutes of the card's `created_at`
+  and not after the card closed (`resolved_at`), and no other unstamped card of that call ON THE SAME LINE fits the same arming (an X card and a Y card of one call do not
+  compete).
+  A card that fails any of these binds to nothing: it is not listed and releases nothing. The line match is the hold
+  writer's own rule (`holdPhoneKey`: `toE164`, accepted only when `isLikelyE164`), in SQL as `holdPhoneKeySql`; a
+  `+` number keeps its country code and needs 10 to 15 digits, any other input with at least ten digits is
+  `+1` plus its last ten, so `+44...` and `+55...` never match and an unprefixed 11 to 15 digit value matches the
+  hold the writer stored. The Postgres suite runs the SQL and `holdPhoneKey` over one fixture list and asserts they
+  agree. Limit: a hold row keeps only its latest `held_at`, so earlier armings of one (call, line) cannot be counted;
+  the close time and the one-card-per-arming check are what rule out a later re-arm. To make legacy cards exact, the
+  owner runs the one-time backfill (dry run is the default; do not skip the dry run):
+  `node scripts/backfill-no-text-card-bindings.js` lists the cards it would stamp (card id, call id, number of lines;
+  it never prints a phone number), the cards it reports as `unbound: ambiguous`, and how many stay unbound; `node scripts/backfill-no-text-card-bindings.js --apply` writes
+  the bindings in one transaction. It stamps each unambiguous legacy card with the hold of its own call and line
+  armed within 5 minutes of it, skips ambiguous ones, is idempotent and skips stamped cards. The Postgres suite
+  `no-text-held-lines-postgres.test.js` pins all of this with the processor's real order (card first, hold after).
+
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner
@@ -151,6 +263,24 @@ Pipeline (all fail-open, kill switch `CONTACT_DICTATION_ENABLED=false`):
    contradict a clean extracted value → adopted (behind the cross-customer
    ownership gate). Anything else → review card with candidates + the
    confirmation question. Nothing ambiguous ever reaches a send.
+7. **Spelled names (card-only)** — the decoder also returns `names` entries (a
+   first or last name spelled out letter by letter) and the MODEL labels each
+   `whose: "caller" | "other"`; no regex decides whose name it is. An entry is
+   kept only when its `raw_spoken` is in a source transcript and its letters
+   make `spelled_value`. **Nothing is written from a spelling**: no extraction,
+   customer or lead name changes. When an entry the model attributed to the
+   caller (≥ 0.75, in a `Caller:`-labeled turn when labels exist, not in email
+   wording) differs by letters (any case) from the name being saved for the
+   caller (the linked customer's name when linked, else the extracted name), the
+   processor files ONE advisory `name_spelling_differs` card (category
+   `name_review`): payload `{ spelled_value, field, saved_value, quote, confidence }`,
+   where `quote` is the caller turn with the spelling. Equal letters, no saved
+   name (the missing-name cards cover it), or disagreeing caller spellings of
+   one field file nothing. A reprocess refreshes the open card in place
+   (`onConflict` merge), so Resolve / Dismiss are version-bound; a verdict on a
+   sibling card never sweeps it; a spelling the office already settled on the
+   call is not re-filed. Roles and technician rules are the same as the other
+   `name_review` cards.
 
 ### 1d. CSR read-back script (dictation-quality upstream fix)
 

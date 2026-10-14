@@ -77,6 +77,8 @@ const PREP_CONFIG = Object.freeze({
   cockroach: {
     label: 'Cockroach Treatment Service',
     serviceKeywords: ['roach'],
+    // A car job is not household roach work: this guide is about the kitchen.
+    excludeKeywords: ['vehicle'],
     emailTemplateKey: 'prep.cockroach',
     smsStandaloneKey: 'auto_cockroach_no_email',
   },

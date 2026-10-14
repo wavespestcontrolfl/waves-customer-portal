@@ -129,6 +129,22 @@ function deadlineTransaction(trx, context, stage) {
     get(target, property) {
       const value = Reflect.get(target, property, target);
       if (typeof value !== 'function') return value;
+      if (property === 'transaction') {
+        return (container, ...args) => Reflect.apply(value, target, [async (savepoint) => {
+          const boundedSavepoint = deadlineTransaction(savepoint, context, stage);
+          const refreshDeadline = () => boundedSavepoint.raw(
+            "SELECT set_config('statement_timeout', ?, true)",
+            [`${Math.max(1, context.remainingMs())}ms`],
+          );
+          context.assertActive(stage);
+          await refreshDeadline();
+          const result = await container(boundedSavepoint);
+          context.assertActive(stage);
+          await refreshDeadline();
+          context.assertActive(stage);
+          return result;
+        }, ...args]);
+      }
       return (...args) => {
         const result = Reflect.apply(value, target, args);
         return result && typeof result.timeout === 'function' ? bounded(result) : result;

@@ -319,6 +319,25 @@ describe('admin schedule appointment discount eligibility', () => {
     });
   });
 
+  // codex #6162 r1 P1: the schedule never reads service_discount_rules, and the
+  // client picker takes this same verdict from the catalog endpoint, so the
+  // two vehicle roach rows must resolve excluded here (flat $199 / $99).
+  test('the vehicle roach rows are excluded from percentage discounts', () => {
+    const catalog = buildPercentExclusionCatalog([
+      { service_key: 'vehicle_german_roach', engine_keys: null },
+      { service_key: 'vehicle_roach_addon', engine_keys: null },
+      { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
+    ]);
+    for (const key of ['vehicle_german_roach', 'vehicle_roach_addon']) {
+      expect(lineExcludedFromPercentDiscount(key, catalog)).toBe(true);
+      expect(lineExcludedFromPercentDiscount(key, new Map())).toBe(true);
+      expect(lineExcludedFromPercentDiscount(key.toUpperCase(), new Map())).toBe(true);
+    }
+    expect(isPercentDiscountType('percentage')).toBe(true);
+    // the household roach rows keep their verdicts
+    expect(lineExcludedFromPercentDiscount('german_roach_initial', new Map())).toBe(true);
+  });
+
   test('resolves percent-discount exclusion by engine identity, then explicit aliases', () => {
     const catalog = buildPercentExclusionCatalog([
       { service_key: 'rodent_bait_quarterly', engine_keys: ['rodent_bait'] },

@@ -1,0 +1,112 @@
+{
+ "resources": {
+  "results": {
+   "products": [
+    {
+     "available": true,
+     "body": "Specifically designed for use in food processing, handling and storage establish",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "shockwave-1-flushing-killing-and-residual-aerosol-17oz",
+     "id": 6823719927923,
+     "price": "33.99",
+     "price_max": "33.99",
+     "price_min": "33.99",
+     "tags": [
+      "RESTR:AK",
+      "RESTR:HI",
+      "shipping_full_haz_F",
+      "shipping_hazardous_T",
+      "shipping_oversize2_F",
+      "shipping_oversize_F",
+      "shipping_truck_F",
+      "Spec:Size:17 oz."
+     ],
+     "title": "Shockwave 1 Flushing Killing and Residual Aerosol - 17oz",
+     "type": "Pest Management",
+     "url": "/products/shockwave-1-flushing-killing-and-residual-aerosol-17oz?_pos=1&_psq=bifenthrin&_psid=96ce69047&_ss=e",
+     "variants": [],
+     "vendor": "MGK Company",
+     "featured_image": {
+      "alt": "Shockwave 1 Flushing Killing and Residual Aerosol - 17oz",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0073/1797/9225/products/236113.jpg?v=1707504001",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "Rampage Soft Bait is specifically formulated for Livestock producers, especially",
+     "compare_at_price_max": "134.99",
+     "compare_at_price_min": "134.99",
+     "handle": "rampage-soft-bait-8-lbs",
+     "id": 4427656134771,
+     "price": "121.49",
+     "price_max": "121.49",
+     "price_min": "121.49",
+     "tags": [
+      "shipping_full_haz_F",
+      "shipping_hazardous_F",
+      "shipping_oversize2_F",
+      "shipping_oversize_F",
+      "shipping_truck_F",
+      "Spec:Size:8 lbs"
+     ],
+     "title": "Rampage Soft Bait, 8 lbs",
+     "type": "Pest Management",
+     "url": "/products/rampage-soft-bait-8-lbs?_pos=2&_psq=bifenthrin&_psid=96ce69047&_ss=e",
+     "variants": [],
+     "vendor": "Motomco",
+     "featured_image": {
+      "alt": "Rampage Soft Bait, 8 lbs",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0073/1797/9225/products/231659.jpg?v=1707504882",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "Garlon 4 Ultra Triclopyr Herbicide contains the active ingredient Triclopyr (60.",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "garlon-4-ultra-triclopyr-herbicide",
+     "id": 2042846838873,
+     "price": "274.99",
+     "price_max": "274.99",
+     "price_min": "274.99",
+     "tags": [
+      "RESTR:AA",
+      "RESTR:AE",
+      "RESTR:AK",
+      "RESTR:AP",
+      "RESTR:HI",
+      "RESTR:MI",
+      "RESTR:MN",
+      "RESTR:VT",
+      "RESTR:WA",
+      "shipping_full_haz_F",
+      "shipping_hazardous_T",
+      "shipping_oversize2_F",
+      "shipping_oversize_F",
+      "shipping_truck_F",
+      "Spec:Size:2.5 gal."
+     ],
+     "title": "Garlon 4 Ultra Herbicide | 2.5 Gal",
+     "type": "Sprayers",
+     "url": "/products/garlon-4-ultra-triclopyr-herbicide?_pos=3&_psq=bifenthrin&_psid=96ce69047&_ss=e",
+     "variants": [],
+     "vendor": "Corteva",
+     "featured_image": {
+      "alt": "Garlon 4 Ultra Herbicide | 2.5 Gal",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0073/1797/9225/files/160358.jpg?v=1744907279",
+      "width": 1200
+     }
+    }
+   ]
+  }
+ }
+}

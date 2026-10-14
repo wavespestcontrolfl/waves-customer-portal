@@ -2,7 +2,8 @@
  * Weather signals for the public Pest Pressure Forecast.
  *
  * Primary source: the National Weather Service API (api.weather.gov) — free,
- * keyless, covers all of Florida by lat/lng. We pull the next several daytime
+ * keyless, covers all of Florida by lat/lng. Backup when NWS fails: the same
+ * two signals from Open-Meteo (weather-forecast.js getOpenMeteoDaytime). We pull the next several daytime
  * forecast periods and reduce them to two signals the pest model cares about:
  * a representative daytime high (°F) and an average precipitation chance (%).
  *
@@ -22,6 +23,7 @@
 
 const logger = require('../logger');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
+const { getOpenMeteoDaytime } = require('../weather-forecast');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const NWS_UA = 'WavesPestControl-PestForecast/1.0 (+https://www.wavespestcontrol.com)';
@@ -89,6 +91,27 @@ async function fetchNwsForecast(lat, lng) {
   const tempHighF = temps.length ? Math.round(temps.reduce((a, b) => a + b, 0) / temps.length) : null;
   const precipChance = precip.length ? Math.round(precip.reduce((a, b) => a + b, 0) / precip.length) : null;
   return { tempHighF, precipChance, source: 'nws' };
+}
+
+// NWS backup (owner 2026-10-08): the same two signals from Open-Meteo's
+// daytime hours, over the same six days, when NWS fails. Null when it cannot
+// answer either; the forecast then falls to its seasonal baseline as before.
+// The backup spends only what NWS left of the lookup's old worst case (its
+// two requests at TIMEOUT_MS each) and is skipped when too little remains,
+// so a stalled NWS does not add a third wait on top (Codex #6119 r4).
+const WEATHER_BUDGET_MS = 2 * TIMEOUT_MS;
+const BACKUP_MIN_MS = 1000;
+async function fetchOpenMeteoBackup(lat, lng, startedAt) {
+  const remaining = WEATHER_BUDGET_MS - (Date.now() - startedAt);
+  if (remaining < BACKUP_MIN_MS) return null;
+  const days = ((await getOpenMeteoDaytime(lat, lng, { timeoutMs: remaining })) || []).slice(0, 6);
+  const avg = (values) => {
+    const nums = values.filter((v) => Number.isFinite(v));
+    return nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
+  };
+  const tempHighF = avg(days.map((d) => d.tempHighF));
+  const precipChance = avg(days.map((d) => d.rainChance));
+  return tempHighF == null && precipChance == null ? null : { tempHighF, precipChance, source: 'open_meteo' };
 }
 
 /**
@@ -159,11 +182,14 @@ async function fillSignals({ lat, lng, region, key, now }) {
     : Promise.resolve(null);
 
   let base = { hasWeather: false, tempHighF: null, precipChance: null, recentRainIn: null, source: null };
+  const startedAt = Date.now();
   try {
     const nws = await fetchNwsForecast(lat, lng);
     base = { ...base, ...nws, hasWeather: nws.tempHighF != null || nws.precipChance != null };
   } catch (err) {
     logger.warn?.(`[pest-forecast/weather] NWS lookup failed for ${key}: ${err.message}`);
+    const backup = await fetchOpenMeteoBackup(lat, lng, startedAt).catch(() => null);
+    if (backup) base = { ...base, ...backup, hasWeather: true };
   }
 
   const recentRainIn = await rainLookup;

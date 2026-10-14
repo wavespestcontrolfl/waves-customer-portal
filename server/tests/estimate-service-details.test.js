@@ -347,6 +347,13 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     for (const text of strings) expect(text).toMatch(/North Port/);
   });
 
+  test('new sod stays on the regular program with some products held (owner 2026-10-09: one program, no sod protocol)', () => {
+    const sod = SERVICE_DETAILS_COPY.lawn_care.sections.find((sec) => /^New sod you had installed/.test(sec.heading || ''));
+    expect(sod.heading).toBe('New sod you had installed (we don’t install sod)');
+    expect(sod.paragraphs[0]).toBe('Tell us the install date, the grass type, and what the installer applied. New sod stays on your regular program. We hold some products while it roots.');
+    expect(JSON.stringify(SERVICE_DETAILS_COPY.lawn_care)).not.toMatch(/establishment plan/);
+  });
+
   test('all lawn copy obeys the product & safety standard', () => {
     const strings = lawnStrings(SERVICE_DETAILS_COPY.lawn_care);
     // EPA registration covers pesticides, not fertilizer (Codex r2 P1).

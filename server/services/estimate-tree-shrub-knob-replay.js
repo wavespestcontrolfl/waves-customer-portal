@@ -30,6 +30,11 @@ const NEUTRAL_TREE_SHRUB_KNOBS = {
   minutesPerPalmVisit: 0,
   largePalmFactor: 1,
   callbackReservePerVisit: 0,
+  // The no-bed-signal fallback bed size every quote priced before the
+  // 2026-10-05 change to 1,200 sqft. A stored T&S line with no stamped size
+  // (older stamp, or no stamp at all) replays 2,000 so a sent fallback quote
+  // keeps its price. Never read from the live constant.
+  fallbackBedSqFt: 2000,
 };
 
 function treeShrubKnobSignalForReplay(estData = {}) {
@@ -67,6 +72,9 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     // palms, so neutral 1 replays it exactly.
     largePalmFactor: pick('largePalmFactor'),
     callbackReservePerVisit: pick('callbackReservePerVisit'),
+    // A stamp from before the fallback size became a knob priced 2,000;
+    // pick() falls back to that neutral value when the key is absent.
+    fallbackBedSqFt: pick('fallbackBedSqFt'),
   };
 }
 

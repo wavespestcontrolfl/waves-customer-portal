@@ -80,6 +80,9 @@ function makeKnex(fixtures) {
   return knex;
 }
 
+// The next visit is property-scoped: every booking carries the same stamped address.
+const HOME = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
+
 const LAWN_SERVICE = {
   id: 'svc-lawn-1',
   scheduled_service_id: 'ss-current',
@@ -130,10 +133,10 @@ test('a rescheduled phantom row never publishes as the lawn nextVisit — the re
   const knex = makeKnex({
     ...FIXTURES,
     scheduled_services: [
-      { id: 'ss-current', customer_id: 'cust-lawn', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Lawn Care Treatment Program' },
+      { id: 'ss-current', customer_id: 'cust-lawn', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME },
       // phantom holding the OLD date — sorts first, must be skipped
-      { id: 'ss-phantom', customer_id: 'cust-lawn', scheduled_date: '2999-01-02', status: 'rescheduled', service_type: 'Lawn Care Treatment Program' },
-      { id: 'ss-real', customer_id: 'cust-lawn', scheduled_date: '2999-02-03', status: 'confirmed', service_type: 'Lawn Care Treatment Program' },
+      { id: 'ss-phantom', customer_id: 'cust-lawn', scheduled_date: '2999-01-02', status: 'rescheduled', service_type: 'Lawn Care Treatment Program', ...HOME },
+      { id: 'ss-real', customer_id: 'cust-lawn', scheduled_date: '2999-02-03', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME },
     ],
   });
 
@@ -143,10 +146,11 @@ test('a rescheduled phantom row never publishes as the lawn nextVisit — the re
   const nextVisit = data.reportV2.snapshot?.nextVisit;
   expect(nextVisit).toBeTruthy();
   expect(nextVisit.source).toBe('scheduled');
+  // A date outside this calendar year names its year.
   const expectedLabel = new Date('2999-02-03T12:00:00Z')
-    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   const phantomLabel = new Date('2999-01-02T12:00:00Z')
-    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   expect(nextVisit.label).toBe(expectedLabel);
   expect(nextVisit.label).not.toBe(phantomLabel);
 });
@@ -155,8 +159,8 @@ test('with only a rescheduled row upcoming, no confident scheduled date publishe
   const knex = makeKnex({
     ...FIXTURES,
     scheduled_services: [
-      { id: 'ss-current', customer_id: 'cust-lawn', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Lawn Care Treatment Program' },
-      { id: 'ss-phantom', customer_id: 'cust-lawn', scheduled_date: '2999-01-02', status: 'rescheduled', service_type: 'Lawn Care Treatment Program' },
+      { id: 'ss-current', customer_id: 'cust-lawn', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME },
+      { id: 'ss-phantom', customer_id: 'cust-lawn', scheduled_date: '2999-01-02', status: 'rescheduled', service_type: 'Lawn Care Treatment Program', ...HOME },
     ],
   });
 

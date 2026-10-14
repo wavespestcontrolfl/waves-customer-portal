@@ -155,6 +155,9 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   expect(labels).toContainEqual(EMAIL_FANOUT_DISCLOSURE);
   // A phone change appends the hold-clear clause (codex round-5 P2).
   expect(labels).toContainEqual(`${CONTACT_FANOUT_DISCLOSURE} ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`);
+  expect(labels).toContainEqual(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
+  const bulk = buildContract({ toolName: 'bulk_update_customers', params: { customer_ids: ['c1', 'c2'], updates: { phone: '9415550000' } }, displayParams: { updates: { phone: '9415550000' } } });
+  expect(bulk.effects.map((e) => e.label)).toContainEqual(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   const only = buildContract({ toolName: 'update_customer', params: { updates: { notes: 'gate code 1234' } }, displayParams: { updates: { notes: 'gate code 1234' } } });
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
 });
@@ -169,6 +172,7 @@ test('codex round-5 P2: a name-only update_customer edit discloses the fan-out W
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContainEqual(CONTACT_FANOUT_DISCLOSURE);
   expect(labels.some((l) => l.includes(CONTACT_FANOUT_PHONE_HOLD_CLAUSE))).toBe(false);
+  expect(labels.some((l) => l.includes('clears that mark'))).toBe(false);
 });
 
 test('bulk_update_customers with an email change discloses the per-customer email fan-out (email only)', () => {
@@ -182,6 +186,20 @@ test('bulk_update_customers with an email change discloses the per-customer emai
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContainEqual(`For each of 3 customers: ${EMAIL_FANOUT_DISCLOSURE}`);
   expect(labels.some((l) => l.includes(CONTACT_FANOUT_DISCLOSURE))).toBe(false);
+});
+
+test('a stock write card shows the product, the entered amount and unit, and on hand before and after (owner 2026-10-05)', () => {
+  const adjust = buildContract({ toolName: 'adjust_stock', params: { movement_type: 'restock', quantity: 2, unit: 'gal' }, displayParams: {}, preview: {
+    preview: true, tool: 'adjust_stock', product: { id: 'p-1', name: 'Synthetic Talak' }, movement_type: 'restock',
+    stock_before: 384, change: 256, stock_after: 640, unit: 'fl_oz', entered_quantity: 2, entered_unit: 'gal' } });
+  expect(adjust.effects[0]).toMatchObject({ label: 'Synthetic Talak: restock 2 gal; on hand 384 → 640 fl_oz', before: '384 fl_oz', after: '640 fl_oz' });
+  const receive = buildContract({ toolName: 'update_restock_request', params: { action: 'receive', quantity: 2, unit: 'gal' }, displayParams: {}, preview: {
+    preview: true, tool: 'update_restock_request', product: { id: 'p-1', name: 'Synthetic Talak' }, action: 'receive',
+    stock_before: 384, adds: 256, stock_after: 640, unit: 'fl_oz', entered_quantity: 2, entered_unit: 'gal' } });
+  expect(receive.effects[0]).toMatchObject({ label: 'Synthetic Talak: receive 2 gal; on hand 384 → 640 fl_oz' });
+  // A mark-ordered or cancel on a restock request changes no stock and gets no stock line.
+  const ordered = buildContract({ toolName: 'update_restock_request', params: { action: 'mark_ordered' }, displayParams: {}, preview: { preview: true, action: 'mark_ordered', product: { name: 'Synthetic Talak' } } });
+  expect(ordered.effects.some((e) => /on hand/.test(e.label))).toBe(false);
 });
 
 test('two-step previews surface their resolved facts as effects (capped) and fingerprint exactly', () => {
@@ -227,6 +245,11 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
   expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
   expect(buildContract({ toolName: 'trigger_review_request', params: {}, displayParams: {} }).notifies_customer).toBe(true);
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+  // send_autopay_setup_link texts or emails the customer their setup link: contact, and irreversible once sent.
+  const autopaySend = buildContract({ toolName: 'send_autopay_setup_link', params: {}, displayParams: {}, preview: { preview: true, notifies_customer: true } });
+  expect(autopaySend).toMatchObject({ notifies_customer: true, irreversible: true });
+  // create_customer_link builds a link and sends nothing (the card request kind, the one that could email, is composer-only).
+  expect(buildContract({ toolName: 'create_customer_link', params: {}, displayParams: {}, preview: { preview: true } }).notifies_customer).toBe(false);
 });
 
 // Codex round-1 P1/P2 on the ib-cancel-appointment-live lane: cancel_appointment's
@@ -292,19 +315,22 @@ test('cancel_appointment is irreversible unconditionally — money moves no port
   expect(silent.irreversible).toBe(true);
 });
 
-test('create_appointment: card bookings are credit-free by construction; a windowless one never sends a booking confirmation', () => {
+test('create_appointment: a card booking is credit-free by construction and says nothing about credit; a windowless one never sends a booking confirmation', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking/));
-  expect(labels).toContainEqual(expect.stringMatching(/placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h\/24h reminders/));
+  expect(labels.some((l) => /inspection credit|credit lock/i.test(l))).toBe(false);
+  expect(labels).toContain('No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) are set up once a time is added. They skip if the customer turned reminders off. If setup fails, you see a warning.');
   expect(c.notifies_customer).toBe(false);
 });
 
-test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27)', () => {
+test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27), in short plain lines', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
-  expect(labels).toContainEqual(expect.stringMatching(/^Registers the 72h\/24h reminder rows/));
+  expect(labels).toContain('Booking confirmation goes out by text or email, per their settings.');
+  expect(labels).toContain('No confirmation if they turned it off or were already confirmed for another visit at this time.');
+  expect(labels).toContain('Sets reminders for 3 days and 1 day before. They skip if the customer turned reminders off, and the 3-day one skips when the visit is sooner. If setup fails, you see a warning.');
+  expect(labels.filter((l) => /confirmation/i.test(l) && l.length > 100)).toEqual([]);
+  expect(labels.some((l) => /go out 3 days/.test(l))).toBe(false);
   expect(c.notifies_customer).toBe(true);
 });
 
@@ -316,9 +342,35 @@ test('create_appointment with a time texts the booking confirmation, as on the S
 test('the after-8PM hold is disclosed as a TEXT-only hold — an email confirmation still goes right away', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  const confirmationLabel = labels.find((l) => l.startsWith('Customer is sent a booking confirmation'));
-  expect(confirmationLabel).toMatch(/a text after 8 PM waits until 8 AM, but an email goes right away/);
-  expect(confirmationLabel).not.toMatch(/after 8 PM it waits for 8 AM/);
+  expect(labels).toContain('Texts after 8 PM wait until 8 AM; an email goes right away.');
+  expect(labels.some((l) => /after 8 PM it waits for 8 AM/.test(l))).toBe(false);
+});
+
+test('create_appointment names the technician once and the overlapping visit by who, service and window', () => {
+  const c = buildContract({
+    toolName: 'create_appointment',
+    params: { customer_id: 'c1', time_window: '9:00 AM' },
+    displayParams: { when: 'Thursday, Oct 9, 9:00 AM', service: 'Lawn Care', technician: 'Testa Tech' },
+    preview: {
+      proposal: true,
+      pinned_technician: { id: 't1', name: 'Testa Tech' },
+      pinned_customer: { id: 'c1', name: 'Testa Alpha' },
+      slot_overlap: { already_overlaps: true, with: [{ customer: 'Testa Beta', service: 'Pest Control', window: '9:00 AM-10:00 AM' }, { customer: 'Testa Gamma', service: 'Lawn Care', window: '9:00 AM-10:00 AM' }] },
+    },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels.filter((l) => /Testa Tech/.test(l))).toEqual(['Technician: Testa Tech']);
+  expect(labels).toContain('When: Thursday, Oct 9, 9:00 AM');
+  expect(labels).toContain('Service: Lawn Care');
+  expect(labels).toContain('Another visit is at this time: Testa Beta, Pest Control, 9:00 AM-10:00 AM (and 1 more). Both stay on the calendar.');
+});
+
+test('create_appointment overlap line without a name stays short and plain', () => {
+  const c = buildContract({
+    toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: {},
+    preview: { proposal: true, slot_overlap: { already_overlaps: true } },
+  });
+  expect(c.effects.map((e) => e.label)).toContain('Another visit is at this time. Both stay on the calendar.');
 });
 
 test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {
@@ -964,4 +1016,56 @@ test('cancel_appointment always discloses that it closes any open overdue dispat
   const preview = { cancellation: { appointment: { id: 'svc-1' }, customer_notice: 'none', technician_notice: 'none' } };
   const contract = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview });
   expect(contract.effects.some((e) => e.kind === 'operational' && /running-late \/ unassigned-overdue dispatch alert/.test(e.label))).toBe(true);
+});
+
+// Owner 2026-10-06: a rate edit's card shows the whole monthly bill by service,
+// so replacing a pest plan with a lawn price can never hide behind one number.
+test('update_customer monthly-rate edit lists every bill line, the total and the no-notice line', () => {
+  const params = { customer_id: 'c1', updates: { monthly_rate: 60.33 }, _rate_family: 'whole_bill' };
+  const contract = buildContract({
+    toolName: 'update_customer', params, displayParams: { updates: { monthly_rate: 60.33 } },
+    preview: { rate_change: {
+      billing_mode: 'monthly_membership', replaces_whole_bill: true,
+      lines: [{ label: 'Pest control', before: 41.33, after: 0 }, { label: 'Earlier rate (not split by service)', before: 0, after: 60.33 }],
+      total_before: 41.33, total_after: 60.33,
+    } },
+  });
+  const labels = contract.effects.map((e) => e.label);
+  expect(labels).toContain('Pest control: $41.33 → $0.00 a month (drops off the bill)');
+  expect(labels).toContain('Monthly bill total: $41.33 → $60.33 (replaces the whole bill)');
+  expect(labels).toContain('No price-change notice is sent to the customer');
+});
+
+// Owner 2026-10-08 (GATE_IB_TIER_UPGRADE_EMAIL): a card that will email the
+// customer the tier-upgrade notice says so in its own line, and never also
+// says that no price notice goes or that the only contact is a double-opt-in.
+test('update_customer tier-upgrade email: one comms line, the no-notice line gone, the card marked as contacting the customer', () => {
+  const rate_change = {
+    billing_mode: 'monthly_membership', replaces_whole_bill: true,
+    lines: [{ label: 'Pest control', before: 100, after: 90 }], total_before: 100, total_after: 90,
+  };
+  const tier_upgrade_email = { first_name: 'Taylor', from_tier: 'Bronze', to_tier: 'Gold' };
+  const build = (updates, preview) => buildContract({
+    toolName: 'update_customer', params: { customer_id: 'c1', updates }, displayParams: { updates }, preview,
+  });
+  const line = "Emails Taylor the Gold upgrade notice after the update is saved (plan moved up from Bronze, with the new monthly rate). Attempted, not guaranteed: it does not go if their email is turned off or the send fails, and the customer's interaction history records the result";
+
+  const promised = build({ waveguard_tier: 'Gold', monthly_rate: 90 }, { rate_change, tier_upgrade_email });
+  expect(promised.effects.filter((e) => e.kind === 'comms').map((e) => e.label)).toEqual([line]);
+  expect(promised.effects.map((e) => e.label)).not.toContain('No price-change notice is sent to the customer');
+  expect(promised).toMatchObject({ notifies_customer: true, irreversible: true });
+
+  // With an email change on the same card: its own double-opt-in line stays,
+  // and the "conditional double-opt-in re-send only" label is not added.
+  const withEmail = build({ waveguard_tier: 'Gold', monthly_rate: 90, email: 'new@example.invalid' }, { rate_change, tier_upgrade_email });
+  const comms = withEmail.effects.filter((e) => e.kind === 'comms').map((e) => e.label);
+  expect(comms).toContain(line);
+  expect(comms.some((l) => /double-opt-in email to the NEW address/.test(l))).toBe(true);
+  expect(comms.some((l) => /re-send only/.test(l))).toBe(false);
+
+  // Not promised: the same card is byte-for-byte the card of before.
+  const plain = build({ waveguard_tier: 'Gold', monthly_rate: 90 }, { rate_change });
+  expect(plain.effects.filter((e) => e.kind === 'comms')).toEqual([]);
+  expect(plain.effects.map((e) => e.label)).toContain('No price-change notice is sent to the customer');
+  expect(plain).toMatchObject({ notifies_customer: false, irreversible: false });
 });

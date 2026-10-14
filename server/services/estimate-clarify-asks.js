@@ -1835,6 +1835,11 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
         return retire('Clarify draft retired — the linked estimate already moved past draft.');
       }
+      // An archived draft (staff archive, or replaced by a sent estimate) is
+      // not a live quote: its question is obsolete.
+      if (estimate?.archived_at) {
+        return retire('Clarify draft retired — the linked estimate was archived.');
+      }
       // Answer-arrived recheck against CRM state. The linked draft
       // estimate's address counts — operators resolve missing addresses
       // directly on the estimate row. ONLY the lead row answers a service

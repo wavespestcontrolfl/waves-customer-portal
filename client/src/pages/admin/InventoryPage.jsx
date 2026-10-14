@@ -2234,13 +2234,17 @@ export function ProductsTab({
   canAuthor = false,
 }) {
   const [labelPipelineEnabled, setLabelPipelineEnabled] = useState(false);
+  const [labelRatesEnabled, setLabelRatesEnabled] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setLabelPipelineEnabled(false);
+    setLabelRatesEnabled(false);
     if (canAuthor)
       adminFetch("/admin/inventory/label-pipeline")
         .then((data) => {
-          if (!cancelled) setLabelPipelineEnabled(data.enabled === true);
+          if (cancelled) return;
+          setLabelPipelineEnabled(data.enabled === true);
+          setLabelRatesEnabled(data.rates === true);
         })
         .catch(() => {});
     return () => {
@@ -2286,12 +2290,14 @@ export function ProductsTab({
         adminFetch(
           `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
         ),
-        // Vendors are owner-only under the role lockdown — a technician's
-        // Products load must not hang on that 403 (codex P1). Empty vendor
-        // list just hides per-vendor pricing affordances they can't use.
-        adminFetch("/admin/inventory/vendors").catch(() => ({
-          vendors: [],
-        })),
+        // Vendors are owner-only (owner 2026-10-03, "narrow": vendor data is
+        // off a technician's list), so a technician never sends the request.
+        // The empty list just hides the per-vendor affordances they can't use.
+        canAuthor
+          ? adminFetch("/admin/inventory/vendors").catch(() => ({
+              vendors: [],
+            }))
+          : Promise.resolve({ vendors: [] }),
       ]);
       if (sequence !== loadSequence.current) return;
       setProducts(pData.products || []);
@@ -2307,7 +2313,7 @@ export function ProductsTab({
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [search, catFilter, page, filter]);
+  }, [search, catFilter, page, filter, canAuthor]);
   useEffect(() => {
     let current = true;
     void load().catch(() => {
@@ -2893,6 +2899,7 @@ export function ProductsTab({
                         vendors={vendors}
                         canAuthor={canAuthor}
                         labelPipelineEnabled={labelPipelineEnabled}
+                        labelRatesEnabled={labelRatesEnabled}
                         onSave={savePrice}
                         onInventoryChanged={load}
                         showToast={showToast}
@@ -3615,8 +3622,70 @@ function AutoReorderEditor({
     </div>
   );
 }
+// Which service lines apply this product (products_catalog.service_lines).
+// The tech lawn sheet lists lawn-tagged products only; "Not tagged" leaves
+// the sheets to go by the category. Saved on its own, like Auto-reorder.
+function ServiceLinesEditor({ product, showToast, onInventoryChanged }) {
+  const [lines, setLines] = useState(
+    Array.isArray(product.serviceLines) ? product.serviceLines : null,
+  );
+  const [saving, setSaving] = useState(false);
+  const tagged = Array.isArray(lines);
+  const saveServiceLines = async () => {
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/inventory/${product.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ serviceLines: lines }),
+      });
+      showToast?.("Service lines saved");
+      onInventoryChanged?.();
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="mb-[12px]">
+      <div className="text-ui-body text-ink-secondary mb-[6px]">
+        Service lines
+      </div>
+      <div
+        title="Which service lines apply this product. The tech lawn sheet lists Lawn products only; Not tagged = the sheets go by the category."
+        className="flex gap-[10px] items-center flex-wrap text-ui-body"
+      >
+        <span className="text-ink-secondary">Applied on:</span>
+        <Checkbox
+          label="Not tagged"
+          checked={!tagged}
+          onChange={(e) => setLines(e.target.checked ? null : [])}
+        />
+        {COMPLETION_SERVICE_LINES.map((line) => (
+          <Checkbox
+            key={line.id}
+            label={line.label}
+            disabled={!tagged}
+            checked={tagged && lines.includes(line.id)}
+            onChange={(e) =>
+              setLines((cur) =>
+                e.target.checked
+                  ? [...new Set([...(cur || []), line.id])]
+                  : (cur || []).filter((x) => x !== line.id),
+              )
+            }
+          />
+        ))}
+        <Button type="button" onClick={saveServiceLines} disabled={saving} variant="primary">
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </div>
+  );
+}
 function ExpandedProduct({
   labelPipelineEnabled = false,
+  labelRatesEnabled = false,
   product,
   vendors,
   canAuthor = false,
@@ -3644,10 +3713,15 @@ function ExpandedProduct({
   });
   const loadMovements = useCallback(async () => {
     const sequence = ++movementSequence.current;
+    // Movements are owner-only (rows carry costUsed; owner 2026-10-03,
+    // "narrow"): a technician's expanded product never asks for them.
+    if (!canAuthor) {
+      setMovements([]);
+      setMovementLoading(false);
+      return;
+    }
     setMovementLoading(true);
     try {
-      // Movements are owner-only (rows carry costUsed) — a technician's
-      // expanded product just shows no history instead of erroring.
       const data = await adminFetch(`/admin/inventory/${product.id}/movements`);
       if (sequence === movementSequence.current)
         setMovements(data.movements || []);
@@ -3656,7 +3730,7 @@ function ExpandedProduct({
     } finally {
       if (sequence === movementSequence.current) setMovementLoading(false);
     }
-  }, [product.id]);
+  }, [product.id, canAuthor]);
   useEffect(() => {
     void loadMovements();
     setAdjustForm((f) => ({
@@ -3750,6 +3824,13 @@ function ExpandedProduct({
       {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
            technician would only ever see a 403 here. */}
       {canAuthor && (
+        <ServiceLinesEditor
+          product={product}
+          showToast={showToast}
+          onInventoryChanged={onInventoryChanged}
+        />
+      )}
+      {canAuthor && (
         <AutoReorderEditor
           product={product}
           vendors={vendors}
@@ -3760,7 +3841,16 @@ function ExpandedProduct({
       {canAuthor && labelPipelineEnabled && (
         <ProductLabelReview key={product.id} product={product} />
       )}
-      {product.vendorPricing.length > 0 && (
+      {canAuthor && labelRatesEnabled && (
+        <ProductLabelReview
+          key={`rates-${product.id}`}
+          product={product}
+          kind="rates"
+        />
+      )}
+      {/* Vendor prices are owner-only (owner 2026-10-03, "narrow"); the
+           server already sends a technician none. */}
+      {canAuthor && product.vendorPricing.length > 0 && (
         <div className="mb-[12px]">
           {" "}
           <div className="text-ui-body text-ink-secondary mb-[6px]">
@@ -3893,13 +3983,10 @@ function ExpandedProduct({
           </Button>{" "}
         </div>
       )}{" "}
-      <div
-        className={
-          canAuthor
-            ? "grid grid-cols-[minmax(260px,380px)_1fr] gap-[12px] mt-[14px]"
-            : "grid grid-cols-1 gap-[12px] mt-[14px]"
-        }
-      >
+      {/* Stock adjustment and movement history are owner-only: movement rows
+           carry costUsed (owner 2026-10-03, "narrow"). */}
+      {canAuthor && (
+      <div className="grid grid-cols-[minmax(260px,380px)_1fr] gap-[12px] mt-[14px]">
         {" "}
         {canAuthor && (
           <Card className="p-3">
@@ -4059,7 +4146,8 @@ function ExpandedProduct({
             </div>
           )}
         </Card>{" "}
-      </div>{" "}
+      </div>
+      )}{" "}
     </div>
   );
 }

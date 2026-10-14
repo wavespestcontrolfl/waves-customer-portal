@@ -1608,6 +1608,7 @@ async function reconcileRecurringTiers(options = {}) {
 }
 
 module.exports = {
+  WAVEGUARD_SERVICE_FAMILIES,
   LAWN_CARE_RECURRING_PLANS,
   MOSQUITO_RECURRING_PLANS,
   ONE_TIME_BOOKING_SOURCE_VALUES,

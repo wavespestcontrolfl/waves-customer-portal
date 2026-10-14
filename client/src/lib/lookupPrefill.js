@@ -55,14 +55,40 @@ export function subdivisionMedianPrefillSqFt(enrichedProfile) {
 }
 
 /**
+ * Permit-plan home-size prefill: the conditioned (living) area read off the
+ * home's OWN building permit, for a new-construction lot the county roll has
+ * no building for. Stronger than the plat median (it is this house, not its
+ * neighbors) but still an estimate until the roll or the operator confirms.
+ * `permitBuildingFacts` has three states: undefined (no permit stamp), null
+ * (stamp withheld by the server) and an object; only an object with a
+ * positive conditionedSqft yields a value. Same rules as the median helper:
+ * an unconfirmed address yields nothing, and the record's own homeSqFt wins
+ * unless it equals the prefill (a reopened saved estimate stores the prefill
+ * as homeSqFt). Returns a positive integer or null.
+ */
+export function permitPlanPrefillSqFt(enrichedProfile) {
+  if (!enrichedProfile) return null;
+  if ((enrichedProfile.fieldVerifyFlags || []).some((flag) => flag?.field === "address")) return null;
+  const conditioned = Number(enrichedProfile.permitBuildingFacts?.conditionedSqft);
+  if (!Number.isFinite(conditioned) || conditioned <= 0) return null;
+  const rounded = Math.round(conditioned);
+  if (rounded <= 0) return null;
+  const own = Number(enrichedProfile.homeSqFt);
+  if (own > 0 && own !== rounded) return null;
+  return rounded;
+}
+
+/**
  * Home sq ft the lookup prefills into the estimator: the record's own value
- * first, the plat-median estimate second, empty otherwise. A value typed by
- * the operator (`_homeSqFtEdited`) is handled by the caller and never
- * overwritten here.
+ * first, the home's building-permit plan second, the plat-median estimate
+ * third, empty otherwise. A value typed by the operator (`_homeSqFtEdited`)
+ * is handled by the caller and never overwritten here.
  */
 export function lookupHomeSqFtPrefill(enrichedProfile) {
   if (!enrichedProfile) return "";
   if (Number(enrichedProfile.homeSqFt) > 0) return String(enrichedProfile.homeSqFt);
+  const permit = permitPlanPrefillSqFt(enrichedProfile);
+  if (permit) return String(permit);
   const median = subdivisionMedianPrefillSqFt(enrichedProfile);
   return median ? String(median) : "";
 }
@@ -189,18 +215,21 @@ export function scrubReopenedEstimateForm(form, engineProfile) {
 }
 
 /**
- * The "Verify home living area" save must never stamp a plat-median
- * PREFILL as a tech-verified measurement (that would poison the cached
- * record with a neighbor's number under the strongest source type). The
- * guard clears the moment the operator edits the field — the same rule the
- * defaulted stories value already follows.
+ * The "Verify home living area" save must never stamp a plat-median or a
+ * building-permit PREFILL as a tech-verified measurement (that would poison
+ * the cached record with a neighbor's number, or an unconfirmed permit
+ * plan, under the strongest source type). The guard clears the moment the
+ * operator edits the field — the same rule the defaulted stories value
+ * already follows. (The name predates the permit prefill; it covers both.)
  */
 export function homeSqFtIsUnverifiedPlatMedian(form, enrichedProfile) {
   if (!form || form._homeSqFtEdited) return false;
+  const typed = Number(form.homeSqFt);
+  const permit = permitPlanPrefillSqFt(enrichedProfile);
   const median = subdivisionMedianPrefillSqFt(enrichedProfile);
-  // Only the untouched median itself is blocked: a reopened estimate loses
+  // Only the untouched prefill itself is blocked: a reopened estimate loses
   // the transient edited flag, so a different typed size stays verifiable.
-  return median !== null && Number(form.homeSqFt) === median;
+  return (permit !== null && typed === permit) || (median !== null && typed === median);
 }
 
 // Measurements belong to the property, regardless of whether its address

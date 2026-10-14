@@ -84,7 +84,8 @@ Respond ONLY in JSON, no markdown:
     "service_interest": "pest control, lawn care, mosquito, termite, etc. if relevant",
     "invoice_number": "if this is an invoice",
     "invoice_amount": "dollar amount if this is an invoice",
-    "invoice_date": "date if this is an invoice",
+    "invoice_date": "date if this is an invoice, as YYYY-MM-DD",
+    "payment_status": "if this is an invoice or receipt: paid (money went OUT of the business: this email confirms the business was charged or paid a vendor), received (money came IN: a payout, refund or customer payment), failed (a payment failed or was declined), due (a bill or renewal not yet paid), or none",
     "urgency_reason": "why this is urgent, if applicable"
   }
 }`,

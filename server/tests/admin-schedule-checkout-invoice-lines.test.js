@@ -76,7 +76,7 @@ describe('calculateDiscountDollars percentage rounding (checkout mint cap-check)
 
   // Codex pre-push audit P0 (slice 9 of #4405): the mobile checkout sheet's
   // preview now runs every discount through lib/discountStack's cent-exact
-  // percentageDiscountDollars (5% of $20.70 = $1.04, per CLAUDE.md's
+  // percentageDiscountDollars (5% of $20.70 = $1.04, per docs/gates-and-env.md's
   // "regardless of the gate" rounding rule), but this cap-check still used
   // baseAmount * (amount/100) then Math.round(dollars*100)/100 — plain
   // IEEE754 float division, which lands 5% of $20.70 at $1.03
@@ -96,7 +96,7 @@ describe('calculateDiscountDollars percentage rounding (checkout mint cap-check)
 
   // Not itself behind GATE_DISCOUNT_STACKING — this cap-check runs on every
   // checkout mint whether or not the gate is live, so the corrected rounding
-  // must be identical either way (CLAUDE.md: "regardless of the gate").
+  // must be identical either way (docs/gates-and-env.md: "regardless of the gate").
   test('gate-off parity — the same cent-exact rounding applies with GATE_DISCOUNT_STACKING unset', () => {
     const prior = process.env.GATE_DISCOUNT_STACKING;
     delete process.env.GATE_DISCOUNT_STACKING;

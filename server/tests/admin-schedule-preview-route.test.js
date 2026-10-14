@@ -192,7 +192,7 @@ describe('POST /api/admin/schedule/preview', () => {
   // percentageDiscountDollars helper for its OWN percentage branch
   // UNCONDITIONALLY as of slice 9 of #4405 (#4658) — "not itself gated...
   // whether or not GATE_DISCOUNT_STACKING is live" (see that function's own
-  // comment; also documented in this repo's CLAUDE.md: "The corrected
+  // comment; also documented in this repo's docs/gates-and-env.md: "The corrected
   // cent-exact rounding... is live regardless of the gate") — so a LINE-ONLY
   // discount with no appointment-level discount at all now prices identically
   // in both regimes; only a MULTI-discount interaction (a fixed credit

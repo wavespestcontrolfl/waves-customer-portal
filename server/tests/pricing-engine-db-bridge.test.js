@@ -982,6 +982,35 @@ describe('pricing engine DB bridge', () => {
   });
 });
 
+describe('ts_material_rates fallback_bed_sqft (owner ruling 2026-10-05)', () => {
+  afterEach(() => { constants.TREE_SHRUB.fallbackBedSqFt = constants.TREE_SHRUB_FALLBACK_BED_SQFT; });
+  const sync = (data) => syncConstantsFromDB(pricingConfigDb([{ config_key: 'ts_material_rates', data }]));
+
+  test('a valid size syncs; the in-code default is 1200', async () => {
+    expect(constants.TREE_SHRUB_FALLBACK_BED_SQFT).toBe(1200);
+    await expect(sync({ fallback_bed_sqft: 1500 })).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.fallbackBedSqFt).toBe(1500);
+  });
+
+  test('out-of-range or non-numeric values degrade to the default, never to a stale value', async () => {
+    await sync({ fallback_bed_sqft: 1500 });
+    for (const bad of [50, 25000, 'abc', null]) {
+      await expect(sync({ fallback_bed_sqft: bad })).resolves.toBe(true);
+      expect(constants.TREE_SHRUB.fallbackBedSqFt).toBe(1200);
+    }
+    // A removed key rebases too.
+    await sync({ fallback_bed_sqft: 1500 });
+    await sync({ per_sqft: 0.055 });
+    expect(constants.TREE_SHRUB.fallbackBedSqFt).toBe(1200);
+  });
+
+  test('a fresh no-bed quote prices the synced size', async () => {
+    const { priceTreeShrub } = require('../services/pricing-engine/service-pricing');
+    await sync({ fallback_bed_sqft: 1500 });
+    expect(priceTreeShrub({}, { tier: 'standard' }).bedArea).toBe(1500);
+  });
+});
+
 describe('ts_material_rates v4.7 knobs', () => {
   // Standalone describe: restore the knobs itself — the main describe's
   // afterEach doesn't cover this block, and syncs mutate constants in place.

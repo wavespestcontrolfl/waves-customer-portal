@@ -7,6 +7,15 @@
  * POST /link-as-property — merge, then preserve the loser's address as an
  *                     additional property on the winner (multi-property case)
  * POST /dismiss     — record a "not a duplicate" verdict for a pair
+ *
+ * GATE_DUPLICATES_SAME_ADDRESS (dark): GET / also returns `sameAddressGroups`
+ * — customers at the same address with different phones, review-only — and
+ * POST /merge | /link-as-property accept `kind: 'same_address'` for those
+ * pairs. Gate off: the response and every refusal are exactly as before.
+ * GATE_DUPLICATES_SAME_NAME (dark): GET / also returns `sameNameGroups` —
+ * customers with the same first and last name but a different phone and
+ * address, review-only — and POST /merge | /link-as-property accept
+ * `kind: 'same_name'` for those pairs. Gate off: byte-identical, as above.
  * GET  /merges      — recent merge-journal rows (winner/loser, revertibility)
  * POST /merges/:journalId/revert — journal-backed undo of a merge
  *
@@ -17,8 +26,9 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { duplicatesSameAddressLive, duplicatesSameNameLive } = require('../config/feature-gates');
 const {
-  findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
+  findDuplicateGroups, findSameAddressGroups, SAME_ADDRESS_KIND, findSameNameGroups, SAME_NAME_KIND, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
   countActivityRows, activityColumnsFor, UNDO_MERGE_DISMISSAL_REASON,
 } = require('../services/customer-dedupe');
@@ -42,7 +52,7 @@ function performedById(req) {
 router.get('/', async (req, res) => {
   try {
     const groups = await findDuplicateGroups();
-    res.json({
+    const payload = {
       groups: groups.map((g) => ({
         phone10: g.phone10,
         winner: g.winner,
@@ -53,7 +63,49 @@ router.get('/', async (req, res) => {
           evidence: c.evidence,
         })),
       })),
-    });
+    };
+    // Same-address section (dark gate, read per request). Its own try: a
+    // failure here must never take the phone queue down with it.
+    if (duplicatesSameAddressLive()) {
+      try {
+        const sameAddress = await findSameAddressGroups();
+        payload.sameAddressGroups = sameAddress.map((g) => ({
+          kind: g.kind,
+          winner: g.winner,
+          candidates: g.candidates.map((c) => ({
+            customer: c.loser,
+            tier: c.tier,
+            reasons: c.reasons,
+            evidence: c.evidence,
+          })),
+        }));
+      } catch (saErr) {
+        logger.error(`[admin-customer-duplicates] same-address list failed: ${saErr.message}`);
+        payload.sameAddressGroups = [];
+        payload.sameAddressError = 'Could not load same-address duplicates';
+      }
+    }
+    // Same-name section (its own dark gate, read per request, its own try).
+    if (duplicatesSameNameLive()) {
+      try {
+        const sameName = await findSameNameGroups();
+        payload.sameNameGroups = sameName.map((g) => ({
+          kind: g.kind,
+          winner: g.winner,
+          candidates: g.candidates.map((c) => ({
+            customer: c.loser,
+            tier: c.tier,
+            reasons: c.reasons,
+            evidence: c.evidence,
+          })),
+        }));
+      } catch (snErr) {
+        logger.error(`[admin-customer-duplicates] same-name list failed: ${snErr.message}`);
+        payload.sameNameGroups = [];
+        payload.sameNameError = 'Could not load same-name duplicates';
+      }
+    }
+    res.json(payload);
   } catch (err) {
     logger.error(`[admin-customer-duplicates] list failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to load duplicate groups' });
@@ -72,7 +124,18 @@ async function handleMerge(req, res, { linkAsProperty }) {
     // this exact winner, and not tiered red. Canonical check, shared with
     // the IB merge tool and the task-context pair authority — never
     // re-derive tier/reasons logic here.
-    const eligibility = await duplicatePairEligibility(winnerId, loserId);
+    // A same-address pair shares no phone, so it lives in its own queue: only
+    // when the gate is on AND the request names that kind. Everything else —
+    // gate off included — takes the exact phone-queue path as before.
+    const sameAddress = duplicatesSameAddressLive() && (req.body || {}).kind === SAME_ADDRESS_KIND;
+    // Same for a same-name pair (its own gate, its own queue). It admits both
+    // actions: its two addresses differ by definition, so eligibility never
+    // answers address_conflict for it.
+    const sameName = !sameAddress && duplicatesSameNameLive() && (req.body || {}).kind === SAME_NAME_KIND;
+    const reviewKind = sameAddress ? SAME_ADDRESS_KIND : (sameName ? SAME_NAME_KIND : null);
+    const eligibility = reviewKind
+      ? await duplicatePairEligibility(winnerId, loserId, undefined, { kind: reviewKind })
+      : await duplicatePairEligibility(winnerId, loserId);
     // Every non-eligible answer refuses (not_in_queue, red_pair, an
     // unreadable dismissals table, any code added later) — never a list of
     // known refusals that a new code could fall through. The ONE admitted
@@ -94,7 +157,7 @@ async function handleMerge(req, res, { linkAsProperty }) {
       mode: 'manual',
       performedBy: performedBy(req),
       performedById: performedById(req),
-      evidence: { via: linkAsProperty ? 'admin_link_as_property' : 'admin_review_queue' },
+      evidence: { via: linkAsProperty ? 'admin_link_as_property' : 'admin_review_queue', ...(reviewKind ? { kind: reviewKind } : {}) },
       // The eligibility check above is check-then-act: a /dismiss ("not a
       // duplicate") committing in the window between it and the merge would
       // otherwise be overtaken. The executor re-decides eligibility inside
@@ -106,6 +169,7 @@ async function handleMerge(req, res, { linkAsProperty }) {
       // does, or every link-as-property merge on an address-conflicted pair
       // passes the gate and then refuses inside the transaction.
       allowAddressConflict: linkAsProperty,
+      ...(reviewKind ? { pairKind: reviewKind } : {}),
     });
     let propertyLinked = false;
     if (linkAsProperty) {
@@ -148,7 +212,10 @@ async function handleMerge(req, res, { linkAsProperty }) {
         }
       }
     }
-    res.json({ ok: true, journalId: result.journalId, repointed: result.repointed, backfills: result.backfills, propertyLinked });
+    // phoneCarry (same-address and same-name merges only): whether the merged-away person's
+    // phone now sits in a contact slot on the kept customer, so their next
+    // call finds it — or why not (no free slot).
+    res.json({ ok: true, journalId: result.journalId, repointed: result.repointed, backfills: result.backfills, propertyLinked, ...(reviewKind ? { phoneCarry: result.phoneCarry } : {}) });
   } catch (err) {
     logger.error(`[admin-customer-duplicates] merge failed: ${err.message}`);
     // "refresh the queue" covers the executor's under-lock rechecks (phone no
@@ -543,6 +610,8 @@ router.get('/merges', async (req, res) => {
           // email/name-bound identity artifact probes (EMAIL_BOUND_SURFACES),
           // the billing-identity, address-clear and service-contact-clear
           // activity gates,
+          // a same-address merge's carried phone whose contact slot was
+          // edited since (the undo would lift its text hold),
           // non-invoice journaled-row activity (estimates / visits /
           // contracts updated_at), children minted by journaled estimates /
           // visits / contracts, since-merge recipient_optin rows,

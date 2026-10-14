@@ -171,6 +171,76 @@ describe('service report email recipient delivery', () => {
     expect(result.attachedPdf).toBe(true);
   });
 
+  // Wraps the default table mocks: the record row gets `overrides`, and the
+  // customers table (the account primary read) answers with `primaryRow`.
+  function withRecord(overrides, primaryRow) {
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'service_records') {
+        const chain = base(table);
+        chain.first = jest.fn(() => base(table).first().then((row) => ({ ...row, ...overrides })));
+        return chain;
+      }
+      if (table === 'customers') {
+        const chain = query(null);
+        chain.whereNull = jest.fn(() => chain);
+        chain.first = jest.fn(() => (primaryRow instanceof Error ? Promise.reject(primaryRow) : Promise.resolve(primaryRow)));
+        return chain;
+      }
+      return base(table);
+    });
+  }
+
+  test('an occupant on a property-manager account gets no report email; the manager does', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+    withRecord({ contact_role: 'property_manager' });
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: true, recipientCount: 1 });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => args.to)).toEqual(['owner@example.com']);
+  });
+
+  test('a property profile of a manager account takes the role from the account primary', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+    withRecord({ contact_role: null, account_id: 'account-1', is_primary_profile: false },
+      { id: 'primary-1', contact_role: 'property_manager' });
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: true, recipientCount: 1 });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => args.to)).toEqual(['owner@example.com']);
+  });
+
+  test('a property row with no email of its own: the report goes to the account primary, never the occupant', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+    withRecord({ customer_email: null, contact_role: null, account_id: 'account-1', is_primary_profile: false },
+      { id: 'primary-1', first_name: 'Morgan', email: 'manager@example.com', contact_role: 'property_manager' });
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: true, recipientCount: 1 });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => args.to)).toEqual(['manager@example.com']);
+  });
+
+  test('an unreadable account primary retries the report, never sends it', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    withRecord({ contact_role: null, account_id: 'account-1', is_primary_profile: false }, new Error('fixture read failed'));
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: false, transient: true, reason: 'account_role_unavailable' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an explicit opt-out is skipped as an opt-out even when the account primary is unreadable', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    withRecord({ contact_role: null, account_id: 'account-1', is_primary_profile: false }, new Error('fixture read failed'));
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'notification_prefs'
+      ? query({ customer_id: 'customer-1', service_completed: false })
+      : base(table)));
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: false, skipped: true });
+    expect(result.error).toMatch(/^Suppressed/);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('a failed history read still delivers the report PDF without introduction', async () => {
     const { isFirstServiceVisit } = require('../services/customer-visit-history');
     const realHistory = jest.requireActual('../services/customer-visit-history');

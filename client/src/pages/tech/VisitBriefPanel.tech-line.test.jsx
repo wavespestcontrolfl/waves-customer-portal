@@ -64,9 +64,9 @@ describe('VisitBriefPanel — own tech line', () => {
   it('line lookup not yet succeeded: no personal links, no line buttons, a notice — never the personal phone on a lookup error', () => {
     render(<VisitBriefPanel stop={stop} detail={detail} techLine={{ unknown: true }} request={vi.fn()} />);
     expect(screen.queryByRole('link', { name: /Call|Text/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^(📞 )?Call$|Text/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Call$|Text/ })).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent("Your line couldn't be checked");
-    expect(screen.getByRole('button', { name: /Navigate/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Navigate/ })).not.toBeInTheDocument();
   });
 
   it('while a text is sending, Close and the Text toggle are disabled so the pending send cannot be unmounted and resent', async () => {

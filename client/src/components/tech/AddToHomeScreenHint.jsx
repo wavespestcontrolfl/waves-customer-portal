@@ -1,3 +1,4 @@
+import { Smartphone } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { isNativeApp } from '../../native/platform';
 
@@ -15,12 +16,13 @@ import { isNativeApp } from '../../native/platform';
  * Dismissed state is remembered so it never nags.
  */
 
+// Waves Admin palette (tech-field.css values).
 const DARK = {
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
+  card: '#ffffff',
+  border: '#e7e5e4',
+  teal: '#1c1917',
+  text: '#1c1917',
+  muted: '#57534e',
 };
 
 const DISMISS_KEY = 'tech_a2hs_dismissed';
@@ -81,7 +83,7 @@ export default function AddToHomeScreenHint() {
         position: 'relative',
         background: DARK.card,
         border: `1px solid ${DARK.border}`,
-        borderRadius: 12,
+        borderRadius: 6,
         padding: '14px 16px',
         marginBottom: 16,
         display: 'flex',
@@ -95,22 +97,22 @@ export default function AddToHomeScreenHint() {
           flexShrink: 0,
           width: 36,
           height: 36,
-          borderRadius: 10,
-          background: `linear-gradient(135deg, ${DARK.teal}, #2563eb)`,
+          borderRadius: 4,
+          background: '#f5f5f4',
+          color: DARK.text,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           fontSize: 18,
         }}
       >
-        📲
+        <Smartphone size={18} />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
             fontSize: 14,
-            fontWeight: 700,
-            fontFamily: "'Montserrat', sans-serif",
+            fontWeight: 500,
             color: DARK.text,
             marginBottom: 4,
           }}
@@ -121,7 +123,7 @@ export default function AddToHomeScreenHint() {
           Tap the Share button{' '}
           <ShareGlyph />
           {' '}then choose{' '}
-          <span style={{ color: DARK.text, fontWeight: 600 }}>
+          <span style={{ color: DARK.text, fontWeight: 500 }}>
             “Add to Home Screen.”
           </span>{' '}
           You’ll sign in once inside the app and it stays logged in.

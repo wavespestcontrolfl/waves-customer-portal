@@ -9,13 +9,18 @@ const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
 const AppointmentEmail = require('../services/appointment-email');
 
-function mockDb({ customer = null, prefs = null, slot = { scheduled_date: '2026-06-22', window_start: '10:00' } }) {
+function mockDb({ customer = null, prefs = null, slot = { scheduled_date: '2026-06-22', window_start: '10:00' }, onSiteDemoted = false }) {
   db.mockImplementation((table) => {
     if (table === 'customers') {
       return { where: () => ({ select: () => ({ first: async () => customer }) }) };
     }
     if (table === 'notification_prefs') {
       return { where: () => ({ first: async () => prefs }) };
+    }
+    if (table === 'recipient_optin') {
+      // The on-site flow's texts-only demotion marker (GATE_ONSITE_CALLER_DEMOTE).
+      const q = { where: () => q, whereNotNull: () => q, whereNull: () => q, first: async () => (onSiteDemoted ? { phone_key: '9415557777' } : undefined) };
+      return q;
     }
     if (table === 'customer_interactions') {
       return { insert: async () => [1] };
@@ -58,6 +63,49 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     const call = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(call.idempotencyKey).toContain(String(new Date('2026-06-22T14:00:00.000Z').getTime()));
     expect(call.idempotencyKey).not.toContain('sue@service.com');
+  });
+
+  test('the on-site flow switched the holder\'s TEXTS off: the holder still gets the appointment email, beside the contact', async () => {
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+      },
+      prefs: { appointment_notify_primary: false },
+      onSiteDemoted: true,
+    });
+    const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+    });
+    expect(res.ok).toBe(true);
+    const to = EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to).sort();
+    expect(to).toEqual(['primary@example.com', 'sue@service.com']);
+  });
+
+  test('the texts-only override applies to the account row BEFORE the property overlay (a property\'s own false still wins)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-email.js'), 'utf8');
+    const override = src.indexOf("callerDemotedForTextsOnly(customer.id)");
+    // Ownership comes from the markers alone, not the row's status (a STOP declines the row before the restore).
+    const optin = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(optin).toContain(".where({ customer_id: customerId })\n      .whereNotNull('caller_demoted_at')\n      .whereNull('caller_choice_at')\n      .first('phone_key');");
+    const overlay = src.indexOf("prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients')");
+    expect(override).toBeGreaterThan(0);
+    expect(override).toBeLessThan(overlay);
+  });
+
+  test('the holder\'s OWN opt-out (no flow marker) still keeps them off the email', async () => {
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+      },
+      prefs: { appointment_notify_primary: false },
+      onSiteDemoted: false,
+    });
+    await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+    });
+    expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to)).toEqual(['sue@service.com']);
   });
 
   test('falls back to the primary email when the service contact has no email', async () => {

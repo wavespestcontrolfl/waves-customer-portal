@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning, drivePhrase, fmtHour } from './AvailabilityStrip';
+import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning, drivePhrase, driveHerePhrase, rainPhrase, fmtHour } from './AvailabilityStrip';
 
 afterEach(cleanup);
 
@@ -22,8 +22,8 @@ const at = (currentDate, currentStart) => ({ currentDate, currentStart });
 const starts = (verdict) => verdict.offers.map((h) => `${h.date.slice(8)} ${h.start}`);
 
 describe('labels', () => {
-  it('prints the added drive, "no added drive" for zero, and nothing for an unpriced route', () => {
-    expect(drivePhrase(11.4)).toBe('+11 min drive');
+  it('prints what the stop adds to the day, "no added drive" for zero, and nothing for an unpriced route', () => {
+    expect(drivePhrase(11.4)).toBe('+11 min day');
     expect(drivePhrase(0)).toBe('no added drive');
     expect(drivePhrase(null)).toBeNull();
   });
@@ -36,7 +36,7 @@ describe('labels', () => {
 describe('availabilityVerdict', () => {
   it('fits: says so with the added drive and offers the other hours that day, cheapest first', () => {
     const v = availabilityVerdict(answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11 }), at('2035-01-02', '09:00'));
-    expect(v).toMatchObject({ tone: 'ok', text: 'Tue Jan 2 · 9 AM fits.', detail: '+11 min drive.', lead: 'Also open that day:', withDay: false });
+    expect(v).toMatchObject({ tone: 'ok', text: 'Tue Jan 2 · 9 AM fits.', detail: 'Adds +11 min to the day · estimated.', lead: 'Also open that day:', withDay: false });
     expect(starts(v)).toEqual(['02 11:00', '02 16:00']);
   });
 
@@ -106,7 +106,7 @@ describe('AvailabilityStrip', () => {
     render(<AvailabilityStrip availability={missed} currentDate="2035-01-02" currentStart="14:00" onPick={onPick} />);
     expect(screen.getByRole('status').getAttribute('data-tone')).toBe('miss');
     const chip = screen.getAllByTestId('availability-hour')[0];
-    expect(chip.textContent).toBe('11 AM+5 min drive');
+    expect(chip.textContent).toBe('11 AM~+5 min day');
     fireEvent.click(chip);
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-02', start: '11:00', end: '12:00', technicianId: 't1' }));
   });
@@ -149,7 +149,7 @@ describe('AvailabilityStrip', () => {
   it('names the technician on an all-technician search', () => {
     const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0, { technicianName: 'Fixture Tech' })] }];
     render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} />);
-    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AMno added drive · Fixture Tech');
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added driveFixture Tech');
   });
 });
 
@@ -172,7 +172,7 @@ describe('calendar facts on the days', () => {
 
   it('a pick on a closed day says so in the verdict', () => {
     const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
-    expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('+1 min drive. Wed Jan 3 is a closed day.');
+    expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day · estimated. Wed Jan 3 is a closed day.');
   });
 
   it('a held answer during a re-check shows "Checking…" and still covers the route warning', () => {
@@ -189,3 +189,96 @@ describe('calendar facts on the days', () => {
   });
 });
 
+
+// Owner 2026-10-06: each chip shows the drive here AND what the stop adds to
+// the day, plus rain; New Appointment shows two rows of four.
+describe('best-times rows', () => {
+  const chip = (date, start, detourMinutes, driveInMinutes, over = {}) => hour(date, start, detourMinutes, { driveInMinutes, ...over });
+  const best = {
+    day: [
+      chip('2035-01-02', '12:00', 34, 19, { rainChance: 20, driveSource: 'google' }),
+      chip('2035-01-02', '13:00', 34, 19, { rainChance: 60, driveSource: 'google' }),
+    ],
+    week: [chip('2035-01-01', '10:00', 9, 7), chip('2035-01-04', '13:00', 2, 4)],
+  };
+  const withBest = (picked, extra = {}) => ({ ...answer(picked), best, ...extra });
+
+  it('labels the drive here, unknown legs and rain', () => {
+    expect(driveHerePhrase({ driveInMinutes: 19.2, detourMinutes: 34 })).toBe('~19 min here');
+    expect(driveHerePhrase({ driveInMinutes: 19.2, detourMinutes: 34, driveSource: 'google' })).toBe('19 min here');
+    expect(driveHerePhrase({ driveInMinutes: null, detourMinutes: null })).toBe('drive unknown');
+    // Arrival-window hours carry no single leg: the added drive stands alone.
+    expect(driveHerePhrase({ driveInMinutes: null, detourMinutes: 12 })).toBeNull();
+    expect(rainPhrase(40)).toBe('40% rain');
+    expect(rainPhrase(null)).toBeNull();
+  });
+
+  it('a fitting pick names where the drive comes from, the added drive and rain', () => {
+    const v = availabilityVerdict(answer({
+      start: '12:00', fits: true, reason: null, detourMinutes: 34, driveInMinutes: 19, fromName: 'Stop A', rainChance: 20, driveSource: 'google',
+    }), at('2035-01-02', '12:00'));
+    expect(v.detail).toBe('Drive here: 19 min from Stop A · Adds +34 min to the day · 20% rain.');
+  });
+
+  it('shows both rows with every fact on each chip, in place of the closest offers', () => {
+    const onPick = vi.fn();
+    render(<AvailabilityStrip bestRows availability={withBest({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={onPick} />);
+    expect(screen.getByText('Best on Tue Jan 2')).toBeTruthy();
+    expect(screen.getByText('Best in the next 7 days')).toBeTruthy();
+    expect(screen.queryByText('Open that day:')).toBeNull();
+    const rows = screen.getAllByTestId('best-row');
+    expect([...rows[0].querySelectorAll('button')].map((b) => b.textContent)).toEqual([
+      '12 PM19 min here+34 min day20% rain', '1 PM19 min here+34 min day60% rain',
+    ]);
+    // Model numbers carry "~" and the legend says what it means.
+    expect(rows[1].querySelector('button').textContent).toBe('Mon 110 AM~7 min here~+9 min day');
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+    fireEvent.click(rows[1].querySelector('button'));
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-01', start: '10:00' }));
+  });
+
+  it('an empty picked day says why and keeps the week row', () => {
+    render(<AvailabilityStrip bestRows availability={withBest(null, { best: { day: [], week: best.week } })} currentDate="2035-01-03" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('No open hours that day. The note above says why.')).toBeTruthy();
+    expect(screen.getAllByTestId('best-row')).toHaveLength(1);
+  });
+
+  it('a day with no stops yet says any hour works', () => {
+    const empty = { day: [chip('2035-01-02', '08:00', 0, 30, { stopsThatDay: 0 })], week: [] };
+    render(<AvailabilityStrip bestRows availability={withBest(null, { best: empty })} currentDate="2035-01-02" currentStart="08:00" onPick={() => {}} />);
+    expect(screen.getByText('No stops on this route that day yet.')).toBeTruthy();
+  });
+
+  it('a re-check titles the old rows with their own date, not the new pick (Codex #6045 r2)', () => {
+    render(<AvailabilityStrip bestRows availability={{ ...withBest(null), stale: true }} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('Best on Tue Jan 2')).toBeTruthy();
+    expect(screen.queryByText('Best on Thu Jan 4')).toBeNull();
+  });
+
+  it('an arrival-window detour with no single leg still says estimated', () => {
+    const v = availabilityVerdict(answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11, driveInMinutes: null }), at('2035-01-02', '09:00'));
+    expect(v.detail).toBe('Adds +11 min to the day · estimated.');
+  });
+
+  it('a drive-in with no priced detour still says estimated (Codex #6045 r3)', () => {
+    const v = availabilityVerdict(answer({ start: '09:00', fits: true, reason: null, detourMinutes: null, driveInMinutes: 17, fromName: 'Stop A' }), at('2035-01-02', '09:00'));
+    expect(v.detail).toBe('Drive here: 17 min from Stop A · estimated.');
+  });
+
+  it('the "~" note shows on a strip without the rows too (Codex #6045 r4)', () => {
+    render(<AvailabilityStrip availability={answer({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+  });
+
+  it('a model "no added drive" is marked and explained too (Codex #6045 r7)', () => {
+    const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0)] }];
+    render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive');
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+  });
+
+  it('without bestRows the strip keeps its closest offers', () => {
+    render(<AvailabilityStrip availability={withBest({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.queryByTestId('best-row')).toBeNull();
+  });
+});

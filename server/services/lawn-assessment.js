@@ -195,11 +195,19 @@ function isValidVisionScores(parsed) {
   return true;
 }
 
-async function callClaudeVision(base64Image, mimeType, context = {}) {
+// Whole milliseconds before `deadline` (AbortSignal.timeout rejects a
+// fraction), floored so a call that starts late still gets a real (if short)
+// window rather than a zero timeout.
+const remainingMs = (deadline) => (deadline ? Math.max(1000, Math.ceil(deadline - Date.now())) : null);
+
+async function callClaudeVision(base64Image, mimeType, context = {}, deadline = null) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // With a deadline the SDK's per-attempt timeout is the ceiling and its
+    // default retries are off (each retry would get the full timeout again).
+    const budget = remainingMs(deadline);
     const response = await anthropic.messages.create({
       model: MODELS.VISION,
       ...anthropicEffortConfig(MODELS.VISION),
@@ -211,7 +219,7 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
           { type: 'text', text: buildVisionPrompt(context) },
         ],
       }],
-    });
+    }, budget ? { timeout: budget, maxRetries: 0 } : undefined);
 
     const text = anthropicText(response);
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
@@ -231,11 +239,13 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
 
 // Single attempt against one Gemini model. Returns the parsed scores, or null on
 // any miss (HTTP error / empty output / unparseable JSON) so the caller can retry.
-async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
+async function geminiVisionAttempt(model, base64Image, mimeType, context = {}, deadline = null) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
 
+  const budget = remainingMs(deadline);
   const response = await fetch(url, {
     method: 'POST',
+    ...(budget ? { signal: AbortSignal.timeout(budget) } : {}),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{
@@ -267,7 +277,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   return parsed;
 }
 
-async function callGeminiVision(base64Image, mimeType, context = {}) {
+async function callGeminiVision(base64Image, mimeType, context = {}, deadline = null) {
   if (!GEMINI_KEY) return null;
 
   // Live model first, then the prior model on any miss (skip the retry if an
@@ -277,8 +287,9 @@ async function callGeminiVision(base64Image, mimeType, context = {}) {
     : [GEMINI_VISION_MODEL];
 
   for (const model of models) {
+    if (deadline && Date.now() >= deadline) break;
     try {
-      const parsed = await geminiVisionAttempt(model, base64Image, mimeType, context);
+      const parsed = await geminiVisionAttempt(model, base64Image, mimeType, context, deadline);
       if (parsed) return parsed;
     } catch (err) {
       logger.error(`Lawn assessment Gemini vision failed (${model}): ${err.message}`);
@@ -298,9 +309,18 @@ async function callGeminiVision(base64Image, mimeType, context = {}) {
  * model in play, averageScores returns that model's result unchanged as
  * composite with no divergence flags.
  */
-async function analyzePhoto(base64Image, mimeType, context = {}) {
-  const gemini = await callGeminiVision(base64Image, mimeType, context);
-  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType, context);
+// timeoutMs (optional): one wall-clock budget shared by the Gemini attempts and
+// the Claude fallback; a photo that runs out returns null like any other miss,
+// and one handed no budget at all (zero or less) is never sent.
+async function analyzePhoto(base64Image, mimeType, context = {}, { timeoutMs } = {}) {
+  if (timeoutMs != null && timeoutMs <= 0) return null;
+  const deadline = timeoutMs ? Date.now() + timeoutMs : null;
+  // When Claude can stand in, the Gemini attempts get the first half of the
+  // budget so a stalled Gemini still leaves the fallback time to answer.
+  const claudeAvailable = Boolean(Anthropic && process.env.ANTHROPIC_API_KEY);
+  const geminiDeadline = deadline && claudeAvailable ? Date.now() + Math.floor(timeoutMs / 2) : deadline;
+  const gemini = await callGeminiVision(base64Image, mimeType, context, geminiDeadline);
+  const claude = gemini || (deadline && Date.now() >= deadline) ? null : await callClaudeVision(base64Image, mimeType, context, deadline);
 
   if (!claude && !gemini) return null;
 

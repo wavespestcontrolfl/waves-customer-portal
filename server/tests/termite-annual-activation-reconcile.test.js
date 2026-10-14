@@ -387,7 +387,15 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     // out exactly as before (its own behavior is covered by
     // termite-annual-signature-charge.test.js).
     const chargeAnnualInvoiceAtSignature = jest.fn(chargeImpl || (async () => ({ status: 'skipped', reason: 'no_enrolled_method', deliverPayLink: true })));
-    jest.doMock('../services/termite-annual-signature-charge', () => ({ chargeAnnualInvoiceAtSignature }));
+    jest.doMock('../services/termite-annual-signature-charge', () => ({
+      chargeAnnualInvoiceAtSignature,
+      // The activation transaction records the after-installation wait; these
+      // agreements are the at-signing kind (covered on real Postgres in
+      // termite-annual-charge-after-installation-postgres.test.js).
+      recordInstallationWait: jest.fn(async () => ({ agreed: false })),
+      AWAITING_INSTALLATION: 'awaiting_installation',
+      NEVER_INSTALLED_ALERT_DAYS: 14,
+    }));
     jest.doMock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue(undefined) } }));
     jest.doMock('../routes/estimate-public', () => ({ registerAcceptedEstimateAppointmentReminder: jest.fn().mockResolvedValue(null) }));
     jest.doMock('../services/new-recurring-welcome-sms', () => ({ sendNewRecurringWelcome: jest.fn().mockResolvedValue(undefined) }));

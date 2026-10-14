@@ -140,7 +140,15 @@ describe('termite annual plan activation on sign', () => {
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
     jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice, convertEstimate }));
-    jest.doMock('../services/termite-annual-signature-charge', () => ({ chargeAnnualInvoiceAtSignature }));
+    jest.doMock('../services/termite-annual-signature-charge', () => ({
+      chargeAnnualInvoiceAtSignature,
+      // The activation transaction records the after-installation wait; these
+      // agreements are the at-signing kind (covered on real Postgres in
+      // termite-annual-charge-after-installation-postgres.test.js).
+      recordInstallationWait: jest.fn(async () => ({ agreed: false })),
+      AWAITING_INSTALLATION: 'awaiting_installation',
+      NEVER_INSTALLED_ALERT_DAYS: 14,
+    }));
     jest.doMock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap } }));
     jest.doMock('../routes/estimate-public', () => ({ registerAcceptedEstimateAppointmentReminder }));
     jest.doMock('../services/new-recurring-welcome-sms', () => ({ sendNewRecurringWelcome }));

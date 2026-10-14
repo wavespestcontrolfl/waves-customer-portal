@@ -31,7 +31,7 @@ export default function IntelligenceTaskCard({ task, onSelectTarget, onRefresh, 
         ...receipts.filter(r => r.outcome !== 'awaiting_approval').map(r => ({
           id: r.id, tool: r.tool, summary: r.summary, contract: r.contract, receipt: r,
         })), ...(task.pendingActions || []),
-      ]} variant={variant} touchFriendly onResolved={onResolved} />
+      ]} variant={variant} touchFriendly inTask onResolved={onResolved} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
         <button type="button" onClick={onRefresh} style={buttonStyle}>Refresh status</button>
         {task.canContinue && <button type="button" onClick={onContinue} style={buttonStyle}>Continue request</button>}

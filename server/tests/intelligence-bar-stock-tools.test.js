@@ -153,6 +153,16 @@ describe('adjust_stock', () => {
     });
   });
 
+  test('a confirmed card the writer refuses (stale preview) says the stock was not written', async () => {
+    const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
+    const result = await executeRaw('adjust_stock', {
+      product_id: 'prod-1', movement_type: 'restock', quantity: 2, unit: 'gal', _verified_inventory_version: 'stale-version',
+    }, { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+    expect(result).toMatchObject({ success: false, written: false, code: 'preview_changed', preview_changed: true });
+    expect(result.error).toMatch(/Stock was not written\.$/);
+    expect(mutations.filter(m => m.op !== 'select')).toEqual([]);
+  });
+
   test('set_total 0 on an UNTRACKED product seeds tracking at zero (Codex P2)', async () => {
     const mutations = useDb({ products_catalog: [UNTRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
@@ -171,7 +181,7 @@ describe('adjust_stock', () => {
   test('a correction that lowers stock keeps its sign in the ledger quantity (Codex rd2 P2)', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'correction', set_total: 32, confirmed: true,
+      product_name: 'Bifen', movement_type: 'correction', set_total: 32, unit: 'fl_oz', confirmed: true,
     });
     expect(result.error).toBeUndefined();
     expect(result.success).toBe(true);
@@ -186,7 +196,7 @@ describe('adjust_stock', () => {
   test('set_total equal to current stock on a TRACKED product is rejected as a no-op', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'correction', set_total: 64, confirmed: true,
+      product_name: 'Bifen', movement_type: 'correction', set_total: 64, unit: 'fl_oz', confirmed: true,
     });
     expect(result.error).toMatch(/nothing to adjust/);
     expect(mutations).toEqual([]);
@@ -204,13 +214,13 @@ describe('adjust_stock', () => {
   test('rejects negative quantity for restock/damaged_lost and set_total outside correction', async () => {
     useDb({ products_catalog: [TRACKED_PRODUCT] });
     expect((await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'restock', quantity: -3,
+      product_name: 'Bifen', movement_type: 'restock', quantity: -3, unit: 'fl_oz',
     })).error).toMatch(/positive/);
     expect((await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'restock', set_total: 10,
+      product_name: 'Bifen', movement_type: 'restock', set_total: 10, unit: 'fl_oz',
     })).error).toMatch(/setTotal.*not allowed/);
     expect((await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'correction', quantity: 4, set_total: 10,
+      product_name: 'Bifen', movement_type: 'correction', quantity: 4, set_total: 10, unit: 'fl_oz',
     })).error).toMatch(/exclusive peers/);
   });
 
@@ -222,11 +232,76 @@ describe('adjust_stock', () => {
       ],
     });
     const result = await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'restock', quantity: 32, confirmed: true,
+      product_name: 'Bifen', movement_type: 'restock', quantity: 32, unit: 'fl_oz', confirmed: true,
     });
     expect(result.error).toMatch(/Multiple products match/);
     expect(result.candidates).toHaveLength(2);
     expect(mutations).toEqual([]);
+  });
+});
+
+describe('adjust_stock with no stated unit (the bar never assumes the inventory unit)', () => {
+  const TALAK = { ...TRACKED_PRODUCT, id: 'prod-talak', name: 'Talak', container_size: '96 fl oz', inventory_on_hand: 384 };
+  const NO_UNIT_CALLS = [
+    ['restock', { movement_type: 'restock', quantity: 2 }],
+    ['damaged_lost', { movement_type: 'damaged_lost', quantity: 2 }],
+    ['signed correction', { movement_type: 'correction', quantity: -2 }],
+    ['set_total', { movement_type: 'correction', set_total: 100 }],
+  ];
+
+  test.each(NO_UNIT_CALLS)('%s with no unit refuses with unit_required, names the inventory unit and container, writes nothing', async (_label, fields) => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    for (const extra of [{}, { confirmed: true }]) {
+      const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', ...fields, ...extra });
+      expect(result).toMatchObject({ success: false, code: 'unit_required' });
+      expect(result.preview).toBeUndefined();
+      expect(result.error).toMatch(/unit is missing/i);
+      expect(result.error).toContain('fl_oz');
+      expect(result.error).toContain('96 fl oz');
+    }
+    // The server-side confirmed path with a valid approval is refused the same way: no execution on an assumed unit.
+    const direct = await executeRaw('adjust_stock', { product_id: 'prod-talak', ...fields, _verified_inventory_version: 'any' },
+      { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+    expect(direct).toMatchObject({ success: false, code: 'unit_required' });
+    expect(mutations).toEqual([]);
+  });
+
+  test('no amount and no unit reports both in one refusal; a unit with no amount keeps the writer\'s amount validation', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'damaged_lost' });
+    expect(result).toMatchObject({ success: false, code: 'unit_and_amount_required' });
+    expect(result.error).toMatch(/amount and the unit are missing/i);
+    const amountOnly = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'damaged_lost', unit: 'fl_oz' });
+    expect(amountOnly.code).not.toMatch(/unit/);
+    expect(amountOnly.error).toMatch(/quantity/i);
+    expect(mutations).toEqual([]);
+  });
+
+  test('a blank or whitespace unit counts as no unit', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    for (const unit of ['', '   ']) {
+      const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'restock', quantity: 2, unit });
+      expect(result.code).toBe('unit_required');
+    }
+    expect(mutations).toEqual([]);
+  });
+
+  test('a product with no saved inventory unit still refuses and still asks for the unit', async () => {
+    const mutations = useDb({ products_catalog: [UNTRACKED_PRODUCT] });
+    const result = await executeProcurementTool('adjust_stock', { product_name: 'Prodiamine', movement_type: 'correction', set_total: 5 });
+    expect(result).toMatchObject({ success: false, code: 'unit_required' });
+    expect(mutations).toEqual([]);
+  });
+
+  test('a stated unit still previews and writes exactly as before', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    const preview = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'restock', quantity: 192, unit: 'fl_oz' });
+    expect(preview).toMatchObject({ preview: true, change: 192, stock_after: 576, unit: 'fl_oz', entered_quantity: 192, entered_unit: 'fl_oz' });
+    expect(mutations).toEqual([]);
+    const done = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'restock', quantity: 2, unit: 'gal', confirmed: true });
+    expect(done).toMatchObject({ success: true, change: 256, stock_after: 640, unit: 'fl_oz' });
+    const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+    expect(movement.args[0]).toMatchObject({ movement_type: 'restock', quantity: 256, unit: 'fl_oz' });
   });
 });
 
@@ -375,6 +450,63 @@ describe('update_restock_request', () => {
 
     expect(result).not.toHaveProperty('readiness_recheck');
     expect(mutations.some(m => m.table === 'admin_alerts')).toBe(false);
+  });
+
+  describe('receive with an amount and no unit (the bar never assumes the request unit)', () => {
+    const GAL_REQUEST = { ...OPEN_REQUEST, requested_quantity: 2, unit: 'gal' };
+
+    test('a quantity with no unit refuses with unit_required, names the request amount and unit, writes nothing, builds no card', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      for (const extra of [{}, { confirmed: true }]) {
+        const result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 3, ...extra });
+        expect(result).toMatchObject({ success: false, code: 'unit_required' });
+        expect(result.preview).toBeUndefined();
+        expect(result.error).toMatch(/unit is missing/i);
+        expect(result.error).toContain('The request is for 2 gal.');
+      }
+      // The server-side confirmed path with a valid approval is refused the same way: no execution on an assumed unit.
+      const direct = await executeRaw('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 3, _verified_inventory_version: 'any' },
+        { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+      expect(direct).toMatchObject({ success: false, code: 'unit_required' });
+      expect(mutations).toEqual([]);
+    });
+
+    test('a blank or whitespace unit counts as no unit', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      for (const unit of ['', '   ']) {
+        const result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 3, unit });
+        expect(result.code).toBe('unit_required');
+      }
+      expect(mutations).toEqual([]);
+    });
+
+    test('a quantity with a unit previews and writes as before', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      const preview = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 1, unit: 'gal' });
+      expect(preview).toMatchObject({ preview: true, adds: 128, entered_quantity: 1, entered_unit: 'gal' });
+      expect(mutations).toEqual([]);
+      const done = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 1, unit: 'gal', confirmed: true });
+      expect(done).toMatchObject({ success: true, added: 128, stock_after: 192 });
+      const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+      expect(movement.args[0].metadata).toMatchObject({ enteredQuantity: 1, enteredUnit: 'gal' });
+    });
+
+    test('receive with no quantity still takes the requested amount in the request unit (deliberate, unchanged)', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [OPEN_REQUEST] });
+      const preview = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive' });
+      expect(preview).toMatchObject({ preview: true, adds: 128, entered_quantity: 128, entered_unit: 'fl_oz' });
+      const done = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', confirmed: true });
+      expect(done).toMatchObject({ success: true, added: 128, stock_after: 192 });
+      expect(mutations.some(m => m.table === 'product_inventory_movements' && m.op === 'insert')).toBe(true);
+    });
+
+    test('mark_ordered and cancel never ask for a unit', async () => {
+      useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      for (const action of ['mark_ordered', 'cancel']) {
+        const result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action });
+        expect(result.code).not.toBe('unit_required');
+      }
+    });
   });
 
   test('mark_ordered and cancel only touch the request row', async () => {
@@ -1654,6 +1786,27 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         });
         expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
+    });
+  });
+
+  // Short product names stay out of scope (owner direction pending): the
+  // prompts Codex raised against earlier resolvers are still refused, as on
+  // main.
+  describe('short or unknown product phrases are still refused, as on main', () => {
+    const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
+    const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
+    const restock = product => ({ product: { id: product.id, name: product.name }, movement_type: 'restock' });
+    test.each([
+      'Add 2 gallons of the Guard to inventory',
+      'Add 2 gallons of Unlisted Guard Chemical to inventory',
+      'Add 2 gallons of Unlisted Chemical to inventory',
+      'request 2 gallons of the Guard',
+      'Yes',
+      'Actually use the other one',
+    ])('"%s" is refused', async (prompt) => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: restock(GUARD) });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
   });
 });

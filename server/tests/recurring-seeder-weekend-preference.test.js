@@ -142,7 +142,9 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
     // canonical duplicate-series guard, findActiveRecurringSeries, which
     // has no weekend-preference concern of its own. Back to the 8
     // pre-existing consult sites below.)
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
+    // 9th: seriesNextOccurrencesUnbillable's cadence walk (the lane edit's
+    // billable verdict) uses the same live weekday preference the extension does.
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);');
@@ -172,7 +174,10 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
   test('rebooker projects seasonal siblings with the live preference', () => {
     const rebookerSrc = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
     expect(rebookerSrc).toContain('const seriesSkipWeekends = !!parent.skip_weekends');
-    expect(rebookerSrc).toContain('|| await customerPrefersNoWeekends(conn, parent.customer_id);');
+    // The live read stays the default. A caller that projects many dates for
+    // one series (projectNextVisitDates) passes the value it just read live.
+    expect(rebookerSrc).toContain(': await customerPrefersNoWeekends(conn, parent.customer_id));');
+    expect(rebookerSrc).toContain(': !!(await customerPrefersNoWeekends(conn, parent.customer_id));');
     expect(rebookerSrc).toContain('{ skipWeekends: seriesSkipWeekends }');
   });
 });

@@ -134,6 +134,9 @@ const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 const { anthropicMaxTokens } = require('../llm/anthropic-wire');
+const { recordStreamedMessage } = require('../llm-dispatch-metrics');
+// The adapters' own failure reason (`<provider>_<status>`, `<provider>_timeout`).
+const { providerErrorReason } = require('../llm/call');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -678,6 +681,15 @@ const SYSTEM_PROMPT = [
   '  once you have the service address or at least the city/ZIP.',
   '- You CANNOT confirm or reserve an appointment, and you cannot take payment. Offering a',
   '  time is not booking it — a Waves team member calls back to lock it in. Say so.',
+  // Owner 2026-10-08: a cancel call never gets a run-around. The portal's
+  // self-serve cancel (Plan → Cancel) is the fastest path, so say it exists.
+  '- You CANNOT cancel a service plan on this call, and you must never say a plan is cancelled.',
+  '  ONLY when the caller wants to end their recurring service plan altogether, do not push',
+  '  back or try to talk them out of it: tell them they can cancel the plan',
+  '  on their own at any time in the Waves customer portal, under Plan, or a',
+  '  Waves team member can do it for them. Then capture their request as usual.',
+  '  Cancelling or moving ONE visit is a different request: never point that caller to the',
+  '  portal plan cancellation — capture it so a Waves team member can change the visit.',
   PRICE_LINE_NO_CONTEXT, // ONE source: the gate-on prompt replaces this exact line
   '',
   'How to talk:',
@@ -733,12 +745,16 @@ const PRICE_LINE_CONTEXT = [
   '- If you cannot give a number for what they want, do not leave them empty-handed — but do not',
   '  promise first: say the office can put a written estimate together, get their first and last',
   '  name, email address, and full service street address, and call capture_lead with',
-  '  estimate_requested: true. Only if the tool result says the request is queued may you promise',
+  '  estimate_requested: true. (For a caller a KNOWN CALLER block says is already a customer, do',
+  '  not collect those first: call capture_lead with what they have told you and follow its',
+  '  result.) Only if the tool result says the request is queued may you promise',
   '  it: during office hours that is usually about 15 minutes; if CLOCK DATA says the office is',
   '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
   '  it could not be queued, or the caller declines to give a missing detail, call capture_lead',
   '  again WITHOUT estimate_requested, do not promise an estimate — say a team member will follow',
-  '  up — and end normally.',
+  '  up — and end normally. The one exception: when the tool result says an estimate already',
+  '  promised on this call is still owed, follow that result instead — the estimate stays',
+  '  promised, and a team member calls back to confirm where to send it.',
 ].join('\n');
 
 function agentDisplayName() {
@@ -768,6 +784,18 @@ function contextPromptAddendum() {
     '  the matched caller about their own account is fine.',
     '- Use get_account_overview and get_service_history for account questions; never answer',
     '  them from memory or guesswork.',
+    '- A caller a KNOWN CALLER block says is already a customer (the block can arrive at the',
+    '  start of the call or partway through) is the exception to gathering a name, address and',
+    '  email: those are already on their account. Do not ask for them unless a tool needs one',
+    '  or its result says one is missing. Open times for such a customer need no address: call',
+    '  get_availability or find_slots without one and the tool uses the property on their',
+    '  account; pass an address only when they say the visit is for a different property. For a',
+    '  written estimate, call capture_lead with estimate_requested first, with what they have',
+    '  told you. Its result says what is missing. ONLY when that result offers it, ask the one',
+    '  question "Should it go to the email and service address on your account?" — on a yes call',
+    '  capture_lead again with use_account_details true; on a no, ask for the ones they want.',
+    '  When the result does not offer it, ask for what is missing. Never read the account\'s',
+    '  details aloud.',
     '- "When is my tech coming?" is get_today_eta. Give the window it returns, and say the',
     '  technician is on the way ONLY when the tool says so. Never invent a tighter ETA, never',
     '  promise a minute-by-minute arrival.',
@@ -2700,6 +2728,9 @@ class RelayConversation {
           duration: (offerContext && offerContext.duration) || null,
           timeOfDay: (offerContext && offerContext.timeOfDay) || 'any',
           expandOpenDays: Boolean(offerContext && offerContext.expandOpenDays),
+          // The account whose property the times were scored at (null = a
+          // location stated on the call): request_booking's fence.
+          ...(offerContext && offerContext.accountCustomerId ? { accountCustomerId: offerContext.accountCustomerId } : {}),
         };
         const existing = this._slotRefsByKey.get(key);
         if (existing) {
@@ -2714,6 +2745,19 @@ class RelayConversation {
         return ref;
       },
       resolveSlotRef: (ref) => this._slotRefs.get(String(ref || '').trim().toUpperCase()) || null,
+      // The caller said the visit is for a DIFFERENT property: times already
+      // offered for the account's own are no longer bookable for it. The refs
+      // stay (a stale ref still resolves, to a refusal) and lose their account
+      // stamp, which request_booking's fence requires; the registry is what a
+      // reconnect carries, so the revocation survives one.
+      revokeAccountSlots: () => {
+        for (const [ref, slot] of this._slotRefs) {
+          if (slot && slot.accountCustomerId) {
+            const { accountCustomerId, ...rest } = slot; // eslint-disable-line no-unused-vars
+            this._slotRefs.set(ref, rest);
+          }
+        }
+      },
       bookingRequested: () => this._bookingRequested,
       markBookingRequested: () => { this._bookingRequested = true; },
       leadId: () => this._leadId,
@@ -2767,6 +2811,7 @@ class RelayConversation {
       markOwnerAlerted: () => { this._ownerAlerted = true; },
       // Promises the tools confirmed to the caller (capture_lead: a queued
       // estimate). Recorded as owed commitments at close.
+      getPromise: (kind) => { const p = this._promises.get(String(kind || '')); return p ? { ...p } : null; },
       notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
       // ── PR 2A transfer ─────────────────────────────────────────────────
@@ -2798,7 +2843,9 @@ class RelayConversation {
         callerAttested: !!(convo._callerContext && convo._callerContext.attested === true),
         from: this.from || null,
         language: this.language || null,
-        factsCollected: { ...(convo._estimateFields || {}) },
+        // A location part the caller replaced is stored as a marker, not a fact.
+        factsCollected: Object.fromEntries(Object.entries(convo._estimateFields || {})
+          .filter(([, v]) => v !== require('./relay-estimate-details').ESTIMATE_FIELD_REPLACED)),
         tools: this._toolOutcomes.slice(),
         commitments: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict === true, expectation: v.expectation || null })),
         turnCount: this._userTurns.length,
@@ -3362,6 +3409,39 @@ class RelayConversation {
    * streamState, timedOut }` — `_runModelRound` decides what a failure
    * becomes.
    */
+  /**
+   * Cost ledger: one row per model round the provider finished (owner
+   * 2026-10-08: the voice agent's spend was invisible). Not awaited. A round
+   * that is aborted or times out has no response and records nothing. An
+   * eval-harness session records nothing either: that replay refuses every
+   * database write while a conversation runs, by construction, and its
+   * rounds are not production traffic.
+   */
+  _ledgerRound(message, modelStartAt, errorCode = null) {
+    if (this._evalHarness) return;
+    recordStreamedMessage({ provider: this._provider, requestedModel: this.model, message, latencyMs: Math.round(now() - modelStartAt), laneId: 'voice_relay', errorCode });
+  }
+
+  /**
+   * A model round that rejected, on the cost ledger, so the lane's failure
+   * rate is real (an OpenAI outage followed by a Claude retry is one failure
+   * and one success, not a success only):
+   *   - a response the provider finished and billed but the relay could not
+   *     use (relay-openai-client attaches it): failed, with its usage, under
+   *     the client's own code;
+   *   - the relay's own stream timeout: `<provider>_timeout`;
+   *   - any other provider error (429, 5xx, network): the adapters' reason.
+   * A barge-in abort is the caller talking, not a failure: nothing is filed.
+   */
+  _ledgerFailedRound(err, timedOut, modelStartAt) {
+    if (err?.billedRound) return this._ledgerRound(err.billedRound, modelStartAt, err.billedRound.errorCode);
+    if (timedOut) return this._ledgerRound(null, modelStartAt, `${this._provider}_timeout`);
+    // The round's own abort signal is the truth: the two SDKs name an abort
+    // differently (AbortError, APIUserAbortError).
+    if (this._controller?.signal?.aborted) return undefined;
+    return this._ledgerRound(null, modelStartAt, providerErrorReason(this._provider, err));
+  }
+
   async _modelAttempt(stat) {
     const client = clientFor(this._provider);
     this._controller = new AbortController();
@@ -3424,8 +3504,11 @@ class RelayConversation {
       // policy. Only wired when this session pinned the stream renderer;
       // the block path below is otherwise untouched.
       if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
-      return { msg: await stream.finalMessage(), streamState };
+      const msg = await stream.finalMessage();
+      this._ledgerRound(msg, modelStartAt);
+      return { msg, streamState };
     } catch (err) {
+      this._ledgerFailedRound(err, timedOut, modelStartAt);
       return { err, streamState, timedOut };
     } finally {
       clearTimeout(streamTimer);
@@ -4180,6 +4263,38 @@ class RelayConversation {
           }
           await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });
         }
+        // Sandy unbooked-call hand-off (GATE_RELAY_UNBOOKED_HANDOFF, dark): a
+        // production call that reconciled to ai_handled THIS statement (0 rows
+        // = a failure outcome / foreign owner won — nothing to do), with caller
+        // speech and no booking, lead or transfer, rings the office once and
+        // enters the lead pipeline. Awaited inside the close's own try so a
+        // failure is logged here; the module never throws.
+        if (updated && !this.sandbox) {
+          await require('./relay-unbooked-handoff').runUnbookedHandoff({
+            db,
+            callSid: this.callSid,
+            from: this.from,
+            to: this.to,
+            sandbox: this.sandbox === true,
+            sessionKey: this.sessionKey || null,
+            callerVerified: this._callerVerified === true,
+            language: this._provedLanguage || null,
+            callerTurnCount: this._userTurns.length + priorCallerTurns.length,
+            bookingRequested: this._bookingRequested === true,
+            reserviceFiled: this._reserviceFiled === true,
+            transferRequested: this._transferRequested === true,
+            // A write that outlived the bounded drain (capture_lead, request_reservice,
+            // a booking, the capture floor) IS this call's artifact once it lands:
+            // the hand-off stands down rather than race it.
+            pendingWrites: this._inFlightWrites.size > 0 || detachedWrites.length > 0 || Boolean(this._captureFloorWrite),
+            // The floor's "ran, wrote NO lead" (an existing customer) latches leadCaptured to
+            // stand down, but it is not an artifact: the office still gets the bell.
+            leadCaptured: this.leadCaptured === true && this._floorNoLead !== true,
+            leadId: this._leadId || null,
+            estimateFields: this._estimateFields || null,
+            fence: fenceOwner,
+          });
+        }
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     } finally {
@@ -4487,7 +4602,7 @@ class RelayConversation {
         }
         const floorLeadId = result && result.leadId;
         this.leadCaptured = true;
-        if (!floorLeadId) this._noLeadCreated = true;
+        if (!floorLeadId) { this._noLeadCreated = true; this._floorNoLead = true; }
         logger.info(
           `[voice-relay] capture-floor ${floorLeadId ? 'lead written' : 'ran with NO lead (existing customer)'} `
           + `callSid=${this.callSid} reason=${reason || 'end'}`

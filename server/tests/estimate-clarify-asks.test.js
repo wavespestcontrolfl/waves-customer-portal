@@ -638,6 +638,16 @@ describe('claimClarifyDispatch', () => {
     expect(verdict.message).toContain('moved past draft');
   });
 
+  test('an archived draft estimate retires its clarification (replaced by a sent estimate)', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { estimate_id: 'est-1' }),
+      { id: 'est-1', status: 'draft', sent_at: null, archived_at: '2026-10-06T22:00:00Z', address: null },
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('retired');
+    expect(verdict.message).toContain('archived');
+  });
+
   test('an unparseable source_ref fails closed without writing anything', async () => {
     const verdict = await claimClarifyDispatch({ draft: { id: 'draft-1', source_ref: 'not-a-clarify-ref' } });
     expect(verdict.outcome).toBe('error');

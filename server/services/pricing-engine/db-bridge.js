@@ -1057,7 +1057,10 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // mutated in place across syncs, so deleting the DB key (or the row)
     // after an admin edit must restore the in-code defaults on the next
     // sync, never leave the edited values resident until restart.
-    constants.LAWN_PRICING_V2.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2 };
+    constants.LAWN_PRICING_V2.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2, cost: { ...constants.BERMUDA_SUPPRESSION_COST_DEFAULTS } };
+    // Cost-plus list knobs rebase the same way; a row without the key keeps
+    // the in-code defaults, a row with it deep-merges over them.
+    constants.LAWN_PRICING_V2.costPlusList = JSON.parse(JSON.stringify(constants.LAWN_COST_PLUS_LIST_DEFAULTS));
     // Tier sellability rebases too: a row that drops tiers.<key> (or the
     // row itself) must restore the in-code default — standard hidden since
     // 2026-09-24 — never leave a temporary DB re-enable resident.
@@ -1214,6 +1217,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     constants.TREE_SHRUB.densityFactors = { light: 1, moderate: 1, heavy: 1 };
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 };
     constants.TREE_SHRUB.callbackReservePerVisit = 0;
+    constants.TREE_SHRUB.fallbackBedSqFt = constants.TREE_SHRUB_FALLBACK_BED_SQFT;
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
       const model = constants.TREE_SHRUB.materialModel;
@@ -1261,6 +1265,13 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         // 1–5x: a large palm prices at least like a regular one, and past 5
         // regular palms' worth is a typo, not a canopy.
         if (largeFactor >= 1 && largeFactor <= 5) reserve.largePalmFactor = largeFactor;
+      }
+      // Bed size a quote with NO bed signal prices (owner ruling 2026-10-05:
+      // 1,200). 100-20000 sqft: below 100 is not a landscape and past 20000
+      // is a typo for a no-data guess. Out of range keeps the in-code default.
+      const fallbackBed = Number(rates.fallback_bed_sqft);
+      if (Number.isFinite(fallbackBed) && fallbackBed >= 100 && fallbackBed <= 20000) {
+        constants.TREE_SHRUB.fallbackBedSqFt = fallbackBed;
       }
       const callbackReserve = Number(rates.callback_reserve_per_visit);
       if (callbackReserve >= 0 && callbackReserve <= 50) {
@@ -1798,6 +1809,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
       constants.ONE_TIME.mosquito = next;
     }
+
+    // Area add-on treatments (pricing_config `area_addon_pricing`): rebased onto the in-code defaults on EVERY sync, then the
+    // row applied only when the whole row is valid. A deleted or malformed row leaves the defaults (never the previous edit,
+    // never half a row); the label-bound fields (yearly limits, grass, product) are not in the row's reach.
+    require('./area-addon-config').syncAreaAddOnPricingConfig(config.area_addon_pricing, constants.AREA_ADDONS);
 
     // ── One-Time / Specialty ─────────────────────────────────
     if (config.onetime_urgency) {

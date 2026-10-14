@@ -65,6 +65,16 @@ describe('estimate accept — sign-before-pay payloads', () => {
     expect(payload.adminBody).not.toMatch(/Invoice follow-up needed/);
   });
 
+  test('buildAcceptNotificationPayload: an after-installation agreement tells the office the charge follows the installation, not the signature', () => {
+    const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
+    const args = { customerName: 'Customer', billingTerm: 'prepay_annual', invoiceKind: 'annual_prepay_deferred', annualPrepayAmount: 449 };
+
+    expect(buildAcceptNotificationPayload(args).adminBody).toContain('at signature the saved payment method is charged, or the pay link sent');
+    const after = buildAcceptNotificationPayload({ ...args, annualChargeAfterInstallation: true }).adminBody;
+    expect(after).toContain('nothing is charged at signature either: after the station installation is completed the saved payment method is charged, or the pay link sent');
+    expect(after).not.toContain('at signature the saved payment method is charged');
+  });
+
   test('buildAcceptNotificationPayload: an ordinary prepay accept keeps its existing copy', () => {
     const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
     const payload = buildAcceptNotificationPayload({ customerName: 'Customer', billingTerm: 'prepay_annual' });
@@ -106,6 +116,69 @@ describe('estimate accept — sign-before-pay payloads', () => {
     expect(contractLookup.find((c) => c.method === 'where').args[0])
       .toEqual({ document_template_key: 'service_agreement.termite_annual_protection', status: 'signed' });
     expect(contractLookup.find((c) => c.method === 'whereRaw').args[1]).toEqual(['est-1']);
+  });
+
+  // GATE_PAF_TERMITE (GitHub Codex #5816 r3): signing mints the term and the
+  // invoice, so a retry after the signature reads as an ordinary annual
+  // prepay. While the charge waits for the installation it must never hand
+  // the customer the pay link.
+  describe('retry builder — signed plan whose charge waits for the installation', () => {
+    const activated = (charge) => ({
+      ...parkedEstimate,
+      annual_plan_activation_status: 'activated',
+      accepted_billing_term: 'prepay_annual',
+      annual_plan_signature_charge: charge,
+    });
+    const tables = {
+      annual_prepay_terms: { id: 'term-1', prepay_invoice_id: 'inv-1', status: 'payment_pending' },
+      invoices: { id: 'inv-1', token: 'tok-1', status: 'draft', total: 449, customer_id: 'cust-1' },
+    };
+    async function retry(charge) {
+      jest.doMock('../models/db', () => fakeDb(tables));
+      const { buildAlreadyAcceptedSuccessPayload } = require('../routes/estimate-public');
+      return buildAlreadyAcceptedSuccessPayload(activated(charge));
+    }
+
+    test.each([
+      ['awaiting_installation', { status: 'awaiting_installation', invoice_id: 'inv-1' }],
+      ['awaiting_installation (stored as a string)', JSON.stringify({ status: 'awaiting_installation', invoice_id: 'inv-1' })],
+      ['the after-installation charge in flight', { status: 'claimed', trigger: 'installation_complete' }],
+    ])('%s: no pay link, no pay step, after_installation', async (_label, charge) => {
+      const payload = await retry(charge);
+
+      expect(payload.invoicePayUrl).toBeNull();
+      expect(payload.invoiceMode).toBe(false);
+      expect(payload.nextStep).toBe('confirmed');
+      expect(payload.invoiceSettled).toBe(true);
+      expect(payload.prepayChargeStatus).toBe('after_installation');
+    });
+
+    test.each([
+      ['held for the office (a cancelled agreement)', { status: 'deferred', reason: 'agreement_no_longer_signed', trigger: 'installation_complete' }],
+      ['possibly through', { status: 'ambiguous', trigger: 'installation_complete' }],
+      ['an at-signing charge in flight', { status: 'claimed', trigger: 'signature' }],
+    ])('%s: no pay link, the neutral confirming copy', async (_label, charge) => {
+      const payload = await retry(charge);
+
+      expect(payload.invoicePayUrl).toBeNull();
+      expect(payload.invoiceMode).toBe(false);
+      expect(payload.nextStep).toBe('confirmed');
+      expect(payload.prepayChargeStatus).toBe('ambiguous');
+    });
+
+    test('a declined after-installation charge: the pay link is back', async () => {
+      const payload = await retry({ status: 'declined', trigger: 'installation_complete' });
+
+      expect(payload.invoicePayUrl).toMatch(/^\/pay\/tok-1/);
+      expect(payload.prepayChargeStatus).not.toBe('after_installation');
+    });
+
+    test('an at-signing plan (no wait record) keeps its pay step', async () => {
+      const payload = await retry(null);
+
+      expect(payload.invoicePayUrl).toMatch(/^\/pay\/tok-1/);
+      expect(payload.prepayChargeStatus).not.toBe('after_installation');
+    });
   });
 
   test('slice 3b: retry builder — signature_expired → offer_closed, never re-offers sign_agreement, no total reported', async () => {

@@ -27,6 +27,10 @@ const { canonicalStaffEmail } = require('../utils/staff-identity');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
+const staffMfa = require('../services/staff-mfa');
+const { noStore } = require('../middleware/no-store');
+const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
+const { adminMfaLive } = staffMfa;
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -67,6 +71,20 @@ const changePasswordLimiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
+// Two-step setup / recovery-code / turn-off routes (authenticated). The login
+// code step itself shares the /api/admin/auth/login limiter in server/index.js
+// (app.use prefix match) and the per-account lockout in staff-mfa.js.
+const mfaManageLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many attempts. Please try again in 15 minutes.' },
+  keyGenerator: rateLimitKey,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+
+const MFA_CHALLENGE_TYPE = 'staff_mfa_challenge';
+const MFA_CHALLENGE_TTL = '5m';
+
 function staffTokenVersion(tech) {
   const version = Number(tech?.auth_token_version);
   if (!Number.isInteger(version) || version < 1) {
@@ -82,10 +100,14 @@ function staffUser(tech) {
     email: tech.email,
     role: tech.role,
     mustChangePassword: Boolean(tech.must_change_password),
+    ...staffMfa.twoStepProfile(tech),
   };
 }
 
-function mintStaffTokens(tech) {
+// `mfa: true` marks an access token issued after the two-step code passed
+// (GATE_ADMIN_MFA); the claim is omitted otherwise, so gate-off tokens are
+// unchanged.
+function mintStaffTokens(tech, { mfa = false, mfaRecoveryUntil = null } = {}) {
   const tokenVersion = staffTokenVersion(tech);
   return {
     token: jwt.sign({
@@ -94,6 +116,10 @@ function mintStaffTokens(tech) {
       name: tech.name,
       type: 'access',
       tokenVersion,
+      ...(mfa ? { mfa: true } : {}),
+      // Epoch seconds until which this recovery-code session may replace a
+      // lost authenticator without a second code (staff-mfa.js).
+      ...(mfa && Number.isFinite(mfaRecoveryUntil) ? { mfaRecoveryUntil } : {}),
     }, config.jwt.secret, { expiresIn: '30d' }),
     refreshToken: jwt.sign({
       technicianId: tech.id,
@@ -185,6 +211,22 @@ async function login(req, res, next) {
     const tech = candidate;
     if (!valid) return rejectInvalidCredentials(res, startedAt);
 
+    // Two-step sign-in: the password alone issues no session for an enrolled
+    // staff member — only a short-lived challenge for POST /login/mfa.
+    if (adminMfaLive() && staffMfa.mfaEnabled(tech)) {
+      // The challenge is a short-lived bearer: same privacy headers as
+      // /login/mfa (gate-off answers keep their headers unchanged).
+      noStore(req, res, () => {});
+      return res.json({
+        mfaRequired: true,
+        challengeToken: jwt.sign({
+          technicianId: tech.id,
+          type: MFA_CHALLENGE_TYPE,
+          tokenVersion: staffTokenVersion(tech),
+        }, config.jwt.secret, { expiresIn: MFA_CHALLENGE_TTL }),
+      });
+    }
+
     const { token, refreshToken } = mintStaffTokens(tech);
 
     await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
@@ -198,6 +240,211 @@ async function login(req, res, next) {
 }
 
 router.post('/login', login);
+
+// `invalidStatus`: the login step answers a wrong code 401 (no session yet);
+// the signed-in management routes answer it 400 so a typo never reads as a
+// revoked session.
+function mfaFailureResponse(res, result, invalidStatus = 401) {
+  if (result.reason === 'revoked') {
+    return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+  }
+  if (result.reason === 'locked') {
+    return res.status(429).json({ error: 'Too many wrong codes. Try again in 15 minutes.', code: 'MFA_LOCKED' });
+  }
+  if (result.reason === 'unavailable') {
+    return res.status(503).json({ error: 'Two-step sign-in cannot check codes right now. Try again shortly.', code: 'MFA_UNAVAILABLE' });
+  }
+  return res.status(invalidStatus).json({ error: 'That code did not work. Check your authenticator app and try again.', code: 'MFA_INVALID' });
+}
+
+// A signed JWT's shape, bounded (the challenge is ~250 characters).
+const JWT_SHAPE_RE = /^[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,1024}\.[A-Za-z0-9_-]{1,512}$/;
+// An authenticator code or a recovery code, as typed (spaces and dashes).
+const MFA_CODE_INPUT_RE = /^[\sA-Za-z0-9-]{6,64}$/;
+
+// Step two of an enrolled staff member's sign-in: the challenge from /login
+// plus a 6-digit authenticator code or a recovery code. A malformed body and
+// an unknown, expired, revoked or ineligible challenge all answer the same
+// generic 404 as the dark route (the public token-route baseline); the
+// sign-in page restarts at the password step on it. Only a wrong code for a
+// live challenge says so (401 MFA_INVALID).
+async function loginMfa(req, res, next) {
+  try {
+    const { challengeToken, code } = req.body || {};
+    const restart = () => res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    if (!JWT_SHAPE_RE.test(String(challengeToken ?? '')) || !MFA_CODE_INPUT_RE.test(String(code ?? ''))) {
+      return restart();
+    }
+    let claims;
+    try {
+      claims = jwt.verify(challengeToken, config.jwt.secret);
+    } catch {
+      return restart();
+    }
+    if (claims?.type !== MFA_CHALLENGE_TYPE || !claims.technicianId || !Number.isInteger(claims.tokenVersion)) return restart();
+
+    const tech = await db('technicians')
+      .where({ id: claims.technicianId, active: true })
+      .whereIn('role', ['admin', 'technician'])
+      .first();
+    if (!tech || Number(tech.auth_token_version) !== claims.tokenVersion || !staffMfa.mfaEnabled(tech)) return restart();
+
+    const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: claims.tokenVersion });
+    if (result.reason === 'revoked') return restart();
+    if (!result.ok) return mfaFailureResponse(res, result);
+
+    const { token, refreshToken } = mintStaffTokens(tech, {
+      mfa: true,
+      mfaRecoveryUntil: result.method === 'recovery' ? staffMfa.recoveryReplaceDeadline() : null,
+    });
+    // Best-effort: the code (possibly the last recovery code) is already
+    // spent, so a failed timestamp write must not withhold the session.
+    await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() })
+      .catch((stampErr) => logger.warn(`[staff-auth] last_login_at stamp failed after two-step sign-in (${stampErr?.code || 'db_error'})`));
+    setAdminMarkerCookie(res, tech.id);
+    return res.json({ token, refreshToken, user: staffUser(tech) });
+  } catch (err) { return next(err); }
+}
+
+// Dark = the generic unknown-route 404 (server/middleware/staff-mfa-guard.js,
+// also mounted ahead of every limiter in server/index.js).
+router.post('/login/mfa', ...loginMfaPreParserGuard, loginMfa);
+
+// The self-service two-step routes exist only while GATE_ADMIN_MFA is on.
+function requireMfaGate(req, res, next) {
+  if (!adminMfaLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+async function currentPasswordMatches(tech, currentPassword) {
+  if (typeof currentPassword !== 'string' || !currentPassword) return false;
+  if (Buffer.byteLength(currentPassword, 'utf8') > MAX_STAFF_PASSWORD_BYTES) return false;
+  if (typeof tech.password_hash !== 'string' || !tech.password_hash) return false;
+  return bcrypt.compare(currentPassword, tech.password_hash);
+}
+
+async function mfaStatus(req, res, next) {
+  try {
+    return res.json(await staffMfa.status(req.technician, req.staffToken));
+  } catch (err) { return next(err); }
+}
+
+// Starts (or, with the current code, replaces) an authenticator. Always asks
+// for the account password, so a borrowed session alone cannot bind an
+// authenticator to the account. A session that just signed in with a
+// recovery code (the lost-phone path) may replace it without another code.
+async function mfaSetup(req, res, next) {
+  try {
+    const tech = req.technician;
+    const { currentPassword, code } = req.body || {};
+    if (!(await currentPasswordMatches(tech, currentPassword))) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+    const needsCode = staffMfa.mfaEnabled(tech) && !staffMfa.recoverySessionCanReplace(req.staffToken);
+    if (needsCode && (typeof code !== 'string' || !code.trim() || code.length > 64)) {
+      return res.status(400).json({ error: 'Enter a code from your current authenticator app to replace it.' });
+    }
+    // The current code is checked in the same transaction that writes the
+    // pending setup: a recovery code is consumed only if the setup starts.
+    const started = await staffMfa.startSetup(tech, { expectedTokenVersion: staffTokenVersion(tech), code: needsCode ? code : null });
+    if (!started.ok) return mfaFailureResponse(res, started, 400);
+    // A recovery code spent here (lost authenticator) gives this session the
+    // same replacement window a recovery-code sign-in gets, so a failed,
+    // expired or cancelled setup can be retried with the password alone.
+    const recoverySession = started.method === 'recovery'
+      ? {
+        ...mintStaffTokens(tech, { mfa: true, mfaRecoveryUntil: staffMfa.recoveryReplaceDeadline() }),
+        replaceWithoutCode: true,
+      }
+      : {};
+    return res.json({
+      secret: started.secret,
+      otpauthUrl: started.otpauthUrl,
+      expiresInMinutes: staffMfa.PENDING_SETUP_TTL_MS / 60000,
+      ...recoverySession,
+    });
+  } catch (err) {
+    if (err.status === 503) return res.status(503).json({ error: err.message });
+    return next(err);
+  }
+}
+
+async function mfaConfirm(req, res, next) {
+  try {
+    const { code } = req.body || {};
+    if (typeof code !== 'string' || !code.trim() || code.length > 64) {
+      return res.status(400).json({ error: 'Enter the 6-digit code from your authenticator app.' });
+    }
+    const result = await staffMfa.confirmSetup(req.technician, code, {
+      expectedTokenVersion: staffTokenVersion(req.technician),
+    });
+    if (!result.ok) {
+      if (result.reason === 'revoked') {
+        return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+      }
+      if (result.reason === 'no_pending' || result.reason === 'expired') {
+        return res.status(409).json({ error: 'This setup expired. Start again to get a new QR code.', code: 'MFA_SETUP_EXPIRED' });
+      }
+      return mfaFailureResponse(res, result, 400);
+    }
+    const tech = result.technician;
+    // The credential version moved, so every earlier session and device is
+    // signed out; this session passed the new factor and continues on a
+    // fresh two-step token minted from the row the fence wrote.
+    disconnectRevokedStaffSessions(tech.id, 'mfa_enrolled');
+    const { token, refreshToken } = mintStaffTokens(tech, { mfa: true });
+    setAdminMarkerCookie(res, tech.id);
+    return res.json({ token, refreshToken, user: staffUser(tech), recoveryCodes: result.recoveryCodes });
+  } catch (err) { return next(err); }
+}
+
+async function mfaRegenerateRecoveryCodes(req, res, next) {
+  try {
+    const tech = req.technician;
+    const { code } = req.body || {};
+    if (!staffMfa.mfaEnabled(tech)) return res.status(409).json({ error: 'Two-step sign-in is not set up.' });
+    if (typeof code !== 'string' || !code.trim() || code.length > 64) {
+      return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
+    }
+    // The code is checked and the new batch written in one transaction.
+    const regenerated = await staffMfa.regenerateRecoveryCodes(tech.id, { expectedTokenVersion: staffTokenVersion(tech), code });
+    if (!regenerated.ok) return mfaFailureResponse(res, regenerated, 400);
+    return res.json({ recoveryCodes: regenerated.recoveryCodes });
+  } catch (err) { return next(err); }
+}
+
+async function mfaDisable(req, res, next) {
+  try {
+    const tech = req.technician;
+    const { currentPassword, code } = req.body || {};
+    if (!staffMfa.mfaEnabled(tech)) return res.status(409).json({ error: 'Two-step sign-in is not set up.' });
+    if (staffMfa.enrollmentRequired({ ...tech, mfa_enabled_at: null })) {
+      return res.status(409).json({ error: 'Two-step sign-in is required for admin accounts. Replace your authenticator instead of turning it off.', code: 'MFA_REQUIRED_FOR_ROLE' });
+    }
+    if (!(await currentPasswordMatches(tech, currentPassword))) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+    if (typeof code !== 'string' || !code.trim() || code.length > 64) {
+      return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
+    }
+    // The code is checked and the factor removed in one transaction.
+    const disabled = await staffMfa.disable(tech.id, { expectedTokenVersion: staffTokenVersion(tech), code });
+    if (!disabled.ok) return mfaFailureResponse(res, disabled, 400);
+    // Every earlier session and device is signed out; this one continues.
+    disconnectRevokedStaffSessions(tech.id, 'mfa_disabled');
+    const { token, refreshToken } = mintStaffTokens(disabled.technician);
+    setAdminMarkerCookie(res, tech.id);
+    return res.json({ ok: true, token, refreshToken, user: staffUser(disabled.technician) });
+  } catch (err) { return next(err); }
+}
+
+// noStore: these answers carry sessions, the authenticator secret or
+// recovery codes.
+router.get('/mfa', noStore, adminAuthenticate, requireMfaGate, mfaStatus);
+router.post('/mfa/totp/setup', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaSetup);
+router.post('/mfa/totp/confirm', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaConfirm);
+router.post('/mfa/recovery-codes', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaRegenerateRecoveryCodes);
+router.post('/mfa/disable', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaDisable);
 
 async function lockStaffAccountMutations(trx) {
   await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');
@@ -358,6 +605,11 @@ async function resetPassword(req, res, next) {
     if (!updated) return res.status(400).json({ error: 'Reset link is invalid or expired' });
 
     disconnectRevokedStaffSessions(updated.id, 'password_reset');
+    // A reset link proves the inbox, not the authenticator: an enrolled staff
+    // member signs in again with the new password and their code.
+    if (adminMfaLive() && staffMfa.mfaEnabled(updated)) {
+      return res.json({ passwordReset: true, signInRequired: true });
+    }
     const tokens = mintStaffTokens(updated);
     setAdminMarkerCookie(res, updated.id);
     return res.json({ ...tokens, user: staffUser(updated) });
@@ -410,7 +662,13 @@ async function changePassword(req, res, next) {
     }
 
     disconnectRevokedStaffSessions(updated.id, 'password_changed');
-    const { token, refreshToken } = mintStaffTokens(updated);
+    // The replacement session keeps the two-step mark of the session that
+    // changed the password (adminAuthenticate already required it).
+    // A recovery-code session keeps its replacement window, never extended.
+    const { token, refreshToken } = mintStaffTokens(updated, {
+      mfa: req.staffToken?.mfa === true,
+      mfaRecoveryUntil: staffMfa.recoverySessionCanReplace(req.staffToken) ? req.staffToken.mfaRecoveryUntil : null,
+    });
     setAdminMarkerCookie(res, updated.id);
     res.json({ token, refreshToken, user: staffUser(updated) });
   } catch (err) { next(err); }
@@ -525,6 +783,11 @@ module.exports._handlers = {
   issuePasswordReset,
   lockStaffAccountMutations,
   login,
+  loginMfa,
+  mfaConfirm,
+  mfaDisable,
+  mfaRegenerateRecoveryCodes,
+  mfaSetup,
   register,
   resetPassword,
 };

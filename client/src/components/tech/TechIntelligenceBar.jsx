@@ -12,7 +12,8 @@ import { filesToImageParts, MAX_ATTACHMENTS } from '../../utils/ibImages';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+// Waves Admin look (DECISIONS 2026-10-03): ink and stone surfaces; `teal` is the ink accent.
+const D = { bg: '#fafaf9', card: '#ffffff', border: '#d6d3d1', teal: '#1c1917', green: '#1c1917', amber: '#854d0e', text: '#1c1917', muted: '#57534e', white: '#fff' };
 // Owner-reported bug (#5218 was the admin fix, this is the owner-approved
 // tech-bar follow-up): the composer was a single-line <input>, so dictated
 // or long typed text couldn't be seen or edited past the cut-off. Tech
@@ -38,7 +39,7 @@ function renderMarkdown(text) {
   if (!text) return null;
   return text.split('\n').map((line, i) => {
     if (!line.trim()) return <div key={i} style={{ height: 6 }} />;
-    if (line.startsWith('### ') || line.startsWith('## ')) return <div key={i} style={{ fontSize: 14, fontWeight: 700, color: D.white, marginTop: 10, marginBottom: 4 }}>{line.replace(/^#+\s/, '')}</div>;
+    if (line.startsWith('### ') || line.startsWith('## ')) return <div key={i} style={{ fontSize: 14, fontWeight: 500, color: D.text, marginTop: 10, marginBottom: 4 }}>{line.replace(/^#+\s/, '')}</div>;
     if (line.match(/^[-•*]\s/)) return <div key={i} style={{ display: 'flex', gap: 6, paddingLeft: 2, marginBottom: 2 }}><span style={{ color: D.teal, fontSize: 8, marginTop: 6 }}>●</span><span>{renderBold(line.replace(/^[-•*]\s/, ''))}</span></div>;
     return <div key={i} style={{ marginBottom: 3 }}>{renderBold(line)}</div>;
   });
@@ -46,7 +47,7 @@ function renderMarkdown(text) {
 
 function renderBold(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
-    p.startsWith('**') && p.endsWith('**') ? <strong key={i} style={{ color: D.white, fontWeight: 600 }}>{p.slice(2, -2)}</strong> : p
+    p.startsWith('**') && p.endsWith('**') ? <strong key={i} style={{ color: D.text, fontWeight: 500 }}>{p.slice(2, -2)}</strong> : p
   );
 }
 
@@ -156,14 +157,14 @@ export default function TechIntelligenceBar() {
 
   return (
     <div style={{
-      background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
+      background: D.card, border: `0.5px solid ${D.border}`, borderRadius: 6,
       marginBottom: 16, overflow: 'hidden',
     }}>
       {/* Input */}
       <div style={{ padding: '10px 12px', display: 'flex', alignItems: 'flex-end', gap: 8 }}>
         <div style={{
-          width: 28, height: 28, borderRadius: 8,
-          background: `linear-gradient(135deg, ${D.teal}, #6366f1)`,
+          width: 28, height: 28, borderRadius: 4,
+          background: D.teal, color: D.white,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: 13, flexShrink: 0,
         }}>⚡</div>
@@ -179,13 +180,13 @@ export default function TechIntelligenceBar() {
           enterKeyHint="send"
           style={{
             flex: 1, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`,
-            borderRadius: 8, color: D.text, fontSize: 14, fontFamily: "'Nunito Sans', sans-serif",
+            borderRadius: 4, color: D.text, fontSize: 14, fontFamily: "'Roboto', system-ui, sans-serif",
             outline: 'none', boxSizing: 'border-box', resize: 'none',
           }}
         />
         {!loading && (
           <button onClick={() => fileInputRef.current?.click()} title="Attach a photo" aria-label="Attach a photo" style={{
-            width: 32, height: 32, borderRadius: 8, background: 'transparent',
+            width: 32, height: 32, borderRadius: 4, background: 'transparent',
             border: `1px solid ${D.border}`, color: D.muted, cursor: attachmentsLoading ? 'not-allowed' : 'pointer',
             opacity: attachmentsLoading ? 0.45 : 1,
             display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0,
@@ -200,17 +201,17 @@ export default function TechIntelligenceBar() {
         <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
           onChange={(e) => { addAttachments(e.target.files); e.target.value = ''; }} />
         {loading || attachmentsLoading ? (
-          <div style={{ padding: '6px 10px', borderRadius: 6, background: `${D.teal}22`, color: D.teal, fontSize: 11, fontWeight: 600, animation: 'pulse 1.5s ease infinite' }}>...</div>
+          <div style={{ padding: '6px 10px', borderRadius: 4, background: `${D.teal}22`, color: D.teal, fontSize: 11, fontWeight: 500, animation: 'pulse 1.5s ease infinite' }}>...</div>
         ) : prompt.trim() ? (
           <button onClick={() => submit()} style={{
-            padding: '6px 12px', borderRadius: 6, background: D.teal, color: D.white,
-            border: 'none', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            padding: '6px 12px', borderRadius: 4, background: D.teal, color: D.white,
+            border: 'none', fontSize: 12, fontWeight: 500, cursor: 'pointer',
           }}>Go</button>
         ) : null}
         {response && (
           <button onClick={clear} style={{
             padding: '6px 8px', background: 'transparent', border: `1px solid ${D.border}`,
-            borderRadius: 6, color: D.muted, fontSize: 10, fontWeight: 600, cursor: 'pointer',
+            borderRadius: 4, color: D.muted, fontSize: 10, fontWeight: 500, cursor: 'pointer',
           }}>✕</button>
         )}
       </div>
@@ -219,11 +220,11 @@ export default function TechIntelligenceBar() {
       {attachments.length > 0 && (
         <div style={{ padding: '0 12px 10px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {attachments.map((a, i) => (
-            <div key={i} style={{ position: 'relative', width: 48, height: 48, borderRadius: 8, overflow: 'hidden', border: `1px solid ${D.border}` }}>
+            <div key={i} style={{ position: 'relative', width: 48, height: 48, borderRadius: 4, overflow: 'hidden', border: `1px solid ${D.border}` }}>
               <img src={a.previewUrl} alt={a.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               <button onClick={() => removeAttachment(i)} title="Remove" aria-label={`Remove ${a.name}`} style={{
                 position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: '50%',
-                border: 'none', background: 'rgba(15,25,35,0.85)', color: D.white, fontSize: 11, lineHeight: 1,
+                border: 'none', background: 'rgba(28,25,23,0.85)', color: D.white, fontSize: 11, lineHeight: 1,
                 cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
               }}>×</button>
             </div>
@@ -237,9 +238,9 @@ export default function TechIntelligenceBar() {
           {quickActions.map(a => (
             <button key={a.id} onClick={() => { setPrompt(a.prompt); submit(a.prompt); }} style={{
               display: 'flex', alignItems: 'center', gap: 6, padding: '10px 10px',
-              background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-              color: D.muted, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-              fontFamily: "'Nunito Sans', sans-serif", textAlign: 'left',
+              background: D.bg, border: `1px solid ${D.border}`, borderRadius: 4,
+              color: D.muted, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+              fontFamily: "'Roboto', system-ui, sans-serif", textAlign: 'left',
             }}>
               <span style={{ fontSize: 15 }}>{a.icon}</span>
               <span>{a.label}</span>
@@ -260,7 +261,7 @@ export default function TechIntelligenceBar() {
       {/* Response */}
       {response && !loading && (
         <div style={{ padding: '0 12px 12px', maxHeight: 350, overflowY: 'auto' }} aria-live="polite">
-          <div role={typeof response === 'string' && response.startsWith('Error:') ? 'alert' : undefined} style={{ fontSize: 13, lineHeight: 1.6, color: D.text, fontFamily: "'Nunito Sans', sans-serif" }}>
+          <div role={typeof response === 'string' && response.startsWith('Error:') ? 'alert' : undefined} style={{ fontSize: 13, lineHeight: 1.6, color: D.text, fontFamily: "'Roboto', system-ui, sans-serif" }}>
             {renderMarkdown(response)}
           </div>
           {/* Follow-up */}
@@ -271,9 +272,9 @@ export default function TechIntelligenceBar() {
               aria-label="Follow-up question" value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up..."
               enterKeyHint="send"
-              style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, fontFamily: "'Nunito Sans', sans-serif", outline: 'none', boxSizing: 'border-box', resize: 'none' }} />
+              style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 4, color: D.text, fontSize: 13, fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none', boxSizing: 'border-box', resize: 'none' }} />
             <button onClick={() => submit()} disabled={!prompt.trim() || attachmentsLoading} style={{
-              padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700,
+              padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 4, fontSize: 12, fontWeight: 500,
               cursor: prompt.trim() && !attachmentsLoading ? 'pointer' : 'not-allowed', opacity: prompt.trim() && !attachmentsLoading ? 1 : 0.4,
             }}>Go</button>
           </div>

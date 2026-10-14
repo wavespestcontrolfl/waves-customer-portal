@@ -75,6 +75,12 @@ describe('intelligence bar create_customer', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  test('rejects an impossible US phone (area code starting with 1) before any lookup', async () => {
+    const result = await executeTool('create_customer', { first_name: 'Jeff', phone: '(103) 555-0100' });
+    expect(result.error).toMatch(/not a valid US phone number/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('rejects a phone with fewer than 10 digits', async () => {
     const result = await executeTool('create_customer', { first_name: 'Jeff', phone: '941-555' });
     expect(result).toEqual({ error: 'phone must include at least 10 digits' });

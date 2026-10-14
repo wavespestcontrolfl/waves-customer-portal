@@ -25,12 +25,17 @@ function normalizeNamePart(value) {
 // Latin letters NFD does not decompose — folded by table so "Søren" is
 // "soren", not "sren".
 const NON_DECOMPOSING = { 'ø': 'o', 'Ø': 'O', 'ł': 'l', 'Ł': 'L', 'œ': 'oe', 'Œ': 'OE', 'æ': 'ae', 'Æ': 'AE', 'ß': 'ss', 'đ': 'd', 'Đ': 'D', 'ð': 'd', 'Ð': 'D', 'þ': 'th', 'Þ': 'TH', 'ı': 'i' };
-function normalizeNameFolded(value) {
-  const folded = String(value || '')
+// Folds accents and the table above but keeps case, spaces and punctuation,
+// so a caller that needs word boundaries (fuzzy retrieval) tokenizes on the
+// same folding policy instead of keeping its own.
+function foldNameLetters(value) {
+  return String(value || '')
     .replace(/[øØłŁœŒæÆßđĐðÐþÞı]/g, (c) => NON_DECOMPOSING[c] || c)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
-  return normalizeNamePart(folded);
+}
+function normalizeNameFolded(value) {
+  return normalizeNamePart(foldNameLetters(value));
 }
 
 // Common NANP nickname/diminutive groups — "Bob" calling from a line whose
@@ -201,6 +206,16 @@ function payerFirstNameCompatible(payerRun, customerFirst) {
   if ((NICKNAME_GROUP_COUNT.get(payerRun) || 0) !== 1) return false;
   return sameFirstName(payerRun, customerFirst);
 }
+// Same person's first name with no guess: equal, or nickname variants where
+// NEITHER name sits in more than one nickname group. "bill"/"william" pass;
+// "pat" (patrick and patricia) matches only "pat". For evidence about someone
+// who may be a different household member (a parcel's co-owner).
+function sameFirstNameUnambiguous(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if ((NICKNAME_GROUP_COUNT.get(a) || 0) !== 1 || (NICKNAME_GROUP_COUNT.get(b) || 0) !== 1) return false;
+  return sameFirstName(a, b);
+}
 function sameFirstName(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
@@ -293,6 +308,10 @@ function payerNameCorroborates(payerName, customer = {}) {
 const SPOKEN_FIRST_NAME_GROUPS = [
   ['jason', 'jayson'], ['jennifer', 'jenifer'],
   ['debbie', 'debbi'], ['hannah', 'hanna'],
+  // 2026-10-07: a voicemail and a callback minted two leads when the two
+  // transcripts spelled one first name with c and with k.
+  ['carl', 'karl'], ['eric', 'erik'], ['marc', 'mark'], ['nick', 'nik'],
+  ['sara', 'sarah'], ['philip', 'phillip'],
 ].map(group => new Set(group.flatMap(firstNameVariants)));
 function spokenFirstNameVariants(name) {
   if (!name) return [];
@@ -309,8 +328,10 @@ function sameSpokenFirstName(a, b) {
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
+  foldNameLetters,
   firstNameVariants,
   sameFirstName,
+  sameFirstNameUnambiguous,
   sameSpokenFirstName,
   spokenFirstNameVariants,
   payerNameCorroborates,

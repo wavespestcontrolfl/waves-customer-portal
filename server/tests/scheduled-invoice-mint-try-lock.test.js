@@ -10,6 +10,7 @@
  */
 const {
   acquireScheduledInvoiceMintLock,
+  acquireScheduledMintLockChain,
   tryAcquireScheduledInvoiceMintLock,
   SCHEDULED_SERVICE_INVOICE_MINT_LOCK,
 } = require('../services/scheduled-invoice-mint');
@@ -57,4 +58,41 @@ test('the SQL is the non-blocking pg_try_advisory_xact_lock form, not the blocki
   await tryAcquireScheduledInvoiceMintLock(trx, 'visit-1');
   expect(trx._calls[0].sql).toMatch(/pg_try_advisory_xact_lock/);
   expect(trx._calls[0].sql).not.toMatch(/pg_advisory_xact_lock\(/); // not the blocking call as a substring escape hatch
+});
+
+// B08: a membership-dues mint holds the customer FOR SHARE (not FOR KEY SHARE)
+// through its insert so the billing terms it judged cannot change under it. The
+// customer lock stays BEFORE the visit-row lock either way.
+describe('acquireScheduledMintLockChain — customer lock strength', () => {
+  function chainTrx() {
+    const order = [];
+    const visitQb = {
+      where: jest.fn(() => visitQb),
+      forUpdate: jest.fn(() => { order.push('visit FOR UPDATE'); return visitQb; }),
+      first: jest.fn(async () => ({ id: 'visit-1', status: 'confirmed' })),
+    };
+    const trx = jest.fn(() => visitQb);
+    trx.raw = jest.fn(async (sql) => { order.push(String(sql)); return { rows: [] }; });
+    trx._order = order;
+    return trx;
+  }
+
+  test('default: FOR KEY SHARE on the customer, ahead of the visit row lock', async () => {
+    const trx = chainTrx();
+    await acquireScheduledMintLockChain(trx, { scheduledServiceId: 'visit-1', customerId: 'cust-1' });
+    const customerAt = trx._order.findIndex((o) => /FROM customers WHERE id = \? FOR KEY SHARE$/.test(o));
+    expect(customerAt).toBeGreaterThanOrEqual(0);
+    expect(customerAt).toBeLessThan(trx._order.indexOf('visit FOR UPDATE'));
+  });
+
+  test("customerLock 'share' (dues mint): FOR SHARE on the customer, still ahead of the visit row lock — with and without a known customer id", async () => {
+    for (const customerId of ['cust-1', null]) {
+      const trx = chainTrx();
+      await acquireScheduledMintLockChain(trx, { scheduledServiceId: 'visit-1', customerId, customerLock: 'share' });
+      const customerAt = trx._order.findIndex((o) => /FROM customers WHERE id = .* FOR SHARE$/.test(o));
+      expect(customerAt).toBeGreaterThanOrEqual(0);
+      expect(trx._order.some((o) => /FOR KEY SHARE/.test(o))).toBe(false);
+      expect(customerAt).toBeLessThan(trx._order.indexOf('visit FOR UPDATE'));
+    }
+  });
 });

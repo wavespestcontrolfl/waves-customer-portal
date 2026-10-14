@@ -11,7 +11,10 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => w
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(),
   // The real done writer: a system close is done, not just read (read is not done).
-  _private: { doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args) },
+  _private: {
+    doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args),
+    openToCloser: (...args) => jest.requireActual('../services/notification-service')._private.openToCloser(...args),
+  },
 }));
 
 const knex = require('knex');
@@ -451,7 +454,7 @@ postgres('SMS commitments on PostgreSQL', () => {
         await trx('property_preferences').insert({ customer_id: message.customer_id, access_notes: 'Use the side gate.' });
       });
       await locked;
-      const enriched = enrichFromCall({ customerId: message.customer_id, callCreatedAt: '2026-09-06T00:00:00Z',
+      const enriched = enrichFromCall({ customerId: message.customer_id, callCreatedAt: '2026-09-06T16:00:00Z', // midday: the tag is the call's Eastern day
         extraction: { property: { access_notes: 'front gate code is 4545' } } });
       await Promise.all([held, enriched]);
       const prefs = await mockPg('property_preferences').where({ customer_id: message.customer_id });
@@ -2940,9 +2943,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(row.sms_context).toMatchObject({ basis: 'promise', due_date: tomorrow });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await refreshSmsCommitments({ conn: mockPg, now: new Date(new Date(row.due_at).getTime() + 60000) });
-    // Owner audit 2026-10-01: the bell names the customer and quotes the promise.
+    // Owner audit 2026-10-01: the bell names the customer and quotes the promise —
+    // the slice of the text that matches this promise's description (#6056).
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
-      expect.stringContaining('We said “Gonna knock out your quarterly spray tomorrow”'), expect.objectContaining({ bell: true }));
+      expect.stringContaining('We said “knock out your quarterly spray tomorrow”'), expect.objectContaining({ bell: true }));
   });
 
   test('Codex #5248 r2: the promised item sent by an automated text closes a general staff promise', async () => {

@@ -3,7 +3,10 @@
 // registry (registry.js, which decides a vendor IS a Shopify store) anchor to ONE list —
 // they can't drift, and the registry keeps its no-browser-adapter-dependency design (this
 // file pulls in nothing). Add a host here when onboarding a new Shopify store.
-const SHOPIFY_HOSTS = ['chemicalwarehouse.com', 'seedworldusa.com', 'seedbarn.com', 'gciturfacademy.com', 'intermountainturf.com'];
+const SHOPIFY_HOSTS = [
+  'chemicalwarehouse.com', 'seedworldusa.com', 'seedbarn.com', 'gciturfacademy.com', 'intermountainturf.com',
+  'golfcourselawn.store', 'gemplers.com',
+];
 
 // True iff `hostname` is an approved storefront host or one of its subdomains. Exact match
 // or a dot-anchored suffix only — so a suffix spoof like `chemicalwarehouse.com.evil.com`

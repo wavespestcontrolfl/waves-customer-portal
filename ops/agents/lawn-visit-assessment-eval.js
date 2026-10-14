@@ -209,7 +209,6 @@ async function runReplay(args) {
   const MODELS = require(path.join(REPO, 'server/config/models'));
   const PhotoService = require(path.join(REPO, 'server/services/photos'));
   const visit = require(path.join(REPO, 'server/services/lawn-visit-assessment'));
-  const { PROMPT_VERSION, PROMPT_DIGEST } = require(path.join(REPO, 'server/services/lawn-visit-input'));
   const evalLib = require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'));
   assertNoLedgerWrites(gates, 'after imports');
 
@@ -231,18 +230,25 @@ async function runReplay(args) {
     log: (line) => console.error(line),
   }, { repeat: args.repeat, concurrency: args.concurrency, thinkingLevel: args.thinking });
 
-  const title = `Lawn visit assessment eval — ${PROMPT_VERSION}${variant}`;
+  // Provenance comes from the prompt variants the results actually ran under (a shot-list
+  // capture replays under its own prompt), never from a single hardcoded version.
+  const variants = evalLib.promptVariants(results);
   // Every output format carries the fixture's property-history branch and the prompt digest (see renderMarkdown).
   const propertyHistory = typeof fixture.propertyHistory === 'boolean' ? fixture.propertyHistory : null;
   if (args.json) {
     process.stdout.write(`${JSON.stringify({
-      generatedAt: new Date().toISOString(), promptVersion: PROMPT_VERSION, promptDigest: PROMPT_DIGEST, propertyHistory,
+      generatedAt: new Date().toISOString(),
+      ...(variants.length === 1 ? { promptVersion: variants[0].promptVersion, promptDigest: variants[0].promptDigest } : {}),
+      // A mixed run is not one experiment: each prompt variant carries its own summary.
+      ...(variants.length > 1 ? { promptVariants: variants.map((v) => ({ promptVersion: v.promptVersion, promptDigest: v.promptDigest, runs: v.results.length, summary: v.summary })) } : {}),
+      propertyHistory,
       policy, options: { thinking: args.thinking, forceFallback: args.forceFallback, repeat: args.repeat, concurrency: args.concurrency },
-      summary, skipped, results,
+      ...(variants.length > 1 ? {} : { summary }),
+      skipped, results,
     }, null, 2)}\n`);
     return;
   }
-  console.log(evalLib.renderMarkdown(summary, results, { title, promptVersion: PROMPT_VERSION, promptDigest: PROMPT_DIGEST, propertyHistory }));
+  console.log(evalLib.renderReport(results, { titleSuffix: variant, propertyHistory }));
   if (skipped.length) console.log(`\nskipped: ${skipped.map((s) => `${String(s.assessmentId).slice(0, 8)} (${s.reason})`).join(', ')}`);
 }
 

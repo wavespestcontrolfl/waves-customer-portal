@@ -383,6 +383,18 @@ describe('deferred-replay registry', () => {
     })).toEqual({ eligible: false, reason: 'settled' });
   });
 
+  test('billing failure replay is suppressed while an OPEN stamped dues invoice bills the obligation month (the row stays armed, never charged)', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'failed', retry_count: 1 }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    const rules = require('../services/retry-collectibility');
+    rules.classifyFailedPaymentRetry.mockResolvedValueOnce({
+      disposition: rules.DISPOSITIONS.SKIP_ARMED, reason: rules.REASONS.DUES_INVOICE_OPEN, collectedByInvoiceId: 'inv-dues',
+    });
+    expect(await recheckDeferredReplay('billing_failure_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1,
+    })).toEqual({ eligible: false, reason: 'dues_invoice_open' });
+  });
+
   test('invoice_send_deferred replays without a phone and dispatches through the default sender', async () => {
     const { dispatchDeferredReplay, replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
     expect(replaysWithoutPhone('invoice_send_deferred')).toBe(true);

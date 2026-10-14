@@ -18,7 +18,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { resolveBillingLane } = require('./billing-lane');
+const { resolveBillingLane, findLiveStampedDuesInvoice } = require('./billing-lane');
 
 // Lazy: annual-prepay-renewals consumes this module for the card-expiry
 // exemption, so a top-level require would be circular. Resolved through the
@@ -39,6 +39,7 @@ const REASONS = Object.freeze({
   PENDING_PREPAY_HOLD: 'pending_prepay_hold',
   AMBIGUOUS_OUTCOME_PARKED: 'ambiguous_outcome_parked',
   SIBLING_ORPHAN_UNRESOLVED: 'sibling_orphan_unresolved',
+  DUES_INVOICE_OPEN: 'dues_invoice_open',
 });
 
 /**
@@ -150,6 +151,35 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
   if (keylessConsumedToday) attemptNumber += 1;
   const base = `autopay_monthly_${customerId}_${todayEt}`;
   return attemptNumber > 0 ? `${base}_r${attemptNumber}` : base;
+}
+
+// The monthly already-collected predicate, ONE definition shared by the cron's
+// locked read and post-contention recheck and by the Intelligence Bar billing
+// type card (which asks for the still-`processing` dues alone). Metadata-first
+// (billed_month stamp), payment_date window + description marker as the legacy
+// fallback; exactly the dedupe charge-now and the retry classifier apply.
+// `statuses` narrows the payment statuses; `withDuesInvoice: false` leaves out
+// the completion-minted dues invoice fallback (it names no payment row).
+async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true } = {}) {
+  const payment = await conn('payments')
+    .where({ customer_id: customerId })
+    .whereIn('status', statuses)
+    .where(function () {
+      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .orWhere(function () {
+          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+            .andWhere('payment_date', '>=', monthStart)
+            .andWhere('payment_date', '<=', monthEnd)
+            .andWhere('description', 'like', '%WaveGuard Monthly%');
+        });
+    })
+    .first();
+  if (payment || !withDuesInvoice) return payment;
+  // A live completion-minted dues invoice (paid, processing or still open)
+  // IS this month's bill — an unpaid one is collected by the invoice
+  // follow-up ladder, never by a second charge. No payment row to name.
+  const duesInvoice = await findLiveStampedDuesInvoice(conn, customerId, monthKey);
+  return duesInvoice ? { id: null, dues_invoice_id: duesInvoice.id } : undefined;
 }
 
 async function hasUnresolvedSiblingStripeOutcome(customerId, monthKey, conn = db) {
@@ -385,6 +415,32 @@ async function classifyFailedPaymentRetry({
         collectedByPaymentId: collected.id,
       });
     }
+    // A live completion-minted membership-dues invoice for the obligation
+    // month (paid, processing or still open) IS that month's bill — same
+    // resolution, one shared lookup with completion and the monthly cron. A
+    // paid one names its payment row when there is one; an open one has none
+    // (collectedByPaymentId null when the paid invoice left no payment row: the
+    // sweep resolves the row against itself).
+    const duesInvoice = await findLiveStampedDuesInvoice(conn, payment.customer_id, obligationMonth);
+    // An OPEN (unpaid) stamped invoice only defers: the row stays armed and is
+    // re-read each sweep (SKIP_ARMED: no charge, no write, no retry_count or
+    // ladder movement). Paid → resolved below as already collected; voided or
+    // refunded → the invoice stops matching and the row is collectible again.
+    if (duesInvoice && !['paid', 'prepaid', 'processing'].includes(String(duesInvoice.status))) {
+      return verdict(REASONS.DUES_INVOICE_OPEN, DISPOSITIONS.SKIP_ARMED, { collectedByInvoiceId: duesInvoice.id });
+    }
+    if (duesInvoice) {
+      const duesPayment = await conn('payments')
+        .where({ customer_id: payment.customer_id })
+        .whereNot({ id: payment.id })
+        .whereIn('status', ['paid', 'processing'])
+        .whereRaw("metadata->>'invoice_id' = ?", [String(duesInvoice.id)])
+        .first('id');
+      return verdict(REASONS.ALREADY_COLLECTED, DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, {
+        collectedByPaymentId: duesPayment?.id || null,
+        collectedByInvoiceId: duesInvoice.id,
+      });
+    }
     // RESOLUTION GUARD (Codex round-2 P0): a SIBLING attempt for this SAME
     // obligation — a different row than this one — left an unresolved
     // Stripe outcome. Checked here because an orphan/ambiguous row is
@@ -484,8 +540,10 @@ module.exports = {
   DISPOSITIONS,
   loadRetryContext,
   armedRetryQuery,
+  isMonthlyObligationRow,
   classifyFailedPaymentRetry,
   hasUnresolvedSiblingStripeOutcome,
+  findCollectedMonthlyPayment,
   deriveMonthlyChargeIdempotencyKey,
   _private: { monthKeyOf, dateKeyOf, pausedOn, isMonthlyObligationRow, parseMeta },
 };

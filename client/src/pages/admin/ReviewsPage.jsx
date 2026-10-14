@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Award,
   Building2,
+  MessageSquareText,
   CheckCircle2,
   Download,
   RefreshCw,
@@ -22,6 +23,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import ReviewVelocityEngine from "./ReviewVelocityEngine";
+import ReviewDraftsPanel from "./ReviewDraftsPanel";
 import GBPManagementPanel from "./GBPManagement";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -49,6 +51,11 @@ const REVIEWS_LEAF_SECTIONS = [
     label: "Incentives",
     Icon: Award,
   },
+  {
+    key: "drafts",
+    label: "Tech-voice texts",
+    Icon: MessageSquareText,
+  },
 ];
 
 // The flat leaf bar is grouped into parent sections, each revealing its leaf
@@ -64,7 +71,7 @@ const REVIEWS_TAB_GROUPS = [
     key: "outreach",
     label: "Outreach",
     Icon: Send,
-    tabs: ["outreach", "incentives"],
+    tabs: ["outreach", "incentives", "drafts"],
   },
   {
     key: "gbp",
@@ -2160,6 +2167,7 @@ export default function ReviewsPage() {
       {activeTab === "gbp" && <GBPManagementPanel />}
       {activeTab === "outreach" && <ReviewVelocityEngine />}
       {activeTab === "incentives" && <ReviewIncentivesPanel />}
+      {activeTab === "drafts" && <ReviewDraftsPanel />}
     </UiSurface>
   );
 }

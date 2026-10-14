@@ -17,14 +17,15 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
+const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -33,10 +34,10 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
-const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
+const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool, sendEmailReplyProposalRefusal, replyViaSmsProposalRefusal } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
@@ -60,11 +61,22 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+const { CHOICE_TOOLS, executeChoiceTool, OFFER_CHOICES_TOOL_NAME } = require('../services/intelligence-bar/choice-tools');
+const { ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME } = require('../services/intelligence-bar/address-tools');
+// Scope 'none' (they read no customer rows) but their inputs or results can
+// carry a customer's name or street address: treated as PII-bearing for logs
+// and thread redaction, as PII_TOOL_NAMES would if their scope were not 'none'.
+const SCOPE_NONE_PII_TOOL_NAMES = new Set([OFFER_CHOICES_TOOL_NAME, CHECK_ADDRESS_TOOL_NAME]);
 const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
+const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
+const { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool } = require('../services/intelligence-bar/customer-link-tools');
+const { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, repriceVisitsLive } = require('../services/intelligence-bar/reprice-visits-tools');
+const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
+const { INVOICE_ACTION_TOOLS, executeInvoiceActionTool, invoiceActionsLive } = require('../services/intelligence-bar/invoice-action-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
-const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
@@ -73,13 +85,14 @@ const { outsideWritePins } = require('../services/intelligence-bar/outside-write
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
-const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
+const { isToolFailure, recordToolOutcome, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
+const ToolSearch = require('../services/intelligence-bar/tool-search');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -103,7 +116,20 @@ const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-met
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
-const MAX_TOOL_ROUNDS = 8;
+// 12, not 8: a "check the last call, then fix the address" ask needed nine
+// tool rounds and got the "too many steps" line (owner IB history 10-12).
+const MAX_TOOL_ROUNDS = 12;
+// The last round may not call a tool: the model answers with what it has
+// found and names what is left, in place of the generic "too many steps" line.
+const FINAL_ROUND_NOTE = '[Step limit reached. Do not call a tool. Answer now: say what you found, what you changed or proposed, and what is still left to do.]';
+function finalRoundMessages(messages) {
+  return ToolSearch.withTurnEndingText(messages, FINAL_ROUND_NOTE);
+}
+// What the gap collector needs beside a tool result: the round, and whether
+// this call proposed a card or committed an owner-direct write.
+function gapToolMeta(round, proposedCard, result) {
+  return { round, wrote: proposedCard === true || result?.executed === true };
+}
 // Model arguments that only pick WHICH task customer an operation targets.
 // They are excluded from an operation's clarification identity so a retry
 // with the corrected target answers the original clarification.
@@ -150,6 +176,11 @@ const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => 
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
+const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
+const CUSTOMER_LINK_TOOL_NAMES = new Set(CUSTOMER_LINK_TOOLS.map(t => t.name));
+const REPRICE_VISITS_TOOL_NAMES = new Set(REPRICE_VISITS_TOOLS.map(t => t.name));
+const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
+const INVOICE_ACTION_TOOL_NAMES = new Set(INVOICE_ACTION_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -170,6 +201,15 @@ const INFRA_TOOLS = [
   // customer. Admin-only (technicians get no billing reads), so they ride the
   // admin-only infra set like needs_me and load in every admin context.
   ...BILLING_READER_TOOLS,
+  // Resend a paid receipt: the Invoices page button as a carded write, offered
+  // beside the invoice readers on every admin context (admin-only below).
+  ...RECEIPT_RESEND_TOOLS,
+  // The composer's Insert Link kinds: a carded write a customer link is asked
+  // for from any page (admin-only below).
+  ...CUSTOMER_LINK_TOOLS,
+  // Saved-card removal (with the Auto Pay-off step) and invoice address
+  // correction: admin-only writes, both always behind the confirm card.
+  ...BILLING_WRITE_TOOLS,
   // The sitemap submit is advertised with the other outside-service writes in
   // the global infrastructure prompt, so it rides the global infra set too —
   // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
@@ -209,12 +249,26 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  'delete_duplicate_customer', // mirrors requireAdmin DELETE /api/admin/customers/:id
   // Billing readers show invoices, balances and payment evidence: admin only,
   // like the requireAdmin invoice routes they mirror.
   ...BILLING_READER_TOOLS.map(t => t.name),
+  // Mirror requireAdmin /api/admin/customers/:id/payment-methods/:methodId and
+  // /api/admin/invoices/:id/receipt-address.
+  ...BILLING_WRITE_TOOL_NAMES,
+  // send_invoice runs the requireAdmin invoice send handler.
+  ...INVOICE_ACTION_TOOL_NAMES,
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
   ...CLOSEOUT_REPAIR_TOOL_NAMES,
+  // Resending a receipt contacts the customer — admin only, like the
+  // requireAdmin send-receipt route it mirrors.
+  ...RECEIPT_RESEND_TOOL_NAMES,
+  // Customer links mirror the requireAdmin /customer-link, /reschedule-link
+  // and /reservice-link routes — admin only.
+  ...CUSTOMER_LINK_TOOL_NAMES,
+  // Repricing visits runs the requireAdmin visit edit — admin only.
+  ...REPRICE_VISITS_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -265,7 +319,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
 // The persisted-turn markers are defined once, with the thread store.
-const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER } = IbThreads;
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -381,7 +435,7 @@ function stripInternalHistoryMarkers(message) {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER && line.trim() !== PII_TAINT_MARKER)
+      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER].includes(line.trim()))
       .join('\n')
       .trim(),
   };
@@ -428,6 +482,9 @@ const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
 function withCacheBreakpoint(messages) {
   if (!messages.length) return messages;
   const last = messages[messages.length - 1];
+  // A paused turn (pause_turn) continues from the assistant message: its blocks
+  // (server tool search results) take no breakpoint.
+  if (last.role === 'assistant') return messages;
   let content = last.content;
   if (typeof content === 'string') {
     content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
@@ -546,6 +603,17 @@ const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabl
 // never touched by this — only this health-event copy.
 const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
+// The refusal's machine code (capability_not_loaded, invalid_input,
+// target_clarification_required, ...) stays on the health event even when its
+// text is redacted: without it a refused PII tool leaves no reason at all. Only
+// a code-shaped value is kept (snake_case, or the older UPPER_SNAKE such as
+// COLLECTIVE_MOVE_REQUIRED), so free text can never ride in through `code`.
+const TOOL_HEALTH_CODE_RE = /^(?:[a-z][a-z0-9_]{1,63}|[A-Z][A-Z0-9_]{1,63})$/;
+function toolHealthFailureCode(result) {
+  const code = result?.code;
+  return typeof code === 'string' && TOOL_HEALTH_CODE_RE.test(code) ? code : null;
+}
+
 // A search_field_intelligence result with no page, entry or operational
 // match. Open contradictions only ever attach to returned hits.
 const KNOWLEDGE_GAP_MAX = 300;
@@ -557,6 +625,12 @@ function isEmptyKnowledgeSearch(result) {
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
+}
+
+// A close or colloquial service name books, and shows on the card, as the exact
+// catalog name the proposal resolved it to; any other name stays as given.
+function bookedServiceTypeParam(booking, params) {
+  return { service_type: booking.bookedServiceType || params.service_type };
 }
 
 function summarizeProposal(toolName, params, displayParams = params) {
@@ -597,6 +671,10 @@ function summarizeProposal(toolName, params, displayParams = params) {
     rippleParts.push(params?.updates?.phone !== undefined
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
+  }
+  // A phone edit (single or bulk) may clear the shared-phone texting mark (codex #6268 r8/r9).
+  if ((toolName === 'update_customer' || toolName === 'bulk_update_customers') && params?.updates?.phone !== undefined) {
+    rippleParts.push(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   }
   const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
   // The ripple is long by design (it names every synced surface) and sits
@@ -758,7 +836,21 @@ function pinnedRecipientDisplay(params, preview) {
   return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
 }
 
+// delete_duplicate_customer: the fingerprint-verified preview's content pins
+// (route-owned, `_`-prefixed): the archived record's pin, and the other record
+// on the card as { id, version } - both asserted under the row locks inside
+// the archive transaction. A preview without a pin yields none.
+function deleteDuplicatePins(livePreview) {
+  const pins = {};
+  if (!livePreview?._version) return pins;
+  pins._approved_version = String(livePreview._version);
+  const keeper = livePreview.duplicate_of;
+  if (keeper?.customer_id && keeper?.version) pins._approved_keeper = { id: String(keeper.customer_id), version: String(keeper.version) };
+  return pins;
+}
+
 const PINNED_DISPLAY_BUILDERS = {
+  delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
   reply_via_sms: pinnedRecipientDisplay,
   send_sms: pinnedRecipientDisplay,
@@ -790,6 +882,55 @@ const PINNED_DISPLAY_BUILDERS = {
       scheduled: preview.scheduled_time,
       message: preview.body_preview,
     }
+    : null),
+  // reprice_future_visits: the card names the customer, the service and the
+  // new price; each visit's old -> new line is curated in authorization-contract.js.
+  reprice_future_visits: (_params, preview) => (preview?.preview === true
+    ? { customer: preview.customer_name, service: preview.service_label, new_price: `${preview.new_price} per visit` }
+    : null),
+  // The card names the invoice, what the receipt states, whether this is a
+  // re-send, and who it reaches — never just the raw invoice id the model sent.
+  resend_receipt: (params, preview) => (preview?.preview === true
+    ? {
+      invoice: preview.invoice_number,
+      customer: preview.customer_name || preview.customer_id,
+      amount: `$${preview.amount} paid${preview.paid_date ? ` on ${preview.paid_date}` : ''}`,
+      receipt: preview.receipt_status,
+      send_by: preview.channels,
+      to: preview.recipients,
+      ...(preview.memo ? { memo: preview.memo, memo_note: preview.memo_note } : {}),
+      ...(preview.visit_closeout ? { visit: preview.visit_closeout } : {}),
+      // What a queued automatic receipt will do when this send settles it (the card must say it).
+      ...(preview.automatic_receipt ? { automatic_receipt: preview.automatic_receipt } : {}),
+      ...(preview.opted_out ? { opted_out: preview.opted_out } : {}),
+    }
+    : null),
+  // The billing writes: the card names the customer, the method or invoice and
+  // the before/after — never raw ids (the steps and notices ride the contract).
+  remove_saved_payment_method: (params, preview) => (preview?.preview === true && preview.method
+    ? {
+      customer: preview.customer_name || preview.customer_id,
+      method: preview.method.label,
+      auto_pay: preview.autopay.uses_this_method ? `${preview.autopay.state}, using this method` : preview.autopay.state,
+    }
+    : null),
+  // accept_estimate names the customer and the estimate, never raw ids; the
+  // plan, bill, visits and messages ride the contract's curated lines.
+  accept_estimate: (params, preview) => (preview?.preview === true && preview.estimate
+    ? { customer: preview.customer_name || preview.customer_id, estimate: `${preview.estimate.label} (${preview.estimate.status})` }
+    : null),
+  correct_invoice_address: (params, preview) => (preview?.preview === true && preview.invoice_number
+    ? {
+      invoice: `${preview.invoice_number} (${preview.invoice_status})`,
+      customer: preview.customer_name || preview.customer_id,
+      printed_now: preview.printed_now_text,
+      corrected_to: preview.after_correction_text,
+    }
+    : null),
+  // send_invoice: the card names the invoice, the customer, the
+  // money and who is contacted; the full lines are curated in authorization-contract.js.
+  send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
@@ -827,10 +968,65 @@ const VERIFIED_VERSION_PARAMS = {
   adjust_stock: '_verified_inventory_version',
   create_restock_request: '_verified_inventory_version',
   update_restock_request: '_verified_inventory_version',
+  // send_invoice binds the invoice state, the recipients and the total the card
+  // showed (invoice-action-tools.js _version).
+  send_invoice: '_verified_invoice_send_version',
   cancel_queued_message: '_verified_message_version',
+  // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
+  // state the card showed — a receipt sent in between is refused, never doubled.
+  resend_receipt: '_verified_receipt_version',
+  // reprice_future_visits binds every listed visit's id, date, status, price
+  // and row version (reprice-visits-tools.js plan version).
+  reprice_future_visits: '_verified_reprice_version',
+  // create_customer_link binds the customer, kind and the phone (last ten)
+  // the card showed; a number changed since is refused at commit
+  // (customer-link-tools.js pinnedVersionRefusal).
+  create_customer_link: '_verified_link_version',
+  // send_autopay_setup_link binds the customer, the channel and the contact (phone
+  // last ten or email) the card showed; one changed since is refused at commit
+  // (customer-link-tools.js pinnedVersionRefusal), and the service re-checks it
+  // before the provider call (expectedRecipient).
+  send_autopay_setup_link: '_verified_autopay_version',
 };
 
+// The overlapping visits a booking card names, or [] when the lookup fails
+// (the plain line shows and only the boolean pin applies).
+async function bookingOverlapWithBestEffort(params) {
+  try {
+    return await ibBookingOverlapWho(params.scheduled_date, params.time_window);
+  } catch (err) {
+    logger.warn(`[intelligence-bar] booking overlap names unavailable: ${err.message}`);
+    return [];
+  }
+}
+
+// "Thursday, Oct 9, morning" for the booking card (display only). A date or
+// window that does not parse shows as typed, never dropped.
+function bookingWhenLabel(scheduledDate, timeWindow) {
+  const parts = [];
+  if (scheduledDate !== undefined && scheduledDate !== null && String(scheduledDate).trim()) {
+    const raw = String(scheduledDate).trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+    const d = m ? new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : null;
+    parts.push(d && !Number.isNaN(d.getTime()) && d.getUTCMonth() === Number(m[2]) - 1
+      ? d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' })
+      : raw);
+  }
+  if (timeWindow !== undefined && timeWindow !== null && String(timeWindow).trim()) parts.push(String(timeWindow).trim());
+  return parts.length ? parts.join(', ') : null;
+}
+
 function confirmationDisplayParams(toolName, params, preview) {
+  // The card shows what the plan will save (a note as the line it adds; a
+  // property code that is the community code is left out) and what it will
+  // not, never the raw request.
+  if (toolName === 'update_property_access' && preview?.preview === true) {
+    return {
+      customer: preview.customer_name || params.customer_id,
+      ...(preview.would_update || {}),
+      ...(preview.kept?.length ? { not_saved_or_changed: preview.kept.join('; ') } : {}),
+    };
+  }
   if (toolName === 'cancel_plan' && preview?.preview === true) {
     // The card must show everything the commit will do: who, what scope,
     // the visits coming off, the money, the effective date, whether the
@@ -906,7 +1102,11 @@ function confirmationDisplayParams(toolName, params, preview) {
     // is a money fact the card must show (owner 2026-09-27); the contract
     // carries this display line as a billing effect.
     const pinnedPrice = preview?.pinned_price;
-    const { price, ...unpriced } = params;
+    const {
+      price, customer_id: customerId, scheduled_date: scheduledDate, time_window: timeWindow,
+      service_type: serviceType, technician_id: technicianId, technician_name: technicianName,
+      price_confirmed: _priceConfirmed, ...others
+    } = params;
     const money = (n) => `$${Number(n).toFixed(2)}`;
     // A member discount names itself and the list price it came off (owner
     // 2026-09-27: members get the WaveGuard member discount on a one-off).
@@ -917,15 +1117,37 @@ function confirmationDisplayParams(toolName, params, preview) {
     if (pinnedPrice && pinnedPrice.amount == null) {
       priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
     } else if (pinnedPrice) {
-      const basis = pinnedPrice.source === 'stated' ? 'as stated' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
-      priceLine = `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
+      const basis = pinnedPrice.source === 'stated' ? 'price you gave' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
+      // A stated price that differs from what the catalog would charge this
+      // customer shows both, so a typo in the stated one is easy to spot.
+      priceLine = pinnedPrice.source === 'stated' && pinnedPrice.catalog_price != null
+        ? `${money(pinnedPrice.amount)} (${basis}) — catalog price is ${money(pinnedPrice.catalog_price)}. Invoiced when the visit is completed`
+        : `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
     }
-    const shown = !pinnedPrice ? params : { ...unpriced, price: priceLine };
-    if (!preview?.pinned_technician) return shown;
-    // Show the pinned tech by NAME (the id is opaque on a card) — the visit
-    // binds to exactly this technician at commit.
-    const { technician_id, technician_name, ...rest } = shown;
-    return { ...rest, technician: preview.pinned_technician.name };
+    // Plain fields, in the order an owner reads them. Display text only: the
+    // execution params and pins are untouched. The raw customer id stays off
+    // the card once the customer is pinned by name ("Booked for").
+    const shown = {};
+    const when = bookingWhenLabel(scheduledDate, timeWindow);
+    if (when) shown.when = when;
+    if (serviceType !== undefined && serviceType !== null) shown.service = serviceType;
+    if (!pinnedPrice && price !== undefined && price !== null) shown.price = price;
+    else if (priceLine) shown.price = priceLine;
+    // Show the pinned tech by NAME, once (the id is opaque on a card) — the
+    // visit binds to exactly this technician at commit.
+    if (preview?.pinned_technician) shown.technician = preview.pinned_technician.name;
+    else {
+      if (technicianId !== undefined && technicianId !== null) shown.technician_id = technicianId;
+      if (technicianName !== undefined && technicianName !== null) shown.technician_name = technicianName;
+    }
+    if (!preview?.pinned_customer && customerId !== undefined && customerId !== null) shown.customer_id = customerId;
+    // Model-supplied extras can never overwrite or imitate a server-derived
+    // card fact (GATE_IB_PLATFORM off lets extra fields through): the display
+    // alias keys are dropped in any case, and the curated fields spread last.
+    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price']);
+    const extras = Object.fromEntries(Object.entries(others)
+      .filter(([k]) => !CARD_ALIAS_KEYS.has(String(k).toLowerCase().replace(/[\s_-]+/g, ''))));
+    return { ...extras, ...shown };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
@@ -1007,10 +1229,13 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, reproposal = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
+  // The card's own display line and model note, when the stock layer turns
+  // the proposal into a "choose the product" card (owner 2026-10-07).
+  let cardText = null;
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL && selectedLeadId) {
     if (params.leadId && String(params.leadId) !== String(selectedLeadId)) {
       return { failed: true, modelResult: { error: 'Draft lead does not match the Agent Estimate lead currently open.' } };
@@ -1029,7 +1254,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // service write proposed by the full-access owner, and correctly refuse
     // one from anyone else even if a forged tool_use reached this far.
     preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
-    if (isToolFailure(preview)) {
+    // A stock write's failed preview is judged by the stock layer below (it
+    // may offer a "choose the product" card instead).
+    if (isToolFailure(preview) && !STOCK_WRITE_TOOL_NAMES.has(toolUse.name)) {
       return { failed: true, modelResult: preview };
     }
     // An unconfigured integration ({ configured: false } — a missing token)
@@ -1055,6 +1282,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // after the fingerprint check (pre-push P1). `_`-prefixed: never
       // shown, ignored by the unconfirmed fingerprint re-run.
       params._approved_changes = preview.changes;
+      // …and the customer link the card was built on (Codex #6099 r11).
+      params._approved_customer_link = preview._customer_id ? String(preview._customer_id) : 'none';
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -1108,6 +1337,15 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
+    if (toolUse.name === 'send_sms') {
+      // No card for a text that cannot go out: an opted-out or suppressed number,
+      // or a repeat of a text whose provider outcome is still unknown. Runs for a
+      // pinned customer AND for a direct phone with no customer. The refusal
+      // carries the send tool's own wording; the execution-time check stays (a
+      // customer can opt out between the card and the confirm).
+      const sendRefusal = await sendSmsProposalRefusal(params);
+      if (sendRefusal) return { failed: true, modelResult: sendRefusal };
+    }
     if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
       // Pin the technician like send_sms pins the recipient: resolution
       // happens NOW, so the card names the exact tech the visit binds to
@@ -1158,7 +1396,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // then silently dropped at commit. Unknown keys refuse the proposal
       // instead, naming them so the model can correct the call.
       const { UPDATABLE_FIELDS } = require('../services/intelligence-bar/tools');
-      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS));
+      // Billing type + per-application fee: update_customer only, and only
+      // while GATE_IB_BILLING_MODE_EDIT is on (billing-mode-change.js).
+      const BillingModeChange = require('../services/intelligence-bar/billing-mode-change');
+      const billingFields = toolUse.name === 'update_customer' && BillingModeChange.billingEditLive()
+        ? BillingModeChange.BILLING_EDIT_FIELDS : [];
+      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS) && !billingFields.includes(k));
       if (unsupported.length) {
         return { failed: true, modelResult: { error: `These fields cannot be updated by this tool: ${unsupported.join(', ')} — nothing was proposed. Supported fields: ${Object.keys(UPDATABLE_FIELDS).join(', ')}.` } };
       }
@@ -1214,6 +1457,69 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._ib_notes_before = current.crm_notes ?? null;
       notesReadVersion = current.version;
     }
+    if (toolUse.name === 'update_customer') {
+      // monthly_rate is the customer's WHOLE monthly bill (owner 2026-10-06):
+      // a rate edit names the one service whose price changes, the card lists
+      // every line before and after, and a total below the other lines is
+      // refused (rate-change.js). rate_service is model input only: it is
+      // resolved here into the pinned _rate_family, never stored as itself.
+      const rateService = params.rate_service;
+      delete params.rate_service;
+      if (params.customer_id && params.updates && params.updates.monthly_rate !== undefined) {
+        let rate;
+        try {
+          rate = await require('../services/intelligence-bar/rate-change')
+            .rateChangeProposal(String(params.customer_id), params.updates.monthly_rate, rateService);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s monthly bill — nothing was proposed. Try again in a moment.' } };
+        }
+        if (rate?.error) return { failed: true, modelResult: { error: rate.error, ...(rate.code ? { code: rate.code } : {}) } };
+        if (rate) {
+          params._rate_family = rate.family;
+          params._rate_ledger_pin = rate.pin;
+        }
+        if (rate?.display) preview = { ...preview, rate_change: rate.display };
+      }
+      // Billing type + per-application fee (owner D5 2026-10-06): the same
+      // rules as the customer page, a card in plain words, and the billing
+      // fields + customer version pinned (billing-mode-change.js).
+      const BillingModeChange = require('../services/intelligence-bar/billing-mode-change');
+      if (params.customer_id && BillingModeChange.hasBillingEdit(params.updates)) {
+        let billing;
+        try {
+          billing = await BillingModeChange.billingEditProposal(String(params.customer_id), params.updates);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s billing — nothing was proposed. Try again in a moment.' } };
+        }
+        if (billing.error) return { failed: true, modelResult: { error: billing.error, code: billing.code } };
+        params._ib_billing_pin = billing.pin;
+        params._ib_customer_version = billing.version;
+        // A billing edit carries no notes; the task path below reuses this
+        // read's version instead of reading a newer one.
+        notesReadVersion = billing.version;
+        preview = { ...preview, billing_change: billing.display };
+      }
+      // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): a
+      // card that raises the WaveGuard tier and changes the billed monthly
+      // rate emails the customer after commit. Decided once here; the pin is
+      // server-owned (a model-supplied copy is dropped first) and the card
+      // names the email. Gate off, not eligible or an unreadable customer:
+      // no pin, no card line, no email.
+      const TierUpgradeEmail = require('../services/intelligence-bar/tier-upgrade-email');
+      delete params[TierUpgradeEmail.PIN_PARAM];
+      if (preview?.rate_change) {
+        let tierEmail = null;
+        try {
+          tierEmail = await TierUpgradeEmail.proposal(String(params.customer_id), params.updates);
+        } catch (err) {
+          logger.warn(`[intelligence-bar] tier upgrade email proposal read failed: ${err.message}`);
+        }
+        if (tierEmail) {
+          params[TierUpgradeEmail.PIN_PARAM] = tierEmail.pin;
+          preview = { ...preview, tier_upgrade_email: tierEmail.display };
+        }
+      }
+    }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
       // the Schedule screen): the stated price, else the catalog default the
@@ -1223,12 +1529,42 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
       let booking;
       try {
-        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request, params.time_window);
       } catch {
         return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
-      if (booking.error) return { failed: true, modelResult: { error: booking.error } };
+      // A refusal may carry a stable code (window_not_on_the_hour, W5-dev-03); the model sees it, and no card is made.
+      if (booking.error) return { failed: true, modelResult: { error: booking.error, ...(booking.code ? { code: booking.code } : {}) } };
+      // One-time price read-back: a STATED price that differs from the
+      // catalog price for this customer is asked about once before a card.
+      // Not a hard refusal (custom quotes and owner rulings differ on
+      // purpose). price_confirmed is model-supplied, so it counts only when
+      // the server recorded a read-back for this operator, customer and
+      // stated price in an EARLIER request (price-read-back.js): the model
+      // cannot skip the question on its first call or by retrying in the same
+      // loop. The flag is never stored or pinned; the execution pins
+      // (_booking_price etc.) are unchanged. No catalog price: no guard.
+      const priceConfirmedClaim = params.price_confirmed === true;
+      delete params.price_confirmed;
+      if (booking.source === 'stated' && booking.catalogPrice != null) {
+        const readBackKey = {
+          actorId: getAdminActorId(req), customerId: String(params.customer_id), statedPrice: booking.price,
+        };
+        if (priceConfirmedClaim && PriceReadBack.isConfirmed({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt })) {
+          PriceReadBack.clear(readBackKey);
+        } else {
+          PriceReadBack.recordReadBack({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt });
+          const money = (n) => `$${Number(n).toFixed(2)}`;
+          return {
+            failed: true,
+            modelResult: {
+              error: `You gave ${money(booking.price)}, but the catalog price is ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
+              code: 'price_read_back',
+            },
+          };
+        }
+      }
       // Server pins, set unconditionally so a model-supplied value can never
       // stand in for them. The discount identity/terms (Codex r2 on #5093,
       // P1) ride alongside the net price and service id: the card shows the
@@ -1237,6 +1573,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // a preset swapped for one that happens to net the same dollars —
       // must refuse the same way a net-price mismatch already does, not
       // silently commit a visit the card never actually showed.
+      // The reason as it will be saved (trimmed, capped) is what the card
+      // shows and what the executor stamps; an empty one leaves the params.
+      if (booking.customerRequest) params.customer_request = booking.customerRequest;
+      else delete params.customer_request;
+      // A close name books, and shows on the card, as the exact catalog name.
+      Object.assign(params, bookedServiceTypeParam(booking, params));
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
       params._booking_list_price = booking.listPrice;
@@ -1244,8 +1586,40 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // Whether another visit already overlaps this time when the card is
+      // built (owner 2026-10-05). The executor books through an overlap that
+      // already existed (warning only) but refuses one that is NEW since
+      // this card, so the operator sees a fresh card first. Set
+      // unconditionally: a model-supplied value can never stand in. A
+      // windowless or invalid-window booking has nothing to probe: no pin;
+      // neither does one whose probe could not be read.
+      let overlapNow = null;
+      try {
+        overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window);
+      } catch (err) {
+        // A transient read error is less than a conflict, and a staff save
+        // never blocks on a conflict (owner 2026-08-25): no pin, so the
+        // executor keeps the warn-only behavior.
+        logger.warn(`[intelligence-bar] booking overlap pin unavailable for customer ${params.customer_id}: ${err.message}`);
+        overlapNow = null;
+      }
+      if (overlapNow == null) delete params._booking_overlap;
+      else params._booking_overlap = overlapNow;
+      // What the card shows about each overlapping visit is pinned (set
+      // below); a model-supplied value can never stand in for it.
+      delete params._booking_overlap_facts;
+      // Who the overlapping visit is, for the card line only. Best effort:
+      // a lookup that fails leaves the plain line; the _booking_overlap pin
+      // above is the boolean the executor compares and is never changed here.
+      const overlapWith = overlapNow ? await bookingOverlapWithBestEffort(params) : [];
+      // Pin the facts the card names: the executor refuses an overlapping
+      // visit outside this set, or one whose shown facts changed, as a new
+      // overlap (fresh card). Nothing pinned (a failed lookup or an overlap
+      // gone by now) keeps the boolean pin.
+      if (overlapWith.length) params._booking_overlap_facts = overlapWith.map((v) => v.fact).sort();
       preview = {
         ...preview,
+        ...(overlapNow ? { slot_overlap: { already_overlaps: true, ...(overlapWith.length ? { with: overlapWith.map(({ id: _id, fact: _fact, ...shownVisit }) => shownVisit) } : {}) } } : {}),
         pinned_price: {
           amount: booking.price,
           source: booking.source,
@@ -1253,6 +1627,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           list_price: booking.listPrice,
           discount_name: booking.discountName,
           discount_percent: booking.discountPercent,
+          // Only when the price was stated and the catalog would charge this
+          // customer a different amount (display only).
+          ...(booking.catalogPrice != null ? { catalog_price: booking.catalogPrice } : {}),
         },
       };
     }
@@ -1304,6 +1681,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Same recipient pin send_sms has (codex P1 on #3648): resolve the
       // human the message goes to NOW, show name + last4 on the card, and
       // let /confirm-action refuse if the resolved phone drifts.
+      if (toolUse.name === 'reply_via_sms') {
+        // No card for a text the send would refuse for a customer link in it
+        // (the read-only proposal-phase check, run on the recipient exactly as
+        // the send resolves it); the execution-time check stays.
+        const replyRefusal = await replyViaSmsProposalRefusal(params);
+        if (replyRefusal) return { failed: true, modelResult: replyRefusal };
+      }
       const recipient = toolUse.name === 'reply_via_sms'
         ? await resolveReplyViaSmsRecipient(params)
         : await resolveReviewRequestRecipient(params);
@@ -1314,7 +1698,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // pin the number that will actually receive it (codex r5 P1).
       const contactApi = require('../services/customer-contact');
       const smsTarget = toolUse.name === 'trigger_review_request'
-        ? contactApi.getServiceContactSmsRecipient(recipient)
+        ? await require('../services/recipient-optin').resolveServiceContactSmsRecipient(recipient)
         : null;
       const pinPhone = smsTarget ? smsTarget.phone : recipient.phone;
       // The resolver keeps role 'service_contact' even when it falls back to
@@ -1363,6 +1747,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           phone_last4: String(pinPhone).replace(/\D/g, '').slice(-4) || null,
         },
       };
+    }
+    if (toolUse.name === 'send_email_reply') {
+      // No card for a reply the send would refuse for a portal link in its body
+      // (the read-only 'email' phase check); the execution-time check stays.
+      const emailRefusal = await sendEmailReplyProposalRefusal(params);
+      if (emailRefusal) return { failed: true, modelResult: emailRefusal };
     }
     if (toolUse.name === 'send_email_reply' && params.email_id) {
       const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
@@ -1594,7 +1984,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Live rows only (pre-push r11 P1): a soft-deleted/merged customer
       // must never ride a proposal — the executors refuse or skip them,
       // but the card must not name them as approved targets either.
-      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name');
+      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name', 'monthly_rate');
+      // A bulk rate edit writes one number as each customer's WHOLE monthly
+      // bill (owner 2026-10-06): on a customer who already has a bill that
+      // would replace every service line. Only first rates go in bulk; an
+      // existing bill is edited one customer at a time, naming the service.
+      if (params.updates && params.updates.monthly_rate !== undefined) {
+        const billedIds = await require('../services/intelligence-bar/rate-change').customersWithBill(db, rows);
+        const billed = rows.filter((r) => billedIds.has(String(r.id)));
+        if (billed.length) {
+          const names = billed.slice(0, 5).map((r) => `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.id).join(', ');
+          return { failed: true, modelResult: { error: `${billed.length} of these customers already have a monthly bill (${names}${billed.length > 5 ? ', …' : ''}). A bulk rate would replace their whole bill. Change each one with update_customer and rate_service, or leave them out. Nothing was proposed.`, code: 'bulk_rate_over_existing_bill' } };
+        }
+      }
       const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
       const missing = ids.filter((id) => !nameById.has(id));
       if (missing.length) {
@@ -1628,21 +2030,31 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
   }
-  if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolUse.name)) {
+  if (STOCK_WRITE_TOOL_NAMES.has(toolUse.name)) {
     // actorId/threadId only feed the operator-grounding fallback (a prior
     // OPERATOR turn on the OPERATOR's OWN server-persisted thread naming the
     // preview's product) — resolveInventoryWriteTarget re-verifies thread
     // ownership and the threads gate itself before reading anything.
-    const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
-      toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
+    // A re-proposal (a picked product) carries its target from the server's
+    // own stored row (`grounded`), never from the request body.
+    const target = await require('../services/intelligence-bar/procurement-tools').stockProposalTarget({
+      toolName: toolUse.name, params, prompt: req.body.prompt, pageData: req.body.pageData, preview,
       actorId: getAdminActorId(req), threadId: req.body.thread_id,
       // The requesting tab's OWN observed thread tail (Codex round-2 P2) —
       // same parse as the optimistic-append check below — so a stale tab
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+      grounded: reproposal?.groundedTarget,
     });
-    if (target.error) return { failed: true, modelResult: target };
-    if (toolUse.name !== 'update_restock_request') {
+    if (target.failed) return target;
+    if (target.productChoice) {
+      // A picker card's stored params ARE the shortlist and the amount; it
+      // never executes (commitPendingAction refuses it).
+      cardText = target.productChoice;
+      preview = cardText.preview;
+      for (const key of Object.keys(params)) delete params[key];
+      Object.assign(params, cardText.params);
+    } else if (toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
       taskContext = { ...taskContext, requestedRecords: { ...taskContext?.requestedRecords, product_id: target.productId } };
@@ -1672,6 +2084,27 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (toolUse.name === 'set_estimate_presentation' && preview?.estimate_id) {
     params.estimate_identifier = String(preview.estimate_id);
   }
+  // The billing writes resolve their target in the preview (a lone saved
+  // method; an invoice number): pin the resolved ids so the confirmed run
+  // acts on exactly those, and task-context validates the invoice by id.
+  if (toolUse.name === 'remove_saved_payment_method' && preview?.method?.id) {
+    params.payment_method_id = String(preview.method.id);
+  }
+  // The property access write pins the plan the card showed; the confirmed
+  // run refuses when its plan under the lock differs.
+  if (toolUse.name === 'update_property_access' && preview?.plan_hash) {
+    params._ib_property_plan_hash = String(preview.plan_hash);
+  }
+  if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
+    params.invoice_id = String(preview.invoice_id);
+    delete params.invoice_number;
+  }
+  // send_invoice: the stored approval names the invoice the preview resolved,
+  // never the number the model sent.
+  if (toolUse.name === 'send_invoice' && preview?.preview === true && preview.invoice_id) {
+    params.invoice_id = String(preview.invoice_id);
+    delete params.invoice_number;
+  }
 
   if (task) {
     const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
@@ -1699,30 +2132,68 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // marker predates it and is counted conservatively (Codex r4).
   if (ownerDirectVerdict) params._ib_owner_direct = directVerdict?.direct === true;
 
+  const card = { req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, sourcePin: reproposal?.sourcePin };
+  return reproposal ? prepareProposalCard(card) : storeProposalCard(card);
+}
+
+// A card made from another card (a product choice, Show again) is stored
+// inside the transaction that uses up its source card. Everything that reads
+// through the shared pool (the preview above, the task scope here) is done
+// BEFORE that transaction opens, so the transaction never waits for a second
+// connection (Codex #6111 r7). Returns { prepared } for storeProposalCard.
+async function prepareProposalCard(card) {
+  Object.assign(card.params, card.sourcePin);
+  const approvedParams = await PendingActions.approvedCardParams({ toolName: card.toolName, params: card.params,
+    taskId: card.task?.id, requestStartedAt: card.requestStartedAt });
+  return { prepared: { ...card, approvedParams } };
+}
+
+// Stores a proposal as a pending card and builds what the model and the
+// client get. Every card path ends here: the /query proposal, a picked
+// product and Show again. `cardText` is a card's own display line and model
+// note (a picker card); `sourcePin` names the card a derived card came from (a
+// server pin, so a retried request finds it); `trx` and `approvedParams`
+// store a prepared card inside the caller's transaction.
+async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, sourcePin = null, trx = null, approvedParams = null }) {
+  Object.assign(params, sourcePin);
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
   // lists plus the proposal-time pins — never model text — then hashed; the
   // card echoes the hash on Confirm and the claim refuses any other.
-  const displayParams = confirmationDisplayParams(toolUse.name, params, preview);
-  const summary = summarizeProposal(toolUse.name, params, displayParams);
+  const displayParams = cardText?.displayParams || confirmationDisplayParams(toolName, params, preview);
+  const summary = summarizeProposal(toolName, params, displayParams);
   const contract = AuthorizationContract.buildContract({
-    toolName: toolUse.name, params, displayParams, preview, summary,
+    toolName, params, displayParams, preview, summary,
   });
   const contractHash = AuthorizationContract.contractHash(contract);
 
   const row = await PendingActions.createPendingAction({
-    toolName: toolUse.name,
+    toolName,
     params,
     summary,
     requestedBy: getAdminActorId(req),
     context,
     contract,
     contractHash,
-    ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolUse.name, params, preview) } : {}),
+    // When this request started, on the platform-on and platform-off paths alike:
+    // a request that finishes late must not out-rank one that started later.
+    requestStartedAt,
+    trx,
+    approvedParams,
+    ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolName, params, preview),
+      ...(task.inherited ? { inheritedTask: true } : {}) } : {}),
   });
 
+  // A request that finished after a newer request already replaced its card:
+  // nothing is prepared and no card is shown.
+  if (row.earlier_card_confirmed) {
+    return { failed: true, modelResult: { error: row.earlier_card_confirmed } };
+  }
+  if (row.superseded_by_newer_request) {
+    return { failed: true, modelResult: { error: 'A newer request in this conversation already replaced this proposal. Nothing was prepared and nothing was changed. Do not propose it again; tell the operator to use the newer card.' } };
+  }
   if (task && row.status !== 'pending') {
-    const receipt = await PendingActions.getActionReceipt(row.id, getAdminActorId(req));
+    const receipt = await PendingActions.getActionReceipt(row.id, getAdminActorId(req), trx ? { database: trx } : undefined);
     return { failed: !receipt.success, modelResult: { outcome: receipt.outcome, result: receipt.result,
       note: 'This step already has a durable outcome. Do not repeat it.' } };
   }
@@ -1732,11 +2203,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       ...preview,
       ...(preview.params ? { params: Object.fromEntries(Object.entries(preview.params).filter(([key]) => !key.startsWith('_'))) } : {}),
       pending_confirmation: true,
-      note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
+      note: cardText?.note
+        || 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
     },
     clientPayload: {
       id: row.id,
-      tool: toolUse.name,
+      tool: toolName,
       summary: row.summary,
       // Display-only summary. The full immutable payload stays server-side
       // behind the pending-action id/hash; do not make a road user scroll
@@ -1759,6 +2231,240 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   };
 }
 
+// ─── PRODUCT PICKER + SHOW AGAIN (owner 2026-10-07) ─────────────
+
+const STOCK_WRITE_TOOL_NAMES = new Set(['adjust_stock', 'create_restock_request', 'update_restock_request']);
+// The role rules /confirm-action applies, for routes that re-propose a card.
+function cardRoleRefusal(req, toolName) {
+  if (ADMIN_ONLY_TOOL_NAMES.has(toolName) && req.techRole !== 'admin') return { status: 403, error: 'Admin access required for this action' };
+  if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolName) && !ibFullAccess(req)) return { status: 403, error: 'This action is limited to the owner account.' };
+  if (!isToolAllowedForRole(toolName, req.techRole)) return { status: 403, error: 'This action is not available to your role' };
+  return null;
+}
+
+// The tool input a stored adjust_stock card was built from: every
+// `_`-prefixed key is a server pin the fresh proposal recomputes.
+function publicCardInput(params) {
+  return Object.fromEntries(Object.entries(params || {}).filter(([key]) => !key.startsWith('_')));
+}
+
+const claimErrorStatus = (error) => (error === 'not_found' ? 404 : error === 'actor_mismatch' ? 403 : 409);
+const claimErrorMessage = (error) => (error === 'contract_mismatch'
+  ? 'The card no longer matches the proposed action. Ask again to get a fresh card.'
+  : `Pending action ${error.replace(/_/g, ' ')}`);
+
+// The ids a picker card offered (its server-built shortlist), or null.
+function offeredProductIds(params) {
+  const offered = params?._ib_product_choices;
+  return Array.isArray(offered) ? offered.map((v) => String(v).toLowerCase()) : null;
+}
+
+// Why /choose-product refuses before touching the card, or null.
+function pickerChoiceRefusal(req, row, productId) {
+  if (!row) return { status: 404, body: { error: 'Pending action not found' } };
+  const offered = offeredProductIds(row.params);
+  if (row.tool_name !== 'adjust_stock' || !offered) return { status: 409, body: { error: 'This card has no product to choose.', code: 'not_a_product_choice' } };
+  if (!offered.includes(productId)) {
+    logger.warn(`[intelligence-bar:pending] Product choice on ${row.id} refused: the id was not on the card`);
+    return { status: 409, body: { error: 'That product was not on this card. Nothing was written.', code: 'product_not_offered' } };
+  }
+  const role = cardRoleRefusal(req, row.tool_name);
+  return role ? { status: role.status, body: { error: role.error } } : null;
+}
+
+// The card a re-proposal could not make: the refusal the operator sees.
+const cardRefusal = (proposed, fallback) => ({ status: 409, body: { error: proposed.modelResult?.error || fallback.error, code: proposed.modelResult?.code || fallback.code } });
+
+// Claims the picker card and stores the normal card for the chosen product in
+// ONE transaction (Codex #6111 r2): any refusal or failure on the way rolls
+// the claim back, so the picker stays usable and a retry can succeed. The
+// card is prepared from `row` (the picker as just read) before the
+// transaction opens. Writes no stock. Returns { status, body }.
+async function chooseProductOnCard(req, row, productId, contractHash) {
+  const actor = getAdminActorId(req);
+  const rollback = new Error('product choice rolled back');
+  const proposed = row.status === 'pending' ? await prepareChosenProduct(req, row, productId) : null;
+  let answer = null;
+  let source = null;
+  try {
+    await db.transaction(async (trx) => {
+      const claim = await PendingActions.claimForConfirm(row.id, actor, { contractHash, trx, forProductChoice: true });
+      if (claim.error) {
+        answer = claim.error === 'already_used' ? null : { status: claimErrorStatus(claim.error), body: { error: claimErrorMessage(claim.error) } };
+        throw rollback;
+      }
+      source = claim.action;
+      answer = await storeChosenProduct(source, productId, sameCard(source, row) ? proposed : null, trx);
+      if (answer.status !== 200) throw rollback;
+    });
+  } catch (err) {
+    if (err !== rollback) throw err;
+  }
+  // Already used: a retry after a lost response gets the card that choice made.
+  if (!answer) return replayProductChoice(row.id, actor, productId);
+  if (answer.status === 200) {
+    await attachDerivedCard(source, answer.body.pendingAction.id, actor);
+    logger.info(`[intelligence-bar:pending] Product chosen on ${row.id}; proposed ${answer.body.pendingAction.id}`);
+  }
+  return answer;
+}
+
+// The row a transaction took is the row its card was prepared from.
+const sameCard = (taken, read) => String(taken.params_hash) === String(read.params_hash);
+
+// Before chooseProductOnCard's transaction: the normal adjust_stock proposal
+// for the chosen product, prepared and not stored.
+async function prepareChosenProduct(req, row, productId) {
+  const input = publicCardInput(row.params);
+  delete input.product_name;
+  // A task's picker hands its step to the new card: the task keeps waiting
+  // for that card's outcome instead of reading the picker as the result.
+  const task = row.task_id ? { id: row.task_id, runner_token: null, inherited: true } : null;
+  return proposePendingWrite({
+    toolUse: { name: 'adjust_stock', input: { ...input, product_id: productId } },
+    req, context: row.context || null, requestStartedAt: new Date(),
+    task, taskContext: task ? taskScopeFromProof(row.params?._ib_task_context) : null,
+    reproposal: { groundedTarget: { productId }, sourcePin: { _ib_chosen_from: String(row.id) } },
+  });
+}
+
+// Inside chooseProductOnCard's transaction: store the prepared card and
+// record on the picker card what happened.
+async function storeChosenProduct(action, productId, proposed, trx) {
+  // The claimed row is the authority (its params hash was just verified).
+  if (!(offeredProductIds(action.params) || []).includes(productId)) {
+    return { status: 409, body: { error: 'That product was not on this card. Nothing was written.', code: 'product_not_offered' } };
+  }
+  // Made inactive since the card listed it: the claim rolls back, so the
+  // operator picks another product on the same card.
+  if (!(await require('../services/intelligence-bar/procurement-tools').productIsActive(productId, trx))) {
+    return { status: 409, body: { error: 'That product is no longer active — pick another.', code: 'product_inactive' } };
+  }
+  const refusal = { error: 'The card for this product could not be made.', code: 'product_choice_refused' };
+  if (!proposed?.prepared) return cardRefusal(proposed || {}, refusal);
+  const stored = await storeProposalCard({ ...proposed.prepared, trx });
+  if (stored.failed || !stored.clientPayload) return cardRefusal(stored, refusal);
+  const name = stored.modelResult?.product?.name || 'The product';
+  await PendingActions.recordResult(action.id, { success: true, state: 'completed', written: false, chosen_product_id: productId,
+    note: 'No stock was changed by this card. A new card for the chosen product waits for the operator to confirm.',
+    receipt: { label: 'Product chosen', summary: `${name}. Confirm the new card to change the stock.` } }, { database: trx });
+  return { status: 200, body: { success: true, outcome: 'completed', chosen_product_id: productId, pendingAction: stored.clientPayload } };
+}
+
+// A stored card keeps only its approval proof, not the task's raw context.
+// The chosen card is validated afresh in the same customer scope the picker
+// was approved in (its targets and the owner-direct flag), never wider.
+function taskScopeFromProof(proof) {
+  return { targets: Array.isArray(proof?.targets) ? proof.targets : [], ...(proof?.ownerDirect === true ? { ownerDirect: true } : {}) };
+}
+
+// A card made from another card (a product choice, Show again) joins the
+// source card's conversation exchange, so history and recall show the action
+// that actually ran. Best-effort, like the /query path.
+async function attachDerivedCard(source, newId, actor) {
+  const seq = source.thread_turn_seq == null ? null : Number(source.thread_turn_seq);
+  if (!source.thread_id || !Number.isInteger(seq)) return;
+  try {
+    await PendingActions.attachThread([newId], source.thread_id, seq, actor);
+  } catch (err) {
+    logger.warn(`[intelligence-bar:pending] Could not attach ${newId} to its thread (code=${err.code || 'unknown'})`);
+  }
+}
+
+// The card shape the client renders, from a stored pending row.
+function cardPayload(row) {
+  return { id: row.id, tool: row.tool_name, summary: row.summary, params: {},
+    contract: (typeof row.contract === 'string' ? JSON.parse(row.contract) : row.contract) || null, contract_hash: row.contract_hash || null, expiresAt: row.expires_at,
+    expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()) };
+}
+
+// The picker card was already used. When this operator used it for this same
+// product, answer with the card that choice made (found by its server pin);
+// otherwise it stays a plain "already used" refusal.
+async function replayProductChoice(id, actor, productId) {
+  const next = await PendingActions.findDerivedCard('_ib_chosen_from', id, actor);
+  if (!next || String(next.params?.product_id || '').toLowerCase() !== productId) return { status: 409, body: { error: claimErrorMessage('already_used') } };
+  return { status: 200, body: { success: true, outcome: 'completed', replayed: true, chosen_product_id: productId, pendingAction: cardPayload(next) } };
+}
+
+// Why /show-again refuses before retiring the card, or null.
+function showAgainRefusal(req, row) {
+  if (!row) return { status: 404, body: { error: 'Pending action not found' } };
+  // Only stock cards (an adjust_stock card or its product picker) are shown
+  // again: their input is rebuilt exactly from the stored row. Every other
+  // card keeps the earlier rule: ask again.
+  if (row.tool_name !== 'adjust_stock') return { status: 409, body: { error: 'Ask again to get a fresh card.', code: 'ask_again' } };
+  // A task owns its cards and its outcome: a standalone copy would run outside
+  // it and leave the task reporting the step as cancelled.
+  if (row.task_id) return { status: 409, body: { error: 'This card belongs to a task — continue it from the task.', code: 'task_owned' } };
+  const role = cardRoleRefusal(req, row.tool_name);
+  return role ? { status: role.status, body: { error: role.error } } : null;
+}
+
+// Under GATE_IB_PLATFORM a proposal's input must pass the action registry for
+// this actor and context, as it did in the /query loop.
+function platformInputRefusal(req, row, input) {
+  if (!gateEnvValue('GATE_IB_PLATFORM') || req.techRole !== 'admin') return null;
+  return ActionRegistry.validateInput(row.tool_name, input, { role: req.techRole, context: row.context || null, fullAccess: ibFullAccess(req) });
+}
+
+// Retires the expired card and stores its fresh proposal in ONE transaction:
+// a refusal or an error on the way rolls the retirement back, so the card
+// stays expired and a retry can succeed. The proposal is prepared from `row`
+// (the card as just read) before the transaction opens. Returns { status, body }.
+async function showCardAgain(req, row) {
+  const actor = getAdminActorId(req);
+  const rollback = new Error('show again rolled back');
+  // A decided card cannot be retired below: nothing to prepare.
+  const proposed = row.status === 'pending' ? await prepareShownAgain(req, row, publicCardInput(row.params)) : {};
+  let answer = null;
+  let retired = null;
+  try {
+    await db.transaction(async (trx) => {
+      retired = await PendingActions.retireExpiredAction(row.id, actor, { trx });
+      if (!retired) throw rollback;
+      const stored = proposed.prepared && sameCard(retired, row) ? await storeProposalCard({ ...proposed.prepared, trx }) : proposed;
+      if (stored.failed || !stored.clientPayload) {
+        answer = cardRefusal(stored, { error: 'This action could not be shown again.' });
+        throw rollback;
+      }
+      answer = { status: 200, body: { success: true, pendingAction: stored.clientPayload } };
+    });
+  } catch (err) {
+    if (err !== rollback) throw err;
+  }
+  if (answer?.status === 200) {
+    await attachDerivedCard(retired, answer.body.pendingAction.id, actor);
+    logger.info(`[intelligence-bar:pending] Expired action ${row.id} shown again as ${answer.body.pendingAction.id}`);
+  }
+  return answer || showAgainReplay(row.id, actor);
+}
+
+// Not retired now: a retry after a lost response gets the card Show again
+// already made; otherwise the card was live or decided.
+async function showAgainReplay(id, actor) {
+  const made = await PendingActions.findDerivedCard('_ib_shown_from', id, actor);
+  if (made) return { status: 200, body: { success: true, replayed: true, pendingAction: cardPayload(made) } };
+  return { status: 409, body: { error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' } };
+}
+
+// Before showCardAgain's transaction: the fresh proposal for an expired stock
+// card, prepared and not stored. A picker card re-lists its own products with
+// fresh numbers; an adjust_stock card keeps the product its row stored.
+async function prepareShownAgain(req, row, input) {
+  const stored = row.params || {};
+  const base = { req, context: row.context || null, requestStartedAt: new Date() };
+  const sourcePin = { _ib_shown_from: String(row.id) };
+  if (Array.isArray(stored._ib_product_choices)) {
+    const card = await require('../services/intelligence-bar/procurement-tools').productChoiceCard({ params: input, seedIds: stored._ib_product_choices });
+    if (!card) return { failed: true, modelResult: { error: 'None of the products on the earlier card can take this amount now. Nothing was written and no confirmation card was created.', code: 'target_clarification_required' } };
+    if (card.failed) return card;
+    return prepareProposalCard({ ...base, toolName: row.tool_name, params: card.params, preview: card.preview, task: null, cardText: card, sourcePin });
+  }
+  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input },
+    reproposal: { groundedTarget: { productId: stored.product_id || null }, sourcePin } });
+}
+
 function getAdminActorId(req) {
   return String(req.technicianId || req.technician?.id || 'admin');
 }
@@ -1772,6 +2478,13 @@ function getConfirmedActionIdempotencyKey(req, params) {
 }
 
 // Context-specific system prompt extensions
+// The lawn tracks the estimate prompt names: the v13 program (GATE_LAWN_V13) has no bahia track,
+// so a bahia lawn is parked for review rather than offered as a track. Read per request.
+function lawnTracksPromptText() {
+  if (!require('../services/lawn-program').lawnV13NoBahiaProgram()) return 'st_augustine, bermuda, zoysia, bahia';
+  return 'st_augustine, bermuda, zoysia (bahia has no v13 program: a bahia lawn is parked for review, never priced as a plan)';
+}
+
 const CONTEXT_PROMPTS = {
   agent_estimate: `
 AGENT ESTIMATE CONTEXT:
@@ -2138,7 +2851,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
-- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
+- Fix a lead's contact details — first/last name, phone, email, street address, city, zip (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost
@@ -2204,8 +2917,8 @@ QUOTING WORKFLOW:
 ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
 - Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
-- Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
-- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+) — discount applies automatically based on service count
+- Lawn tracks: __LAWN_TRACKS__. Tiers: basic, enhanced, premium
+- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+). The tier is a label the office sets; changing it changes NO price. Prices change only through a new estimate or a monthly-rate edit, so never tell the operator a discount "will apply" after a tier change. monthly_rate is the customer's whole monthly bill (all services summed; get_customer_detail shows the lines as monthly_bill).
 - Default sqft if unknown: 2000. Default lot: 4× home sqft.
 
 OUT-OF-SCOPE EXAMPLES (do not draft):
@@ -2300,15 +3013,50 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 // on EVERY admin context regardless of role (INFRA_TOOLS below), so this
 // filter is the ONLY place that keeps these out of a non-full-access list —
 // there is no per-module QUERY-only export to fall back to.
+// Core tools on EVERY admin page (EVERY_PAGE_TOOL_NAMES in
+// action-registry.js; owner IB history 10-06: asks failed with "no tool" on
+// the Customers page or dashboard). This legacy list carries the ones its
+// modules execute by name. The property writes are registry-only
+// (executePropertyTool refuses unless GATE_IB_PLATFORM), so they ride the
+// platform list only. Admin-only; never the tech or agent-estimate rails.
+// Only the offer widens: every write keeps its UI-confirm card.
+const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
+function withEveryPageTools(tools, context, isAdmin) {
+  if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...ADDRESS_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
+    .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
+}
+
+// reprice_future_visits (owner ruling 2026-10-07): offered to admins on the
+// Customers, Schedule / Dispatch and dashboard pages while
+// GATE_IB_REPRICE_VISITS is on; off, it is in no list (and refuses every call).
+const REPRICE_VISITS_CONTEXTS = new Set(['customers', 'schedule', 'dispatch', 'dashboard']);
+function withRepriceVisitsTool(tools, context, isAdmin) {
+  if (!isAdmin || !REPRICE_VISITS_CONTEXTS.has(context) || !repriceVisitsLive()) return tools;
+  return [...tools, ...REPRICE_VISITS_TOOLS];
+}
+
 function getToolsForContext(context, isAdmin = false, fullAccess = false) {
-  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+  const tools = withRepriceVisitsTool(withEveryPageTools(toolsForContextUngated(context, isAdmin, fullAccess), context, isAdmin), context, isAdmin)
     // Defense in depth: catches a future red tool reaching a context list
     // through a module that forgot its own write-free "query" export
     // (banking-tools.js / seo-tools.js already build one for the branches
     // below) — never offered without full access, whatever module it rides.
     .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
     .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
-  return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
+  const offered = withInvoiceActionTools(tools, context, isAdmin);
+  return (mergeCustomersEnabled() ? offered : offered.filter(t => t.name !== 'merge_customers')).filter(t => deleteDuplicateCustomerEnabled() || t.name !== 'delete_duplicate_customer');
+}
+
+// send_invoice (owner ruling 2026-10-07): offered to admins on the
+// Customers, Invoices / Revenue and dashboard pages while GATE_IB_INVOICE_ACTIONS is
+// on; off, they are in no list (and refuse every call).
+const INVOICE_ACTION_CONTEXTS = new Set(['customers', 'revenue', 'dashboard']);
+function withInvoiceActionTools(tools, context, isAdmin) {
+  if (!isAdmin || !INVOICE_ACTION_CONTEXTS.has(context) || !invoiceActionsLive()) return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...INVOICE_ACTION_TOOLS.filter(t => !present.has(t.name))];
 }
 
 function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
@@ -2507,8 +3255,29 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
     return executeNeedsMeTool(toolName, input);
   }
+  if (toolName === OFFER_CHOICES_TOOL_NAME) {
+    return executeChoiceTool(toolName, input);
+  }
+  if (toolName === CHECK_ADDRESS_TOOL_NAME) {
+    return executeAddressTool(toolName, input);
+  }
   if (BILLING_READER_TOOL_NAMES.has(toolName)) {
     return executeBillingReaderTool(toolName, input, actionContext);
+  }
+  if (RECEIPT_RESEND_TOOL_NAMES.has(toolName)) {
+    return executeReceiptResendTool(toolName, input, actionContext);
+  }
+  if (CUSTOMER_LINK_TOOL_NAMES.has(toolName)) {
+    return executeCustomerLinkTool(toolName, input, actionContext);
+  }
+  if (REPRICE_VISITS_TOOL_NAMES.has(toolName)) {
+    return executeRepriceVisitsTool(toolName, input, actionContext);
+  }
+  if (BILLING_WRITE_TOOL_NAMES.has(toolName)) {
+    return executeBillingWriteTool(toolName, input, actionContext);
+  }
+  if (INVOICE_ACTION_TOOL_NAMES.has(toolName)) {
+    return executeInvoiceActionTool(toolName, input, actionContext);
   }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
@@ -2567,6 +3336,7 @@ BUSINESS CONTEXT:
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
+- A tier change never reprices any visit; never say it does. To apply a discount or a new price to a customer's upcoming visits, use reprice_future_visits when it is in your tools: one service, the new dollar price per visit (ask for the dollar price; it takes no percentage).
 - Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port
 
@@ -2588,9 +3358,13 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). Never create an invoice, change an amount, charge a card, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
+- Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
+- Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values as the operator would say them ("$61.33", not a sentence), then ask the question in your reply text as usual. A button shows the value and a tap sends exactly that value as the operator's next message: treat it as their answer to the question you just asked. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
+- Addresses: before you save or change any street address (add_customer_property, update_customer, update_lead_contact, create_customer, correct_invoice_address), run check_address on it and use Google's spelling, city and ZIP. Never guess a ZIP and never fix a street spelling from memory. If Google's result differs from what the operator said or from a call transcript, show both and ask which is right. If the operator says a spelling is wrong, run check_address again with their words instead of repeating the transcript. If check_address returns not_attempted or api_unavailable, say the address could not be verified and ask the operator for the ZIP. An address change always shows a confirmation card with the exact address, so put Google's version on it.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
@@ -2601,10 +3375,12 @@ IMAGE ATTACHMENTS:
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
+- Duplicate customer records (when these tools are available): merge_customers folds a duplicate with ANY history into the real record; delete_duplicate_customer only soft-deletes a record that holds nothing at all. Prefer merge_customers when unsure.
 - You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
+- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. send_autopay_setup_link texts or emails a customer their Auto Pay setup link behind a confirmation card (it refuses a customer with a saved card: enrolling one is a billing change for the Customers page, and a link-only Auto Pay link is also the Customers page button). Never say there is no link tool. Card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days
@@ -2619,7 +3395,17 @@ Use the request-time Eastern date provided on the current turn.`;
 
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
 
+// The shape /query accepts for conversationHistory: an array of user and
+// assistant text turns. runQuery answers 400 otherwise, and the idle rollover
+// never touches a body that fails it, so the request reaches runQuery unchanged.
+function isValidConversationHistory(history) {
+  return Array.isArray(history)
+    && history.every(turn => turn && ['user', 'assistant'].includes(turn.role) && typeof turn.content === 'string');
+}
+
 async function runQuery(req, res, next) {
+  // A resumed task keeps its original start, so a late card is not ordered as the newest.
+  const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
   let activeTask = null;
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
@@ -2640,8 +3426,7 @@ async function runQuery(req, res, next) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-    if (!Array.isArray(conversationHistory) || conversationHistory.some(turn =>
-      !turn || !['user', 'assistant'].includes(turn.role) || typeof turn.content !== 'string')) {
+    if (!isValidConversationHistory(conversationHistory)) {
       return res.status(400).json({ error: 'Conversation history must contain user and assistant text turns' });
     }
     // Role guards run on the REQUESTED context so a technician asking for a
@@ -2670,6 +3455,9 @@ async function runQuery(req, res, next) {
     // sees or can invoke one through initialTools/discover/validateInput
     // either, whatever GATE_IB_PLATFORM is set to.
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
+    // GATE_IB_TOOL_SEARCH: a full-access login reaches its non-page tools through
+    // the API's tool search instead of discover_capabilities (tool-search.js).
+    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope, MODEL);
     // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
     // login gets no target refusals, no card on internal edits and short
     // replies. Read from the live request on every run; the isolated tech
@@ -2682,12 +3470,13 @@ async function runQuery(req, res, next) {
     const ownerDirectCommits = ownerDirect && platformEnabled;
     let taskContext = null;
     if (platformEnabled) {
+      const taskRequest = { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
+        conversationHistory: conversationHistory.slice(-10),
+        thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
+        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
-        request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
-          conversationHistory: conversationHistory.slice(-10),
-          thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
-          thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null },
+        ...taskRequestsFor(req, taskRequest),
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -2747,7 +3536,8 @@ async function runQuery(req, res, next) {
     // Build context-aware system prompt
     let systemPrompt = SYSTEM_PROMPT;
     if (context && CONTEXT_PROMPTS[context]) {
-      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+      // The lawn track list follows GATE_LAWN_V13 (bahia has no v13 program), read per request.
+      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context].replace('__LAWN_TRACKS__', lawnTracksPromptText());
     }
     // Infra tools load on every admin context (getToolsForContext), so their
     // guidance rides along for every admin request. The tech and
@@ -2770,10 +3560,17 @@ async function runQuery(req, res, next) {
     }
     if (platformEnabled) {
       systemPrompt += `\n\nPLATFORM CAPABILITIES:
-The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
+The page ranks useful tools; it does not restrict what you can do. ${ToolSearch.capabilitySearchLine(toolSearch)} Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine({ toolSearch })}`;
+    }
+    // Offered only while GATE_IB_ACCEPT_ESTIMATE is on (owner ruling
+    // 2026-10-07, Q5); appended after the shared blocks so off is
+    // byte-identical and the cacheable prefix is unchanged.
+    if (platformEnabled && context !== 'tech' && context !== 'agent_estimate' && ibAcceptEstimateLive()) {
+      systemPrompt += `\n\nACCEPTED QUOTES:
+When the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"), find that customer's sent or viewed estimate and prepare accept_estimate for it (load it with discover_capabilities if it is not listed). It does what the estimate page's Mark accepted does. Never use update_customer or create_appointment to record an acceptance. If the customer has more than one open estimate, ask which one.`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -2805,7 +3602,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Select tools based on context and role (email tools are admin-only).
     // Red-tier tools additionally require full access (owner ruling
     // 2026-09-28) — never a card either way; see getToolsForContext.
-    let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
+    let tools = (platformEnabled ? ActionRegistry.initialTools(context, { ...actionScope, toolSearch })
       : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
@@ -2819,10 +3616,19 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
     ];
 
-    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...req.ibResumedTask.checkpoint] : messages;
+    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...ToolSearch.stripServerSearchBlocks(req.ibResumedTask.checkpoint)] : messages;
+    // A resumed task never uses tool search: the saved search blocks are
+    // stripped on load and the request runs on the ordinary list (tool-search.js).
+    const searchQueries = new Map();
     if (req.ibResumedTask) {
-      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
+    // Once the general admin read returned data, nothing after it runs without
+    // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
+    const requestTaint = await OwnerDirect.loadRequestTaint({
+      history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
+      fullAccess: actionScope.fullAccess, conversationHistory,
+    });
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
@@ -2834,8 +3640,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
         .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
       const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
-      const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
-        .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
+      const searchedNames = ToolSearch.searchReferencedNames(req.ibResumedTask.checkpoint);
+      const previouslyLoaded = [...invokedNames, ...discoveredNames, ...searchedNames].map(name => ActionRegistry.actions.get(name))
+        .filter(Boolean).filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
     let finalResponse = null;
@@ -2886,10 +3693,18 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // knowledge-gaps email (POST /knowledge-gap). Never logged here: the
     // search text can carry a customer's name, address or phone.
     const knowledgeMisses = new Set();
+    // Tap-to-answer buttons for this reply (offer_choices, choice-tools.js):
+    // the validated labels, client-only, and only while offer_choices is the
+    // LAST tool that ran before the terminal answer. Any later tool call
+    // clears them: the answer then no longer is the question they belong to.
+    let offeredChoices = null;
 
     // Tool-use loop
     let lastToolResponse = null;
+    let stepLimitReached = false; // the final, tool-less round ran: the request used every step
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const finalRound = round === MAX_TOOL_ROUNDS - 1;
+      stepLimitReached = finalRound;
       const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
@@ -2902,7 +3717,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // shorter-TTL ones — system renders before messages, so this is safe.
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
-        messages: withCacheBreakpoint(currentMessages),
+        ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
+        messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
@@ -2916,16 +3732,17 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
+      ToolSearch.observeServerToolSearches(response.content, gapCollector, searchQueries);
       // This message's calls that could run direct, judged before any of them
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
         ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
-          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope))))
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint))
         : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
-      if (toolUses.length === 0) {
+      if (ToolSearch.finishesTurn(response, toolUses)) {
         finalResponse = textBlocks.map(t => t.text).join('\n');
         // A terminal turn with neither a tool call nor usable text (a
         // thinking-only or refused reply) answers nothing — the `!finalResponse`
@@ -2945,7 +3762,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Outside-service writes too (Codex r1 on #5275, P1): assign_sentry_issue
         // takes an account email, and their scope is 'none' so they are never
         // in PII_TOOL_NAMES.
-        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name);
+        // offer_choices too: its scope is 'none' (it reads no rows), but an
+        // option can name a customer the operator is choosing between.
+        // check_address likewise: its input is a customer's street address.
+        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)
+          || SCOPE_NONE_PII_TOOL_NAMES.has(toolUse.name);
         const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
@@ -2979,9 +3800,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         } else if (platformEnabled && toolUse.name === ActionRegistry.DISCOVERY_TOOL.name) {
           const discovered = ActionRegistry.discover(toolUse.input, actionScope);
           result = discovered.result;
-          const byName = new Map(tools.map(t => [t.name, t]));
-          for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
-          tools = [...byName.values()];
+          tools = ToolSearch.mergeDiscoveredTools(tools, discovered.definitions.map(apiToolDefinition), toolSearch);
           gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
@@ -3040,13 +3859,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
               task: activeTask,
               taskContext,
+              requestStartedAt,
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches
               // its card (Codex r2), and before the approval is stored, so
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
-                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview)) return null;
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint)) return null;
                 return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
               } : null,
             });
@@ -3054,7 +3874,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
@@ -3105,13 +3925,20 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // an owner-direct fallback read is unscoped.
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
+              // General admin read (owner ruling 2026-10-12): the request's own
+              // login and bearer token, set here from the authenticated request,
+              // never from model input; read_admin_data forwards the token on
+              // its loopback GET and it is persisted nowhere. Only the platform
+              // contexts carry full access, so the tech and agent_estimate rails
+              // refuse these reads even for a forced call.
+              fullAccess: platformEnabled && ibFullAccess(req), staffAuthorization: req.headers.authorization,
             });
+            // Breaker: faults only. A coded refusal is a decision, not an outage;
+            // `failed` below is unchanged (activity line, ledger, model view).
+            recordToolOutcome(adminToolBreaker, result);
             if (isToolFailure(result)) {
               failed = true;
               errorMessage = result.error || result.message || 'tool returned error';
-              adminToolBreaker.recordFailure();
-            } else {
-              adminToolBreaker.recordSuccess();
             }
           } catch (err) {
             logger.error(`[intelligence-bar] Tool ${toolUse.name} threw:`, err);
@@ -3144,20 +3971,23 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           errorMessage: (PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)) && errorMessage
             ? REDACTED_TOOL_HEALTH_ERROR
             : errorMessage,
+          ...(failed && toolHealthFailureCode(result) ? { metadata: { code: toolHealthFailureCode(result) } } : {}),
         });
-        gapCollector?.toolResult(toolUse.name, result, failed);
+        gapCollector?.toolResult(toolUse.name, result, failed, gapToolMeta(round, proposedCard, result));
 
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
-          content: JSON.stringify(result),
+          content: ToolSearch.toolResultContent(toolUse.name, result, tools, toolSearch),
           ...(failed ? { is_error: true } : {}),
         });
 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        OwnerDirect.noteUntrustedRead(requestTaint, toolUse.name, result);
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
+        offeredChoices = toolUse.name === OFFER_CHOICES_TOOL_NAME && !failed && result?.status === 'choices_shown' ? result.choices : null;
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
@@ -3173,18 +4003,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
-      currentMessages = [
-        ...currentMessages,
-        { role: 'assistant', content: response.content },
-        { role: 'user', content: results },
-      ];
+      currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results);
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
+    const noReply = !finalResponse; // no terminal answer: the loop ended on a tool call
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
+      offeredChoices = null; // no question was asked, so there is nothing to answer
     }
     // Gap reports: records only when this reply says the bar could not do
     // something. Awaited — flush() never rejects and writes nothing on an
@@ -3192,7 +4020,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // discover_capabilities loop there to gather signals from); the admin
     // platform collector already searches first, so passing it there too is
     // inert on every request that already gathered a signal.
-    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined });
+    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -3223,7 +4051,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // prompt/response (assignee email, Sentry titles/culprits, GitHub PR
     // titles, Pages branch names) would otherwise persist unredacted.
     // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
-    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name));
+    // offer_choices is scope 'none' too, and the question it rides on can
+    // name the customers being chosen between with no PII reader in this turn.
+    // check_address is scope 'none' too; the street address it checked is the
+    // customer's, and the reply that follows repeats it.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name)
+      || SCOPE_NONE_PII_TOOL_NAMES.has(c.name));
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'
@@ -3257,9 +4090,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       PII_TAINT_MARKER,
     );
     const persistedAssistantTurn = appendTaintMarker(
-      appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
-      piiTainted,
-      PII_TAINT_MARKER,
+      appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
+      requestTaint.untrustedRead,
+      UNTRUSTED_READ_MARKER,
     );
 
     // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
@@ -3333,6 +4166,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // Knowledge searches that came back empty, for the "add to knowledge
       // gaps" prompt. Absent when there were none.
       ...(knowledgeMisses.size ? { knowledgeMisses: [...knowledgeMisses] } : {}),
+      // Tap-to-answer buttons (offer_choices): plain strings. A tap sends
+      // exactly the button text as the operator's next message. Absent when the model offered
+      // none, and dropped when this turn made a card or committed a direct
+      // edit: a button must never sit beside a Confirm control or a receipt.
+      ...(offeredChoices && !pendingProposals.length && !directActionIds.length ? { choices: offeredChoices } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the
@@ -3392,7 +4230,65 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
   }
 }
 
-router.post('/query', runQuery);
+// The server is the only authority on starting a new conversation. An explicit
+// thread_id whose thread is idle past IB_THREAD_IDLE_HOURS starts a NEW
+// conversation (no thread id, no client history, so the model never sees the old
+// customer) unless the client says the operator reopened it on purpose from
+// History or a restored saved task (thread_reopened: true). Every JSON reply to
+// that request then carries threadRolledOver: true (whether or not a new thread
+// id could be created), and never otherwise; the palette holds the thread it
+// has and obeys the flag. Direct /query only: a saved task resumed through
+// /tasks/:id/* keeps its own thread. Fails open (the request runs unchanged)
+// when the lookup throws.
+//
+// The rollover must not change the request's identity: a retry of the same
+// request key (lost response, failed run) is recognised by the hash of what the
+// client sent, so taskRequestsFor hands IbTasks.begin the original thread fields
+// to hash while the saved task keeps the rolled-over ones plus the decision
+// (thread_rolled_over), which the snapshot a retry gets back replays.
+function taskRequestsFor(req, taskRequest) {
+  const original = req.ibThreadRollover;
+  if (!original) return { request: taskRequest };
+  return {
+    request: { ...taskRequest, thread_rolled_over: true },
+    identityRequest: { ...taskRequest, conversationHistory: original.conversationHistory.slice(-10),
+      thread_id: original.thread_id, thread_seq: original.thread_seq },
+  };
+}
+
+// Marks every JSON object body of this response, unless the body already states
+// the flag itself (a stored task snapshot replays its own first decision).
+function flagRolledOverReplies(res) {
+  const json = res.json.bind(res);
+  res.json = (body) => json(body && typeof body === 'object' && !Array.isArray(body) && !('threadRolledOver' in body)
+    ? { ...body, threadRolledOver: true } : body);
+}
+
+async function startFreshWhenThreadIdle(req, res, next) {
+  try {
+    const body = req.body || {};
+    const eligible = [IbThreads.threadsEnabled(), req.techRole === 'admin', body.thread_reopened !== true,
+      UUID_RE.test(String(body.thread_id || '')),
+      // A malformed history is left for runQuery to refuse with its 400.
+      body.conversationHistory === undefined || isValidConversationHistory(body.conversationHistory)].every(Boolean);
+    if (eligible && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
+      req.ibThreadRollover = {
+        thread_id: body.thread_id,
+        thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+        conversationHistory: Array.isArray(body.conversationHistory) ? body.conversationHistory : [],
+      };
+      delete body.thread_id;
+      delete body.thread_seq;
+      body.conversationHistory = [];
+      flagRolledOverReplies(res);
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar] idle thread check failed (code=${err?.code || 'unknown'})`);
+  }
+  next();
+}
+
+router.post('/query', startFreshWhenThreadIdle, runQuery);
 
 // Operator-chosen knowledge gap: the client offers this after a knowledge
 // search came back empty, with the search text in an editable box. Nothing
@@ -3535,7 +4431,7 @@ router.post('/execute', async (req, res, next) => {
     }
 
     if (gateEnvValue('GATE_IB_PLATFORM') && !CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
-      const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform' });
+      const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform', fullAccess: ibFullAccess(req) });
       if (invalid) return res.status(invalid.code === 'permission_denied' ? 403 : 400).json(invalid);
     }
 
@@ -3559,10 +4455,12 @@ router.post('/execute', async (req, res, next) => {
       // Request-derived actor for actor-bound reads (recall) — same source
       // the /query loop uses, never the client params.
       actorId: getAdminActorId(req),
+      // General admin read (owner ruling 2026-10-12): see the /query loop.
+      fullAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization,
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action) || SCOPE_NONE_PII_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,
@@ -3593,6 +4491,14 @@ router.post('/execute', async (req, res, next) => {
 // both run exactly this — the same claim, role guards, proposal-time pin
 // re-checks and receipt. Returns { status, body, claimed } and never touches
 // the response; `claimed` says whether the approval was consumed.
+// Claim refusals with their own wording. A "choose the product" card is not
+// consumed by a Confirm (claimForConfirm): its way forward is /choose-product.
+const CLAIM_REFUSALS = {
+  contract_mismatch: 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.',
+  product_choice_required: 'Pick the product on the card first. Nothing was written.',
+};
+const CLAIM_REFUSAL_FACTS = { product_choice_required: { code: 'product_choice_required', written: false } };
+
 async function commitPendingAction(req, { id, contractHash }) {
   let claimedAction = null;
   const reply = (status, body) => ({ status, body, claimed: claimedAction !== null });
@@ -3613,10 +4519,8 @@ async function commitPendingAction(req, { id, contractHash }) {
       const status = claim.error === 'not_found' ? 404
         : claim.error === 'actor_mismatch' ? 403
           : 409; // already_used | cancelled | expired | hash_mismatch | contract_mismatch
-      const message = claim.error === 'contract_mismatch'
-        ? 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.'
-        : `Pending action ${claim.error.replace(/_/g, ' ')}`;
-      return reply(status, { error: message });
+      const message = CLAIM_REFUSALS[claim.error] || `Pending action ${claim.error.replace(/_/g, ' ')}`;
+      return reply(status, { error: message, ...CLAIM_REFUSAL_FACTS[claim.error] });
     }
     const action = claim.action;
     claimedAction = action;
@@ -3686,6 +4590,8 @@ async function commitPendingAction(req, { id, contractHash }) {
     // winner_version/loser_version are inside that fingerprint).
     delete execParams._approved_versions;
     delete execParams._approved_effects;
+    delete execParams._approved_version;
+    delete execParams._approved_keeper;
     if (execParams._ib_task_context) {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
@@ -3744,7 +4650,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           : await resolveReviewRequestRecipient(execParams);
         const livePhone = !r || r.error ? null
           : (action.tool_name === 'trigger_review_request'
-            ? require('../services/customer-contact').getServiceContactSmsRecipient(r).phone
+            ? (await require('../services/recipient-optin').resolveServiceContactSmsRecipient(r)).phone
             : r.phone);
         drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
         // The card promised a NEW review request: any gate that closed
@@ -3836,7 +4742,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           return reply(409, result);
         }
         if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
-        if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
+        if (['add_customer_property', 'update_customer_property', 'set_primary_property', 'remove_customer_property'].includes(action.tool_name)) {
           execParams._verified_property_version = livePreview._version;
         }
         if (action.tool_name === 'save_customer_estimate') execParams._verified_estimate_version = livePreview._version;
@@ -3851,6 +4757,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
           execParams._verified_stops = livePreview.stops;
         }
+        if (action.tool_name === 'delete_duplicate_customer') Object.assign(execParams, deleteDuplicatePins(livePreview));
         // merge_customers: the fingerprint-verified preview's pins (both
         // customer versions + the disclosed effects fingerprint) ride to
         // the executor so it validates the APPROVED snapshot under its own
@@ -3879,6 +4786,19 @@ async function commitPendingAction(req, { id, contractHash }) {
         // re-plan differs (pre-push P1: never add a step the card lacked).
         if (action.tool_name === 'repair_closeout' && Array.isArray(livePreview?.steps)) {
           execParams._verified_repair_steps = livePreview.steps;
+        }
+        // The billing writes: the verified preview IS the approved plan — the
+        // executor re-plans and refuses if its own plan differs.
+        if (action.tool_name === 'remove_saved_payment_method' && Array.isArray(livePreview?.steps)) {
+          execParams._verified_removal_plan = livePreview;
+        }
+        if (action.tool_name === 'correct_invoice_address' && livePreview?.invoice_id) {
+          execParams._verified_address_correction = livePreview;
+        }
+        // accept_estimate: the verified card IS the approved plan — the
+        // executor re-plans and refuses if its own card differs.
+        if (action.tool_name === 'accept_estimate' && livePreview?.estimate_id) {
+          execParams._verified_accept_plan = livePreview;
         }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate
@@ -3963,6 +4883,56 @@ router.post('/confirm-action', async (req, res, next) => {
   } catch (err) {
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);
     next(err);
+  }
+});
+
+// Product picker, step 2 (owner 2026-10-07). The operator picked one product
+// on a "choose the product" card. The id is accepted ONLY when this card's own
+// stored shortlist lists it (the server built that list; the client cannot add
+// to it), and the card's contract hash must match what it displayed. Choosing
+// writes nothing: it uses up the picker card and proposes a normal adjust_stock
+// card for that product, with its exact before and after, which the operator
+// then confirms through /confirm-action like any other card.
+router.post('/choose-product', async (req, res, next) => {
+  try {
+    const id = String(req.body?.pending_action_id || '').trim();
+    const productId = String(req.body?.product_id || '').trim().toLowerCase();
+    if (!UUID_RE.test(id) || !UUID_RE.test(productId)) return res.status(400).json({ error: 'pending_action_id and product_id are required' });
+    if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    const actor = getAdminActorId(req);
+    // Checked before the claim, so a wrong id leaves the card usable.
+    const row = await PendingActions.getPendingRow(id, actor);
+    const refusal = pickerChoiceRefusal(req, row, productId);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
+    const chosen = await chooseProductOnCard(req, row, productId, req.body.contract_hash ? String(req.body.contract_hash).trim() : null);
+    return res.status(chosen.status).json(chosen.body);
+  } catch (err) {
+    logger.error(`[intelligence-bar] choose-product failed (code=${err.code || 'unknown'})`);
+    return next(err);
+  }
+});
+
+// Show again (owner 2026-10-07), stock cards only. An adjust_stock card or
+// its product picker that expired before the operator confirmed or cancelled
+// it is proposed again: the same input, through the full proposal (fresh
+// preview, fresh pins, fresh contract hash). It never commits: the result is a new card, or
+// the same refusal a fresh proposal would get. Only the card's own actor can
+// do this, and only once per expired card (it is retired atomically first).
+router.post('/show-again', async (req, res, next) => {
+  try {
+    const id = String(req.body?.pending_action_id || '').trim();
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: 'pending_action_id is required' });
+    if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    const row = await PendingActions.getPendingRow(id, getAdminActorId(req));
+    const refusal = showAgainRefusal(req, row);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
+    const invalid = platformInputRefusal(req, row, publicCardInput(row.params));
+    if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
+    const shown = await showCardAgain(req, row);
+    return res.status(shown.status).json(shown.body);
+  } catch (err) {
+    logger.error(`[intelligence-bar] show-again failed (code=${err.code || 'unknown'})`);
+    return next(err);
   }
 });
 
@@ -4242,6 +5212,8 @@ function threadsGuard(req, res) {
 router.get('/threads/latest', async (req, res, next) => {
   try {
     if (!threadsGuard(req, res)) return;
+    // null = nothing to resume: no thread, or the newest is idle past the
+    // limit (the server decides: a new conversation starts).
     const thread = await IbThreads.latestThread(getAdminActorId(req));
     res.json({ thread: thread || null });
   } catch (err) {
@@ -4279,6 +5251,9 @@ module.exports = router;
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
+// Exposed for the idle-thread rollover identity test.
+module.exports.taskRequestsFor = taskRequestsFor;
+module.exports.startFreshWhenThreadIdle = startFreshWhenThreadIdle;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
 // Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
 // keeps that test tied to the route's own offered-tool list instead of a

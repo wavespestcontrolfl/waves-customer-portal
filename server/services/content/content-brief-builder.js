@@ -35,6 +35,7 @@ const router = require('./decision-router');
 const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
+const { isBlogSearchSuggestion } = require('../service-report/report-blog-suggestion');
 const spokeSeeder = require('./spoke-seed-seeder');
 // Lazy: the seeder pulls in the quality gate; only backfill rows need it.
 const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
@@ -509,7 +510,11 @@ class ContentBriefBuilder {
     // regardless), SERP profiling competitor-brand keywords burns API spend
     // for data the router must ignore, and a stray customer-cluster topic
     // match could misclassify the FAQ policy for a consumer-protection post.
-    const operatorPinned = interceptSeeder.isOperatorIntercept(opp);
+    // A "Suggest a post" row shares the bucket but nobody authored it: its
+    // signals are gathered like any mined topic's, so the router's SERP
+    // safety demotions and the quality gate's SERP check see its intent
+    // (GitHub Codex P1 on ba9bed50fc).
+    const operatorPinned = interceptSeeder.isOperatorIntercept(opp) && !isBlogSearchSuggestion(opp);
     const signals = operatorPinned
       ? { serp_profile: null, customer_signal: null, conversion_feedback: null }
       : await this._gatherSignals(opp, { skipSerp });
@@ -813,7 +818,12 @@ class ContentBriefBuilder {
       actionType: decision.action_type,
       pageType,
       query: opportunity.query,
-      operatorPinned: spokeSeeder.isSpokeSeed(opportunity) || interceptSeeder.isOperatorIntercept(opportunity),
+      // A "Suggest a post" row (report-blog-suggestion.js) shares the
+      // operator_intercept bucket for the chain's SERP/GSC exemption but
+      // carries no human-authored outline, so a list-shaped suggestion keeps
+      // the listicle contract (GitHub Codex P2 on 322faf591d).
+      operatorPinned: (spokeSeeder.isSpokeSeed(opportunity) || interceptSeeder.isOperatorIntercept(opportunity))
+        && !isBlogSearchSuggestion(opportunity),
       requiredSections: aeo.requiredSections,
       schemaTypes: aeo.schemaTypes,
       voiceConstraints: aeo.voiceConstraints,
@@ -981,6 +991,10 @@ class ContentBriefBuilder {
         // operator_intercept bucket, so downstream price policy needs this
         // to tell them apart after the content_briefs round-trip.
         intercept: Boolean(opportunity.signal_metadata?.intercept_brief),
+        // "Suggest a post" provenance (report-blog-suggestion.js): the quality
+        // gate waives GSC evidence for it (a new topic has no traffic) but not
+        // SERP evidence, and never treats it as operator-authored.
+        ...(isBlogSearchSuggestion(opportunity) ? { suggested: true, suggested_at: opportunity.signal_metadata?.suggested_at || null } : {}),
         // Fallback covers rows mined BEFORE seasonal_rising started writing
         // the canonical key — without it those queued rows keep failing
         // gsc_signal_attached until they are re-mined.

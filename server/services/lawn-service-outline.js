@@ -1,11 +1,13 @@
 const crypto = require('crypto');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('./lawn-program');
+const featureGates = require('../config/feature-gates');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
+const V13_PROTOCOL_VERSION = 'lawn-v13';
 const LAWN_SERVICE_TIME_ZONE = 'America/New_York';
 
 const BANNED_PHRASES = [
@@ -212,8 +214,31 @@ function protocolLines(text) {
     .filter(Boolean);
 }
 
+// The v13 program names exact products and rates on every line, which a customer
+// outline must never carry: each line becomes its treatment category, first match
+// wins, and a line no category covers is left out rather than quoted.
+const V13_OUTLINE_CATEGORIES = [
+  [/scout visit|inspect/i, 'Lawn inspection'],
+  [/stonewall 0\.43%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer'],
+  [/stonewall|dimension/i, 'Pre-emergent weed control'],
+  [/nutra-tech/i, 'Micronutrients'],
+  [/\d{2}-\d-\d{2}/, 'Fertilizer and nutrition'],
+  [/tetrino|arena|talak|acelepryn|dylox/i, 'Insect control'],
+  [/artavia|velista|gravex/i, 'Disease control'],
+  [/celsius|certainty|blindside|dismiss/i, 'Weed spot treatment'],
+  [/dispatch|surfactant/i, 'Wetting agent'],
+];
+
+function v13OutlineBullets(visit) {
+  const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
+  const labels = lines.map((line) => V13_OUTLINE_CATEGORIES.find(([pattern]) => pattern.test(line))?.[1]).filter(Boolean);
+  return [...new Set(labels)].slice(0, 8)
+    .map((label) => `${label} may be relevant when turf condition, weather, label directions, and local rules allow.`);
+}
+
 function customerProtocolBullets(visit) {
   if (!visit) return [];
+  if (featureGates.lawnV13Live?.() === true) return v13OutlineBullets(visit);
   const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
   return lines
     .filter((line) => !/material|labor|cost/i.test(line))
@@ -221,15 +246,21 @@ function customerProtocolBullets(visit) {
     .map((line) => `${line} may be relevant when turf condition, weather, label directions, and local rules allow.`);
 }
 
+// The stamp on an outline and the staleness check against it: the v13 program
+// (GATE_LAWN_V13) writes its own, so a flip shows older outlines as updated.
+function protocolVersion() {
+  return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
+}
+
 function protocolVisitForMonth(turfType, month) {
-  const track = protocols.lawn?.[turfType];
+  const track = lawnProtocols()?.[turfType];
   if (!track) return null;
   const monthName = MONTHS[Number(month) - 1];
   return (track.visits || []).find((visit) => String(visit.month || '').toLowerCase() === monthName.toLowerCase()) || null;
 }
 
 function protocolTrack(turfType) {
-  return protocols.lawn?.[turfType] || null;
+  return lawnProtocols()?.[turfType] || null;
 }
 
 async function loadApprovedModules(db) {
@@ -729,7 +760,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       templateVersion: TEMPLATE_VERSION,
       contentLibraryVersion: CONTENT_LIBRARY_VERSION,
       productRegistryVersion: PRODUCT_REGISTRY_VERSION,
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: protocolVersion(),
     },
   };
 }
@@ -738,11 +769,12 @@ module.exports = {
   BANNED_PHRASES,
   CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
-  PROTOCOL_VERSION,
+  protocolVersion,
   TEMPLATE_VERSION,
   buildOutline,
   createPublicToken,
   currentMonthNumber,
+  customerProtocolBullets,
   estimateHasLawnService,
   hashNullable,
   hashToken,

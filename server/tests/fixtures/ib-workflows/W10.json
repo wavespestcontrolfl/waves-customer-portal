@@ -57,7 +57,7 @@
           "product_inventory_movements count = 1"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "One receipt movement, never a set_total; reports the new on-hand with the converted units."
       },
       "call": {
@@ -114,7 +114,7 @@
           "products_catalog[Talak].inventory_on_hand"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "The open Taurus request is marked received with the delivered quantity and the answer says so; no purchase or supplier action."
       },
       "call": {
@@ -168,7 +168,7 @@
           "purchase_orders count"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "First movement committed."
       },
       "call": {
@@ -209,7 +209,7 @@
               "product_inventory_movements[first].metadata.enteredQuantity = 2 and product_inventory_movements[first].metadata.enteredUnit = qt (the stored quantity is converted to the product inventory unit)"
             ],
             "sends": 0,
-            "card": false,
+            "card": true,
             "say": "A correcting movement with its own receipt for the difference; the first movement is not edited and is reported."
           },
           "call": {
@@ -385,7 +385,7 @@
           "vendor_prices"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Records the receipt; says it cannot place the supplier order from here; says what remains."
       },
       "call": {
@@ -540,7 +540,7 @@
           "product_inventory_movements count = 1"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Reload finds the receipt; the repeat does not add a second movement."
       },
       "call": {
@@ -640,7 +640,7 @@
           "products_catalog[Taurus SC].inventory_on_hand"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Product identity resolves to Talak 96 oz by ruling; says so; one movement."
       },
       "call": {
@@ -827,7 +827,7 @@
           "product_inventory_movements duplicate"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Says the read-back is unknown, finds the receipt on resume, never records a second movement."
       },
       "call": {

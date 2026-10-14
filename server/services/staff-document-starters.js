@@ -98,6 +98,19 @@ Call emergency services when needed and notify the Operations Lead immediately; 
 
 ## Facts and follow-up {#incident-follow-up}
 Record observed facts, immediate controls, notification evidence and the corrective-action owner and deadline. The Office Manager tracks paperwork and deadlines, the Operations Lead owns immediate field controls, and the Owner or authorized Acting Owner owns final business review. The Certified Operator in Charge handles applicable regulatory reporting; internal approval must not delay required reporting. [DECISION: verify the incident contact roster, applicable reporting deadlines and review responsibilities].`, [field('incident-time', 'Incident date and time'), field('location-reference', 'Work location / service ID'), field('observed-facts', 'Observed facts', 'textarea'), field('notifications', 'Who was notified and when', 'textarea'), field('corrective-action', 'Controls and corrective-action evidence', 'textarea'), field('review-reference', 'Supervisor review reference')]) },
+  // Parity with the draft the owner created by hand in production (same key). Auto clock-in requires a
+  // completed record on this form (services/geofence-auto-clock-in.js hasVehicleAgreement).
+  { key: 'vehicle-use-commuting-agreement', kind: 'form', access: 'staff', source: source('Vehicle Use & Commuting Agreement', `## Company vehicle and commuting {#vehicle-commuting}
+This agreement covers the company vehicle assigned to you and the drive between your home and your first and last stops. [DECISION: confirm the commuting terms, including whether the commute is paid time, personal use limits and any reimbursement or deduction, before issuing].
+
+## Your confirmation {#your-confirmation}
+Record the vehicle you are assigned, your home address, the date you start and your confirmation that you read and agree to these terms. Your typed name is your electronic signature under Fla. Stat. 668.50 (Uniform Electronic Transaction Act).`, [
+    field('vehicle', 'Assigned vehicle'),
+    field('home-address', 'Home address'),
+    field('start-date', 'Start date', 'date'),
+    field('agree', 'I have read and agree to this agreement', 'checkbox'),
+    field('signed-name', 'Typed name (electronic signature)'),
+  ]) },
   { key: 'vehicle-inspection-record', kind: 'form', access: 'staff', source: source('Vehicle Inspection & Release Record', `## Inspect before operation {#vehicle-inspection}
 Follow the vehicle's approved inspection checklist and record its asset ID, odometer and any defects. The original daily, weekly and monthly inspection requirements must be reconciled before issuance: [DECISION: confirm inspection items and cadence].
 

@@ -429,7 +429,7 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     );
     // In its OWN savepoint: a PostgreSQL error inside the fence must not
     // leave the booking txn aborted (codex r1 P2).
-    const fenceIdx = txnSlice.indexOf('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));');
+    const fenceIdx = txnSlice.indexOf('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId || null }));');
     expect(fenceIdx).toBeGreaterThan(-1);
     // Fence, then the in-txn conflict read, then the first row lock in this
     // txn (the re-service customer FOR UPDATE) — rung 1 precedes row locks.

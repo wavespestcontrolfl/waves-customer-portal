@@ -336,7 +336,7 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
   return committed;
 }
 
-module.exports = { reviewEnabled, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
+module.exports = { reviewEnabled, effectiveCustomer, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
   attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, excludeCustomerAutomaticGeocodeForId,
   reviewedCustomerLocation, withCustomerReviewWriteFence, effectiveReview, blocksAutomaticGeocode,
   needsCoordinatePairRepair,

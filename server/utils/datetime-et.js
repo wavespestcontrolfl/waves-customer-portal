@@ -75,6 +75,22 @@ function etDateString(date = new Date()) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+// ISO-8601 instant with the Eastern offset in force at that instant
+// ("2026-10-06T16:00:00-04:00"), the NWS startTime format. Built from etParts,
+// so midnight and DST follow the one ET implementation.
+function etOffsetIso(date) {
+  const at = date instanceof Date ? date : new Date(date);
+  const ms = at.getTime();
+  if (!Number.isFinite(ms)) return null;
+  const p = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const local = `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
+  const wholeSecondMs = Math.floor(ms / 1000) * 1000;
+  const offsetMin = Math.round((Date.parse(`${local}Z`) - wholeSecondMs) / 60000);
+  const abs = Math.abs(offsetMin);
+  return `${local}${offsetMin < 0 ? '-' : '+'}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
 // How many times the ET wall clock of `date` (year..minute) occurs on its
 // calendar day: 1 normally, 2 inside the fall-back fold (1:00-1:59 AM on the
 // November transition, once in EDT and once in EST). parseETDateTime keeps
@@ -467,7 +483,7 @@ module.exports = {
   dateOnlyString,
   lastCompletedWeekEndingET,
   TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
-  etParts, etDateString, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
+  etParts, etDateString, etOffsetIso, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

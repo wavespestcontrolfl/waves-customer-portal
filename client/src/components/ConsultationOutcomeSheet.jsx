@@ -82,7 +82,7 @@ function parseInterests(value) {
   return [];
 }
 
-function formFromRow(row) {
+export function formFromRow(row) {
   return {
     outcome: row?.outcome || '',
     lostReason: row?.lost_reason || '',
@@ -111,6 +111,12 @@ export function followUpPayload({ outcome, followUpDate, followUpTouched, loaded
   return null;
 }
 
+// Which outcomes take a call-back date (a loss has none), and the office
+// sheet's own words for the blank default. The Fast Complete sheet reads these
+// too, so the rule lives in one place.
+export const followUpApplies = (outcome) => outcome !== 'lost';
+export const FOLLOW_UP_DEFAULT_HINT = 'Leave blank for the default: warm in 3 days, cold in 30.';
+
 export function buildOutcomePayload(form, { followUpTouched = false, loadedRow = null } = {}) {
   return {
     outcome: form.outcome,
@@ -128,7 +134,7 @@ export function buildOutcomePayload(form, { followUpTouched = false, loadedRow =
   };
 }
 
-function readOnlyReason(row) {
+export function readOnlyReason(row) {
   if (!row) return null;
   if (row.outcome === 'won') {
     const when = row.won_at ? ` on ${etDateOf(row.won_at)}` : '';
@@ -157,7 +163,7 @@ function sheetStyles(c) {
   };
 }
 
-function validationErrorOf(form) {
+export function validationErrorOf(form) {
   if (!form.outcome) return 'Pick warm, cold or lost';
   if (form.outcome === 'lost' && !form.lostReason) return 'Pick why it was lost';
   return null;
@@ -244,7 +250,7 @@ function OutcomeFields({ form, set, onFollowUpChange, st }) {
       />
       <p style={st.hint}>Internal only. The customer never sees these.</p>
 
-      {form.outcome !== 'lost' && (
+      {followUpApplies(form.outcome) && (
         <>
           <label style={st.label} htmlFor="co-follow-up">Follow up on</label>
           <input
@@ -254,7 +260,7 @@ function OutcomeFields({ form, set, onFollowUpChange, st }) {
             onChange={(e) => onFollowUpChange(e.target.value)}
             style={st.input}
           />
-          <p style={st.hint}>Leave blank for the default: warm in 3 days, cold in 30.</p>
+          <p style={st.hint}>{FOLLOW_UP_DEFAULT_HINT}</p>
         </>
       )}
     </>
@@ -264,7 +270,7 @@ function OutcomeFields({ form, set, onFollowUpChange, st }) {
 // Loads the recorded outcome. A 404 means nothing is recorded yet (the save
 // reports a missing visit itself); any other failure is shown, never
 // silently treated as a blank form.
-function useRecordedOutcome(serviceId, request) {
+export function useRecordedOutcome(serviceId, request) {
   const [state, setState] = useState({ loading: true, error: '', row: null });
   useEffect(() => {
     let cancelled = false;

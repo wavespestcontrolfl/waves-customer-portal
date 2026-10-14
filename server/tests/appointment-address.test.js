@@ -176,7 +176,9 @@ test('ordinary edit saves pre-acquire tech-day fences before maintenance too', (
   const handler = source.slice(source.indexOf("router.put('/:id/update-details'"));
   const fence = handler.indexOf('await lockTechDays(trx, preFence)');
   const maintenance = handler.indexOf('await acquireRecurringSeriesMaintenanceLock(trx,');
-  const conditionalStop = handler.indexOf('if (preReadVisitId)');
+  // The stop lock is also taken for a technician change on a row with a visit.
+  const conditionalStop = handler.indexOf('if (preReadVisitId || reassignSeenVisitId)');
+  expect(conditionalStop).toBeGreaterThan(-1);
   expect(fence).toBeGreaterThan(-1);
   expect(fence).toBeLessThan(maintenance);
   expect(fence).toBeLessThan(conditionalStop);

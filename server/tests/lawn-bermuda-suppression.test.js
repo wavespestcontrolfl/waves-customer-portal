@@ -227,6 +227,49 @@ describe('send-boundary gate for persisted suppression estimates', () => {
     expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: {} }, result: { results: { lawnMeta: { bermudaSuppression: null } } } })).toBe(false);
     expect(estimateDataCarriesBermudaSuppression('not json')).toBe(false);
     expect(estimateDataCarriesBermudaSuppression(null)).toBe(false);
+    // The narrower reader the step's account check uses: the CURRENT priced result only.
+    const { estimateResultCarriesBermudaSuppression: carries } = require('../services/pricing-engine/v1-legacy-mapper');
+    expect(carries({ engineRequest: { options: { bermudaSuppression: true } } })).toBe(false);
+    expect(carries({ engineRequest: { options: { bermudaSuppression: true } }, result: { results: { pest: {} } } })).toBe(false);
+    expect(carries({ result: { results: { lawnMeta: { bermudaSuppression: null } } } })).toBe(false);
+    expect(carries({ result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } })).toBe(true);
+    expect(carries(JSON.stringify({ result: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }))).toBe(true);
+    expect(carries({ result: { results: { lawn: [{ prov: { bermudaSuppressionPerApp: 25 } }] } } })).toBe(true);
+    expect(carries({ engineResult: { lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 13.08 } }] } })).toBe(true);
+    expect(carries({ engineResult: { lineItems: [{ service: 'pest_control', bermudaSuppression: { perApp: 25 } }] } })).toBe(false);
+    // A current `result` that prices something is authoritative: a stale engineResult left by a
+    // revision is never read.
+    const staleEngine = { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 71.25 } }] };
+    const pestResult = { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 }] } };
+    expect(carries({ result: pestResult, engineResult: staleEngine })).toBe(false);
+    expect(carries({ result: { lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 40, annual: 480 }] }, engineResult: staleEngine })).toBe(false);
+    expect(carries({ result: { ...pestResult, results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: { lineItems: [{ service: 'pest_control' }] } })).toBe(true);
+    // No `result` at all (a wizard or agent-draft row): the engineResult is the current one.
+    expect(carries({ engineResult: staleEngine })).toBe(true);
+    // An ancillary `result` that prices nothing yields to a priced engineResult (the audit's own pick):
+    // the priced engine lawn line with the suppression counts.
+    const pricedEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, bermudaSuppression: { perApp: 25 } }] };
+    expect(carries({ result: { results: {} }, engineResult: pricedEngine })).toBe(true);
+    // A SERVER-authoritative reprice rewrote `result` wholesale: it stays authoritative even when it prices
+    // nothing, and the stale engine suppression is never read.
+    expect(carries({ result: { results: {} }, engineResult: pricedEngine }, { pricingAuthority: 'SERVER' })).toBe(false);
+    expect(carries({ result: pestResult, engineResult: pricedEngine }, { pricingAuthority: 'SERVER' })).toBe(false);
+    expect(carries({ result: { ...pestResult, results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: {} }, { pricingAuthority: 'SERVER' })).toBe(true);
+    // An enabled authored proposal is the accepted quote: only an explicit marker on its own lines counts,
+    // never a result or engineResult (retained engine rows) that carries the suppression.
+    const withAddOn = { result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: pricedEngine };
+    expect(carries({ ...withAddOn, proposal: { enabled: true, buildings: [{ lineItems: [{ name: 'Lawn Care', frequency: 'monthly' }] }] } })).toBe(false);
+    // An enabled proposal with NO itemization is not an authored quote (normalizeProposal shows the
+    // customer the fallback synthesized from the priced result), so the result is the evidence
+    // (codex r52 P1; r27 had pinned this case the other way).
+    expect(carries({ ...withAddOn, proposal: { enabled: true } })).toBe(true);
+    expect(carries({ ...withAddOn, proposal: { enabled: true, buildings: [], programs: [], correctiveWork: [] } })).toBe(true);
+    expect(carries({ ...withAddOn, proposal: { enabled: true, correctiveWork: [{ name: 'One-time cleanup' }] } })).toBe(false);
+    expect(carries({ ...withAddOn, proposal: { enabled: true, buildings: [{ lineItems: [{ name: 'Lawn Care', bermudaSuppression: true }] }] } })).toBe(true);
+    // A disabled proposal does not take over.
+    expect(carries({ ...withAddOn, proposal: { enabled: false } })).toBe(true);
+    expect(carries('not json')).toBe(false);
+    expect(carries(null)).toBe(false);
   });
 
   test('detector works on an ACTUAL engine-mapped result (result-only persistence)', () => {

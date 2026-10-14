@@ -214,6 +214,52 @@ postgres('series extension keeps riding the lawn', () => {
     } finally { await trx.rollback(); }
   });
 
+  // Second batch (GATE_RIDER_PAIRS_MONTHLY_LAWN): a bi-monthly rider on a
+  // monthly lawn extends onto every 2nd lawn visit (its own 49-day minimum gap,
+  // not the quarterly 77), and only while that gate is on.
+  describe('a bi-monthly rider on a monthly lawn', () => {
+    const SECOND = 'GATE_RIDER_PAIRS_MONTHLY_LAWN';
+    let originalSecond;
+    beforeEach(() => { originalSecond = process.env[SECOND]; });
+    afterEach(() => {
+      if (originalSecond === undefined) delete process.env[SECOND];
+      else process.env[SECOND] = originalSecond;
+    });
+    const monthlyLawn = { recurring_pattern: 'monthly', service_key_snapshot: 'lawn_care_monthly', service_type: 'Monthly Lawn Care Service' };
+    const monthlyWorld = (trx) => world(trx, {
+      lawnDates: Array.from({ length: 12 }, (_, i) => addDays(weekdayBack(7), 28 * (i + 1))),
+      lawnParentExtra: monthlyLawn,
+      lawnChildExtra: monthlyLawn,
+      pestExtra: { recurring_pattern: 'bimonthly', service_key_snapshot: 'pest_general_bimonthly', service_type: 'Bi-Monthly Pest Control Service' },
+    });
+
+    test('second gate on: the extension rides the 2nd lawn visit (D0 + 56) and shares its visit', async () => {
+      process.env[SECOND] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const w = await monthlyWorld(trx);
+        expect(await extend(trx, w.pestParent.id)).toBeTruthy();
+        const [row] = await extensionRows(trx, w.pestParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 56));
+        const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
+        expect(row.visit_id).not.toBeNull();
+        expect(row.visit_id).toBe(host.visit_id);
+      } finally { await trx.rollback(); }
+    });
+
+    test('second gate off: the pair is not enabled, so the bi-monthly cadence walk runs', async () => {
+      delete process.env[SECOND];
+      const trx = await mockPg.transaction();
+      try {
+        const w = await monthlyWorld(trx);
+        const walk = await cadenceDate(trx, w.pestParent.id);
+        expect(await extend(trx, w.pestParent.id)).toBeTruthy();
+        const [row] = await extensionRows(trx, w.pestParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(walk);
+      } finally { await trx.rollback(); }
+    });
+  });
+
   test('an off-hour lawn start is floored to the hour for the rider and still shares the visit', async () => {
     const trx = await mockPg.transaction();
     try {

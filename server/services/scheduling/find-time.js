@@ -63,6 +63,11 @@ const DEFAULT_SERVICE_MIN = 60;
 // route-optimizer's model, so this module and auto-dispatch score on the
 // same scale (a local copy lived here until the travel-gap lane).
 
+// The pins and times of a gap candidate's two neighbours, for a caller that
+// re-prices the shown legs on real roads (find-time-hints.js). Symbol-keyed
+// so JSON never carries stop coordinates to a client; spreads keep it.
+const GAP_LEGS = Symbol('gapLegs');
+
 function hasCoords(stop) {
   return stop != null && stop.lat != null && stop.lng != null;
 }
@@ -128,8 +133,16 @@ async function findArrivalWindowSlots(opts) {
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
         excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
+        // The staff availability box asks for the whole stop, or for this
+        // service alone when the operator chose to separate it
+        // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+        unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
       });
       if (!context) continue;
+      // A whole visit: the technician must be able to do every service on it
+      // (the capacity path below applies the same filter).
+      if (context.target.memberServices && (await require('../technician-capabilities')
+        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
       evaluated += candidates.evaluated;
@@ -216,12 +229,16 @@ async function findCapacitySlots(opts) {
         excludeEstimateId: opts.excludeEstimateId,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
+          // Same as the non-capacity path above.
+          unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
           service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
-        .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
+        // A whole visit carries every member's service: the technician must
+        // be able to do all of them.
+        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       // Enumerate every on-the-hour start through the shift close and let
@@ -298,8 +315,12 @@ async function findCapacitySlots(opts) {
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
       context.target.service_type, { before: byId.get(fit.routeOrder[index - 1]), after: byId.get(fit.routeOrder[index + 1]) });
     const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+    const legs = capacityLegs({ fit, target: context.target });
     slots.push({ date, technician: { id: tech.id, name: tech.name }, start_time: options.windowStart,
       end_time: options.windowEnd, detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+      // The drive into this stop as the simulation drove it, so a picker can
+      // show "N min here". from_name stays null: route rows carry no name.
+      drive_in_minutes: legs.driveIn, from_home_base: legs.fromHome, from_name: null,
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
@@ -762,6 +783,22 @@ function toPackingBoundAnchor(stop) {
   return { rawStartMin: stop.startMin, rawEndMin: stop.endMin, expectedEndMin: stop.startMin + expected };
 }
 
+// A capacity placement's drive in, as its own route simulation drove it
+// (waiting excluded), and whether it starts from home base. These are model
+// numbers: the road-times gate re-prices gap chips only, and capacity chips
+// show as estimates (Codex #6045 r3-r9).
+function capacityLegs({ fit, target }) {
+  const arrivals = fit.arrivals || [];
+  const at = arrivals.findIndex((row) => row.id === target.id);
+  if (at < 0) return { driveIn: null, fromHome: null };
+  const drive = Number(arrivals[at].drive);
+  const knownOrigin = at > 0 || !!fit.origin;
+  return {
+    driveIn: knownOrigin && Number.isFinite(drive) ? Math.max(0, Math.round(drive)) : null,
+    fromHome: at === 0 ? (fit.origin ? fit.origin.isHome === true : null) : false,
+  };
+}
+
 // The geometry of ONE route gap (between consecutive anchors prev/next):
 // how much drive the detour adds, how early/late a candidate can start in
 // it, and a maker for the candidate object at a given start. Pulled out of
@@ -883,6 +920,18 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
         before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
       },
       stops_that_day: dayStops.length,
+      [GAP_LEGS]: {
+        prev: hasCoords(prev) ? { lat: Number(prev.lat), lng: Number(prev.lng) } : null,
+        next: hasCoords(next) ? { lat: Number(next.lat), lng: Number(next.lng) } : null,
+        prevEndMin: prev.endMin,
+        prevIsHome: !prevIsStop,
+        // For a home-base baseline: when the van would leave home to reach
+        // the next stop just in time without this one (Codex #6045 r10).
+        nextStartMin: next.startMin,
+        baselineDriveMinutes: baselineDrive,
+        newStop: { lat: Number(newStop.lat), lng: Number(newStop.lng) },
+        durationMinutes,
+      },
     };
   };
 
@@ -918,11 +967,12 @@ function packedEndsStarts({ prevIsStop, nextIsStop, earliestFloor, latestStartFl
 // double loop, and has no reason to share a function scope with the
 // date/tech enumeration around it.
 // `params`: { services, geo, excludeSet, wantsPackedEnds,
-//   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose }.
+//   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose,
+//   everyStepStart }.
 function candidatesForDay(date, tech, params) {
   const {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
-    slotStepMinutes, durationMinutes, dayOpen, dayClose,
+    durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
     tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
@@ -948,16 +998,28 @@ function candidatesForDay(date, tech, params) {
       continue;
     }
 
-    // Legacy single-candidate path: earliest-feasible minute only, snapped
-    // to slotStepMinutes (default 1 = exact minute).
-    const startMin = slotStepMinutes > 1
-      ? Math.ceil(gap.earliestFloor / slotStepMinutes) * slotStepMinutes
-      : gap.earliestFloor;
-    if (startMin > gap.latestStartFloor) continue; // doesn't fit
-    if (startMin + durationMinutes > dayClose) continue; // past end of day
-    found.push(gap.makeCandidate(startMin));
+    for (const startMin of legacyGapStarts(gap, params)) found.push(gap.makeCandidate(startMin));
   }
   return { candidates: found, evaluatedGaps };
+}
+
+// Legacy path: the starts one gap offers. By default ONE, the earliest
+// feasible minute snapped up to slotStepMinutes (default 1 = exact minute);
+// none when it does not fit the gap or ends past the day's close. With
+// `everyStepStart` (and a step above 1) every later step inside the SAME
+// gap bounds follows, so each start still has the drive in from the stop
+// before it and the drive out to the stop after it.
+function legacyGapStarts(gap, { slotStepMinutes, durationMinutes, dayClose, everyStepStart }) {
+  const first = slotStepMinutes > 1
+    ? Math.ceil(gap.earliestFloor / slotStepMinutes) * slotStepMinutes
+    : gap.earliestFloor;
+  const fits = (startMin) => startMin <= gap.latestStartFloor && startMin + durationMinutes <= dayClose;
+  if (!fits(first)) return [];
+  const starts = [first];
+  if (everyStepStart === true && slotStepMinutes > 1) {
+    for (let startMin = first + slotStepMinutes; fits(startMin); startMin += slotStepMinutes) starts.push(startMin);
+  }
+  return starts;
 }
 
 // Normalizes findAvailableSlots' raw opts: applies every default, and
@@ -984,6 +1046,12 @@ function candidatesForDay(date, tech, params) {
 //   a stop blocking the slot it's being moved out of. Default [] = identical legacy behavior.
 // @param {number} [opts.slotStepMinutes=1] Snap proposed start times up to this minute
 //   granularity (e.g. 60 = on the hour). Default 1 = exact earliest-feasible minute.
+// @param {boolean} [opts.everyStepStart=false] Legacy path only, with slotStepMinutes > 1:
+//   a gap offers EVERY step-aligned start that fits it, not only the earliest. Each start
+//   passes the same gap bounds (drive in, drive out, the day's close). Auto-dispatch asks
+//   this for one technician and one date, for a visit that overlaps another stop. Capacity
+//   mode already lists every start the route accepts and ignores it. Default false =
+//   identical legacy behavior.
 // @param {number} [opts.earliestStartMin=0] Lower bound (minutes from midnight) on a
 //   proposed start time. Used to honor a HARD customer time-window preference: each route
 //   gap emits only its earliest-feasible start, so without this an empty/early gap
@@ -1040,6 +1108,7 @@ function normalizeFindTimeOptions(opts) {
     packEnds = false,
     serviceKey = null,
     expectedMinutes = null,
+    everyStepStart = false,
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const wantsPackedEnds = packEnds === true;
@@ -1061,7 +1130,7 @@ function normalizeFindTimeOptions(opts) {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
     earliestStartMin, startFloorByDate, packEnds, serviceKey, expectedMinutes,
-    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet, everyStepStart,
   };
 }
 
@@ -1080,7 +1149,7 @@ function startFloorFor(date, earliestStartMin, startFloorByDate) {
 // empty techs array short-circuits (no services/dates query) — the caller
 // still owns the "no assignable technicians" early return, since that
 // shape is a findAvailableSlots response contract, not a loading concern.
-async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates }) {
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout }) {
   // Only assignable techs (active employment AND field-dispatchable). Every
   // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
@@ -1146,11 +1215,12 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   // commits consume the same shared helper.) Admin manual scheduling stays
   // unblocked by design — staff callers (the dispatch Find-best-times tool)
   // pass includeBlackoutDates:true to keep their recommendations complete.
-  // The helper fails open.
+  // The helper fails open, unless the caller passes strictBlackout (the
+  // nightly auto-dispatch search): then an unreadable list throws.
   let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
   if (dates.length && !includeBlackoutDates) {
     const { getBlackoutDates } = require('./blackout-dates');
-    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
+    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1], undefined, { strict: strictBlackout === true });
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
   return { techs, services, dates, absentDays };
@@ -1167,7 +1237,7 @@ async function findAvailableSlots(opts) {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
     earliestStartMin, startFloorByDate, serviceKey, expectedMinutes,
-    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet, everyStepStart,
   } = normalizeFindTimeOptions(opts);
   // The requesting estimate's OWN uncommitted holds are not route stops for
   // itself (codex r17 P1). The collision filter downstream already excludes
@@ -1202,7 +1272,7 @@ async function findAvailableSlots(opts) {
   const dayClose = dayEndHour * 60;
 
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
-    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates,
+    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
   });
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
@@ -1233,7 +1303,7 @@ async function findAvailableSlots(opts) {
 
   const dayParams = {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
-    slotStepMinutes, durationMinutes, dayOpen, dayClose,
+    slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
   };
   for (const date of dates) {
     for (const tech of techs) {
@@ -1256,11 +1326,14 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
+  GAP_LEGS,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.
   DAY_START_HOUR,
   DAY_END_HOUR,
   _internals: {
+    legacyGapStarts,
+    capacityLegs,
     enumerateDates,
     packCapacityEnds,
     capacityGapNeighbours,

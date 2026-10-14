@@ -41,6 +41,24 @@ describe('buildCockroachReportV2 — assembly and guards', () => {
     expect(buildCockroachReportV2({ typedSnapshotValues: {}, typedReportType: 'cockroach' })).toBeNull();
   });
 
+  test('a car job keeps the German roach instructions except the household appliance one (owner 2026-10-08: same treatment)', () => {
+    const keys = (serviceKey) => buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey, visitSequence: 1 }).help.items.map((item) => item.key);
+    const home = keys('cockroach_control');
+    const car = keys('vehicle_german_roach');
+    expect(home).toContain('food_debris');
+    expect(car).not.toContain('food_debris');
+    expect(car).toEqual(home.filter((key) => key !== 'food_debris'));
+    expect(car).toContain('no_sprays');
+  });
+
+  test('a car job drops the household appliance instruction even when the tech picked the chip', () => {
+    const picked = { ...GERMAN_MODERATE, customer_prep: [...GERMAN_MODERATE.customer_prep, 'Remove food debris'] };
+    const keys = (serviceKey) => buildCockroachReportV2({ typedSnapshotValues: picked, typedReportType: 'cockroach', serviceKey, visitSequence: 1 }).help.items.map((item) => item.key);
+    expect(keys('cockroach_control')).toContain('food_debris');
+    expect(keys('vehicle_german_roach')).not.toContain('food_debris');
+    expect(JSON.stringify(buildCockroachReportV2({ typedSnapshotValues: picked, typedReportType: 'cockroach', serviceKey: 'vehicle_german_roach', visitSequence: 1 }).help)).not.toMatch(/appliances/i);
+  });
+
   it('treatment 1: species + level headline, counts from the chips, work in plain English, metrics traceable', () => {
     const out = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', visitSequence: 1 });
     expect(out.status).toEqual({ key: 'active', tone: 'watch', label: 'German cockroach activity was moderate today' });
@@ -153,6 +171,9 @@ describe('resolveProgram — honest about what the catalog and calendar say', ()
   it('packaged keys fix the total; the calendar fills in for the severity-priced cleanout', () => {
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0, scheduledAhead: 0 });
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0, scheduledAhead: 0 });
+    // The car job (vehicle_german_roach) is a two-treatment package with no scheduled-ahead lookup (codex #6162 r1 P2).
+    expect(resolveProgram({ serviceKey: 'vehicle_german_roach', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0, scheduledAhead: 0 });
+    expect(resolveProgram({ serviceKey: 'vehicle_german_roach', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0, scheduledAhead: 0 });
     expect(resolveProgram({ serviceKey: 'german_roach_initial', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false, laterCompleted: 0, scheduledAhead: 0 });
     // german_roach: 1 upcoming roach visit → 2 total
     expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0, scheduledAhead: 1 });

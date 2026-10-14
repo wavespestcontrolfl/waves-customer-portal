@@ -489,32 +489,51 @@ describe('GET /:token/data — quote-first, first-load-only rules (Codex #4853 r
 // isEstimateAcceptActive/isPdfRenderPass gate, the customer_id lookup, and
 // that contactGaps lands in the /data payload the client actually reads.
 describe('composeEstimateDataPayload — contactGaps wiring', () => {
+  // Owner 2026-10-04: the phone gap is reported only while its capture route
+  // exists (GATE_ESTIMATE_ACCEPT_PHONE), and only for an unlinked estimate
+  // with no phone.
+  test('phone gap: unlinked + phone-less + gate on only', async () => {
+    const featureGates = require('../config/feature-gates');
+    const phoneless = estimateRow({ customer_name: 'Testy Sample', customer_email: 'testy@example.com', customer_id: null, customer_phone: null });
+    dbRows = { estimates: phoneless };
+    expect((await composeEstimateDataPayload(phoneless, {})).contactGaps.phone).toBe(false);
+    featureGates.isEnabled.mockImplementation((name) => name === 'estimateAcceptPhone');
+    try {
+      expect((await composeEstimateDataPayload(phoneless, {})).contactGaps.phone).toBe(true);
+      const withPhone = estimateRow({ customer_name: 'Testy Sample', customer_email: 'testy@example.com', customer_id: null, customer_phone: '+19415550142' });
+      dbRows = { estimates: withPhone };
+      expect((await composeEstimateDataPayload(withPhone, {})).contactGaps.phone).toBe(false);
+    } finally {
+      featureGates.isEnabled.mockImplementation(() => false);
+    }
+  });
+
   test('unlinked estimate, single-token name, no email: both gaps present', async () => {
     const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: null });
     dbRows = { estimates: row };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ firstName: false, lastName: true, email: true });
+    expect(payload.contactGaps).toMatchObject({ firstName: false, lastName: true, email: true });
   });
 
   test('unlinked estimate with a full name and an email: both gaps false, field still present', async () => {
     const row = estimateRow({ customer_name: 'Testy Sample', customer_email: 'testy@example.com', customer_id: null });
     dbRows = { estimates: row };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ firstName: false, lastName: false, email: false });
+    expect(payload.contactGaps).toMatchObject({ firstName: false, lastName: false, email: false });
   });
 
   test('linked customer with a real last name/email on file closes both gaps even off a single-token estimate name', async () => {
     const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: 'cust-1' });
     dbRows = { estimates: row, customers: { last_name: 'Sample', email: 'testy@example.com' } };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ firstName: false, lastName: false, email: false });
+    expect(payload.contactGaps).toMatchObject({ firstName: false, lastName: false, email: false });
   });
 
   test('linked customer with the "Customer" placeholder and no email leaves both gaps open', async () => {
     const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: 'cust-1' });
     dbRows = { estimates: row, customers: { last_name: 'Customer', email: null } };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ firstName: false, lastName: true, email: true });
+    expect(payload.contactGaps).toMatchObject({ firstName: false, lastName: true, email: true });
   });
 
   test('a terminal (accepted) estimate never carries contactGaps (isEstimateAcceptActive false)', async () => {

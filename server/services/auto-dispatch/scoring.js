@@ -76,6 +76,25 @@ function densityOrClusterScore(p, stops) {
     : WEIGHTS.density * clamp(stops / DENSITY_CAP, 0, 1);
 }
 
+// --- time-of-day credit --- a separate function for the same complexity
+// reason as densityOrClusterScore. `defaultTimeScore` is the share of the
+// credit that came from the service-type DEFAULT window, not from a time the
+// customer set: move-rules.js leaves it out of a day move's gain (owner
+// 2026-10-09).
+function timeCreditFor(p, prefs, timeW, reasons) {
+  const win = prefs.effective_time_window;
+  const startMin = hhmmToMin(p.start_time);
+  if (!win || startMin == null) return { timeScore: timeW, defaultTimeScore: 0 }; // no usable window → neutral
+  let timeScore = timeW;
+  if (startMin >= win.startMin && startMin < win.endMin) {
+    reasons.push(prefs.preferred_time_window ? 'MATCHES_PREFERRED_TIME' : 'MATCHES_SERVICE_TIME_DEFAULT');
+  } else {
+    const dist = Math.min(Math.abs(startMin - win.startMin), Math.abs(startMin - win.endMin));
+    timeScore = timeW * clamp(1 - dist / TIME_PROXIMITY_MIN, 0, 1);
+  }
+  return { timeScore, defaultTimeScore: prefs.preferred_time_window ? 0 : timeScore };
+}
+
 /**
  * @param p  placement metrics { is_current, detour_minutes, stops_that_day,
  *           technician_id, date 'YYYY-MM-DD', start_time 'HH:MM', capability_level }
@@ -105,19 +124,8 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
     }
   }
 
-  const win = prefs.effective_time_window;
-  const startMin = hhmmToMin(p.start_time);
-  if (win && startMin != null) {
-    if (startMin >= win.startMin && startMin < win.endMin) {
-      prefScore += timeW;
-      reasons.push(prefs.preferred_time_window ? 'MATCHES_PREFERRED_TIME' : 'MATCHES_SERVICE_TIME_DEFAULT');
-    } else {
-      const dist = Math.min(Math.abs(startMin - win.startMin), Math.abs(startMin - win.endMin));
-      prefScore += timeW * clamp(1 - dist / TIME_PROXIMITY_MIN, 0, 1);
-    }
-  } else {
-    prefScore += timeW; // no usable window → neutral
-  }
+  const { timeScore, defaultTimeScore } = timeCreditFor(p, prefs, timeW, reasons);
+  prefScore += timeScore;
 
   // --- technician skill ---
   const techScore = WEIGHTS.technician * (CAPABILITY_FACTOR[p.capability_level] ?? 0.5);
@@ -144,15 +152,18 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
     stabilityPenalty = Math.min(15, 5 * ctx.changeCount);
   }
 
-  const total = clamp(
-    routeScore + prefScore + techScore + densityScore + workloadScore + continuityScore - stabilityPenalty,
-    0, 100,
-  );
+  const raw = routeScore + prefScore + techScore + densityScore + workloadScore + continuityScore - stabilityPenalty;
+  const total = clamp(raw, 0, 100);
 
   return {
     total_score: round2(total),
+    // The same total with the default-time credit left out BEFORE the clamp
+    // (move-rules.js compares day moves on it; subtracting the credit from a
+    // clamped total under-counts a placement at the cap, Codex #6207 r7 P2).
+    total_without_default_time: round2(clamp(raw - defaultTimeScore, 0, 100)),
     route_efficiency_score: round2(routeScore),
     customer_preference_score: round2(prefScore),
+    default_time_score: round2(defaultTimeScore),
     technician_score: round2(techScore),
     density_score: round2(densityScore),
     workload_score: round2(workloadScore),

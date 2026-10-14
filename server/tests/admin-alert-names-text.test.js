@@ -3,7 +3,11 @@
 // "Payment failed", "Prepaid coverage needs review", and "Estimate accepted". All names are
 // synthetic. docs/admin-notifications.md is the contract (composeAdminAlert throws under
 // NODE_ENV=test on any breach, so a green run proves the rule too).
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  // The real close helpers: the supersede selection is what the tests read.
+  _private: jest.requireActual('../services/notification-service')._private,
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -14,7 +18,20 @@ const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
 const { _prepayCoverageCopy: prepayCoverageCopy } = require('../services/schedule-integrity-watchdog');
 
-const trxFor = (customer) => () => ({ where: () => ({ first: async () => customer }) });
+// The customer lookup is faked. A notifications query is a real knex builder (no
+// connection): awaiting it records the UPDATE it would have sent.
+const kx = require('knex')({ client: 'pg' });
+const sentUpdates = [];
+const trxFor = (customer) => {
+  const trx = (table) => {
+    if (table !== 'notifications') return { where: () => ({ first: async () => customer }) };
+    const builder = kx(table);
+    builder.then = (resolve, reject) => { sentUpdates.push(builder.toSQL().toNative()); return Promise.resolve(1).then(resolve, reject); };
+    return builder;
+  };
+  trx.raw = (...args) => kx.raw(...args);
+  return trx;
+};
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
 const sourceAt = new Date('2026-09-29T14:46:00Z'); // 10:46 AM ET
 
@@ -29,7 +46,10 @@ const ring = (over = {}, customer = { first_name: 'Albert', last_name: 'Clark' }
 });
 const lastCall = () => NotificationService.notifyAdmin.mock.calls.at(-1);
 
-beforeEach(() => NotificationService.notifyAdmin.mockClear());
+beforeEach(() => {
+  NotificationService.notifyAdmin.mockClear();
+  sentUpdates.length = 0;
+});
 
 describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   test('an unanswered estimate request names the customer and quotes their words', async () => {
@@ -54,6 +74,34 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
       area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', subject: { type: 'customer', id: CUSTOMER_ID } });
   });
 
+  test('one open row per promise: a fresh row closes the older rows with the same key', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-new', deduped: false });
+    await ring();
+    expect(sentUpdates).toHaveLength(1);
+    const { sql, bindings } = sentUpdates[0];
+    expect(sql).toMatch(/^update "notifications" set "done_at" = COALESCE\(done_at, \$1::timestamptz\), "done_by" = \$2/);
+    expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment:commit-1', 'n-new']));
+    // The newest row is excluded; the older ones are selected by the system closer's rule.
+    expect(sql).toContain('and not "id" = $7');
+    // Open rows, OR rows a PERSON marked done (taken over, so their Reopen cannot
+    // bring an obsolete duplicate back). A row a system component closed matches
+    // neither arm, so it is left alone.
+    expect(sql).toMatch(/\("done_at" is null or COALESCE\(\(done_by ~ '\^\[0-9\]\+\$' OR .*done_by = 'claude'\), false\)\)/);
+  });
+
+  test('a deduped ring also closes rows an older build left open; the email bell shares the fix', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-standing', deduped: true });
+    await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
+    expect(sentUpdates).toHaveLength(1);
+    expect(sentUpdates[0].bindings).toContain('n-standing');
+  });
+
+  test('a suppressed ring has no row to keep, so nothing is closed', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    await ring();
+    expect(sentUpdates).toHaveLength(0);
+  });
+
   test('a staff promise is worded as ours, and a late finish says so', async () => {
     await ring({ row: { kind: 'other', evidence: [{ quote: "Gonna knock out your quarterly spray tomorrow" }], sms_context: { basis: 'promise' } },
       verdict: { late: true, verdict: 'fulfilled' } });
@@ -62,6 +110,128 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(body).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — done only after the promised time.');
     expect(opts.detail).toContain('only after the promised deadline');
     expect(opts.metadata.verification).toBe('kept_late');
+  });
+
+  test('two promises from one text each quote their own words, not the same first sentence', async () => {
+    const quote = 'Sure, we can switch the spray day to Friday. Also I will mail the receipt to the new billing address';
+    const bodies = [];
+    for (const description of ['switch the spray day to Friday', 'mail the receipt']) {
+      await ring({ row: { kind: 'other', description, evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+      const [, , body, opts] = lastCall();
+      bodies.push(body);
+      expect(opts.detail).toContain(quote);
+    }
+    expect(bodies[0]).toBe('We said “switch the spray day to Friday” (Sep 29) — nothing on record shows it done.');
+    expect(bodies[1]).toBe('We said “mail the receipt” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('short descriptions are quoted too, as the sender wrote them', async () => {
+    const quote = "OK, I'll Call and Refund today";
+    await ring({ row: { kind: 'other', description: 'call', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Call” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'refund', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Refund” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a description found only inside another word keeps the first sentence', async () => {
+    await ring({ row: { kind: 'other', description: 'change address', evidence: [{ quote: 'We can exchange address labels tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “We can exchange address labels tomorrow” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('descriptions in any script are matched, with word edges where the script has them', async () => {
+    const arabic = 'نعم سنغير موعد الرش. سأرسل الفاتورة غدا';
+    await ring({ row: { kind: 'other', description: 'سأرسل الفاتورة', evidence: [{ quote: arabic }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسل الفاتورة” (Sep 29) — nothing on record shows it done.');
+    const chinese = '好的，我们明天改喷洒时间。我也会寄发票给您';
+    await ring({ row: { kind: 'other', description: '寄发票', evidence: [{ quote: chinese }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “寄发票” (Sep 29) — nothing on record shows it done.');
+    // a kana description ending in the prolonged-sound mark matches inside unspaced text
+    await ring({ row: { kind: 'other', description: 'フォロー', evidence: [{ quote: '明日フォローします' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “フォロー” (Sep 29) — nothing on record shows it done.');
+    // a description ending in a combining vowel mark still needs a whole word
+    await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'سأرسلُها غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسلُها غدا” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'نعم. سأرسلُ غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسلُ” (Sep 29) — nothing on record shows it done.');
+    // an Arabic description found only inside a longer word keeps the first sentence
+    await ring({ row: { kind: 'other', description: 'سأرسل', evidence: [{ quote: 'وسأرسلها غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “وسأرسلها غدا” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a matched slice with sentence punctuation inside keeps the first-sentence headline', async () => {
+    await ring({ row: { kind: 'other', description: 'mail the receipt. Then I will call you', evidence: [{ quote: 'I will mail the receipt. Then I will call you Friday' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “I will mail the receipt” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'call! then issue the refund', evidence: [{ quote: 'Okay. I will call! then issue the refund' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a slice the alert rules reject (a redacted address tag) keeps the first-sentence headline', async () => {
+    await ring({ row: { kind: 'other', description: 'service 123 Main St tomorrow', evidence: [{ quote: 'Okay. I will service 123 Main St tomorrow' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('promises that differ only in a contact detail each find their own slice before redaction', async () => {
+    const quote = 'I will email alice@example.test and then email amy@example.test';
+    const bodies = [];
+    for (const description of ['email alice@example.test', 'email amy@example.test']) {
+      await ring({ row: { kind: 'other', description, evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+      bodies.push(lastCall()[2]);
+    }
+    for (const b of bodies) expect(b).not.toContain('alice@example.test');
+    for (const b of bodies) expect(b).not.toContain('amy@example.test');
+  });
+
+  test('Korean noun stems with attached endings are matched without a word edge', async () => {
+    const quote = '네 전화드리고 환불하겠습니다';
+    await ring({ row: { kind: 'other', description: '전화', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “전화” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: '환불', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “환불” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a Latin word with a Japanese or Korean ending attached is still matched (PDFを)', async () => {
+    const quote = '明日PDFを送ります。URLも送ります';
+    await ring({ row: { kind: 'other', description: 'PDF', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “PDF” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'URL', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “URL” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: '파일', evidence: [{ quote: 'PDF파일을 보내겠습니다' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “파일” (Sep 29) — nothing on record shows it done.');
+    // a Latin neighbour is still a word: change address inside exchange address does not match
+    await ring({ row: { kind: 'other', description: 'PDF', evidence: [{ quote: 'Send the PDFs today' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Send the PDFs today” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a period inside a word (email, decimal) keeps the slice; a sentence break still falls back', async () => {
+    await ring({ row: { kind: 'other', description: 'send 2.5 gallons', evidence: [{ quote: 'Sure. We will send 2.5 gallons Friday' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “send 2.5 gallons” (Sep 29) — nothing on record shows it done.');
+    const quote = 'I will email alice@example.test and email amy@example.test';
+    await ring({ row: { kind: 'other', description: 'email alice@example.test', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    const first = lastCall()[2];
+    expect(first).toMatch(/^We said “email /);
+    expect(first).not.toContain('alice@example.test');
+    await ring({ row: { kind: 'other', description: 'mail the receipt. then call', evidence: [{ quote: 'Okay. I will mail the receipt. then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // no space after the stop, next sentence capitalized: still a break
+    await ring({ row: { kind: 'other', description: 'mail the receipt.Then call', evidence: [{ quote: 'Okay. I will mail the receipt.Then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // a period before a closing quote is a break too
+    await ring({ row: { kind: 'other', description: 'Tell her “I mailed it.” Then call her', evidence: [{ quote: 'Okay. Tell her “I mailed it.” Then call her' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // an email followed by a sentence with no space: judged before redaction, still a break
+    await ring({ row: { kind: 'other', description: 'email alice@example.com.Then call', evidence: [{ quote: 'Okay. I will email alice@example.com.Then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // a bare domain is a URL too
+    await ring({ row: { kind: 'other', description: 'visit example.com', evidence: [{ quote: 'Sure. I will visit example.com later' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Sure” (Sep 29) — nothing on record shows it done.');
+    // a URL is a path the alert rules forbid: the headline keeps the first sentence
+    await ring({ row: { kind: 'other', description: 'visit https://example.com/help', evidence: [{ quote: 'Sure. I will visit https://example.com/help later' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Sure” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a description that is not in the quote keeps the first sentence', async () => {
+    await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');
   });
 
   test('an uncertain verdict says the agent cannot tell', async () => {
@@ -182,6 +352,61 @@ describe('payment_failed bell', () => {
     const { composeAdminAlert } = require('../services/admin-alert-compose');
     expect(() => composeAdminAlert({ area: 'Billing', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
       subject: { type: 'invoice', id: 'inv1' }, doneWhen: 'invoice_followed_up', who: 'person' })).not.toThrow();
+  });
+});
+
+describe('reservice_self_booked bell (owner 2026-10-05)', () => {
+  const { build } = TRIGGER_REGISTRY.reservice_self_booked;
+  const why = (built) => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    return composeAdminAlert({ area: 'Schedule', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'visit_closed', who: 'person' });
+  };
+
+  test('names the customer and the visit, quotes their words, links the customer', () => {
+    const request = 'German roaches got into the house a few weeks ago, I treated with a gel bait over a couple of weeks and they seem to have resolved.';
+    const built = build({ customerId: 'c1', name: 'Albert Clark', when: 'Thu, Oct 9 at 1:00 PM', pests: 'Roaches', request });
+    expect(built.title).toBe("Schedule — read Albert Clark's re-service request");
+    expect(built.body.startsWith('Roaches: “German roaches got into the house')).toBe(true);
+    expect(built.body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+    expect(built.detail).toBe(`Pests: Roaches\nVisit: Thu, Oct 9 at 1:00 PM\nRequest: ${request}`);
+    expect(built.link).toBe('/admin/customers?customerId=c1');
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('the row carries the structured parts: Schedule, needs-you, the visit, a person reads it', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', name: 'Albert Clark', request: 'ants' }).alert).toEqual({
+      area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'v1' }, doneWhen: 'visit_closed', who: 'person',
+    });
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).alert.subject).toEqual({ type: 'customer', id: 'c1' });
+  });
+
+  test('with the visit known, the link opens it on the schedule', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', serviceDate: '2026-10-09', name: 'Albert Clark', request: 'ants' }).link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=v1');
+  });
+
+  test('a short name keeps the visit day in the headline', () => {
+    const built = build({ customerId: 'c1', name: 'Al Day', when: 'Thu, Oct 9', request: 'ants' });
+    expect(built.title).toBe("Schedule — read Al Day's re-service request for Thu, Oct 9");
+    expect(built.title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  });
+
+  test('no typed words says so, with the picked pests, and passes the rule', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', pests: 'Ants' });
+    expect(built.body).toBe('Picked ants and typed no description.');
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).body).toBe('They typed no description of the problem.');
+    expect(built.detail).toBeUndefined();
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('a phone number or street address in the words is masked', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', request: 'Call 941-555-0123, ants at 123 Palm Avenue' });
+    expect(built.detail).not.toMatch(/555-0123|123 Palm Avenue/);
+    expect(built.body).not.toMatch(/555-0123|123 Palm Avenue/);
+    // The masked address reads "[address]", a bracket the rule refuses: the alert still
+    // rings with every structured part kept and the broken rule stamped.
+    expect(built.alert).toEqual(expect.objectContaining({ area: 'Schedule', severity: 'needs-you', who: 'person', ruleViolations: ['why_forbidden_token:bracket_tag'] }));
   });
 });
 

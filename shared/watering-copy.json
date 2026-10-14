@@ -1,0 +1,8 @@
+{
+  "_note": "Customer-facing watering sentences that more than one surface says. University of Florida rule (EDIS LH025, LH010): wet the root zone with 1/2 to 3/4 inch each time, change how often by the lawn's wilt signs, never the amount. Owner 2026-10-09: fewer, longer runs; no number of watering days; say allowed watering days (a one-day-a-week order is in force for Manatee and Sarasota). Server requires this file, the client imports it. Change a sentence here, not in the surfaces.",
+  "wiltSigns": "folded blades, a blue-gray tint, or footprints that stay pressed in",
+  "surplusAdvice": "Skip a watering day rather than shortening your runs — longer runs reach the roots better than short ones.",
+  "deficitAdvice": "If the grass shows folded blades, a blue-gray tint, or footprints that stay pressed in, run one full cycle on your next allowed watering day.",
+  "waterInByRainLine1": "Rain since your visit has watered today’s treatment in.",
+  "waterInByRainLine2": "No extra sprinkler run is needed for it."
+}

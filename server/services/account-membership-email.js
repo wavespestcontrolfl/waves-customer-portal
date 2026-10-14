@@ -145,6 +145,54 @@ async function logLifecycleEmailAttempt({
   }
 }
 
+// The portal-wide "Email Messages" switch for one customer. A lookup FAILURE
+// is not the same fact as a genuine opt-out, and the two must not collapse
+// to the same {skipped:true} shape: several callers treat `skipped` as a
+// DEFINITIVE recipient state that closes the run without retrying
+// (cancellation-confirmations.js's emailBlocked check,
+// deferred-replay-registry.js's `skipped !== true` retry gate). A transient
+// DB blip reported as skipped/email_opted_out would settle those callers as
+// "nothing more to do" instead of retrying, so the failure is reported as
+// unavailable (fail closed, retryable).
+async function readEmailOptOut(customerId) {
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    return { emailOptedOut: prefs ? prefs.email_enabled === false : false };
+  } catch (err) {
+    logger.warn(`[account-membership-email] notification_prefs lookup failed for ${customerId}: ${err.message}`);
+    return { unavailable: true, emailOptedOut: false };
+  }
+}
+
+// The attempt log and the caller's outcome for a provider result.
+async function settleTemplateResult(result, { customerId, templateKey, eventType, metadata }) {
+  const providerMessageId = result.message?.provider_message_id || null;
+  const sentAt = result.message?.sent_at || null;
+  const status = result.sent ? 'sent' : (result.blocked ? 'blocked' : 'failed');
+  await logLifecycleEmailAttempt({
+    customerId,
+    templateKey,
+    eventType,
+    status,
+    providerMessageId,
+    sentAt,
+    failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
+    metadata,
+  });
+  return result.sent
+    ? { ok: true, messageId: providerMessageId, sentAt }
+    : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
+}
+
+// Why a template is not sent to this contact: the address is not the one an
+// operator approved (checked against the contact of the CURRENT read), or
+// there is no usable address. null when it can be sent.
+function templateRecipientSkip(contact, expectedRecipientKey) {
+  if (expectedRecipientKey && require('./estimate-accept-effects').recipientKey(contact.email) !== expectedRecipientKey) return 'recipient_changed';
+  if (!isEmailLike(contact.email)) return 'missing_email';
+  return null;
+}
+
 async function sendTemplate({
   customerId,
   recipientCustomerId = customerId,
@@ -157,94 +205,24 @@ async function sendTemplate({
   metadata = {},
   contactOverride = null,
   billingAuthorityInput = null,
+  // The recipient an operator approved (estimate-accept-effects.recipientKey).
+  // Compared against the contact THIS read loads, never against a contact
+  // handed in from an earlier read: an address that changed in between is no
+  // email, so the plan and rate never go to a former address.
+  expectedRecipientKey = null,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
-
   const contact = contactOverride || getPrimaryContact(recipientCustomer);
-  if (!isEmailLike(contact.email)) {
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'missing_email',
-      metadata,
-    });
-    return { ok: false, skipped: true, reason: 'missing_email' };
-  }
-
-  // Portal-wide "Email Messages" kill switch (notification_prefs.email_enabled
-  // = false) must fail-closed across the whole membership.*/account.* family,
-  // the way receipt-delivery-queue.js:262, estimate-deposits.js:386,
-  // cancellation-confirmations.js:185 and autopay-setup-link.js:272 already
-  // do — this sender previously never read notification_prefs at all, so an
-  // opted-out customer had no self-serve way to stop these emails (the
-  // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
-  // SendGrid-side suppression groups by design). A lookup failure is treated
-  // the same as opted-out: it must not read as "no opt-out" on a DB blip.
-  // A billing email (billingAuthorityInput set) leaves the switch, the billing
-  // choice and the recipient to the shared billing email authority (owner
-  // ruling 2026-09-27): read by the caller, and again at the provider handoff
-  // below.
-  let emailOptedOut = false;
-  if (!billingAuthorityInput) try {
-    const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
-    emailOptedOut = prefs ? prefs.email_enabled === false : false;
-  } catch (err) {
-    // A lookup FAILURE is not the same fact as a genuine opt-out, and the
-    // two must not collapse to the same {skipped:true} shape: several
-    // callers treat `skipped` as a DEFINITIVE recipient state that closes
-    // the run without retrying (cancellation-confirmations.js's emailBlocked
-    // check, deferred-replay-registry.js's `skipped !== true` retry gate). A
-    // transient DB blip reported as skipped/email_opted_out would settle
-    // those callers as "nothing more to do" instead of retrying — a
-    // customer whose SMS leg also failed would then get NO confirmation at
-    // all over one brief DB hiccup. Still fail closed (no send this attempt)
-    // but report it as a non-definitive, retryable failure.
-    logger.warn(`[account-membership-email] notification_prefs lookup failed for ${recipientCustomer.id}: ${err.message}`);
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'failed',
-      failureReason: 'prefs_unavailable',
-      metadata,
-    });
-    return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
-  }
-  if (emailOptedOut) {
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'email_opted_out',
-      metadata,
-    });
-    return { ok: false, skipped: true, reason: 'email_opted_out' };
-  }
-
-  const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
-    ? recipientCustomer
-    : await loadCustomer(customerId);
-  const firstName = firstToken(contact.name) || firstToken(recipientCustomer.first_name) || 'there';
-  const finalPayload = {
-    first_name: firstName,
-    customer_name: fullName(recipientCustomer),
-    customer_portal_url: portalTabUrl('dashboard'),
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
-    company_email: CONTACT_EMAIL,
-    property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
-    ...payload,
-  };
+  const log = { customerId: recipientCustomer.id, templateKey, eventType, metadata };
+  const blocked = await templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, log });
+  if (blocked) return blocked;
+  const finalPayload = await templatePayload({ customerId, recipientCustomer, contact, payload });
 
   // A billing email's refusals and thrown sends map and log like every other
   // billing sender's (billing-email-sender.js).
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
-  const billingLog = (fields) => logLifecycleEmailAttempt({
-    customerId: recipientCustomer.id, templateKey, eventType, metadata, ...fields,
-  });
+  const billingLog = (fields) => logLifecycleEmailAttempt({ ...log, ...fields });
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -260,61 +238,96 @@ async function sendTemplate({
         ...categories,
       ],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
-      ...(billingAuthorityInput ? {
-        withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
-          input: billingAuthorityInput, recipientEmail: contact.email, templateKey, dispatch, state,
-        }),
-      } : {}),
+      ...billingHandoffOption({ billingAuthorityInput, recipientEmail: contact.email, templateKey, state }),
     });
-
     if (state.boundaryBlock) return await billingEmailSendOutcome(result, state, billingLog);
-
-    if (result.deduped) {
-      return {
-        ok: !!result.sent,
-        deduped: true,
-        blocked: !!result.blocked,
-        messageId: result.message?.provider_message_id || null,
-        // The ORIGINAL acceptance time from the existing email_messages row
-        // (Codex #4921 r4 P1): a caller that records a dated witness for the
-        // send — the termite renewal notice's on-time/late classification —
-        // must use when the provider first accepted it, not this retry's time.
-        sentAt: result.message?.sent_at || null,
-      };
-    }
-
-    const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status,
-      providerMessageId: result.message?.provider_message_id || null,
-      sentAt: result.message?.sent_at || null,
-      failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
-      metadata,
-    });
-
-    return result.sent
-      ? { ok: true, messageId: result.message?.provider_message_id || null, sentAt: result.message?.sent_at || null }
-      : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
+    if (result.deduped) return dedupedTemplateResult(result);
+    return settleTemplateResult(result, log);
   } catch (err) {
-    if (billingAuthorityInput) {
-      return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
-        logTag: 'account-membership-email', label: `${eventType} for ${recipientCustomer.id}`,
-      });
-    }
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'failed',
-      failureReason: err.message,
-      metadata,
-    });
-    logger.error(`[account-membership-email] ${eventType} failed for ${recipientCustomer.id}: ${err.message}`);
-    return { ok: false, error: err.message };
+    return templateSendFailure(err, { billingAuthorityInput, state, billingLog, log });
   }
+}
+
+// The recipient and opt-out checks that stop a send before the payload is
+// built: the approved-recipient veto, then the portal-wide "Email Messages"
+// kill switch (notification_prefs.email_enabled = false), which must
+// fail-closed across the whole membership.*/account.* family the way
+// receipt-delivery-queue.js:262, estimate-deposits.js:386,
+// cancellation-confirmations.js:185 and autopay-setup-link.js:272 already
+// do (the suppressionGroupKey is TRANSACTIONAL_GROUP, which bypasses
+// SendGrid-side suppression groups by design). A lookup failure is treated
+// the same as opted-out: it must not read as "no opt-out" on a DB blip. A
+// billing email (billingAuthorityInput set) leaves the switch, the billing
+// choice and the recipient to the shared billing email authority (owner
+// ruling 2026-09-27): read by the caller, and again at the provider handoff.
+// Returns the result to hand back, or null to go on.
+async function templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, log }) {
+  const recipientSkip = templateRecipientSkip(contact, expectedRecipientKey);
+  if (recipientSkip) {
+    if (recipientSkip === 'recipient_changed') logger.warn(`[account-membership-email] ${log.templateKey} not sent for customer ${log.customerId}: the address changed since it was approved`);
+    await logLifecycleEmailAttempt({ ...log, status: 'skipped', failureReason: recipientSkip });
+    return { ok: false, skipped: true, reason: recipientSkip };
+  }
+  const optOut = billingAuthorityInput ? { emailOptedOut: false } : await readEmailOptOut(log.customerId);
+  if (optOut.unavailable) {
+    await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: 'prefs_unavailable' });
+    return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
+  }
+  if (optOut.emailOptedOut) {
+    await logLifecycleEmailAttempt({ ...log, status: 'skipped', failureReason: 'email_opted_out' });
+    return { ok: false, skipped: true, reason: 'email_opted_out' };
+  }
+  return null;
+}
+
+async function templatePayload({ customerId, recipientCustomer, contact, payload }) {
+  const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
+    ? recipientCustomer
+    : await loadCustomer(customerId);
+  const firstName = firstToken(contact.name) || firstToken(recipientCustomer.first_name) || 'there';
+  return {
+    first_name: firstName,
+    customer_name: fullName(recipientCustomer),
+    customer_portal_url: portalTabUrl('dashboard'),
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_email: CONTACT_EMAIL,
+    property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
+    ...payload,
+  };
+}
+
+function billingHandoffOption({ billingAuthorityInput, recipientEmail, templateKey, state }) {
+  if (!billingAuthorityInput) return {};
+  return {
+    withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+      input: billingAuthorityInput, recipientEmail, templateKey, dispatch, state,
+    }),
+  };
+}
+
+function dedupedTemplateResult(result) {
+  return {
+    ok: !!result.sent,
+    deduped: true,
+    blocked: !!result.blocked,
+    messageId: result.message?.provider_message_id || null,
+    // The ORIGINAL acceptance time from the existing email_messages row
+    // (Codex #4921 r4 P1): a caller that records a dated witness for the
+    // send — the termite renewal notice's on-time/late classification —
+    // must use when the provider first accepted it, not this retry's time.
+    sentAt: result.message?.sent_at || null,
+  };
+}
+
+async function templateSendFailure(err, { billingAuthorityInput, state, billingLog, log }) {
+  if (billingAuthorityInput) {
+    return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
+      logTag: 'account-membership-email', label: `${log.eventType} for ${log.customerId}`,
+    });
+  }
+  await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: err.message });
+  logger.error(`[account-membership-email] ${log.eventType} failed for ${log.customerId}: ${err.message}`);
+  return { ok: false, error: err.message };
 }
 
 function itemSummary(items = []) {
@@ -761,9 +774,31 @@ async function sendMembershipStarted({
   billingLane = null,
   perApplicationAmount,
   idempotencyKey,
+  // The recipient an operator approved (estimate-accept-effects.recipientKey of
+  // the address on the card). When set, the email goes only if the address on
+  // file NOW is that address; a changed address is no email, logged. Callers
+  // that approved nothing leave it unset.
+  recipientKey = null,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  // An early check on this read; sendTemplate reads the customer again and
+  // checks the same key against THAT contact, so an address that changes in
+  // between is no email (never an override of the fresh read).
+  if (recipientKey) {
+    if (require('./estimate-accept-effects').recipientKey(getPrimaryContact(customer).email) !== recipientKey) {
+      logger.warn(`[account-membership-email] membership.started not sent for customer ${customer.id}: the address changed since it was approved`);
+      await logLifecycleEmailAttempt({
+        customerId: customer.id,
+        templateKey: 'membership.started',
+        eventType: 'membership.started',
+        status: 'skipped',
+        failureReason: 'recipient_changed',
+        metadata: { source_id: sourceId },
+      });
+      return { ok: false, skipped: true, reason: 'recipient_changed' };
+    }
+  }
   const built = membershipStartedPayloadFor(customer, {
     membershipTier, monthlyRate, billingCadence, includedServices, effectiveDate, billingLane, perApplicationAmount,
   });
@@ -787,6 +822,7 @@ async function sendMembershipStarted({
     idempotencyKey: idempotencyKey || `membership.started:${customerId}:${sourceId || stableEventKey(effectiveDate)}`,
     categories: ['membership_started'],
     metadata: { source_id: sourceId, billing_lane: lane },
+    ...(recipientKey ? { expectedRecipientKey: recipientKey } : {}),
   });
 }
 
@@ -864,6 +900,26 @@ async function sendAppIntro({ customerId, sourceId = null, trackToken = null, tr
   });
 }
 
+// The rate-change sentence for every case EXCEPT "billed monthly before and
+// after": it never states a previous monthly figure, and off the monthly lane
+// it states no monthly figure at all. Shared by membership.updated and
+// membership.tier_upgraded so the two emails cannot describe a lane differently.
+function rateChangeSentenceWithoutPriorMonthlyRate(billingLane, newMonthlyRate) {
+  if (billingLane === 'monthly_membership') {
+    // Moved INTO the monthly lane: state the new charge without inventing a
+    // previous monthly rate the customer never paid.
+    return `Your plan is now billed monthly at ${money(newMonthlyRate)}.`;
+  }
+  if (billingLane === 'annual_prepay') {
+    return 'Your plan pricing was updated. Your plan is prepaid for the year, so nothing changes about how you pay.';
+  }
+  if (billingLane === 'per_application') {
+    return 'Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.';
+  }
+  // per_visit / one_time: invoice-on-complete lanes.
+  return 'Your plan pricing was updated — each service is billed after it is completed.';
+}
+
 async function sendMembershipUpdated({
   customerId,
   before = {},
@@ -897,17 +953,8 @@ async function sendMembershipUpdated({
     // application" is wrong for prepaid and per-visit customers too).
     if (monthlyBothSides) {
       changes.push(`Monthly rate: ${money(before.monthly_rate)} to ${money(after.monthly_rate)}`);
-    } else if (billingLane === 'monthly_membership') {
-      // Moved INTO the monthly lane: state the new charge without inventing a
-      // previous monthly rate the customer never paid.
-      changes.push(`Your plan is now billed monthly at ${money(after.monthly_rate)}.`);
-    } else if (billingLane === 'annual_prepay') {
-      changes.push('Your plan pricing was updated. Your plan is prepaid for the year, so nothing changes about how you pay.');
-    } else if (billingLane === 'per_application') {
-      changes.push('Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.');
     } else {
-      // per_visit / one_time: invoice-on-complete lanes.
-      changes.push('Your plan pricing was updated — each service is billed after it is completed.');
+      changes.push(rateChangeSentenceWithoutPriorMonthlyRate(billingLane, after.monthly_rate));
     }
   }
   const summary = changes.join('; ') || 'Your membership details were updated.';
@@ -940,6 +987,124 @@ async function sendMembershipUpdated({
     idempotencyKey: idempotencyKey || `membership.updated:${customerId}:${stableEventKey(effectiveDate)}:${hashValue({ before, after })}`,
     categories: ['membership_updated'],
     metadata: { before, after },
+  });
+}
+
+// WaveGuard tiers, lowest first: the pricing engine's own fixed rank
+// (pricing-engine/discount-engine.js tierRank). Never derived from the
+// configurable minServices thresholds, which are not validated as ascending.
+// -1 for a blank, sentinel ("None", "Commercial") or unknown tier.
+const WAVEGUARD_TIER_ORDER = ['bronze', 'silver', 'gold', 'platinum'];
+function waveguardTierRank(value) {
+  return WAVEGUARD_TIER_ORDER.indexOf(require('./membership-state').membershipTierKey(value));
+}
+
+function tierDisplayName(value) {
+  const key = require('./membership-state').membershipTierKey(value);
+  return key ? key.charAt(0).toUpperCase() + key.slice(1) : '';
+}
+
+// 0.1 -> "10", 0.125 -> "12.5"; '' for anything that is not a positive share.
+function percentText(fraction) {
+  const n = Number(fraction);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return String(Number((n * 100).toFixed(1)));
+}
+
+// The benefit figures of a WaveGuard tier, read from the pricing constants at
+// send time (the pricing-config bridge can change them): the tier's recurring
+// discount, the recurring-customer one-time perk, and the per-palm credit from
+// the tier that earns it up. '' = this tier does not have that benefit.
+function tierBenefitFigures(tierValue) {
+  const { WAVEGUARD, PALM } = require('./pricing-engine/constants');
+  const key = require('./membership-state').membershipTierKey(tierValue);
+  const palmCredit = Number(PALM.flatCreditPerPalm);
+  const earnsPalmCredit = waveguardTierRank(key) >= 0
+    && waveguardTierRank(PALM.flatCreditMinTier) >= 0
+    && waveguardTierRank(key) >= waveguardTierRank(PALM.flatCreditMinTier)
+    && Number.isFinite(palmCredit) && palmCredit > 0;
+  return {
+    recurringDiscountPct: percentText(WAVEGUARD.tiers[key]?.discount),
+    oneTimeDiscountPct: percentText(WAVEGUARD.recurringCustomerOneTimePerk),
+    palmCredit: earnsPalmCredit ? (Number.isInteger(palmCredit) ? `$${palmCredit}` : money(palmCredit)) : '',
+  };
+}
+
+// membership.tier_upgraded — "your WaveGuard plan moved up" (owner-approved
+// copy 2026-10-08). The caller decides WHEN this may send (today only the
+// Intelligence Bar update_customer card, services/intelligence-bar/
+// tier-upgrade-email.js); this sender decides what the email may truthfully
+// say, and refuses when it has nothing true to say:
+//   - not a move to a HIGHER WaveGuard tier (a first tier is a membership
+//     start, not an upgrade) -> skipped;
+//   - the new tier has no recurring discount, or the one-time perk is off ->
+//     skipped (the template's "% off" lines would be untrue);
+//   - the per-palm credit line renders only from the tier that earns it;
+//   - a monthly figure appears only for a customer billed monthly, and a
+//     previous monthly figure only when both sides were billed monthly — the
+//     same lane rule and sentences as sendMembershipUpdated.
+// `before` / `after` are the committed customer rows of the change.
+async function sendMembershipTierUpgraded({
+  customerId,
+  before = {},
+  after = {},
+  idempotencyKey,
+  sourceId = null,
+} = {}) {
+  const fromRank = waveguardTierRank(before.waveguard_tier);
+  const toRank = waveguardTierRank(after.waveguard_tier);
+  if (fromRank < 0 || toRank < 0 || toRank <= fromRank) {
+    return { ok: false, skipped: true, reason: 'not_a_tier_upgrade' };
+  }
+  const figures = tierBenefitFigures(after.waveguard_tier);
+  if (!figures.recurringDiscountPct || !figures.oneTimeDiscountPct) {
+    return { ok: false, skipped: true, reason: 'tier_benefit_unavailable' };
+  }
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+
+  const { resolveBillingLane } = require('./billing-lane');
+  const billingLane = resolveBillingLane({ ...customer, ...after }).mode;
+  const billingLaneBefore = resolveBillingLane({ ...customer, ...before }).mode;
+  const monthlyBothSides = billingLane === 'monthly_membership' && billingLaneBefore === 'monthly_membership';
+  const rateChanged = Math.round(Number(before.monthly_rate || 0) * 100) !== Math.round(Number(after.monthly_rate || 0) * 100);
+  let rateSentence = '';
+  if (rateChanged) {
+    rateSentence = monthlyBothSides
+      ? `Your monthly rate: ${money(after.monthly_rate)} (was ${money(before.monthly_rate)})`
+      : rateChangeSentenceWithoutPriorMonthlyRate(billingLane, after.monthly_rate);
+  }
+
+  const fromTier = tierDisplayName(before.waveguard_tier);
+  const toTier = tierDisplayName(after.waveguard_tier);
+  const facts = {
+    from_tier: fromTier,
+    to_tier: toTier,
+    monthly_rate_before: before.monthly_rate ?? null,
+    monthly_rate_after: after.monthly_rate ?? null,
+    billing_lane: billingLane,
+  };
+  return sendTemplate({
+    customerId,
+    templateKey: 'membership.tier_upgraded',
+    eventType: 'membership.tier_upgraded',
+    payload: {
+      old_membership_tier: fromTier,
+      new_membership_tier: toTier,
+      recurring_discount_pct: figures.recurringDiscountPct,
+      one_time_discount_pct: figures.oneTimeDiscountPct,
+      // A whole line, blank below the tier that earns the credit: the list
+      // block drops an item that resolves blank.
+      palm_credit_line: figures.palmCredit
+        ? `A ${figures.palmCredit} per palm credit each year on palm injections`
+        : '',
+      // A whole sentence, blank when the stored rate did not move: the
+      // paragraph block drops when it resolves blank.
+      rate_sentence: rateSentence,
+    },
+    idempotencyKey: idempotencyKey || `membership.tier_upgraded:${customerId}:${hashValue(facts)}`,
+    categories: ['membership_tier_upgraded'],
+    metadata: { source_id: sourceId, ...facts },
   });
 }
 
@@ -1155,6 +1320,7 @@ module.exports = {
   buildMembershipStartedSection,
   sendAppIntro,
   sendMembershipUpdated,
+  sendMembershipTierUpgraded,
   sendMembershipRenewalReminder,
   sendTermiteRenewalReminder,
   findAcceptedTermiteRenewalReminder,
@@ -1163,6 +1329,8 @@ module.exports = {
   sendMembershipReactivated,
   sendPrevisitBalanceReminder,
   resolvePrevisitBalanceEmailRecipient,
+  // The sender's own address check (sendTemplate skips any other address).
+  isEmailLike,
   _private: {
     hashValue,
     itemSummary,
@@ -1170,5 +1338,8 @@ module.exports = {
     propertyLabel,
     sendTemplate,
     stableEventKey,
+    tierBenefitFigures,
+    tierDisplayName,
+    waveguardTierRank,
   },
 };

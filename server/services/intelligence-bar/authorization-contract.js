@@ -48,11 +48,14 @@ const PREVIEW_NOISE_KEYS = new Set([
 const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|took_ms|_ms$|latency|request_id|trace)/i;
 const PREVIEW_EFFECT_LINES = 12;
 const PREVIEW_EFFECT_CHARS = 200;
-const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property']);
+const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property', 'remove_customer_property']);
 
 // Tools whose commit cannot be undone from the portal (a message leaves,
 // money moves, a public reply posts). Everything else is editable after.
 const IRREVERSIBLE_TOOL_NAMES = new Set([
+  // A removed saved property has no restore in the portal or the bar, and the
+  // same address cannot be added again (the add path dedups against it).
+  'remove_customer_property',
   'send_sms',
   'reply_via_sms',
   'send_email_reply',
@@ -86,7 +89,19 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // No un-cancel tool exists — once cancelled, that queued attempt is gone
   // for good (the original sender would need to queue a fresh one).
   'cancel_queued_message',
+  // The Stripe detach cannot be undone, and an Auto Pay-off the customer
+  // is emailed about is only reversible by the customer's own consent.
+  'remove_saved_payment_method',
+  // Accepting locks the estimate's price, starts the plan's billing and may
+  // email the customer; no portal path un-accepts an estimate.
+  'accept_estimate',
+  // An invoice sent to the customer cannot be unsent.
+  'send_invoice',
 ]);
+
+// Tools whose card lines are curated below from their own preview, not the
+// generic one-line-per-preview-key dump.
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate', 'delete_duplicate_customer']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -103,7 +118,17 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
   'trigger_review_request',
+  // The confirmed run emails and/or texts the customer their paid receipt.
+  'resend_receipt',
+  // The confirmed run texts or emails the customer their Auto Pay setup link.
+  'send_autopay_setup_link',
+  // The invoice text (one text with the pay link; the bar sends no email).
+  'send_invoice',
 ]);
+
+// send_invoice: its card lines come from its own preview
+// (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
+CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -126,6 +151,8 @@ const JOB_EFFECTS = {
 
 const BILLING_TOOL_NAMES = new Set([
   'save_customer_estimate',
+  // Changes what each listed visit will bill.
+  'reprice_future_visits',
   'request_instant_payout',
   'request_standard_payout',
   'cancel_pending_payout',
@@ -133,6 +160,7 @@ const BILLING_TOOL_NAMES = new Set([
   'create_pending_estimate',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
+  'send_invoice',
 ]);
 
 const ACTION_LABELS = {
@@ -145,9 +173,11 @@ const ACTION_LABELS = {
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
   merge_customers: 'Merge duplicate customer',
+  delete_duplicate_customer: 'Delete empty duplicate customer',
   add_customer_property: 'Add saved property',
   update_customer_property: 'Update saved property',
   set_primary_property: 'Change primary property',
+  remove_customer_property: 'Remove saved property',
   create_appointment: 'Book an appointment',
   reschedule_appointment: 'Move an appointment',
   cancel_appointment: 'Cancel an appointment',
@@ -161,6 +191,8 @@ const ACTION_LABELS = {
   bulk_update_leads: 'Change status on multiple leads',
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
+  resend_receipt: 'Re-send a paid receipt',
+  send_invoice: 'Send an invoice to the customer',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -192,7 +224,15 @@ const ACTION_LABELS = {
   submit_gsc_sitemap: 'Submit a sitemap to Search Console',
   set_railway_gate: 'Change a Railway feature gate',
   set_growthbook_feature_environment: 'Enable or disable a GrowthBook feature in one environment',
+  remove_saved_payment_method: 'Remove a saved payment method',
+  correct_invoice_address: 'Correct the address printed on an invoice',
+  accept_estimate: 'Mark an estimate accepted (starts the plan)',
+  reprice_future_visits: 'Change the price of upcoming visits',
 };
+
+// reprice_future_visits' card lines come from its own preview (one line per
+// visit, old -> new), never the generic one-line-per-preview-key dump.
+CURATED_PREVIEW_TOOL_NAMES.add('reprice_future_visits');
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
 // Stripe: the DB merge may still be undoable, but that cancellation is
@@ -337,6 +377,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview?.customer?.name) push('customer', preview.customer.name);
     if (preview?.address) push('customer', `Save property: ${preview.address}`);
     if (preview?.property?.address) push('customer', preview.property.address);
+    if (preview?.removed_property?.address) push('customer', `Remove property: ${preview.removed_property.address}${preview.removed_property.label ? ` (${preview.removed_property.label})` : ''}`);
     if (preview?.previous_primary?.address) push('customer', `Previous primary: ${preview.previous_primary.address}`);
     if (preview?.primary_property?.address) push('customer', `New primary: ${preview.primary_property.address}`);
     for (const [field, value] of Object.entries(preview?.changes || {})) {
@@ -380,6 +421,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         ? "Clearing the email also stamps the lead's email-confirmed time, but an open email-disagreement triage card on this lead stays open until a real address is saved"
         : "The email change also stamps the lead's email-confirmed time, which counts as the correction for any open email-disagreement triage card on this lead");
     }
+    if (preview.estimates_keep_address) {
+      push('operational', 'Estimates already made for this lead keep the address they were made with');
+    }
     push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
@@ -422,9 +466,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('comms', 'Sends to an EXTERNAL (non-customer) recipient — this inbox row is not attributed to a customer');
     }
   }
-  if (toolName === 'create_appointment' && preview?.pinned_technician) {
-    push('operational', `Assigned to ${preview.pinned_technician.name}`);
-  }
+  // The technician shows once, as the card's "Technician" line (built from
+  // the display params), not again as a separate "Assigned to" effect.
   // Single-target mutations name the resolved human (GH r8 P1) — the card
   // hides raw params, so the uuid alone would leave the operator unable to
   // detect a wrong-customer selection before confirming.
@@ -465,6 +508,24 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', 'Clears stale tracker evidence on this visit (tracker state released, cleanup run; no status change)');
     }
   }
+  // Product picker (owner 2026-10-07): the operator's words did not name one product, so the card lists the shortlist and
+  // writes nothing. The list itself rides in the contract (product_choices), so the hash covers every product offered.
+  const productChoices = toolName === 'adjust_stock' && Array.isArray(preview?.product_choices) ? preview.product_choices : null;
+  if (productChoices) {
+    const what = String(preview.movement_type || '').replace(/_/g, ' ');
+    const entered = preview.entered_quantity != null ? ` ${preview.entered_quantity} ${preview.entered_unit || ''}`.trimEnd() : '';
+    push('operational', `Pick the product for this stock change (${what}${entered}). Nothing changes until you pick a product and confirm the next card.`);
+  }
+  // A stock write always shows what it records and where the count lands (owner 2026-10-05): the product, the amount and unit
+  // the operator entered, and the on-hand count before and after in the product's own inventory unit.
+  if ((toolName === 'adjust_stock' || (toolName === 'update_restock_request' && params?.action === 'receive'))
+    && preview && preview.stock_before != null && preview.stock_after != null) {
+    const what = toolName === 'adjust_stock' ? `${String(preview.movement_type || '').replace(/_/g, ' ')}` : 'receive';
+    const entered = preview.entered_quantity != null ? ` ${preview.entered_quantity} ${preview.entered_unit || ''}`.trimEnd() : '';
+    push('operational', `${preview.product?.name || 'Product'}: ${what}${entered}; on hand ${preview.stock_before} → ${preview.stock_after} ${preview.unit || ''}`.trimEnd(), {
+      before: `${preview.stock_before} ${preview.unit || ''}`.trimEnd(), after: `${preview.stock_after} ${preview.unit || ''}`.trimEnd(),
+    });
+  }
   if (toolName === 'bulk_update_leads') {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
       before: params?.current_status, after: params?.new_status,
@@ -497,14 +558,27 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // claimed post-commit and by the hourly sweep — not pinnable), so a card
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
-    if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
+    // The card says nothing about credit when none applies: the executor
+    // still re-verifies it under the credit lock at commit.
+    // Another visit already overlaps this time (pinned at proposal, owner
+    // 2026-10-05): the booking still goes through, as a warning. An overlap
+    // that appears AFTER this card refuses the confirm and shows a new card.
+    if (preview?.slot_overlap?.already_overlaps) {
+      const withVisits = Array.isArray(preview.slot_overlap.with) ? preview.slot_overlap.with : [];
+      const first = withVisits[0];
+      const who = first ? [first.customer, first.service, first.window].filter(Boolean).join(', ') : '';
+      const more = withVisits.length > 1 ? ` (and ${withVisits.length - 1} more)` : '';
+      push('operational', who
+        ? `Another visit is at this time: ${who}${more}. Both stay on the calendar.`
+        : 'Another visit is at this time. Both stay on the calendar.');
+    }
     // A booking with a time texts the booking confirmation exactly as a
     // Schedule-screen booking does (owner 2026-09-27); a windowless one
     // registers a non-delivering placeholder: its confirmation is marked
     // handled, so setting a time later re-arms only the 72h/24h reminders.
     push('operational', params?.time_window
-      ? 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card)'
-      : 'Registers placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h/24h reminders');
+      ? 'Sets reminders for 3 days and 1 day before. They skip if the customer turned reminders off, and the 3-day one skips when the visit is sooner. If setup fails, you see a warning.'
+      : 'No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) are set up once a time is added. They skip if the customer turned reminders off. If setup fails, you see a warning.');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
@@ -706,6 +780,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
+  // reprice_future_visits: each visit that changes (date, service, old price ->
+  // new price), each visit left alone and why, and that no customer message is
+  // sent (reprice-visits-tools.js cardLines).
+  if (toolName === 'reprice_future_visits' && Array.isArray(preview?.visits)) {
+    for (const line of require('./reprice-visits-tools').cardLines(preview)) push(line.kind, line.text);
+  }
   // repair_closeout: one effect per planned step (server-owned labels), plus
   // the open items the confirm will NOT touch — never a flattened dump of
   // the plan object.
@@ -718,7 +798,41 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
     }
   }
-  if (toolName !== 'repair_closeout' && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  // remove_saved_payment_method: the ordered steps ("Step n of m" — the card
+  // sorts lines by kind then label, so the numbering keeps them in order),
+  // then the removal notes and the Auto Pay note; the notice emails ride the
+  // customer-contact line below.
+  if (toolName === 'remove_saved_payment_method' && Array.isArray(preview?.steps)) {
+    for (const st of preview.steps) push('billing', String(st.effect || st.step));
+    const notes = preview.disclosures || {};
+    if (notes.bank_note) push('billing', notes.bank_note);
+    if (notes.holds_appointment?.text) push('billing', notes.holds_appointment.text);
+    if (notes.hold_lookup_failed) push('billing', "Couldn't check whether this card holds an upcoming appointment");
+    if (preview.autopay_note) push('billing', preview.autopay_note);
+    if (preview.customer_emails?.summary) push('comms', String(preview.customer_emails.summary));
+  }
+  // accept_estimate: what the plan starts, the bill line by line, what it
+  // books, and every customer message (owner ruling 2026-10-07, Q5), as the
+  // tool's own card_lines. The card sorts lines by kind then label, so each
+  // label leads with its topic.
+  if (toolName === 'accept_estimate' && Array.isArray(preview?.card_lines)) {
+    for (const l of preview.card_lines) push(l.kind, l.label, l.before !== undefined ? { before: l.before, after: l.after } : {});
+  }
+  // send_invoice: invoice, money and who is contacted.
+  if (toolName === 'send_invoice' && preview?.preview === true) {
+    // Lines flagged `more` (every invoice line past the first few) ride in full under "Show more".
+    for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
+  // correct_invoice_address: what the rewrite does and does not touch.
+  if (toolName === 'correct_invoice_address' && preview?.does) {
+    push('billing', String(preview.does));
+    push('operational', String(preview.does_not));
+    push('operational', 'A critical before/after audit row is written with the change');
+  }
+  if (!CURATED_PREVIEW_TOOL_NAMES.has(toolName) && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -742,6 +856,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // one level of plain-object params flattens to its own lines (so an
   // update_customer card says WHAT changes), deeper structure is described
   // in full rather than dropped.
+  // The booking card's field names read as words with a capital ("When",
+  // "Service", "Price"); other tools keep their existing lowercase labels.
+  const keyLabel = (k) => {
+    const words = humanKey(k);
+    return toolName === 'create_appointment' ? words.charAt(0).toUpperCase() + words.slice(1) : words;
+  };
   for (const [k, v] of Object.entries(propertyAction || customerEstimateAction ? {} : (displayParams || {}))) {
     if (k.startsWith('_')) continue;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
@@ -753,7 +873,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       continue;
     }
     const s = describe(v, 1);
-    if (s !== null) push(kindFor(toolName, k), `${humanKey(k)}: ${s}`);
+    if (s !== null) push(kindFor(toolName, k), `${keyLabel(k)}: ${s}`);
   }
 
   // Deterministic ripples the Confirm also covers (customer-email-fanout /
@@ -804,6 +924,39 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('billing', `${prefix}Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — ${refusalClause} if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired`);
     }
   }
+  // A monthly-rate edit shows the whole bill, line by line (owner 2026-10-06):
+  // monthly_rate is every service's monthly price summed, so "$41.33 →
+  // $60.33" alone hid that a pest plan was being replaced by a lawn price.
+  if (toolName === 'update_customer' && preview?.rate_change) {
+    const rc = preview.rate_change;
+    const { money } = require('./rate-change');
+    for (const line of rc.lines || []) {
+      push('billing', `${line.label}: ${money(line.before)} → ${money(line.after)} a month${line.after === 0 && line.before > 0 ? ' (drops off the bill)' : ''}`, {
+        before: money(line.before), after: money(line.after),
+      });
+    }
+    push('billing', `Monthly bill total: ${money(rc.total_before)} → ${money(rc.total_after)}${rc.replaces_whole_bill ? ' (replaces the whole bill)' : ''}`, {
+      before: money(rc.total_before), after: money(rc.total_after),
+    });
+    // The tier-upgrade email (below) states the new monthly rate, so the
+    // card must not also say that no notice goes.
+    if (!preview.tier_upgrade_email) push('billing', 'No price-change notice is sent to the customer');
+  }
+  // Billing type + per-application fee (owner D5 2026-10-06,
+  // billing-mode-change.js): before -> after in words, what the next visits
+  // are charged, and that no customer message is sent.
+  if (toolName === 'update_customer' && preview?.billing_change) {
+    const bc = preview.billing_change;
+    if (bc.billing_type) push('billing', `Billing type: ${bc.billing_type.before} → ${bc.billing_type.after}`, bc.billing_type);
+    if (bc.fee) push('billing', `Per-application fee: ${bc.fee.before} → ${bc.fee.after}`, bc.fee);
+    for (const line of bc.next_visits || []) push('billing', line);
+    push('billing', 'No customer message is sent');
+  }
+  // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): decided
+  // at proposal time by tier-upgrade-email.js and pinned on the stored params;
+  // absent whenever the gate is off or the card does not qualify.
+  const tierUpgradeEmail = toolName === 'update_customer' && !!preview?.tier_upgrade_email;
+  if (tierUpgradeEmail) push('comms', require('./tier-upgrade-email').cardLine(preview.tier_upgrade_email));
   // Billing-lane stamp (#3140): the executors stamp billing_mode
   // 'monthly_membership' on any affected row the update leaves with a
   // membership tier + positive monthly rate and no billing lane, and notify
@@ -825,6 +978,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', params?.updates?.phone !== undefined
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
+  }
+  // The shared-phone mark clear is a server-derived effect of a phone edit,
+  // single or bulk (codex #6268 r8/r9): bound into the contract so Confirm covers it.
+  if ((toolName === 'update_customer' || toolName === 'bulk_update_customers') && params?.updates?.phone !== undefined) {
+    push('customer', require('../shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   }
 
   // Grouped-visit ripple of a reschedule (GH r12 P1): a pinned visit_id
@@ -885,6 +1043,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // A repair plan that queues a report email or receipt contacts the
       // customer through the delivery workers.
       || (toolName === 'repair_closeout' && preview?.notifies_customer === true)
+      // The portal's own Auto Pay-off / payment-method-removed notices, only
+      // when their gate is on and an email is on file (the plan says which).
+      || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
+      // The membership-started email (and an autosent termite agreement), only
+      // when the preview found they will go out; each rides its own comms line.
+      || (toolName === 'accept_estimate' && preview?.notifies_customer === true)
+      || tierUpgradeEmail
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
@@ -893,6 +1058,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
+    if (toolName === 'accept_estimate') contactLabel = 'Customer will be emailed (see the Message lines)';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,
@@ -908,14 +1075,22 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // knows.
       contactLabel = 'The customer MAY be texted a cancellation notice by the existing notice system, depending on conditions at the moment it processes the cancellation';
     }
+    // A timed booking's confirmation is shown as short lines (owner
+    // 2026-10-06); the three below carry the same conditions as the old
+    // one-sentence text.
+    let bookingConfirmationLines = null;
     if (bookingConfirmationText) {
+      bookingConfirmationLines = [
+        'Booking confirmation goes out by text or email, per their settings.',
+        'No confirmation if they turned it off or were already confirmed for another visit at this time.',
+        'Texts after 8 PM wait until 8 AM; an email goes right away.',
+      ];
       // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
       // send window (appointment-reminders.js reminderSendWindowHold — 'email'
       // is never held, and the 'both' channel sends its email leg right away
       // and defers only the text). The old wording said the WHOLE
       // confirmation waited until 8 AM, which is false for an email-only or
       // email+text customer.
-      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
     }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card
@@ -928,7 +1103,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         contactLabel = `Customers with a pinned SMS recipient will be texted; ${missing} stop(s) have no SMS recipient and will NOT be texted`;
       }
     }
-    push('comms', contactLabel);
+    if (bookingConfirmationLines) bookingConfirmationLines.forEach((line) => push('comms', line));
+    // The tier-upgrade email has its own line above; an email change on the
+    // same card has its own double-opt-in line too.
+    else if (!tierUpgradeEmail) push('comms', contactLabel);
   }
 
   // cancel_appointment's assigned-technician cancel notice
@@ -965,8 +1143,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     version: CONTRACT_VERSION,
     tool: toolName,
     tier: tierFor(toolName),
-    action_label: ACTION_LABELS[toolName] || humanKey(toolName),
+    action_label: productChoices ? 'Choose the product' : (ACTION_LABELS[toolName] || humanKey(toolName)),
     effects,
+    ...(productChoices ? { product_choices: productChoices.map((choice) => ({ ...choice })) } : {}),
     // Irreversibility is derived, not just allowlisted: anything that sends
     // an outbound message (customer texts on a notifying move, the tax
     // advisor's admin SMS) or spends externally (price research) cannot be

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { callStartedAt } = require('../utils/call-timeline');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { ringTargetForLine } = require('../services/tech-line');
 const twilio = require('twilio');
@@ -55,7 +56,7 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
-      // An UNKNOWN caller (no customer on file) who waited 25s+ and left no
+      // An UNKNOWN caller (no customer on file) who waited 15s+ and left no
       // voicemail gets a text-back from the line they called — same grace,
       // own try/catch so a failure here never blocks the bells above.
       try {
@@ -1305,24 +1306,11 @@ router.post('/voice', async (req, res) => {
       gateOn: isEnabled('callPreconnectScreen'),
     });
 
-    // #4: Caller ID Enrichment via Twilio Lookup API
-    if (firstDelivery && !customer && From) {
-      try {
-        const lookupUrl = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(From)}?Fields=caller_name`;
-        const twilioAuth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-        const lookupRes = await fetch(lookupUrl, { headers: { Authorization: `Basic ${twilioAuth}` } });
-        if (lookupRes.ok) {
-          const lookupData = await lookupRes.json();
-          const callerName = lookupData.caller_name?.caller_name;
-          if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
-            logger.info(`[CallerID] Lookup matched for inbound call ${maskSid(CallSid)}; deferring customer creation until transcript confirms first name`);
-          }
-        }
-      } catch (lookupErr) {
-        // Non-critical — Twilio Lookup is a paid add-on, may not be enabled
-        logger.info(`[CallerID] Lookup skipped: ${sanitizeVoiceProviderError(lookupErr.message)}`);
-      }
-    }
+    // No caller-name lookup here. One used to run on every unknown inbound
+    // number, awaited before the call was logged, and its result was only
+    // logged, never stored. The paid Lookup v2 caller_name request now has ONE
+    // caller: call-last-name-lookup.js, after processing, only for a customer
+    // with no last name (GATE_CALL_LAST_NAME_LOOKUP).
 
     // Log the inbound call (first delivery only — see claim above).
     // Serialized per-CallSid with /call-status and /recording-status: an
@@ -2609,6 +2597,8 @@ router.post('/recording-status', async (req, res) => {
           // fresh branch is `processing_status IS NULL`, and it never
           // re-enters voicemail/spam rows that still carry a transcript.
           write.processing_status = null;
+          // The verdict time belongs to the OLD audio too (Codex #6269 r2).
+          write.processed_at = null;
           // …and the retry budget: extraction_attempts counted failures on
           // the OLD audio, and the sweep's cap would otherwise refuse the
           // new recording after a single transient error (Codex #3736 r11).
@@ -2698,10 +2688,17 @@ router.post('/recording-status', async (req, res) => {
             .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .whereIn('status', ['open', 'in_progress'])
             .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
+          // ...and a card the callback-spam sweep auto-resolved on the OLD
+          // audio (same reason as the adoption route, codex #6271 r46 P2).
+          const retiredSwept = await trx('triage_items')
+            .where({ call_log_id: baseline.id, status: 'resolved', resolution_rule: 'callback_spam' })
+            .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+            .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
+            .update({ resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}`, resolution_rule: null });
           // The review flag follows the cards (Codex #3736 r14 P2): with the
           // old audio's cards retired and nothing else open, a row that was
           // review-open (a V2-vetoed spam row, say) must not stay counted.
-          if (retired > 0) {
+          if (retired + retiredSwept > 0) {
             const stillOpen = await trx('triage_items')
               .where({ call_log_id: baseline.id })
               .whereIn('status', ['open', 'in_progress'])
@@ -3550,6 +3547,12 @@ router.post('/call-status', async (req, res) => {
         // duration-gated recording sweeps).
         const status = nextCallStatus(existing.status, CallStatus);
         const incomingDuration = parseInt(CallDuration || 0) || 0;
+        const eventMs = Date.parse(req.body.Timestamp || '');
+        // Not before the call began: callStartedAt, because a row inserted
+        // after the call was over has a created_at later than its real end.
+        const callBeganMs = callStartedAt(existing)?.getTime();
+        const callEndedAt = Number.isFinite(eventMs) && eventMs <= Date.now() && eventMs >= callBeganMs
+          ? new Date(eventMs).toISOString() : null;
         // On a row that is already terminal the duration never decreases: a
         // retried "completed" or a late leg callback can carry
         // CallDuration "0" (a truthy string) and would otherwise zero the
@@ -3560,6 +3563,17 @@ router.post('/call-status', async (req, res) => {
         await trx('call_log').where('twilio_call_sid', CallSid).update({
           status,
           duration_seconds: duration,
+          // When the call actually ended: Twilio's own event time on the
+          // first terminal callback (the existing key wins on a retry).
+          // created_at is written before any ringing and duration_seconds is
+          // one leg's, so their sum is not the end;
+          // sms-pending-conversations.js reads this to tell whether a text
+          // arrived before the conversation was over. Never our receipt
+          // time: a delayed callback would move the end past texts that
+          // came in after the hangup. No usable Timestamp, no stamp.
+          ...(TERMINAL_CALL_STATUSES.has(CallStatus) && callEndedAt ? {
+            metadata: trx.raw("jsonb_build_object('ended_at', ?::text) || COALESCE(metadata, '{}'::jsonb)", [callEndedAt]),
+          } : {}),
           updated_at: new Date(),
         });
         return;

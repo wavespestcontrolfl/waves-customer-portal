@@ -773,8 +773,16 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     // (restackStoredVisitFinancials when the gate is live), falling back to
     // calculateStoredVisitFinancials only when that restack itself defers.
     const helper = src.slice(src.indexOf('async function seriesExtensionUnbillable('), src.indexOf("router.get('/', async (req, res, next) => {"));
-    expect(helper).toContain('storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps)');
-    expect(helper).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+    // The per-date pricing lives in seriesExtensionDatePrices (shared with the Intelligence
+    // Bar billing type card's price check); the verdict takes its minimum.
+    expect(helper).toContain('await seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate })');
+    // seriesExtensionDatePrices is the price-only view of seriesExtensionDateVerdicts (the same
+    // per-date calculation plus the line price the Intelligence Bar card reads).
+    expect(src).toMatch(/async function seriesExtensionDatePrices\(conn, args\) \{\s*return \(await seriesExtensionDateVerdicts\(conn, args\)\)\.map\(\(v\) => v\.price\);/);
+    const datePrices = src.slice(src.indexOf('async function seriesExtensionDateVerdicts('), src.indexOf('async function seriesExtensionUnbillable('));
+    expect(datePrices).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+    expect(datePrices).toMatch(/storedOccurrenceFloorVerdict\(\s*gatePriceParent,[\s\S]*?parentAddons, storedDiscountScope, discountCaps,\s*\)/);
+    expect(datePrices).toContain('filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent)');
     const floorHelper = src.slice(src.indexOf('function storedOccurrenceFloorPrice('), src.indexOf('\nasync function loadStoredDiscountScope('));
     expect(floorHelper).toContain('restackStoredVisitFinancials(parent, dueAddons, discountScope, discountCaps)');
     expect(floorHelper).toContain('calculateStoredVisitFinancials(parent, dueAddons, allParentAddons, discountScope)');
@@ -1119,9 +1127,13 @@ describe('update-details wiring (source guards)', () => {
   test('the collective-move branch and the tech Quick Move flush the shared route-quality Set (codex #4295 r4 P2)', () => {
     const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     expect(dispatchSrc).not.toContain('groupedQualityDates');
-    const start = dispatchSrc.indexOf('if (result.seriesMoveId) {');
-    const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return res.json({', start));
-    expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates })');
+    // The single-visit move lives in moveVisitForStaff (shared by the route
+    // and Edit appointment); its series-widened effects are their own step
+    // and answer through moveReply.
+    const start = dispatchSrc.indexOf('async function applySeriesWidenedMoveEffects(');
+    expect(start).toBeGreaterThan(-1);
+    const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return moveReply(200, {', start));
+    expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: actor.technicianId, qualityDates })');
     expect(branch).toContain('await flushDispatchQualityDates(qualityDates);');
     const techSrc = fs.readFileSync(path.join(__dirname, '../routes/tech-track.js'), 'utf8');
     expect(techSrc).toContain("flushDispatchQualityDates(new Set(result.qualityDates))");
@@ -1216,17 +1228,14 @@ describe('update-details wiring (source guards)', () => {
   test('the trim runs the SHARED cancellation follow-through, not a copy of it (Codex #3337 r4)', () => {
     // Three review rounds each found a different piece of the cancellation
     // pipeline missing from the trim. Both surfaces now call one module.
+    // The card, fee-alert, invoice-void and tracker-cancel obligations are
+    // executed by visit-cancellation-followthrough-load.test.js; the two
+    // tracker-failure recorders are only stubbed there, so they stay pinned.
     const shared = fs.readFileSync(path.join(__dirname, '../services/visit-cancellation-followthrough.js'), 'utf8');
-    // Every obligation lives in the shared module...
-    expect(shared).toContain('handleCardHoldCancellation');
-    expect(shared).toContain('handleAppointmentCardCancellation');
-    expect(shared).toContain('alertUnresolvedCancellationFee');
-    expect(shared).toContain('voidOpenInvoicesForCancelledService');
-    expect(shared).toContain('trackTransitions.cancel');
     expect(shared).toContain('recordTrackTransitionResultFailure');
     expect(shared).toContain('recordTrackTransitionFailure');
 
-    // ...and BOTH cancel surfaces call it rather than inlining their own.
+    // BOTH cancel surfaces call the shared module rather than inlining their own.
     const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     expect(dispatchSrc).toContain("require('../services/visit-cancellation-followthrough')");
     expect(dispatchSrc).toContain("source: 'admin-dispatch'");

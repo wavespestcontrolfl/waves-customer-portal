@@ -12,10 +12,14 @@ const db = require('../../models/db');
 const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
+const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
+const { isReService } = require('../re-service');
+const { MAX_RESULTS: MAX_NAME_MATCHES, isNameLikeSearch, rankNameMatches } = require('./name-match');
+const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -28,10 +32,17 @@ const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
+// What the update_customer description tells the model about price notices.
+// Read once at load, like the rest of the description: the gate is an
+// environment variable, and setting it restarts the server.
+const PRICE_NOTICE_DISCLOSURE = require('../../config/feature-gates').ibTierUpgradeEmailLive?.()
+  ? 'No price-change notice is sent to the customer, with one exception: a card that changes only waveguard_tier and monthly_rate, moves the customer to a higher tier, and leaves a monthly-billed rate above zero emails the customer the tier upgrade notice after Confirm. The preview result and the card say when that email applies; tell the operator.'
+  : 'No price-change notice is sent to the customer.';
 const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../customer-contact-fanout');
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
@@ -39,6 +50,7 @@ const {
   normalizeContactZip,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
+  clearSharedPhoneMarkOnPhoneChange,
 } = require('../../utils/intake-normalize');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
@@ -61,7 +73,8 @@ Use for: "what do we know about large patch on zoysia", "how has K-Flow performe
     name: 'query_customers',
     description: `Search/filter the customer database. Returns matching customers with key fields.
 Use for: finding customers by attribute, missing data, filtering by city/tier/stage/tags/service type.
-Supports SQL-like conditions via the filters parameter.`,
+Supports SQL-like conditions via the filters parameter.
+When a name search (no digits) finds nothing exact on the first page, it falls back to at most 5 sound-alike / close-spelling matches, honoring limit and never offset (result has approximate: true, rows show company_name); offer those with offer_choices and confirm with the operator before acting on one.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -129,7 +142,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'get_schedule_view',
-    description: 'Get the schedule for a date or date range. Optionally filter by technician or zone/city.',
+    description: 'Get the schedule for a date or date range. Optionally filter by technician or zone/city. For ONE customer\'s visits (a customer brief, "when is their next visit") pass customer_id: without it the result lists every customer on those dates.',
     input_schema: {
       type: 'object',
       properties: {
@@ -139,6 +152,7 @@ Only returns active customers with prior service history in that category.`,
         date_to: { type: 'string', description: 'YYYY-MM-DD end of range' },
         technician_name: { type: 'string', description: 'Filter by technician name (as shown on the schedule)' },
         city: { type: 'string', description: 'Filter by customer city/zone' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Only this customer\'s visits. Use it whenever the question is about one customer.' },
       },
     },
   },
@@ -210,6 +224,8 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
+Billing type and per-application fee (only when the office has turned this on; otherwise refused): updates.billing_mode (per_application, per_visit, one_time or monthly_membership) and updates.per_application_fee (dollars per visit, e.g. 147). Send them alone, with no other field; the card shows what the next visits are charged. Annual prepay and clearing the billing type are done elsewhere.
+monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. ${PRICE_NOTICE_DISCLOSURE}
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
       type: 'object',
@@ -218,6 +234,10 @@ IMPORTANT: When asked to update, call this tool immediately once the required fa
         updates: {
           type: 'object',
           description: 'Field-value pairs to update',
+        },
+        rate_service: {
+          type: 'string',
+          description: 'With updates.monthly_rate on a customer who already has a monthly rate: the one service whose monthly price changes (e.g. "lawn", "pest control"), or "whole_bill" to replace the whole bill. updates.monthly_rate stays the new TOTAL.',
         },
       },
       required: ['customer_id', 'updates'],
@@ -242,9 +262,9 @@ IMPORTANT: Always show the list of affected customers and ask for confirmation b
     description: `Update the STRUCTURED property-access and pet fields on a customer's property profile (the property_preferences record). Use this — not the free-text customer notes — for gate/lockbox/garage codes, pet info, parking/access details, and how a tech should keep pets safe. These fields render as their own labeled alerts on the technician's stop card (e.g. "Gate: 9292", a pet warning, a pet-securing reminder), so they are far more reliable in the field than a free-text note.
 
 Pass ONLY the fields you want to set or change:
-- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code for the home/yard gate, neighborhood_gate_code for a community gate)
-- parking_notes / side_gate_access / access_notes — where to park / how to get in
-- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property
+- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code ONLY for a gate on the customer's own lot; a community/HOA/subdivision gate such as \"Del Webb gate\" is neighborhood_gate_code. A community code is never also saved as property_gate_code)
+- parking_notes / side_gate_access / access_notes — where to park / how to get in (ADDED as a new first line; existing notes are never replaced — pass only the new line)
+- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property (pet_details, pets_secured_plan and special_instructions REPLACE what is there)
 - pets_secured_plan — how the tech should keep pets safe, e.g. "keep the screen doors closed during service so the cats don't get out"
 - special_instructions — any other field instruction
 
@@ -302,7 +322,8 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+service_type is a catalog name, but the words the user says also work ("pre-slab termite treatment"): one close catalog service books as that service, and when several are close the tool lists them, so ask the user which and propose again with the exact name. A service that is not in the catalog cannot be booked.
+price: the visit price in dollars when the user states one; it rides the resolved catalog service, quote-required services included. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -313,7 +334,9 @@ price: the visit price in dollars when the user states one. A stated price needs
         technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
+        customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
+        price_confirmed: { type: 'boolean', description: 'Set true ONLY after the user explicitly confirmed the stated price in reply to a price_read_back question (the stated price differed from the catalog price). Never set it on the first proposal.' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -399,7 +422,10 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'find_duplicates': return await findDuplicates(input);
       case 'create_customer': return await createCustomer(input);
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
-        Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null);
+        Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
+        input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
+        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null,
+        input._ib_billing_pin);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -427,7 +453,7 @@ async function queryCustomers(input, readCustomerIds = []) {
 
   let query = db('customers')
     .select(
-      'customers.id', 'customers.first_name', 'customers.last_name',
+      'customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name',
       'customers.email', 'customers.phone', 'customers.city', 'customers.state', 'customers.zip',
       'customers.address_line1', 'customers.waveguard_tier', 'customers.pipeline_stage',
       'customers.monthly_rate', 'customers.lifetime_revenue', 'customers.lead_score',
@@ -446,6 +472,41 @@ async function queryCustomers(input, readCustomerIds = []) {
   const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));
   if (unsupported.length) return { error: `Unsupported customer filters: ${unsupported.join(', ')}` };
 
+  query = applyCustomerFilters(query, filters);
+
+  // Inside a customer-scoped task every customer list — searched, filtered or
+  // bare — may only return that customer; a genuinely unscoped request
+  // arrives with an empty scope and stays broad.
+  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
+  const unsearched = query.clone(); // filters + scope, no text search
+  if (search) query = applyCustomerSearch(query, search);
+
+  // Sort
+  const sortMap = {
+    name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
+    lead_score: 'lead_score', health_score: 'health_score',
+    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
+  };
+  const sortCol = sortMap[sort_by] || 'last_name';
+  query = query.orderBy(sortCol, sort_dir);
+
+  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
+  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
+  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
+
+  const result = {
+    customers: customers.map(customerListRow),
+    total_matching: Number(matched.count),
+    returned_count: customers.length,
+    has_more: offset + customers.length < Number(matched.count),
+    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
+    total_customers: parseInt(total.count),
+  };
+  return Number(matched.count) === 0 ? await withApproximateCustomers(result, unsearched, { search, limit, offset }) : result;
+}
+
+// Every non-search filter of query_customers, in one place.
+function applyCustomerFilters(query, filters) {
   // Table-driven exact filters keep the public names and DB columns aligned.
   for (const [key, column] of Object.entries({ state: 'state', zip: 'zip', stage: 'pipeline_stage', lead_source: 'lead_source', active: 'active' })) {
     if (filters[key] != null) query = query.where(column, filters[key]);
@@ -482,66 +543,78 @@ async function queryCustomers(input, readCustomerIds = []) {
         .whereILike('service_type', `%${filters.service_type}%`);
     });
   }
+  return query;
+}
 
-  // Free text search
-  // Inside a customer-scoped task every customer list — searched, filtered or
-  // bare — may only return that customer; a genuinely unscoped request
-  // arrives with an empty scope and stays broad.
-  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
-  if (search) {
-    const s = `%${search}%`;
-    query = query.where(function () {
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
-        .orWhereILike('phone', s).orWhereILike('email', s)
-        .orWhereILike('address_line1', s).orWhereILike('city', s)
-        .orWhereILike('company_name', s);
-    });
-  }
+function applyCustomerSearch(query, search) {
+  const s = `%${search}%`;
+  return query.where(function () {
+    this.whereILike('first_name', s).orWhereILike('last_name', s)
+      .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
+      .orWhereILike('phone', s).orWhereILike('email', s)
+      .orWhereILike('address_line1', s).orWhereILike('city', s)
+      .orWhereILike('company_name', s);
+  });
+}
 
-  // Sort
-  const sortMap = {
-    name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
-    lead_score: 'lead_score', health_score: 'health_score',
-    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
-  };
-  const sortCol = sortMap[sort_by] || 'last_name';
-  query = query.orderBy(sortCol, sort_dir);
-
-  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
-  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
-  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
-
+function customerListRow(c) {
   return {
-    customers: customers.map(c => ({
-      id: c.id,
-      name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
-      first_name: c.first_name,
-      last_name: c.last_name,
-      email: c.email || null,
-      phone: c.phone || null,
-      city: c.city || null,
-      state: c.state || null,
-      zip: c.zip || null,
-      address: c.address_line1 || null,
-      tier: c.waveguard_tier || null,
-      stage: c.pipeline_stage,
-      monthly_rate: parseFloat(c.monthly_rate || 0),
-      lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
-      lead_score: c.lead_score,
-      health_score: c.health_score ? parseInt(c.health_score) : null,
-      active: c.active,
-      member_since: c.member_since,
-      last_service_date: c.last_service_date,
-      next_service_date: c.next_service_date,
-      last_contact_date: c.last_contact_date,
-      lead_source: c.lead_source,
-    })),
-    total_matching: Number(matched.count),
+    id: c.id,
+    name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+    first_name: c.first_name,
+    last_name: c.last_name,
+    company_name: c.company_name || null,
+    email: c.email || null,
+    phone: c.phone || null,
+    city: c.city || null,
+    state: c.state || null,
+    zip: c.zip || null,
+    address: c.address_line1 || null,
+    tier: c.waveguard_tier || null,
+    stage: c.pipeline_stage,
+    monthly_rate: parseFloat(c.monthly_rate || 0),
+    lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
+    lead_score: c.lead_score,
+    health_score: c.health_score ? parseInt(c.health_score) : null,
+    active: c.active,
+    member_since: c.member_since,
+    last_service_date: c.last_service_date,
+    next_service_date: c.next_service_date,
+    last_contact_date: c.last_contact_date,
+    lead_source: c.lead_source,
+  };
+}
+
+const APPROXIMATE_CUSTOMER_NOTE = 'No customer matched that search exactly. These are sound-alike / close-spelling matches, best first, and may be the wrong people. Show them to the operator with offer_choices and get a confirmed pick before any write or send.';
+// Name columns only, so 20,000 rows stay a light read; a larger book is
+// scanned in id order and the fallback is best-effort past the cap.
+const APPROXIMATE_CANDIDATE_CAP = 20000;
+
+// Rescue path for a dictated, misspelled name. `unsearched` is the main query
+// with its filters and customer scope but no text search. Contract: only the
+// first page (offset 0) gets a fallback, capped at min(limit, 5) rows, so
+// has_more is false and there is no page 2 of guesses. Ranks the candidates by
+// sound and spelling in Node, then reads the best few with the main query's
+// columns. Returns `result` unchanged when nothing is close.
+async function withApproximateCustomers(result, unsearched, { search, limit, offset }) {
+  if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
+  const candidates = await unsearched.clone().clearSelect().clearOrder()
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
+    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+  const ranked = rankNameMatches(search, candidates, { limit: Math.min(limit, MAX_NAME_MATCHES) });
+  if (!ranked.length) return result;
+  const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
+  const rank = new Map(ranked.map((r, i) => [r.id, i]));
+  const customers = rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
+  return {
+    ...result,
+    approximate: true,
+    note: APPROXIMATE_CUSTOMER_NOTE,
+    customers,
+    total_matching: customers.length,
     returned_count: customers.length,
-    has_more: offset + customers.length < Number(matched.count),
-    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
-    total_customers: parseInt(total.count),
+    has_more: false,
+    next_offset: null,
   };
 }
 
@@ -800,6 +873,16 @@ async function getCustomerDetail(customerId) {
     .orderByRaw('scored_at DESC NULLS LAST, created_at DESC')
     .first();
 
+  // The monthly bill by service (plan-rate ledger): monthly_rate is their sum,
+  // so a rate edit must say which line changes (update_customer rate_service).
+  // An unreadable ledger leaves the lines out rather than failing the read.
+  const PlanRateLedger = require('../plan-rate-ledger');
+  const { lineLabel } = require('./rate-change');
+  const monthlyBill = await PlanRateLedger.loadComponents(db, customerId)
+    .then((rows) => [...PlanRateLedger.billLines(rows, customer.monthly_rate)]
+      .map(([family, amount]) => ({ service: family, label: lineLabel(family), monthly: amount })))
+    .catch(() => null);
+
   return {
     profile: {
       id: customer.id,
@@ -815,6 +898,8 @@ async function getCustomerDetail(customerId) {
       tier: customer.waveguard_tier,
       stage: customer.pipeline_stage,
       monthly_rate: parseFloat(customer.monthly_rate || 0),
+      monthly_bill: monthlyBill,
+      billing_mode: customer.billing_mode || null,
       lifetime_revenue: parseFloat(customer.lifetime_revenue || 0),
       active: customer.active,
       member_since: customer.member_since,
@@ -867,8 +952,14 @@ async function getCustomerDetail(customerId) {
 // resolved customers so a date-wide read cannot expose other customers'
 // names, phones, addresses or notes to the model.
 async function getScheduleView(input, readCustomerIds = []) {
-  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
+  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city, customer_id } = input;
   const offset = Math.max(0, Math.trunc(input.offset || 0));
+  // customer_id lands in a uuid-column comparison: a name-like value from the
+  // model would throw a Postgres cast error. Typed error instead (the same
+  // guard query_revenue uses).
+  if (customer_id && !UUID_RE.test(String(customer_id))) {
+    return { error: `customer_id must be a customer UUID, got "${customer_id}". Use query_customers to look the customer up, then retry with their id.` };
+  }
 
   let query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -887,6 +978,10 @@ async function getScheduleView(input, readCustomerIds = []) {
     )
     .whereNotIn('scheduled_services.status', ['cancelled']);
   if (readCustomerIds.length) query = query.whereIn('scheduled_services.customer_id', readCustomerIds);
+  // One customer's schedule (a brief). ANDed with the task scope above, so an
+  // id from outside a customer-scoped task returns nothing rather than
+  // another account's visits.
+  if (customer_id) query = query.where('scheduled_services.customer_id', customer_id);
 
   if (date) {
     query = query.where('scheduled_services.scheduled_date', date);
@@ -914,7 +1009,11 @@ async function getScheduleView(input, readCustomerIds = []) {
       date: a.scheduled_date,
       service_type: a.service_type,
       status: a.status,
-      time_window: a.window_start || null,
+      // The customer's ARRIVAL window (start + 120 min, arrivalWindowRange),
+      // not the stored window_end: that is a scheduling block (a 90-minute
+      // service at 09:00 ends 10:30) and would read as "arriving by 10:30".
+      // A start alone read as an exact arrival time.
+      time_window: a.window_start ? (arrivalWindowRange(a.window_start) || a.window_start) : null,
       route_order: a.route_order,
       customer_id: a.customer_id,
       customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
@@ -929,7 +1028,8 @@ async function getScheduleView(input, readCustomerIds = []) {
     next_offset: fetched.length > 200 ? offset + 200 : null,
     date: date || null,
     coverage: readCustomerIds.length ? 'Requested date range for the task customer only; cancelled appointments excluded'
-      : 'Requested date range; cancelled appointments excluded',
+      : customer_id ? 'Requested date range for the one requested customer only; cancelled appointments excluded'
+        : 'Requested date range; cancelled appointments excluded',
   };
 }
 
@@ -1143,6 +1243,13 @@ const UPDATABLE_FIELDS = {
   monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
 
+// The columns update_customer reports in `changes`: the shared fields plus the
+// billing pair, which reach the write only through billing-mode-change.js
+// (gated and pinned; never through sanitizeUpdates or the bulk tool).
+const CHANGE_REPORT_COLUMNS = {
+  ...UPDATABLE_FIELDS, billing_mode: 'billing_mode', per_application_fee: 'per_application_fee',
+};
+
 function sanitizeUpdates(updates) {
   const clean = {};
   for (const [key, val] of Object.entries(updates)) {
@@ -1174,6 +1281,8 @@ async function createCustomer(input) {
   const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
   const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
+  const phoneProblem = contactPhoneProblem(input.phone);
+  if (phoneProblem) return { error: phoneProblem };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
@@ -1283,10 +1392,17 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null) {
-  const clean = sanitizeUpdates(updates);
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null, billingPin) {
+  // Billing type + per-application fee (GATE_IB_BILLING_MODE_EDIT, owner D5
+  // 2026-10-06): only from a card that pinned them (billing-mode-change.js).
+  const BillingModeChange = require('./billing-mode-change');
+  const billingEdit = BillingModeChange.executorBillingEdit(updates, billingPin);
+  if (billingEdit.error) return billingEdit;
+  const clean = { ...sanitizeUpdates(updates), ...billingEdit.fields };
   Object.assign(clean, normalizeContactRecord(clean));
-  if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
+  // updated_at alone (sanitizeUpdates always stamps it) is no edit; a card
+  // with one recognized field (e.g. billing_mode alone) is one.
+  if (!Object.keys(clean).some((k) => k !== 'updated_at')) return { error: 'No valid fields to update' };
 
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
@@ -1297,8 +1413,18 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
   }
 
+  // A phone being entered now must be a number that can exist; an unchanged
+  // stored number echoed back is not a new write.
+  if (clean.phone && clean.phone !== before.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
+
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
+  // Phone change → drop the shared-phone texting mark (codex #6268 r3); the IB
+  // never sets the mark, so there is no same-write exception here.
+  clearSharedPhoneMarkOnPhoneChange(clean, before);
 
   // Stage change → the FULL canonical lifecycle stamps, identical to the
   // admin route (codex #3282 audit P1 — the old member_since-only handling
@@ -1352,6 +1478,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // transaction's arrow function since its own `decision` const is local to
   // that scope.
   let churnRepairDecision = null;
+  // The rows this write commits, for the tier-upgrade email's own recheck
+  // after commit (tier-upgrade-email.js): the locked row, and that row with
+  // every field the UPDATE below writes.
+  let committedRows = null;
   try {
     await db.transaction(async (trx) => {
       // Membership-affecting writes join the customer-comms serialization
@@ -1370,9 +1500,18 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customerId)],
       );
-      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+      // A billing type / fee edit joins it too (billing-mode-change.js): a
+      // Schedule booking INSERTs visits under this same lock, so taking it
+      // here, before the customer row lock (the order the booking and
+      // customer-comms-lock.js document), fences new visits out until this
+      // transaction ends.
+      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined
+        || Object.keys(billingEdit.fields).length > 0) {
         await lockCustomerComms(trx, customerId);
       }
+      // …then the per-customer annual-prepay lock every term writer takes
+      // (billing-mode-change.js; billing edits only), still before the row.
+      await BillingModeChange.lockAnnualPrepayBeforeRow(trx, customerId, billingEdit.fields);
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
@@ -1386,6 +1525,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.customerNoLongerLive = true;
         throw err;
       }
+      // REBUILD the shared-phone mark clear from the LOCKED row (codex #6268
+      // r4/r8): the pre-lock pass may have derived `false` from a stale phone;
+      // a save that moved the number and marked it since must keep its mark
+      // when this write no longer changes the identity. The IB never sets
+      // the mark itself, so the derived value is dropped and decided again.
+      delete clean.sms_primary_for_shared_phone;
+      clearSharedPhoneMarkOnPhoneChange(clean, lockedBefore);
       if (expectedVersion) {
         // Compare Postgres' full-precision version while holding the same row
         // lock as the domain write; JS Date equality loses microseconds.
@@ -1405,6 +1551,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.previewChanged = true;
         throw err;
       }
+      // The billing fields still read as the card showed, and the customer
+      // page's billing-type rules still hold (no-op without billing fields).
+      await BillingModeChange.assertBillingEditUnderLock(trx, customerId, lockedBefore, billingEdit.fields, billingPin);
       // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage=
       // 'churned' — including a re-save on an already-churned row — so a
       // pre-fix residue row self-heals. Refuses (naming what's still live)
@@ -1457,20 +1606,52 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
+      committedRows = { before: lockedBefore, after: { ...lockedBefore, ...clean } };
       // Coords cleared atomically with the address/move-stamp write — never
       // the former home's lat/lng beside the new address (codex #3565 gh-r46).
       if (addressSubmitted) {
         await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
       }
+      // The card named the one bill line that changes (rate-change.js, owner
+      // 2026-10-06): the bill must still be what the card was built from.
+      // Checked on every pinned rate edit, before the equality shortcut below:
+      // another writer can land the same total by changing a different line
+      // (Codex #6085 r1), and that is not the edit the card showed.
+      const PlanRateLedger = require('../plan-rate-ledger');
+      if (ratePin && clean.monthly_rate !== undefined) {
+        const { ledgerPin } = require('./rate-change');
+        const components = await PlanRateLedger.loadComponents(trx, customerId);
+        if (ledgerPin(components, lockedBefore?.monthly_rate) !== ratePin.ledgerPin) {
+          const err = new Error("This customer's monthly bill changed since the card was shown — nothing was updated. Ask again for a fresh card.");
+          err.previewChanged = true;
+          throw err;
+        }
+      }
       if (clean.monthly_rate !== undefined
         && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
           !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
-        // Only an ACTUAL rate change invalidates per-family attribution
-        // (codex #3245 r2/r6) — resetting on a same-value write would
-        // replace seeded components with an unattributed blob. Gate-aware
-        // error policy lives in the helper.
-        await require('../plan-rate-ledger')
-          .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+        // Only an ACTUAL rate change touches per-family attribution
+        // (codex #3245 r2/r6); then only the named line moves. Gate-aware
+        // error policy lives in the ledger helpers.
+        if (ratePin && ratePin.family === require('./rate-change').UNCHANGED) {
+          // Unreachable while the pin holds (the pinned scalar equals the
+          // submitted one); kept so an UNCHANGED card can never reset lines.
+          const err = new Error("This customer's monthly bill changed since the card was shown — nothing was updated. Ask again for a fresh card.");
+          err.previewChanged = true;
+          throw err;
+        } else if (ratePin) {
+          if (ratePin.family === PlanRateLedger.WHOLE_BILL) {
+            await PlanRateLedger.syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+          } else {
+            await PlanRateLedger.setLineForScalarWrite(trx, customerId, {
+              familyKey: ratePin.family, previousScalar: lockedBefore?.monthly_rate, newScalar: clean.monthly_rate,
+            }, { source: 'ib_update' });
+          }
+        } else {
+          // No rate pin: a card from before this check, or a first rate on a
+          // customer with no bill — one line, as before.
+          await PlanRateLedger.syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+        }
       }
       if (addressSubmitted) {
         await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
@@ -1546,16 +1727,27 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
   const changes = {};
   for (const key of Object.keys(updates)) {
-    const dbCol = UPDATABLE_FIELDS[key];
+    const dbCol = CHANGE_REPORT_COLUMNS[key];
     if (dbCol && String(before[dbCol]) !== String(after[dbCol])) {
       changes[key] = { from: before[dbCol], to: after[dbCol] };
     }
   }
+  // Server-derived effect the card disclosed (codex #6268 r8): the phone
+  // change cleared this customer's shared-phone texting mark.
+  const sharedPhoneMarkCleared = clean.sms_primary_for_shared_phone === false && committedRows?.before?.sms_primary_for_shared_phone === true;
+  if (sharedPhoneMarkCleared) changes.sms_primary_for_shared_phone = { from: true, to: false };
 
   // notes maps to free-text crm_notes (gate codes, access details) — redact
   // it from logs while still persisting the value.
   const logChanges = changes.notes ? { ...changes, notes: '[redacted]' } : changes;
   logger.info(`[intelligence-bar] Updated customer ${customerId}:`, logChanges);
+
+  // Tier-upgrade email the card promised (GATE_IB_TIER_UPGRADE_EMAIL): sent
+  // after commit, fire-and-forget, only when the committed rows still pass the
+  // rules the card was built on. null = this card promised no email.
+  const tierEmailResult = tierEmailPin
+    ? require('./tier-upgrade-email').afterCommit({ ...tierEmailPin, customerId, ...committedRows })
+    : null;
 
   if (impliedLaneStamp) {
     // Post-commit review card for the auto-stamped lane — the shape a
@@ -1579,6 +1771,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
     customer_id: customerId,
     customer_name: `${after.first_name} ${after.last_name}`,
     changes,
+    ...(sharedPhoneMarkCleared ? { shared_phone_mark_cleared: true, shared_phone_mark_note: 'The phone change cleared this customer\'s shared-phone texting mark; texts from the shared phone go unlinked until staff mark an account again.' } : {}),
     // Disclosed commit effect (#3140): this write made the customer an
     // implied monthly member, so the lane inference was stamped explicitly.
     ...(impliedLaneStamp ? {
@@ -1619,20 +1812,51 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       billing_wound_down_fields: ['active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at'],
       message: 'Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.',
     }) : {}),
+    // The card promised a tier-upgrade email: 'sending', or 'not_sent' with a
+    // `warning` the card shows, so the operator never assumes an email that
+    // did not go. The record update itself stands either way.
+    ...tierEmailResult,
   };
 }
 
+
+// A bulk monthly_rate is one number written as each customer's WHOLE monthly
+// bill; on a customer who already has a bill (a positive rate or any ledger
+// row, a paused service's plan_hold marker included — rate-change.js
+// customersWithBill) it would replace every service line (owner 2026-10-06).
+// Such rows are skipped and reported.
+const BULK_RATE_BILLED_ERROR = 'already had a monthly bill, so the bulk rate was not applied (change it with update_customer and rate_service)';
+function bulkRateChanges(row, newRate) {
+  return Math.round((Number(row?.monthly_rate) || 0) * 100) !== Math.round((Number(newRate) || 0) * 100);
+}
 
 async function bulkUpdateCustomers(customerIds, updates) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
   // when phone is part of the update).
-  if (clean.phone !== undefined) clean.line_type = null;
+  if (clean.phone !== undefined) {
+    clean.line_type = null;
+    // ...and the shared-phone texting mark, chosen for the old number — but
+    // only on rows whose number IDENTITY changes (codex #6268 r3/r8): a row
+    // already holding this number keeps its mark. Decided per row inside the
+    // UPDATE against the row's current phone, since there is no per-row
+    // before-state here.
+    const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+    clean.sms_primary_for_shared_phone = db.raw(
+      "CASE WHEN RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN sms_primary_for_shared_phone ELSE false END",
+      [newKey]);
+  }
 
   // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
   // per row, since there's no per-row before-state) — codex #3282 audit P1:
@@ -1700,7 +1924,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared = 0 } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
@@ -1727,12 +1951,25 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .whereIn('id', customerIds)
         .forUpdate()
         .whereNull('deleted_at')
-        .select('id', 'first_name', 'last_name', 'pipeline_stage', 'active', 'autopay_enabled', 'next_charge_date');
+        .select('id', 'first_name', 'last_name', 'pipeline_stage', 'active', 'autopay_enabled', 'next_charge_date', 'monthly_rate');
       const liveIds = new Set(liveRows.map((r) => String(r.id)));
       const skipped = customerIds
         .filter((cid) => !liveIds.has(String(cid)))
         .map((cid) => ({ customer_id: String(cid) }));
       let targetIds = [...liveIds];
+      // A bulk rate is a first rate only (owner 2026-10-06): a customer who
+      // has a monthly bill by commit time is skipped and reported, never
+      // overwritten — the bill would lose every service line. Decided BEFORE
+      // the churn guard below, so a skipped row never has its billing wound
+      // down by a write that then does not update it (Codex #6085 r1).
+      if (clean.monthly_rate !== undefined) {
+        const withBill = await require('./rate-change').customersWithBill(trx, liveRows);
+        const billedIds = new Set(liveRows.filter((r) => withBill.has(String(r.id)) && bulkRateChanges(r, clean.monthly_rate)).map((r) => String(r.id)));
+        if (billedIds.size) {
+          targetIds = targetIds.filter((id) => !billedIds.has(String(id)));
+          skipped.push(...[...billedIds].map((cid) => ({ customer_id: cid, error: BULK_RATE_BILLED_ERROR, rate_blocked: true })));
+        }
+      }
       // ADMIN-BUG-R10 (round 3): a bulk stage move into Churned used to
       // CASE-stamp only churned_at/churn_reason for every targeted row,
       // leaving active/autopay/next_charge_date live — the same money leak
@@ -1800,6 +2037,20 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
+      // Receipt for the shared-phone mark clear the card disclosed (codex
+      // #6268 r9): rows marked primary whose number identity this write
+      // changes. Counted under the same statement's lock set, before the CASE
+      // in `clean` clears them.
+      let sharedPhoneMarksCleared = 0;
+      if (clean.phone !== undefined) {
+        const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+        const marked = await trx('customers')
+          .whereIn('id', targetIds)
+          .where({ sms_primary_for_shared_phone: true })
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) <> ?", [newKey])
+          .count({ n: '*' });
+        sharedPhoneMarksCleared = Number(marked?.[0]?.n || 0);
+      }
       const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
@@ -1810,12 +2061,18 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
     if (!count && skippedRows.length) {
-      return { error: 'None of the approved customers could be updated (deleted/merged since the card was pending, or still billing/scheduled for a churn move) — nothing was updated.', skipped_customers: skippedRows };
+      const rateBlocked = skippedRows.filter((r) => r.rate_blocked).length;
+      return {
+        error: rateBlocked === skippedRows.length
+          ? `None of the approved customers were updated: every one ${BULK_RATE_BILLED_ERROR}.`
+          : `None of the approved customers could be updated (deleted/merged since the card was pending, still billing/scheduled for a churn move${rateBlocked ? `, or ${rateBlocked} ${BULK_RATE_BILLED_ERROR}` : ''}) — nothing was updated.`,
+        skipped_customers: skippedRows,
+      };
     }
     // Codex #4715 r1 P2: the completed card renders `message`. Codex #4715
     // r2 P2: on a PARTIAL update the card renders `warning` FIRST and hides
@@ -1835,6 +2092,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
+      ...(sharedPhoneMarksCleared ? { shared_phone_marks_cleared: sharedPhoneMarksCleared, shared_phone_mark_note: `${sharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
       ...bulkLaneStampResult(laneStampIds),
       // Skipped rows surface on the card, never a silent Done (same
       // contract as the per-row address/email path; GH r9 P1). Each skipped
@@ -1849,9 +2107,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
         skipped_customers: skippedRows,
         warning: (() => {
           const churnBlocked = skippedRows.filter((r) => r.churn_blocked);
-          const other = skippedRows.length - churnBlocked.length;
+          const rateBlocked = skippedRows.filter((r) => r.rate_blocked);
+          const other = skippedRows.length - churnBlocked.length - rateBlocked.length;
           const parts = [];
           if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((r) => r.error).join('; ')})`);
+          if (rateBlocked.length) parts.push(`${rateBlocked.length} ${BULK_RATE_BILLED_ERROR}`);
           if (other) parts.push(`${other} no longer live`);
           return `${skippedRows.length} approved customer(s) were NOT updated — ${parts.join('; ')}.${woundDownMessage ? ` ${woundDownMessage}` : ''}`;
         })(),
@@ -1882,6 +2142,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
+  // Receipt for the shared-phone mark clear the card disclosed (codex #6268
+  // r13): rows marked primary whose number identity this write changes.
+  let perRowSharedPhoneMarksCleared = 0;
   const perRowLaneStampIds = [];
   let churnWoundDownCount = 0;
   // Codex #4715 r4 P2: rows where churnGuardOrRepair only repaired the
@@ -1905,6 +2168,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     }
     let emailSync = null;
     let rowLaneStamp = null;
+    let rowMarkCleared = false;
     let rowRailsRepairedOnly = false;
     try {
       await db.transaction(async (trx) => {
@@ -1928,6 +2192,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
         if (!lockedBefore || lockedBefore.deleted_at) {
           const err = new Error('customer_no_longer_live');
           err.customerNoLongerLive = true;
+          throw err;
+        }
+        if (clean.monthly_rate !== undefined && bulkRateChanges(lockedBefore, clean.monthly_rate)
+          && (await require('./rate-change').customersWithBill(trx, [lockedBefore])).size) {
+          const err = new Error(BULK_RATE_BILLED_ERROR);
+          err.rateBlocked = true;
           throw err;
         }
         const lockedMerged = { ...lockedBefore, ...clean };
@@ -1965,6 +2235,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
         await trx('customers').where('id', customerId).update(
           rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
         );
+        // Flag only; counted after the transaction commits (codex #6268 r14).
+        rowMarkCleared = clean.phone !== undefined && lockedBefore.sms_primary_for_shared_phone === true
+          && String(lockedBefore.phone || '').replace(/\D/g, '').slice(-10) !== String(clean.phone || '').replace(/\D/g, '').slice(-10);
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
             !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -1988,6 +2261,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
     } catch (e) {
       if (e && e.customerNoLongerLive) {
         errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+        continue;
+      }
+      if (e && e.rateBlocked) {
+        errors.push({ customer_id: customerId, error: e.message, rate_blocked: true });
         continue;
       }
       if (e && e.churnBlocked) {
@@ -2034,6 +2311,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       }).catch(() => null);
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
+    if (rowMarkCleared) perRowSharedPhoneMarksCleared += 1;
     // Reaching here means the per-row transaction committed — a blocked
     // churnGuardForRow throws churnBlocked above and lands in `errors`
     // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,
@@ -2062,6 +2340,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     updated_count: count,
     fields_updated: Object.keys(updates),
     ...bulkLaneStampResult(perRowLaneStampIds),
+    ...(perRowSharedPhoneMarksCleared ? { shared_phone_marks_cleared: perRowSharedPhoneMarksCleared, shared_phone_mark_note: `${perRowSharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
     ...(errors.length ? {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never
@@ -2073,9 +2352,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // card hides `message` whenever `warning` is also present.
       warning: (() => {
         const churnBlocked = errors.filter((e) => e.churn_blocked);
-        const other = errors.length - churnBlocked.length;
+        const rateBlocked = errors.filter((e) => e.rate_blocked);
+        const other = errors.length - churnBlocked.length - rateBlocked.length;
         const parts = [];
         if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((e) => e.error).join('; ')})`);
+        if (rateBlocked.length) parts.push(`${rateBlocked.length} ${BULK_RATE_BILLED_ERROR}`);
         if (other) parts.push(`${other} no longer resolved at commit`);
         return `${errors.length} of ${count + errors.length} customers were NOT updated — ${parts.join('; ')}; ${count} updated.${woundDownMessage ? ` ${woundDownMessage}` : ''}`;
       })(),
@@ -2144,14 +2425,116 @@ function sanitizePropertyAccess(input) {
   return clean;
 }
 
+// Free-text fields keep their history: a new line is ADDED with a [bar] tag,
+// never written over what is there (2026-10-05: a bar write replaced a
+// customer's access notes and lost where his gate code came from).
+// Pet details, the pet plan and special instructions are current state, not
+// history: they are replaced, as the tool description says.
+const PROPERTY_ACCESS_NOTE_FIELDS = ['parking_notes', 'side_gate_access', 'access_notes'];
+const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() === String(b || '').replace(/\s+/g, '').toLowerCase();
+// side_gate_access is varchar(200); the other note fields are text.
+const PROPERTY_ACCESS_NOTE_LIMITS = { side_gate_access: 200 };
+const noteWords = (text) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+// A note is already there only when it is the current (first) line, its
+// "[bar]" tag aside: an older line that becomes current again is added back
+// on top, and "Park on street" is new next to "Do not park on street".
+function noteHas(had, add) {
+  // Only this tool's own tag is set aside: "[DO NOT] Park on street" keeps its words.
+  const plain = (line) => noteWords(String(line || '').replace(/^\s*\[bar(?: \d{4}-\d{2}-\d{2})?\]\s*/i, '')).replace(/[.\s]+$/, '');
+  return plain(String(had || '').split('\n')[0]) === plain(add);
+}
+
+// Is this code the community gate code the stop card already shows? Only the
+// saved neighborhood code (this call's, else the one on file) counts: it shows
+// on every stop. Directory codes are not counted: whether one reaches a stop
+// depends on the visit (its home, its address, the directory gate).
+const communityCodeShown = (neighborhoodCode, code) => !!code && !!neighborhoodCode && sameCode(neighborhoodCode, code);
+
+// The gate code part of the plan (changes `updates` and `kept` in place): a
+// property code that is the community code is not saved, and one on file is
+// cleared.
+function planGateCodes(updates, current, kept) {
+  const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
+  if (updates.property_gate_code !== undefined && communityCodeShown(neighborhoodCode, updates.property_gate_code)) {
+    delete updates.property_gate_code;
+    kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
+  }
+  // A property code on file that is the community code shows twice on the
+  // stop card (as the gate and as the yard gate): clear it.
+  // The old community code counts only when this call REPLACES it with
+  // another code (A to B leaves no A behind as a yard gate). Clearing the
+  // community code alone keeps the property code: then it is the only code.
+  if (updates.property_gate_code === undefined && current.property_gate_code
+    && (communityCodeShown(neighborhoodCode, current.property_gate_code)
+      || (updates.neighborhood_gate_code && communityCodeShown(current.neighborhood_gate_code, current.property_gate_code)))) {
+    updates.property_gate_code = null;
+    kept.push('property_gate_code: cleared; the code on file there is the community gate code');
+  }
+}
+
+// What the write will actually do against the row as it is now: notes are
+// added as a new first line (or skipped when the same line is there), and a
+// "property gate" code that is the community gate code stays off the property
+// gate field; a property code already saved that is the community code is
+// cleared. Returns the final updates and a plain list of what was kept,
+// skipped or cleared, for the preview and the result.
+async function planPropertyAccess(conn, customerId, requested, { lock = false } = {}) {
+  const q = conn('property_preferences').where({ customer_id: customerId });
+  const current = (await (lock ? q.forUpdate() : q).first()) || {};
+  const updates = { ...requested };
+  const kept = [];
+  // No date in the tag: the confirm step re-runs this plan and compares, so a
+  // clock value would void a card confirmed after midnight.
+  const stamp = '[bar]';
+  for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
+    if (updates[field] === undefined) continue;
+    const had = String(current[field] || '').trim();
+    const add = updates[field];
+    // An empty value is an explicit clear of the field.
+    if (!add) continue;
+    if (noteHas(had, add)) { delete updates[field]; kept.push(`${field}: already holds this, left as is`); continue; }
+    if (!had) continue;
+    // Newest line first: the job card cuts these notes to their first
+    // 80-120 characters, so the latest instruction must lead.
+    const joined = `${stamp} ${add}\n${had}`;
+    if (PROPERTY_ACCESS_NOTE_LIMITS[field] && joined.length > PROPERTY_ACCESS_NOTE_LIMITS[field]) {
+      delete updates[field];
+      kept.push(`${field}: not saved; with the earlier note it passes ${PROPERTY_ACCESS_NOTE_LIMITS[field]} characters. Shorten it, or edit the profile.`);
+      continue;
+    }
+    updates[field] = joined;
+    kept.push(`${field}: added as a new first line; the earlier notes stay below`);
+  }
+  planGateCodes(updates, current, kept);
+  return { updates, kept, current };
+}
+
+// A keyed fingerprint of the plan AND of the stored values it replaces (keys
+// in any order). It is keyed with the server secret, so the model, which sees
+// the preview, cannot test guesses of a stored code against it; and it covers
+// the before-values, so a field another writer changed after the card was
+// shown makes the confirmed run refuse instead of overwriting it.
+const PLAN_KEY = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
+const planHash = (updates, current = {}) => require('crypto').createHmac('sha256', PLAN_KEY)
+  .update(JSON.stringify(Object.keys(updates || {}).sort().map((k) => [k, updates[k] ?? null, current[k] ?? null])))
+  .digest('hex');
+// What the preview shows: a note field as the line it adds, not the whole note.
+function previewOfPlan(updates, requested) {
+  const out = { ...updates };
+  for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
+    if (out[field] && out[field] !== requested[field]) out[field] = `(new first line) ${requested[field]}`;
+  }
+  return out;
+}
+
 // Two-step write (issue #1568): no mutation without confirmed === true, which
 // only /confirm-action attaches server-side. Registered in write-gates.js.
 async function updatePropertyAccess(input) {
   const customerId = input.customer_id;
   if (!customerId) return { error: 'customer_id is required' };
 
-  const updates = sanitizePropertyAccess(input);
-  if (Object.keys(updates).length === 0) {
+  const requested = sanitizePropertyAccess(input);
+  if (Object.keys(requested).length === 0) {
     return { error: 'No valid property-access fields to update' };
   }
 
@@ -2161,31 +2544,62 @@ async function updatePropertyAccess(input) {
     : null;
 
   if (input.confirmed !== true) {
+    const plan = await planPropertyAccess(db, customerId, requested);
     return {
       preview: true,
       customer_id: customerId,
       customer_name: customerName,
-      would_update: updates,
-      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. After the operator approves, this commits via the confirmation card.',
+      would_update: previewOfPlan(plan.updates, requested),
+      plan_hash: planHash(plan.updates, plan.current),
+      ...(plan.kept.length ? { kept: plan.kept } : {}),
+      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new first line, never written over. After the operator approves, this commits via the confirmation card.',
     };
   }
 
   if (!customer) return { error: 'Customer not found' };
 
-  const now = new Date();
-  await db('property_preferences')
-    .insert({ customer_id: customerId, ...updates, updated_at: now })
-    .onConflict('customer_id')
-    .merge({ ...updates, updated_at: now });
+  let result;
+  try {
+    result = await db.transaction(async (trx) => {
+      // The same customer preference lock every preference writer holds.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
+      // The card the operator approved pinned its plan; a different plan under
+      // the lock (another writer got in between) is refused, not done.
+      if (input._ib_property_plan_hash && input._ib_property_plan_hash !== planHash(plan.updates, plan.current)) {
+        const err = new Error('Property access changed since this action was prepared. Review a fresh proposal.');
+        err.previewChanged = true;
+        throw err;
+      }
+      if (Object.keys(plan.updates).length) {
+        // Stamped by the database clock as the row is written (after any lock
+        // or insert-conflict wait): readers compare it with their own
+        // snapshot time.
+        const now = trx.raw('clock_timestamp()');
+        await trx('property_preferences')
+          .insert({ customer_id: customerId, ...plan.updates, updated_at: now })
+          .onConflict('customer_id')
+          .merge({ ...plan.updates, updated_at: now });
+      }
+      return { updatedFields: Object.keys(plan.updates), kept: plan.kept };
+    });
+  } catch (e) {
+    if (e?.previewChanged) return { error: e.message, preview_changed: true };
+    throw e;
+  }
+  const { updatedFields, kept } = result;
 
   // Log only which fields changed — codes/notes are sensitive.
-  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${Object.keys(updates).join(', ')}`);
+  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${updatedFields.join(', ') || 'nothing (already on file)'}`);
 
   return {
     success: true,
     customer_id: customerId,
     customer_name: customerName,
-    updated_fields: Object.keys(updates),
+    updated_fields: updatedFields,
+    // Owner-direct writes show no preview: this is the only account of what
+    // was added, skipped or not saved.
+    ...(kept.length ? { kept } : {}),
   };
 }
 
@@ -2343,7 +2757,41 @@ const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 // window start. Returns { start } (null start when no time was given) or
 // { error } for garbage input, so callers return a clear tool error instead
 // of a Postgres time-cast error.
-function parseTimeWindowStart(timeWindow) {
+// The refusal for a start that is not on the hour (owner rule — every creator
+// enforces it; Codex #3109 r33 flagged this tool as the bypass). Rejects
+// rather than rounding, and names the nearest valid starts ("Visits start on
+// the hour. Use 2:00 PM or 3:00 PM.") so the model can re-ask. Each candidate
+// (the hour before and the hour after) is checked against the shared admin
+// window rule with the flat-60 duration, so a 7:30 PM request names only
+// 7:00 PM (8:00 PM would end past the day end) and an 8:30 PM request, with
+// no valid neighbor, gets the rule's own refusal as invalid_appointment_window
+// (Codex r1 on #6023, P2). A reschedule passes the visit's preserved
+// duration, so a 90-minute visit asked for 6:30 PM is offered 6:00 PM only
+// (7:00–8:30 ends past the day end; Codex r2 on #6023, P2). The codes are stable: the proposal returns them
+// with no card (W5-dev-03), and the executor refuses the same start the same
+// way if no card was ever made.
+function offHourRefusal(hour, durationMinutes = 60) {
+  const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+  const candidates = hour + 1 > 23 ? [hour] : [hour, hour + 1];
+  const valid = [];
+  let firstRefusal = null;
+  for (const h of candidates) {
+    const start = `${String(h).padStart(2, '0')}:00`;
+    const windowEnd = deriveWindowEnd(start, durationMinutes);
+    try {
+      if (!windowEnd) throw Object.assign(new Error('That window would cross midnight — pick an earlier start.'), { status: 422 });
+      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes });
+      valid.push(hour12(h));
+    } catch (err) {
+      if (err?.status !== 422) throw err;
+      if (!firstRefusal) firstRefusal = err.message;
+    }
+  }
+  if (!valid.length) return { error: firstRefusal, code: 'invalid_appointment_window' };
+  return { error: `Visits start on the hour. Use ${valid.join(' or ')}.`, code: 'window_not_on_the_hour' };
+}
+
+function parseTimeWindowStart(timeWindow, durationMinutes = 60) {
   if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
   const raw = String(timeWindow).trim().toLowerCase();
   if (raw === 'morning') return { start: '08:00' };
@@ -2359,13 +2807,8 @@ function parseTimeWindowStart(timeWindow) {
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
-  // Appointment windows start ON THE HOUR (owner rule — every creator
-  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
-  // rather than silently rounding: the operator asked for a specific time
-  // and the model can re-ask with the corrected value.
-  if (minute !== 0) {
-    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
-  }
+  // Appointment windows start ON THE HOUR; see offHourRefusal.
+  if (minute !== 0) return offHourRefusal(hour, durationMinutes);
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
@@ -2615,19 +3058,47 @@ function resolveBookingCatalogRow(services, serviceType) {
   return { row: null };
 }
 
+// The exact resolver above first; only when it finds nothing, a close or
+// colloquial name ("a pre-slab termite treatment") resolves to ONE catalog
+// service, or to several (returned as `ambiguous`, so the bar asks the owner
+// which). A close match is marked on the row it returns (closeMatch) so the
+// caller books the exact catalog name. Free visit types stay exact-only.
+function resolveBookingCatalogRowWithClose(services, serviceType) {
+  const exact = resolveBookingCatalogRow(services, serviceType);
+  if (exact.row || exact.ambiguous || isAlwaysFreeServiceType(serviceType)) return exact;
+  const close = resolveCloseCatalogService(services, serviceType);
+  if (close.candidates) return { ambiguous: close.candidates };
+  return close.row ? { row: { ...close.row, closeMatch: true } } : exact;
+}
+
+// The service_type to store and show: the catalog name when the operator's
+// wording was only a close match, else the wording as given.
+function bookedServiceTypeFor(booking, serviceType) {
+  return booking?.catalogRow?.closeMatch ? booking.catalogRow.name : serviceType;
+}
+
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
   const services = await conn('services').where({ is_active: true })
-    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
-  const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'frequency');
+  const match = resolveBookingCatalogRowWithClose(Array.isArray(services) ? services : [], serviceType);
   if (match.ambiguous) {
     const names = match.ambiguous.map((r) => r.name).join(', ');
     return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
   }
   const catalogRow = match.row;
+  // Every classification below reads the RESOLVED catalog name (a close phrase
+  // like "trap follow" is the free "Rodent Trapping Follow-Up Visit"), so the
+  // proposal, the executor and the locked recheck all see the same service.
+  const bookedType = bookedServiceTypeFor({ catalogRow }, serviceType);
+  // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
+  // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
+  if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
+  }
   const stated = statedPrice !== undefined && statedPrice !== null;
-  if (isAlwaysFreeServiceType(serviceType)) {
+  if (isAlwaysFreeServiceType(bookedType)) {
     if (stated) {
-      return { error: `"${serviceType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
+      return { error: `"${bookedType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
     }
     return { price: null, source: null, catalogRow, pricing: null };
   }
@@ -2715,7 +3186,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     : false;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
-    serviceType,
+    serviceType: bookedType,
     serviceId: catalogRow.id,
     primaryLinePrice: stated ? statedPrice : catalogDefault,
     ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.row.id } } : {}),
@@ -2807,9 +3278,10 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
   // customer, cut an invoice (or be dues-covered, or free by design)? Asked
   // for ONE visit with the stamps this insert writes: a priced booking
   // carries create_invoice_on_complete (the Schedule modal's own default), an
-  // unpriced one carries neither, and no callback marker or typed one-time
-  // profile (that mint trigger needs a price, and a priced booking already
-  // mints through the create-invoice stamp).
+  // unpriced one carries neither, and no typed one-time profile (that mint
+  // trigger needs a price, and a priced booking already mints through the
+  // create-invoice stamp). The insert's callback marker is not passed: it
+  // is set only on a re-service row, which the gate already frees by name.
   const verdict = recurringWithoutBillableAmount({
     isRecurring: true,
     recurringFloorPrice: priced ? price : 0,
@@ -2824,24 +3296,69 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
   return `This visit needs a price: "${serviceType}" has no catalog price, and nothing in this customer's billing would invoice it. Ask the user for the visit price and propose the booking again with price${orFee}. Nothing was booked.`;
 }
 
+// Why the customer booked a re-service (scheduled_services.customer_request,
+// migration 20260927100000): the operator's words for it, saved exactly as the
+// Schedule screen's "Customer's words" box saves typed words — trimmed, capped,
+// source 'office' (never a quote; the operator relayed it). Same gate and same
+// two catalog rows as that box (reservice-office-request.js). Returns
+// { text } to stamp, null when no reason was given, or { error } when a reason
+// was given for a visit that cannot carry one — refused rather than dropped,
+// so words the card showed are never silently lost.
+function ibBookingCustomerRequest(rawRequest, catalogRow) {
+  const reserviceOfficeRequest = require('../reservice-office-request');
+  const text = reserviceOfficeRequest.cleanRequestText(rawRequest);
+  if (!text) return null;
+  const { isEnabled } = require('../../config/feature-gates');
+  if (!isEnabled('reserviceOfficeRequest')
+    || !reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
+    return { error: 'customer_request is saved only on a Pest Control Re-Service or Lawn Care Re-Service visit — nothing was booked. Propose the booking again with the reason in notes instead, or without it.' };
+  }
+  return { text };
+}
+
 // Proposal-time twin for the confirm-card route: the same price and billing
 // verdict the executor asks at commit, so the card shows the price the
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice) {
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow) {
+  // The window verdict comes first and reads nothing (W5-dev-03): a start the
+  // executor would refuse gets a coded refusal here, never a card.
+  const windowRefusal = ibBookingWindowRefusal(timeWindow);
+  if (windowRefusal) return windowRefusal;
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
   if (booking.error) return { error: booking.error };
-  const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
+  const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
+  const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
+  if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
+  // A STATED price shows the catalog price for this customer beside it when
+  // the two differ (display only). Same helper, same inputs, no stated price;
+  // best effort: any failure just leaves the card without the comparison.
+  let catalogPrice = null;
+  if (booking.source === 'stated') {
+    try {
+      const catalog = await ibBookingPricing({ customer, serviceType: bookedServiceTypeFor(booking, serviceType) });
+      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
+    } catch (err) {
+      logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
+    }
+  }
   return {
     price: booking.price,
     source: booking.source,
+    catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
+    // What the visit is booked as: the exact catalog name when the operator's
+    // words were a close match (the route pins it into the call).
+    bookedServiceType: bookedServiceTypeFor(booking, serviceType),
+    // The reason exactly as the insert will save it (trimmed, capped), so
+    // the card shows the saved words; null when none was given.
+    customerRequest: request?.text || null,
     listPrice: discount ? Number(booking.pricing.primaryBase) : null,
     discountName: discount?.discountName || null,
     discountPercent: discount && discount.discountType === 'percentage' ? Number(discount.discountAmount) : null,
@@ -2856,15 +3373,118 @@ async function ibBookingProposal(customerId, serviceType, statedPrice) {
   };
 }
 
+// Owner 2026-10-05: an overlap that is NEW since the card was shown (another
+// visit took the slot between proposal and Confirm) books nothing, sends
+// nothing, and refuses with preview_changed so the operator sees a fresh
+// card. An overlap that already existed when the card was built keeps the
+// 2026-08-25 / #3486 rule (staff saves never block on a conflict: warn).
+const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing was booked and no text was sent. Confirm the new card to book it anyway, or pick another time.';
+
+// Proposal-time twin of the locked probe in createAppointment: does another
+// visit already overlap this date and window? The route pins the answer as
+// _booking_overlap so the executor can tell an overlap that already existed
+// from one that is new. Same date/window derivation and the same
+// probeSlotOverlap as the executor; the read is not fenced (a pin, not a
+// guard — the executor re-probes under the occupancy lock). Returns
+// true/false, or null when there is no timed window to probe (the executor
+// probes nothing then either). A read error THROWS so the proposal fails
+// closed; an invalid date or window returns null (the executor refuses it).
+async function ibBookingOverlapRows(scheduledDate, timeWindow) {
+  const dateStr = validScheduleDate(scheduledDate);
+  if (!dateStr) return null;
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error || !win.start) return null;
+  let windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return null;
+  try {
+    ({ window_end: windowEnd } = assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 }));
+  } catch (err) {
+    if (err?.status === 422) return null;
+    throw err;
+  }
+  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+}
+
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  return overlap == null ? null : overlap.length > 0;
+}
+
+// "9:00 AM" from a stored "09:00:00" (card text only).
+function clockLabel(hhmmss) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmmss || ''));
+  if (!m) return null;
+  const h = Number(m[1]);
+  return `${h % 12 || 12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// The facts the booking card shows about each overlapping visit: customer
+// name, service, date and window, with the visit id. ONE function builds them
+// for both the proposal (the card line and the pin) and the executor (the
+// commit-time comparison), so the pin and the check can never drift apart.
+// `fact` is the single string that is pinned and compared.
+async function bookingOverlapFacts(conn, rows, dateStr) {
+  const ids = (rows || []).map((r) => r.id).filter(Boolean);
+  const names = ids.length
+    ? await conn('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereIn('scheduled_services.id', ids)
+      .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
+    : [];
+  const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
+  return (rows || []).map((r) => {
+    const start = clockLabel(r.window_start);
+    const end = clockLabel(r.window_end);
+    const id = r.id ? String(r.id) : null;
+    const customer = nameById.get(String(r.id)) || null;
+    const service = r.service_type || null;
+    const window = start && end ? `${start}-${end}` : (start || null);
+    return { id, customer, service, window, fact: [id, customer, service, dateStr, window].map((v) => v ?? '').join('|') };
+  });
+}
+
+// Who the overlapping visit(s) are, for the booking card's line, plus the
+// pinned `fact` of each (the executor refuses an overlapping visit whose fact
+// is not in the pinned set). Every overlapping visit is returned; [] when
+// there is no overlap or no timed window.
+async function ibBookingOverlapWho(scheduledDate, timeWindow) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  if (!rows || !rows.length) return [];
+  return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
+}
+
+// Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
+// parse (parseTimeWindowStart) and the SAME shared admin window rule
+// (assertAdminAppointmentWindow) the executor runs, asked before a card
+// exists so a start the executor would refuse (a :30 start) is a refusal
+// with a code, not a card whose Confirm saves nothing. Returns null when the
+// window is acceptable or absent, else { error, code }.
+function ibBookingWindowRefusal(timeWindow) {
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error) return { error: win.error, code: win.code || 'invalid_appointment_window' };
+  if (!win.start) return null;
+  const windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return { error: 'That window would cross midnight — pick an earlier start.', code: 'invalid_appointment_window' };
+  try {
+    assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 });
+  } catch (err) {
+    if (err?.status === 422) return { error: err.message, code: 'invalid_appointment_window' };
+    throw err;
+  }
+  return null;
+}
+
 async function createAppointment(input, actionContext = {}) {
-  const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
+  const { customer_id, scheduled_date, technician_name, time_window, notes } = input;
+  // Reassigned once the catalog resolves a close name to its exact one.
+  let { service_type } = input;
 
   const dateStr = validScheduleDate(scheduled_date);
   if (!dateStr) {
     return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
   }
   const win = parseTimeWindowStart(time_window);
-  if (win.error) return { error: win.error };
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   // Flat-60 convention (admin-schedule: every service call defaults to 60
   // minutes) so overlap checks see a real block, not an open-ended start.
@@ -2890,14 +3510,6 @@ async function createAppointment(input, actionContext = {}) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
-  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
-  // already on that plan — the shared admin write gate (codex r13 on #4786).
-  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
-    customerId: customer_id, serviceTypes: [service_type],
-  });
-  if (notHeldRetired.length) {
-    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
-  }
   // Same live-customer bar as update_customer (GH r9 P1): a profile
   // merged/soft-deleted while the card was pending must not receive a new
   // appointment after its records were repointed.
@@ -2911,6 +3523,17 @@ async function createAppointment(input, actionContext = {}) {
   // (never proposed through a card) may only book unpriced.
   const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
   if (booking.error) return { error: booking.error };
+  // A close or colloquial name books as the exact catalog name it resolved to.
+  service_type = bookedServiceTypeFor(booking, service_type);
+  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
+  // already on that plan — the shared admin write gate (codex r13 on #4786).
+  // Asked on the resolved name, so a close name cannot slip past it.
+  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
+    customerId: customer_id, serviceTypes: [service_type],
+  });
+  if (notHeldRetired.length) {
+    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
+  }
   const approvedPrice = input._booking_price === undefined ? null : input._booking_price;
   const approvedServiceId = input._booking_service_id === undefined
     ? (booking.catalogRow?.id || null) : input._booking_service_id;
@@ -2934,6 +3557,11 @@ async function createAppointment(input, actionContext = {}) {
   // transaction below, since this read is unlocked.
   const billingRefusal = ibBookingBillingRefusal(customer, service_type, booking.price);
   if (billingRefusal) return { error: billingRefusal };
+  // Why the customer booked (re-service rows only). The catalog row is the
+  // one the price check above just pinned against the card, and the locked
+  // re-read below refuses if it changed, so this verdict holds at the insert.
+  const customerRequest = ibBookingCustomerRequest(input.customer_request, booking.catalogRow);
+  if (customerRequest?.error) return { error: customerRequest.error };
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
   // unordered ILIKE silently picked an arbitrary tech on multiple matches,
@@ -2992,6 +3620,28 @@ async function createAppointment(input, actionContext = {}) {
     // on schedule conflicts): the booking commits with a warning.
     if (win.start && windowEnd) {
       const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      // A card that pinned "no overlap" approved a free slot (owner
+      // 2026-10-05): an overlap that appeared since is NEW. Throwing here
+      // rolls the transaction back before the insert, so nothing is booked
+      // and the post-commit confirmation text below never runs. A pinned
+      // "overlap existed", or no pin at all, keeps the advisory warning.
+      // A card that named the overlapping visits pinned what it showed about
+      // each (id, customer, service, date, window): a visit not in that set,
+      // or one whose shown facts changed, is NEW too. An overlap that
+      // disappeared is fine; a card with nothing pinned (older cards, or a
+      // name lookup that failed) keeps the boolean rule only.
+      const pinnedFacts = Array.isArray(input._booking_overlap_facts) && input._booking_overlap_facts.length
+        ? new Set(input._booking_overlap_facts.map(String)) : null;
+      let unseenOverlap = false;
+      if (overlap.length && input._booking_overlap === true && pinnedFacts) {
+        const liveFacts = await bookingOverlapFacts(trx, overlap, dateStr);
+        unseenOverlap = liveFacts.some((f) => !pinnedFacts.has(f.fact));
+      }
+      if (overlap.length && (input._booking_overlap === false || unseenOverlap)) {
+        const err = new Error('booking_overlap_new');
+        err.bookingOverlapNew = true;
+        throw err;
+      }
       if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
     }
     // Rung 6 — the same comms fence withCustomerCommsLock provided.
@@ -3054,6 +3704,19 @@ async function createAppointment(input, actionContext = {}) {
       window_start: win.start,
       window_end: windowEnd,
       notes: notes || null,
+      ...(customerRequest ? {
+        customer_request: customerRequest.text,
+        customer_request_source: 'office',
+      } : {}),
+      // A re-service is a callback, derived from the catalog row exactly as
+      // the Schedule POST derives it (re-service.js). Callback reporting, the
+      // dispatch badge, the re-service report copy and plan-visit counts read
+      // this persisted flag, not the service name.
+      is_callback: isReService({
+        serviceKey: lockedBooking.catalogRow?.service_key,
+        serviceName: lockedBooking.catalogRow?.name,
+        serviceType: service_type,
+      }),
       // The catalog link and the price exactly as the Schedule POST stamps
       // them: service_id + key/category snapshots, and for a priced visit
       // estimated_price, the primary line's gross, and the create-invoice
@@ -3137,6 +3800,9 @@ async function createAppointment(input, actionContext = {}) {
     }
     if (err && err.bookingPriceChanged) {
       return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+    }
+    if (err && err.bookingOverlapNew) {
+      return { error: BOOKING_NEW_OVERLAP_ERROR, preview_changed: true };
     }
     if (err && err.previewChanged) {
       return {
@@ -3336,8 +4002,11 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (!dateStr) {
     return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
   }
-  const win = parseTimeWindowStart(new_time_window);
-  if (win.error) return { error: win.error };
+  // The visit's own window length, judged before the new start is parsed so
+  // an off-hour refusal names only starts this visit can actually take.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
+  const win = parseTimeWindowStart(new_time_window, apptDuration);
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   const oldDate = appt.scheduled_date;
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this tool moves ONE
@@ -3363,7 +4032,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
-  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
   let newWindowEnd = win.start
     ? deriveWindowEnd(win.start, apptDuration)
@@ -3468,6 +4136,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  // A package visit 1 with a live visit 2: the card shows one visit, so the
+  // bar does not move it (ib-write-tools: the card shows everything the
+  // commit does). The Schedule screen moves both.
+  if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -3490,6 +4164,13 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
+      // Package visit 2 recheck, atomic with this write (the preflight
+      // above is only a fast refusal).
+      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+      // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
+      // is changed). A same-day change and a visit with no limited add-on cost nothing.
+      await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -3661,7 +4342,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -3941,6 +4622,13 @@ async function cancelAppointment(input, actionContext = {}) {
         const { prepaidCommitmentReason } = require('../appointment-cancel-impact');
         const { cardRailRows } = require('../appointment-cancel-impact');
         if (await prepaidCommitmentReason(trx, lockedRow) || (await cardRailRows(trx, appointment_id)).length > 0) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // A linked follow-up (call-booked child or package visit 2) booked
+        // since the proposal: cancelling this visit would cancel that one
+        // too, which the card never showed. Re-read on this trx and refuse.
+        const { linkedFollowUpRows } = require('../appointment-cancel-impact');
+        if ((await linkedFollowUpRows(trx, appointment_id)).length > 0) {
           throw new Error('__cancel_card_refused__');
         }
         const { cardRailFingerprint } = require('../appointment-cancel-impact');
@@ -4229,9 +4917,11 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.
   CARD_CANCEL_REFUSED_MESSAGE,
+  // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
+  _ibBookingPricing: ibBookingPricing,
 };

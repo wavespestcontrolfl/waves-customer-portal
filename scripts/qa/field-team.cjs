@@ -122,7 +122,6 @@ async function seed() {
       scheduled_date: `${month}-10`, status: 'completed', is_callback: false, followup_included: false, actual_end_time: parseETDateTime(`${month}-10T12:00`) });
     await trx('estimates').insert({ id: f.estimate, customer_id: f.customer, status: 'accepted', accepted_at: parseETDateTime(`${visitDate}T12:00`), customer_name: 'QA Field Customer', created_by_technician_id: f.admin }).onConflict('id').merge();
     await trx('review_incentive_payouts').insert({ id: f.review, technician_id: f.tech, amount_cents: 2500, earned_at: parseETDateTime(`${visitDate}T12:00`), status: 'earned' }).onConflict('id').ignore();
-    await trx('user_feature_flags').insert({ user_id: f.tech, flag_key: 'tech-field-workspace', enabled: true }).onConflict(['user_id', 'flag_key']).merge();
   });
 }
 

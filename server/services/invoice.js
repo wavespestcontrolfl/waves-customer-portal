@@ -24,13 +24,26 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
-const { hasAuthoritativeZeroPrice } = require("./billing-lane");
+const {
+  hasAuthoritativeZeroPrice,
+  MEMBERSHIP_DUES_LINE_KEY,
+  membershipDuesProvenanceHolds,
+  isMembershipDuesLane,
+  isUnpricedPlanVisit,
+  acquireMembershipDuesMonthLock,
+  tryAcquireMembershipDuesMonthLock,
+  acquireMembershipDuesMonthLockBounded,
+  monthlyDuesCollected,
+  findLiveStampedDuesInvoice,
+  findCollectedDuesPayment,
+} = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   invoiceDepositCreditCents,
+  invoiceSmsDigest,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -1720,6 +1733,698 @@ function buildDiscountLineItem({
   };
 }
 
+// The ONE place a membership-dues stamp is written (B08). `month` is only the
+// caller's REQUEST ("this mint may be that ET month's dues"); whether it is
+// true is judged here, from the visit and customer rows this transaction
+// holds locked and the line being written, so no caller can pass a stale
+// flag (a visit repriced between the completion's decision and the lock
+// mints a plain invoice with no stamp). For a real dues mint the per
+// customer + month lock is then taken (held through the insert — the line
+// items built here are what create() writes in this same transaction) and
+// coverage is re-read under it: a month a concurrent plan visit's dues
+// invoice (or the cron) has since covered refuses this mint with
+// MEMBERSHIP_DUES_COVERED, which the completion treats exactly like dues
+// that were covered before the mint (no invoice, the visit completes).
+async function stampMembershipDuesUnderLock(conn, { customerId, scheduledServiceId, month, lineItems, derivedAmount = null }) {
+  // The stamp goes ONLY on the line the builder marks as this visit's PRIMARY
+  // service line (client_id scheduled_<visit>_primary, buildScheduledServiceInvoiceLines;
+  // the explicit-amount mint tags its single line the same way), never on the
+  // first positive line by position: when scheduled add-ons total at least the
+  // rate the builder emits no primary line, and an add-on stamped as "the
+  // month" would make every later visit and the collector skip the real dues.
+  // No such line means an UNSTAMPED mint, the same posture as every other dues
+  // visit whose lines are not the plain primary shape (see the provenance check
+  // below): the visit's own invoice is still billed, nothing is skipped, and the
+  // month is simply not marked covered, so the next plan visit or the monthly
+  // charge still bills the dues.
+  const primaryClientId = `scheduled_${scheduledServiceId}_primary`;
+  const duesLine = lineItems.find((li) => li && li._kind !== "discount" && Number(li.amount) > 0 && li.client_id === primaryClientId);
+  if (!duesLine) {
+    if (lineItems.some((li) => li && li._kind !== "discount" && Number(li.amount) > 0)) {
+      logger.warn(`[invoice] dues mint for visit ${scheduledServiceId} has no primary service line (add-ons only) — minted unstamped, the month is not marked covered`);
+    }
+    return lineItems;
+  }
+  const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+  const visit = await acquireScheduledMintLockChain(conn, {
+    scheduledServiceId,
+    customerId,
+    visitColumns: ["id", "customer_id", "estimated_price", "primary_line_price", "is_callback", "scheduled_date"],
+    customerLock: "share",
+  });
+  // The visit's owner is re-read under its row lock: a customer merge that
+  // committed after the caller read the service record repoints the visit to the
+  // surviving customer, and this helper would otherwise lock and stamp the
+  // merged-away customer's month. Refused before any month lock or coverage
+  // decision, retryably (the completion re-decides on fresh data). The other dues
+  // mint entry point, mintScheduledServiceInvoiceWithDeposit, makes the same
+  // check on its own locked row before it calls this.
+  if (visit && String(visit.customer_id) !== String(customerId)) {
+    const e = new Error("Scheduled service changed owner while minting — retry to bill the current customer");
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "SCHEDULED_BILLING_SOURCE_MOVED";
+    throw e;
+  }
+  // FOR SHARE, held through the insert (same transaction): an UPDATE of the
+  // billing terms (monthly_rate / billing_mode / waveguard_tier) waits for this
+  // mint to commit, and a mint that waited on one reads the NEW terms here, so
+  // the stamp is never judged on terms that changed before the insert.
+  // Lock order and deadlock reasoning: the chain above locked the customer
+  // (SHARE) BEFORE the visit row, the customer-before-visit order this codebase
+  // documents for its writers (customer-dedupe, settlement, Bill-To edit, the
+  // completion's own customer FOR SHARE), so a writer that holds the visit row
+  // never asks for this customer lock. FOR SHARE is compatible with FOR SHARE
+  // and FOR KEY SHARE, so two sibling dues mints never block each other on it,
+  // and this transaction never UPDATEs / FOR UPDATEs the customer row after it
+  // (create() and the stamp only read it and INSERT an invoice, whose FK check
+  // takes KEY SHARE), so there is no SHARE-to-UPDATE upgrade for two siblings
+  // to cycle on. Every dues-mint entry point takes this same lock through this
+  // function (completion mint, Charge now's pre-mint).
+  const customer = await conn("customers")
+    .where({ id: customerId })
+    .forShare()
+    .first("billing_mode", "monthly_rate", "waveguard_tier");
+  // Why a requested stamp may not hold, split by cause on the LOCKED visit row
+  // plus the customer row read in this transaction:
+  //  - the visit is no longer a dues visit (its own estimated_price, an
+  //    authoritative $0, a callback — visit.estimated_price / primary_line_price
+  //    / is_callback): a genuine reprice or a non-dues visit. Mint unstamped.
+  //  - the visit is still an unpriced plan visit but the amount the completion
+  //    DERIVED (derivedAmount) no longer equals what the customer row yields —
+  //    customer.monthly_rate changed, or billing_mode / waveguard_tier moved
+  //    the customer off the membership lane: do NOT insert (it would be an
+  //    invoice no dues check can see). Refuse retryably so the completion
+  //    re-derives from fresh data.
+  if (!isUnpricedPlanVisit(visit)) return lineItems;
+  const rateCents = Math.round(Number(customer?.monthly_rate) * 100);
+  if (!isMembershipDuesLane(customer) || !(rateCents > 0)
+    || (derivedAmount != null && Math.round(Number(derivedAmount) * 100) !== rateCents)) {
+    const e = new Error("The customer's monthly rate or plan changed while minting — no dues invoice was created; retry to bill the current dues.");
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.reason = "dues_amount_stale";
+    e.currentMonthlyRateCents = rateCents > 0 ? rateCents : null;
+    throw e;
+  }
+  // Provenance is judged on the RECONCILED dues total — the sum of the set of
+  // lines that together represent the visit's charge (membershipDuesLineSet),
+  // not on one line — so a top-up / adjustment shape is still the monthly rate.
+  // (A dues visit whose lines are some other shape, e.g. with add-ons, mints
+  // unstamped as it always has.)
+  const duesSet = membershipDuesLineSet(lineItems, duesLine);
+  if (!membershipDuesProvenanceHolds({ visit, customer, lineAmount: duesSetCents(duesSet) / 100 })) {
+    return lineItems;
+  }
+  // The month comes from the LOCKED visit, never the caller's pre-lock
+  // snapshot: a visit rescheduled across months before this lock won would be
+  // stamped (and locked) for the wrong month. Refuse, like the scheduled-date
+  // movement guard, so the completion re-decides on fresh data; checked BEFORE
+  // any month lock so only the month actually stamped is ever locked.
+  const lockedMonth = visit?.scheduled_date
+    ? String(visit.scheduled_date instanceof Date ? visit.scheduled_date.toISOString() : visit.scheduled_date).slice(0, 7)
+    : null;
+  if (lockedMonth && lockedMonth !== month) {
+    const e = new Error("Scheduled service date moved to another month while minting — retry to bill the current month");
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "SCHEDULED_BILLING_SOURCE_MOVED";
+    throw e;
+  }
+  // The mint holds the customer FOR SHARE, the visit row and the visit's mint
+  // lock here, so it must not WAIT on the dues-month lock (see THE LOCK RULE at
+  // acquireMembershipDuesMonthLock): a void holding the month can be queued
+  // behind this very customer lock for its credit restore. A bounded try-poll
+  // serializes sibling mints; a miss refuses retryably (rolls this mint back).
+  if (!(await acquireMembershipDuesMonthLockBounded(conn, customerId, month))) {
+    const e = new Error(`Membership dues for ${month} are being billed or changed right now — no dues invoice was created; retry.`);
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.reason = "dues_month_busy";
+    throw e;
+  }
+  // The monthly cron, its retry sweep and Charge now hold the per-customer
+  // collection lock (a SESSION lock held across the Stripe charge): never wait
+  // on it. Claim the same key for this transaction without blocking; while a
+  // collector holds it the month may be mid-collection, so refuse retryably
+  // (same release-for-resume path as an unreadable coverage read). Taken after
+  // the dues-month lock, which only completions wait on, so waiting here can
+  // never form a cycle with a collector.
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryClaimCustomerCollectionInTrx(conn, customerId))) {
+    const e = new Error(`Membership dues for ${month} may be mid-collection by the billing run — no dues invoice was created; retry.`);
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.reason = "collection_in_progress";
+    throw e;
+  }
+  let covered;
+  try {
+    const { savepointRead } = require("../utils/savepoint-read");
+    covered = await savepointRead(conn, (k) => monthlyDuesCollected(
+      k, customerId, new Date(`${month}-15T12:00:00Z`), { excludeScheduledServiceId: scheduledServiceId },
+    ));
+  } catch (err) {
+    // Fail CLOSED. The lock serializes the decisions but cannot stand in for
+    // a successful coverage read: a month another visit already billed would
+    // be billed twice. Nothing is written (the transaction rolls back), and
+    // the completion releases itself for resume — the retry reads coverage
+    // again and mints exactly once if nothing covers the month.
+    logger.error(`[invoice] dues-coverage recheck failed for visit ${scheduledServiceId} — refusing the dues mint: ${err.message}`);
+    const e = new Error(`Membership dues coverage for ${month} could not be verified — no dues invoice was created; retry.`);
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.cause = err;
+    throw e;
+  }
+  if (covered) {
+    const e = new Error(`Membership dues for ${month} are already covered — no second dues invoice was created.`);
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "MEMBERSHIP_DUES_COVERED";
+    throw e;
+  }
+  return lineItems.map((li) => (
+    li === duesLine ? { ...li, [MEMBERSHIP_DUES_LINE_KEY]: month } : li
+  ));
+}
+
+// ── Stamp lifetime (B08) ───────────────────────────────────────────────────
+// membership_dues_month is written ONLY by the completion mint
+// (stampMembershipDuesUnderLock). After the mint it can be KEPT or REMOVED,
+// never created or re-pointed: create() drops it unless the mint vouches for
+// it, and every rewrite of line_items (update) keeps it only on the stored
+// stamped line, unchanged in month, category and amount.
+function stripMembershipDuesMarkers(lineItems) {
+  if (!Array.isArray(lineItems) || !lineItems.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
+    return lineItems;
+  }
+  return lineItems.map((li) => {
+    if (!li || li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
+    const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
+    return rest;
+  });
+}
+
+function stripPayerBilledDuesMarker(items, customerId) {
+  if (Array.isArray(items) && items.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
+    logger.warn(`[invoice] customer ${customerId}: a payer is now responsible for this invoice — the membership-dues stamp was dropped, the month is not marked covered`);
+  }
+  return stripMembershipDuesMarkers(items);
+}
+
+// THE set of lines that together represent a membership-dues visit's charge,
+// shared by the mint (provenance) and the edit sanitizer ("unchanged"): the
+// marker-bearing PRIMARY line plus the scheduled-line replay's reconciliation
+// lines (client_id scheduled_<visit>_primary, scheduled_price_topup_<visit>,
+// discount_scheduled_price_<visit> — the top-up or negative adjustment that
+// brings a stale primary_line_price to the dues amount). Nothing else: a fee,
+// add-on or real discount line an operator or the mint adds is not part of it.
+// The marker still lives on the primary line alone.
+const DUES_RECONCILIATION_CLIENT_ID = /^(scheduled_.+_primary|scheduled_price_topup_.+|discount_scheduled_price_.+)$/;
+const duesLineCents = (li) => Math.round((Number(li.quantity) || 1) * (Number(li.unit_price) || 0) * 100);
+function membershipDuesLineSet(lineItems, primary) {
+  return lineItems.filter((li) => li && (li === primary || DUES_RECONCILIATION_CLIENT_ID.test(String(li.client_id || ""))));
+}
+const duesSetCents = (set) => set.reduce((sum, li) => sum + duesLineCents(li), 0);
+// What "unchanged" means: the same summed amount over the set, and the same
+// categories (order-independent).
+const duesSetSignature = (set) => `${duesSetCents(set)}|${set.map((li) => String(li.category || "")).sort().join(",")}`;
+
+// A stamped invoice IS its customer's dues for that month, and that identity
+// must not depend on editable line attributes: the marker is never stripped
+// or restored by an edit. Judged against the LOCKED stored invoice only (no
+// customer or visit read, so a later rate or lane change cannot matter):
+//  - the stored invoice carries no stamp → any incoming marker is dropped
+//    (forged; never an error, never a stamp);
+//  - it carries one → the incoming lines must still contain the dues line and
+//    leave its dues SET (membershipDuesLineSet) unchanged in summed amount and
+//    categories; the description may change. The dues line is found by the
+//    marker, else by the stored line's client_id, else (a stored line with no
+//    client_id) by the same category and amount, so a client that dropped the
+//    hidden key on an otherwise unchanged set is NOT treated as a change. The
+//    server then owns the marker: it is re-attached to that line and stripped
+//    from any other line.
+//  - anything else (the set changed, or the dues line is gone) is REFUSED with
+//    the update path's operational 409: the only ways to release a month's
+//    coverage are void / refund / cancel, which are explicit and serialized.
+// Mint-time provenance (stampMembershipDuesUnderLock) is still the only
+// authority for creating a stamp.
+function enforceMembershipDuesLines(locked, newLines) {
+  if (!Array.isArray(newLines)) return newLines;
+  const storedLines = parseInvoiceLineItems(locked.line_items);
+  const stored = storedLines.find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  if (!stored) return stripMembershipDuesMarkers(newLines);
+  const month = String(stored[MEMBERSHIP_DUES_LINE_KEY]);
+  const storedSignature = duesSetSignature(membershipDuesLineSet(storedLines, stored));
+  const positive = (li) => li && li._kind !== "discount" && duesLineCents(li) > 0;
+  const primary = newLines.find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] === month)
+    || (stored.client_id ? newLines.find((li) => li && li.client_id === stored.client_id) : null)
+    || (!stored.client_id
+      ? newLines.find((li) => positive(li)
+        && String(li.category || "") === String(stored.category || "")
+        && duesLineCents(li) === duesLineCents(stored))
+      : null);
+  if (!primary || duesSetSignature(membershipDuesLineSet(newLines, primary)) !== storedSignature) {
+    const [y, m] = month.split("-").map(Number);
+    const label = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+    const err = new Error(
+      `This invoice is the customer's ${label} membership dues; its dues line cannot be changed — void it (the month is then billed again by the next plan visit or the monthly charge) or add a separate line for anything extra.`,
+    );
+    err.status = 409;
+    err.statusCode = 409;
+    err.isOperational = true;
+    err.code = "MEMBERSHIP_DUES_LINE_LOCKED";
+    throw err;
+  }
+  return newLines.map((li) => {
+    if (!li) return li;
+    if (li === primary) return { ...li, [MEMBERSHIP_DUES_LINE_KEY]: month };
+    if (li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
+    const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
+    return rest;
+  });
+}
+
+// The month a stamped invoice's marker names, or null.
+function membershipDuesStampMonth(lineItems) {
+  const stamp = parseInvoiceLineItems(lineItems).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  return stamp ? String(stamp[MEMBERSHIP_DUES_LINE_KEY]) : null;
+}
+
+// A writer that REMOVES a month's coverage (a stripping edit, a void, the
+// cancelled-visit void; the invoice row is the writer's own pre-read) holds the
+// dues-month lock while it commits, so it is mutually exclusive with a mint and
+// with a covered completion's commit-time confirmation. It is the FIRST lock of
+// the writer's transaction, which is what lets it WAIT (THE LOCK RULE at
+// acquireMembershipDuesMonthLock): it then takes invoice / statement / customer
+// FOR UPDATE rows while holding it, so every taker that already holds a row
+// lock (the mint, the completion) only tries the month lock, never waits.
+async function lockMembershipDuesMonthOfInvoice(trx, invoiceRow) {
+  // The writer's pre-transaction read can predate a customer merge that
+  // repointed the invoice, so the lock key comes from a FRESH, UNLOCKED read of
+  // the invoice's owner and stamp taken here (it takes no lock, so the month
+  // lock stays the first lock of the transaction). Only a stamped invoice pays
+  // for the extra read. The caller re-verifies the owner on the row it updates
+  // (assertDuesOwnerUnmoved) and aborts retryably if a merge moved it between.
+  if (!(invoiceRow && invoiceRow.customer_id && membershipDuesStampMonth(invoiceRow.line_items))) return null;
+  const fresh = invoiceRow.id
+    ? await trx("invoices").where({ id: invoiceRow.id }).first("customer_id", "line_items")
+    : null;
+  const source = fresh || invoiceRow;
+  const month = membershipDuesStampMonth(source.line_items);
+  if (!month || !source.customer_id) return null;
+  await acquireMembershipDuesMonthLock(trx, source.customer_id, month);
+  return { customerId: String(source.customer_id), month };
+}
+
+// A coverage-removing writer (a void) must not commit while a COLLECTOR (the
+// monthly cron, its retry sweep, charge-now) is mid-collection for this
+// customer: a collector reads "a live stamped invoice bills this month" under
+// the customer collection claim and then skips, so a void committing right after
+// would leave the month neither collected nor billed. Called right after the
+// month lock (month -> claim, the order the mint and un-void take them in): a
+// TRY, never a wait (a collector holds it across a Stripe charge). While this
+// transaction holds the claim a collector's own try refuses and retries, so it
+// either finishes before the void or sees the committed void and charges.
+async function claimCustomerCollectionForDuesRelease(trx, locked) {
+  if (!locked) return;
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryClaimCustomerCollectionInTrx(trx, locked.customerId))) {
+    const e = new Error(`Membership dues for ${locked.month} may be mid-collection by the billing run — try voiding again in a moment`);
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "MEMBERSHIP_DUES_COLLECTION_IN_PROGRESS";
+    throw e;
+  }
+}
+
+// After the writer's status-conditional update: the invoice still belongs to
+// the customer whose month lock was taken (a merge in between would have put
+// the stamp outside the serialization domain). Retryable, like unvoid's own
+// ownership check.
+function assertDuesOwnerUnmoved(locked, updatedRow) {
+  if (locked && String(updatedRow?.customer_id) !== locked.customerId) {
+    throw new Error("Invoice ownership changed while releasing its dues coverage — re-check and retry");
+  }
+}
+
+// Restoring a voided stamped dues invoice re-opens a bill for its month. The
+// void let a later visit or the collectors bill that month again, so under the
+// dues-month lock (non-blocking: an office action never waits on a mint or a
+// collector) the month must not be covered by anything ELSE. Refusal style
+// matches assertUnvoidableLinkedVisit.
+async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
+  const stamp = parseInvoiceLineItems(invoiceRow.line_items).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  if (!stamp) return;
+  const month = String(stamp[MEMBERSHIP_DUES_LINE_KEY]);
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryAcquireMembershipDuesMonthLock(trx, invoiceRow.customer_id, month))
+    || !(await tryClaimCustomerCollectionInTrx(trx, invoiceRow.customer_id))) {
+    throw new Error(
+      `Cannot unvoid right now — ${month} membership dues are being billed or collected; retry in a moment`,
+    );
+  }
+  let other;
+  let payment;
+  try {
+    other = await findLiveStampedDuesInvoice(trx, invoiceRow.customer_id, month, { excludeInvoiceId: invoiceRow.id });
+    payment = other ? null : await findCollectedDuesPayment(trx, invoiceRow.customer_id, month);
+  } catch (err) {
+    throw new Error(`Could not verify ${month} membership dues coverage — refusing to unvoid (${err.message})`);
+  }
+  if (other) {
+    throw new Error(
+      `Cannot unvoid — ${month} membership dues are already billed on invoice ${other.invoice_number || other.id}; restoring this one would bill the month twice`,
+    );
+  }
+  if (payment) {
+    throw new Error(
+      `Cannot unvoid — ${month} membership dues were already collected (payment ${payment.id}); restoring this invoice would bill the month twice`,
+    );
+  }
+}
+
+// A void releases a stamped dues invoice's month. Completed visits of that
+// month with no invoice of their own, other than the invoice's own visit, may
+// have skipped their dues mint because of it (or of autopay / a cron payment:
+// this identification is advisory, from existing durable rows only, and
+// over-reports rather than under-reports). "Skipped because dues cover it" is
+// decided by THE coverage predicate completion itself uses
+// (billing-lane membershipDuesCoverVisit, with the month's dues as the cover),
+// not by a hand-copied price test: a recurring plan visit that carries a
+// positive display price is covered too, a callback or a non-recurring priced
+// visit (billed on its own) is not. completed_at is NOT compared to the
+// invoice's creation: a backdated closeout stores the real service end, so a
+// visit closed out after the invoice existed can carry an earlier time. When
+// nothing else covers the month after the void and there are such visits, ONE
+// office alert asks a person to bill the month again if it is still owed. The
+// alert is an episode (admin-alert-episodes): restoring the invoice closes it
+// (unvoidInvoice), and a later void raises a fresh one with its own details.
+// Never mints. Best effort after the void (or the full refund) commits; a
+// failure here never fails it. A full refund (returnAppliedCreditOnRefund)
+// raises it too, and for a refund this alert is also the recovery path for an
+// armed monthly retry the sweep resolved while the invoice was paid: that row
+// stays disarmed (nothing re-arms it), the office rebills the month.
+// THE candidate filter both dues alerts share: which of a customer's visits does
+// the month's dues COVER (so they complete without an invoice of their own)?
+// Decided by the coverage predicate completion uses (membershipDuesCoverVisit,
+// the month's dues as the cover), with payer ownership resolved the way
+// completion resolves it (PayerService.resolveForInvoice: a concrete ACTIVE payer
+// wins, an inactive one or a self-pay pin falls back to self-pay), one call per
+// visit: the alerts are post-commit and best effort, and a month holds a handful
+// of visits. An unreadable resolution counts as self-pay (over-reports). Needs
+// each candidate's id, estimated_price and is_recurring, and the customer's
+// billing_mode, monthly_rate and waveguard_tier.
+async function filterVisitsCoveredByDues(candidates, customer, customerId, logLabel) {
+  const { membershipDuesCoverVisit } = require("./billing-lane");
+  const PayerService = require("./payer");
+  const payerBilled = new Map();
+  for (const v of candidates) {
+    try {
+      const resolved = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: v.id });
+      payerBilled.set(v.id, !!resolved?.payerId);
+    } catch (e) {
+      logger.warn(`[invoice] ${logLabel} payer resolve failed for visit ${v.id}: ${e.message}`);
+      payerBilled.set(v.id, false);
+    }
+  }
+  return candidates.filter((v) => membershipDuesCoverVisit({
+    visitIsPayerBilled: payerBilled.get(v.id) === true,
+    perApplicationBilling: customer?.billing_mode === "per_application",
+    annualPrepayBilling: customer?.billing_mode === "annual_prepay",
+    customerAutopayActive: false,
+    duesCollectedThisMonth: true,
+    // A display price of at least one cent (the predicate's own "has a price" input, not a charge amount).
+    hasVisitPrice: Number(v.estimated_price) >= 0.01,
+    isRecurring: v.is_recurring,
+    waveguardTier: customer?.waveguard_tier,
+    monthlyRate: customer?.monthly_rate,
+    billingMode: customer?.billing_mode,
+  }));
+}
+
+const duesCoverageReleasedKey = (invoiceId) => `dues_coverage_released:${invoiceId}`;
+async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = "voided" } = {}) {
+  const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
+  if (!month || !invoiceRow.customer_id) return;
+  try {
+    if (await monthlyDuesCollected(db, invoiceRow.customer_id, new Date(`${month}-15T12:00:00Z`))) return;
+    const customer = await db("customers").where({ id: invoiceRow.customer_id })
+      .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier");
+    const candidates = await db("scheduled_services as s")
+      .where({ "s.customer_id": invoiceRow.customer_id, "s.status": "completed" })
+      .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
+      .where((q) => q.whereNull("s.is_callback").orWhere("s.is_callback", false))
+      .whereNot("s.id", invoiceRow.scheduled_service_id || "00000000-0000-0000-0000-000000000000")
+      .whereNotExists(db("invoices as i")
+        .whereRaw("i.scheduled_service_id = s.id")
+        .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
+      .select("s.id", "s.estimated_price", "s.is_recurring");
+    const rows = await filterVisitsCoveredByDues(candidates, customer, invoiceRow.customer_id, "dues-coverage-released");
+    if (!rows.length) return;
+    const { composeAdminAlert, raiseAdminAlert } = require("./admin-alert-compose");
+    const { fitAction } = require("./admin-alert-names");
+    const [y, m] = month.split("-").map(Number);
+    const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    const n = rows.length;
+    const spec = {
+      area: "Billing",
+      action: fitAction("Billing", `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "the customer", [
+        (who) => `rebill ${who}'s ${monthName} dues`,
+        (who) => `rebill ${who}'s dues`,
+      ]),
+      why: `The ${monthName} dues invoice was ${releasedBy === "refunded" ? "refunded" : "voided"}; ${n} other visit${n > 1 ? "s" : ""} that month went unbilled because of it.`,
+      severity: "needs-you",
+      link: `/admin/customers?customerId=${invoiceRow.customer_id}`,
+      subject: { type: "invoice", id: String(invoiceRow.id) },
+      doneWhen: "month_billed",
+      who: "person",
+    };
+    const opts = {
+      detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided, cancelled or refunded, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} that month (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
+      bell: true,
+      dedupeKey: duesCoverageReleasedKey(invoiceRow.id),
+    };
+    let composed = null;
+    try { composed = composeAdminAlert(spec); } catch { composed = null; }
+    if (composed && require("../config/feature-gates").alertEpisodesLive()) {
+      // Reopen: a standing alert stays one row; one closed by a restore of the
+      // invoice (unvoidInvoice) rings again, with this void's own details.
+      await require("./admin-alert-episodes").raiseAdminAlertWithReopen("billing", composed.headline, composed.why, {
+        ...opts, link: composed.link, refreshOnDedupe: true, metadata: composed.metadata,
+      });
+    } else {
+      // ALERT_EPISODES killed (or the copy broke the notification rule): the
+      // plain deduped raise, one bell per invoice.
+      await raiseAdminAlert("billing", spec, opts);
+    }
+  } catch (err) {
+    logger.warn(`[invoice] dues-coverage-released check failed for invoice ${invoiceRow.id}: ${err.message}`);
+  }
+}
+
+// A refunded stamped dues invoice stops covering its month, so another visit can
+// mint a REPLACEMENT stamped invoice (or the cron can collect the month). If the
+// refund then BOUNCES, the webhook brings the original back to life beside it:
+// the month is billed twice. The same situation as un-voiding
+// (assertStampedDuesMonthFreeToRestore), handled differently because the money is
+// real and the restore must happen. NOTHING is voided, edited or refunded
+// automatically (a replacement may carry other charges or an edit may add them):
+// prepare (inside the webhook's transaction, which already holds the payment row,
+// so by THE LOCK RULE only TRIES of the month lock and the customer collection
+// claim; busy throws and Stripe redelivers) finds ANY other live stamped dues
+// invoice for the month, or a payment that collected it; reconcile (after the
+// outermost commit, best effort) raises ONE needs-you Billing alert for it. The
+// month stays billed twice until the office acts on that alert. Returns null for
+// an invoice that is not a stamped dues invoice.
+async function prepareMembershipDuesRestore(trx, invoiceId, { exceptPaymentId = null } = {}) {
+  const inv = await trx("invoices").where({ id: invoiceId }).first("id", "invoice_number", "customer_id", "line_items");
+  const month = inv ? membershipDuesStampMonth(inv.line_items) : null;
+  if (!month || !inv.customer_id) return null;
+  if (!(await tryAcquireMembershipDuesMonthLock(trx, inv.customer_id, month))) {
+    throw Object.assign(
+      new Error(`Membership dues for ${month} are being billed or completed right now — the refund bounce is retried`),
+      { statusCode: 503, code: "MEMBERSHIP_DUES_MONTH_BUSY", isOperational: true },
+    );
+  }
+  // The monthly collectors (cron, retry sweep, charge-now) hold the SEPARATE
+  // customer collection claim across a charge: one that read the original as
+  // refunded and is charging could otherwise write its payment after this
+  // restore finds nothing and commits. Month, then claim (the order the mint and
+  // the void take them in), both TRIES; busy throws and Stripe redelivers.
+  // Coverage and the collected-payment read below happen with both held.
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryClaimCustomerCollectionInTrx(trx, inv.customer_id))) {
+    throw Object.assign(
+      new Error(`Membership dues for ${month} may be mid-collection by the billing run — the refund bounce is retried`),
+      { statusCode: 503, code: "MEMBERSHIP_DUES_COLLECTION_BUSY", isOperational: true },
+    );
+  }
+  const replacement = await findLiveStampedDuesInvoice(trx, inv.customer_id, month, { excludeInvoiceId: inv.id });
+  let collected = null;
+  if (!replacement) {
+    const payment = await findCollectedDuesPayment(trx, inv.customer_id, month);
+    if (payment && String(payment.id) !== String(exceptPaymentId)) collected = payment;
+  }
+  return {
+    invoiceId: inv.id,
+    invoiceNumber: inv.invoice_number || null,
+    customerId: inv.customer_id,
+    month,
+    replacement: replacement ? { id: replacement.id, status: replacement.status, invoice_number: replacement.invoice_number || null } : null,
+    collectedPaymentId: collected ? collected.id : null,
+  };
+}
+async function reconcileMembershipDuesRestore(ctx) {
+  if (!ctx || (!ctx.replacement && !ctx.collectedPaymentId)) return;
+  try {
+    const { raiseAdminAlert } = require("./admin-alert-compose");
+    const { fitAction } = require("./admin-alert-names");
+    const customer = await db("customers").where({ id: ctx.customerId }).first("first_name", "last_name");
+    const name = `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "the customer";
+    const [y, m] = ctx.month.split("-").map(Number);
+    const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    const replacementLabel = ctx.replacement ? (ctx.replacement.invoice_number || ctx.replacement.id) : `payment ${ctx.collectedPaymentId}`;
+    const originalLabel = ctx.invoiceNumber || ctx.invoiceId;
+    // What the bounce left the ORIGINAL as: 'paid' / 'processing' (the money
+    // stood) on the single-payment path, but the combined-charge path can also
+    // REOPEN it unpaid (the original ACH debit failed, so only one payment, the
+    // replacement's, can have succeeded). "Paid twice, refund one" is only true
+    // when the original is settled AND the other side is paid.
+    const originalSettled = ["paid", "prepaid", "processing"].includes(String(ctx.originalStatus || "paid"));
+    const otherPaid = !!ctx.collectedPaymentId
+      || ["paid", "prepaid", "processing"].includes(String(ctx.replacement?.status));
+    const spec = !originalSettled
+      ? {
+        // The reopened original is the duplicate obligation: void or adjust IT.
+        action: fitAction("Billing", name, [(who) => `void or adjust ${who}'s reopened ${monthName} dues`, (who) => `adjust ${who}'s reopened dues`]),
+        why: otherPaid
+          ? `The ${monthName} dues were paid on another invoice; a failed bank debit reopened this one.`
+          : `Two open invoices bill the ${monthName} dues after a failed bank debit reopened this one.`,
+        doneWhen: "month_billed_once",
+        subjectId: ctx.invoiceId,
+      }
+      : otherPaid
+        ? {
+          action: fitAction("Billing", name, [(who) => `refund ${who}'s extra ${monthName} dues`, (who) => `refund ${who}'s extra dues`]),
+          why: `${monthName} dues are paid twice after a bank refund bounced.`,
+          doneWhen: "month_refunded_once",
+        }
+        : {
+          action: fitAction("Billing", name, [(who) => `void or adjust ${who}'s extra ${monthName} dues`, (who) => `adjust ${who}'s extra dues`]),
+          why: `A refund bounced, so the original dues invoice is paid again; a second invoice still bills ${monthName}.`,
+          doneWhen: "month_billed_once",
+        };
+    const { subjectId, ...alertSpec } = spec;
+    const advice = !originalSettled
+      ? "void or adjust the reopened original (it is the duplicate: the month is already covered on the other invoice or payment, or both are open)"
+      : otherPaid ? "refund the extra payment" : "void or adjust the extra invoice (it may carry other charges)";
+    await raiseAdminAlert("billing", {
+      area: "Billing",
+      ...alertSpec,
+      severity: "needs-you",
+      link: `/admin/customers?customerId=${ctx.customerId}`,
+      subject: { type: "invoice", id: String(subjectId || ctx.replacement?.id || ctx.invoiceId) },
+      who: "person",
+    }, {
+      detail: `A bank refund of invoice ${originalLabel} (the ${ctx.month} membership dues) failed, so it was ${originalSettled ? "restored to paid" : "reopened unpaid (its bank debit never settled)"}. ${ctx.replacement ? `Dues invoice ${replacementLabel} (${ctx.replacement.status})` : `The month was also collected (${replacementLabel})`} bills the same month. Nothing was voided, edited or refunded automatically: ${advice}.`,
+      bell: true,
+      dedupeKey: `dues_restore_conflict:${ctx.invoiceId}:${ctx.replacement?.id || ctx.collectedPaymentId}`,
+    });
+  } catch (err) {
+    logger.warn(`[invoice] dues restore reconciliation failed for invoice ${ctx.invoiceId}: ${err.message}`);
+  }
+}
+
+// MARKER FIRST, DUES INVOICE LATER. A manual prepaid marker (cash / Zelle on a
+// plan visit) lives on the VISIT, not the payment ledger: a sibling visit's
+// stamped dues invoice minted afterwards bills the month and never sees it, so
+// the cash sits beside an open invoice that asks for it again. Billing is left
+// as it is (owner ruling: no new money logic); one office alert per (dues
+// invoice, visit) asks a person to apply the cash to that invoice. Raised from
+// the mint side after the mint commits, so it covers every writer of the marker
+// (single visit, series, bulk) that wrote it BEFORE the mint. A marker written
+// AFTER the mint is refused by the single-visit POST (recordPrepaidUnderDuesLock);
+// the series and bulk writers do not check that and raise nothing (stated limit).
+// The receipt-mint undo needs no call: it removes the marker it wrote.
+//
+// Selection (pure, unit-tested): a positive manual prepaid amount, not annual
+// coverage, not a cancelled / skipped visit, not the dues invoice's own visit
+// (its prepaid credit applies at completion); the SQL narrows it further to
+// visits with no live invoice of their own and no payment row recording the cash.
+const PREPAID_ALERT_REFUSED_STATUSES = ["cancelled", "canceled", "no_show", "skipped"];
+function prepaidVisitsToApplyToDuesInvoice(candidates, { ownVisitId = null } = {}) {
+  const { hasAnnualCoverage } = require("./prepaid-series");
+  return (candidates || []).filter((v) => v
+    && Number(v.prepaid_amount) >= 0.01
+    && !hasAnnualCoverage(v)
+    && !PREPAID_ALERT_REFUSED_STATUSES.includes(String(v.status || "").toLowerCase())
+    && String(v.id) !== String(ownVisitId || ""));
+}
+function composePrepaidDuesAlertSpec({ customerName, monthName, amount, invoiceId, customerId }) {
+  const { fitAction } = require("./admin-alert-names");
+  const dollars = `$${Number(amount).toFixed(2)}`;
+  return {
+    area: "Billing",
+    action: fitAction("Billing", customerName || "the customer", [
+      (who) => `apply ${who}'s prepaid cash to dues`,
+      (who) => `apply ${who}'s prepayment`,
+    ]),
+    why: `${dollars} was prepaid on a ${monthName} visit, but the ${monthName} dues invoice still asks for it.`,
+    severity: "needs-you",
+    link: `/admin/customers?customerId=${customerId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "prepaid_applied",
+    who: "person",
+  };
+}
+async function alertPrepaidVisitsToApplyToDuesInvoice(invoiceRow) {
+  const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
+  if (!month || !invoiceRow.customer_id) return;
+  try {
+    const candidates = await db("scheduled_services as s")
+      .where({ "s.customer_id": invoiceRow.customer_id })
+      .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
+      .where("s.prepaid_amount", ">", 0)
+      .whereNotIn("s.status", PREPAID_ALERT_REFUSED_STATUSES)
+      .whereNotExists(db("invoices as i")
+        .whereRaw("i.scheduled_service_id = s.id")
+        .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
+      .whereNotExists(db("payments as p")
+        .whereRaw("p.metadata::jsonb ->> 'scheduled_service_id' = s.id::text")
+        .whereIn("p.status", ["paid", "processing"]))
+      .where((q) => q.whereNull("s.is_callback").orWhere("s.is_callback", false))
+      .select("s.id", "s.status", "s.estimated_price", "s.is_recurring", "s.prepaid_amount", "s.prepaid_method", "s.annual_prepay_term_id");
+    const customer = await db("customers").where({ id: invoiceRow.customer_id })
+      .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier");
+    // Only visits the month's dues COVER: a priced non-recurring or payer-billed
+    // visit's cash belongs to its own service (the same filter as the release alert).
+    const covered = await filterVisitsCoveredByDues(candidates, customer, invoiceRow.customer_id, "dues-prepaid-alert");
+    const visits = prepaidVisitsToApplyToDuesInvoice(covered, { ownVisitId: invoiceRow.scheduled_service_id });
+    if (!visits.length) return;
+    const { raiseAdminAlert } = require("./admin-alert-compose");
+    const customerName = `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim();
+    const [y, m] = month.split("-").map(Number);
+    const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    for (const v of visits) {
+      await raiseAdminAlert("billing", composePrepaidDuesAlertSpec({
+        customerName, monthName, amount: v.prepaid_amount, invoiceId: invoiceRow.id, customerId: invoiceRow.customer_id,
+      }), {
+        detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} is the ${month} membership dues invoice. Visit ${v.id} has $${Number(v.prepaid_amount).toFixed(2)} recorded as prepaid (${v.prepaid_method || "method not recorded"}) with no invoice or payment of its own recording that cash. Apply that payment to invoice ${invoiceRow.invoice_number || invoiceRow.id}; nothing was applied automatically.`,
+        bell: true,
+        dedupeKey: `dues_prepaid_unapplied:${invoiceRow.id}:${v.id}`,
+      });
+    }
+  } catch (err) {
+    logger.warn(`[invoice] prepaid-vs-dues alert failed for invoice ${invoiceRow.id}: ${err.message}`);
+  }
+}
+
 async function buildScheduledServiceInvoiceLines(
   scheduledServiceId,
   {
@@ -2337,6 +3042,35 @@ function alreadyDeliveredForFirstSend(invoice) {
       || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
 }
 
+// The Intelligence Bar's approved invoice version (updated_at + a digest of the
+// total, credit, amount due and lines) no longer matches the row at the claim:
+// an edit or a partial credit landed after the card was shown. Nothing was claimed.
+function approvedVersionChangedError(invoice) {
+  return Object.assign(
+    new Error(`Invoice ${invoice?.invoice_number || invoice?.id || ""} changed after it was approved (amount due, lines or edit time) — not sent`),
+    { code: "approved_version_changed" },
+  );
+}
+
+// expectedVersion: { updatedAtMs, digest } or null. The claim's updated_at
+// predicate is checked in the claim's own locked UPDATE; the digest is checked
+// on the row that UPDATE returned (a claimed invoice is edit-locked).
+function approvedVersionMatchesTime(row, expectedVersion) {
+  if (expectedVersion.updatedAtMs === null || expectedVersion.updatedAtMs === undefined) return !row.updated_at;
+  const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
+  return at !== null && Math.floor(at) === Math.floor(expectedVersion.updatedAtMs);
+}
+
+// A refusal under the Intelligence Bar's approved claim with its own text; it takes the same code and result shape as a changed version.
+function approvedClaimRefusal(message) {
+  return Object.assign(new Error(message), { code: "approved_version_changed" });
+}
+
+// The send wrapper's refusal shape for approvedVersionChangedError (nothing was claimed or sent).
+function approvedVersionChangedResult(err) {
+  return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
+}
+
 function sendClaimLostError() {
   return Object.assign(
     new Error("Invoice send claim changed; delivery not attempted"),
@@ -2352,6 +3086,79 @@ async function linkedScheduledServiceId(invoice, database = db) {
     .first("scheduled_service_id");
   return record?.scheduled_service_id || null;
 }
+
+// One blocked outcome. `error` is the field withProviderHandoff's caller (this file) has always read on a blocked outcome
+// (byte-identical to the pre-refactor shape); `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
+// send-customer-message.js's providerPreparationCheck, then billing-channel-email-authority.js's preSendBlock — gets the
+// real reason too, since that path reads `.reason`, not `.error`.
+function deliveryNotSent(code, message, validator) {
+  return { sent: false, blocked: true, deliveryOutcome: "not_sent", code, error: message, reason: message, validator };
+}
+
+// The preconditions, in the order they run. Each `test(ctx)` returns a refusal (a deliveryNotSent outcome, or the hold's
+// own defer outcome) or null. The first refusal wins, so a claim / visit / balance block keeps its code and order
+// whichever leg catches it.
+const INVOICE_DELIVERY_CHECKS = [
+  { name: "readable", test: ({ current }) => (current ? null
+    : deliveryNotSent("INVOICE_UNREADABLE", "Invoice could not be re-read before delivery", "check_invoice_deposit_settlement")) },
+  { name: "send_claim", test: ({ current, sendClaimToken }) => (current.send_claim_token === sendClaimToken
+    && SEND_FINALIZABLE_STATUSES.includes(current.status) ? null
+    : deliveryNotSent("send_claim_lost", "Invoice send claim changed; delivery not attempted", "check_invoice_send_claim")) },
+  { name: "linked_visit", test: async ({ database, current }) => {
+    const terminalVisit = await require("./invoice-helpers")
+      .visitRefusesSettlement(database, await linkedScheduledServiceId(current, database));
+    return terminalVisit
+      ? deliveryNotSent("INVOICE_VISIT_TERMINAL", `Linked visit is ${terminalVisit}; delivery not attempted`, "check_invoice_visit_status")
+      : null;
+  } },
+  { name: "ownership", test: async ({ database, current }) => {
+    const ownership = await require("./invoice-helpers").selfPayAtDispatch(current.id, database)();
+    return ownership.ok === true ? null : deliveryNotSent(ownership.code, ownership.reason, "check_invoice_ownership_boundary");
+  } },
+  // The Intelligence Bar's live owner check (who owes this invoice RIGHT NOW, Bill-To resolved), run on the locked handle
+  // immediately before the provider call. Fail closed: a verifier that throws refuses the send.
+  { name: "approved_owner", test: async ({ database, current, verifyOwner }) => {
+    if (!verifyOwner) return null;
+    let refusal = "The bar could not verify who owes this invoice, so it was not sent.";
+    try { refusal = await verifyOwner({ ...current }, database); } catch { /* keep the fail-closed text */ }
+    return refusal ? deliveryNotSent("approved_version_changed", typeof refusal === "object" ? refusal.message : refusal, "check_invoice_ownership_boundary") : null;
+  } },
+  // The Intelligence Bar's approved phone, read AGAIN on the locked handle right before the provider call: the customer edit
+  // route changes the phone without taking the invoice lock, so a number removed after the early check must not get the pay
+  // link. A read that fails refuses (fail closed).
+  { name: "recipient", test: async ({ database, current, expectedSmsPhone }) => {
+    if (expectedSmsPhone === undefined) return null;
+    let freshDigits = null;
+    try {
+      const row = await database("customers").where({ id: current.customer_id }).first("phone");
+      freshDigits = String(row?.phone || "").replace(/\D/g, "");
+    } catch { /* keep the fail-closed null */ }
+    return expectedSmsPhone && freshDigits !== null && freshDigits === String(expectedSmsPhone) ? null
+      : deliveryNotSent("recipient_changed", "The customer's phone is not the one the approval showed; the text was not sent", "check_invoice_recipient");
+  } },
+  // Collections DISPUTE hold, re-read at the actual provider boundary on the
+  // locked handle (owner ruling 2026-09-30): a hold that committed after the
+  // sender's own up-front check, during claiming, lock waits or message
+  // preparation, still stops the pay link here - retryable and deferred, never
+  // terminal (savepoint read, fail closed). Payer-billed and the explicit
+  // operator/customer exemptions are skipped; no cross-writer locking (the hold
+  // writer never waits - the accepted millisecond window of collection-hold.js).
+  { name: "collection_hold", test: async ({ database, current, holdExempt }) => {
+    if (current.payer_id) return null;
+    const collectionHold = require("./collections/collection-hold");
+    // A trusted operator / customer exemption skips a plain DISPUTE hold only; a wrong-number /
+    // wrong-party fallback hold (an all-channel outreach block) still stops the pay link.
+    const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, database,
+      { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
+    if (!held.held) return null;
+    const defer = collectionHold.holdDeferOutcome(held);
+    return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
+  } },
+  { name: "balance", test: ({ current, sendInvoice }) => (invoiceAmountDue(current) > 0
+    && invoiceAmountDue(current) === invoiceAmountDue(sendInvoice)
+    && isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items)) ? null
+    : deliveryNotSent("INVOICE_BALANCE_CHANGED", "Invoice balance changed while preparing delivery; retry send", "check_invoice_deposit_settlement")) },
+];
 
 // Shared invoice-handoff preconditions: send-claim token/status, linked-visit
 // terminal state, self-pay ownership, and amount-due/line-items unchanged vs
@@ -2369,68 +3176,11 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // same on its transaction before its caller re-reads it and passes it in).
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
-async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null }) {
-  // `error` is the field withProviderHandoff's caller (this file) has always
-  // read on a blocked outcome (byte-identical to the pre-refactor shape);
-  // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
-  // send-customer-message.js's providerPreparationCheck, then billing-
-  // channel-email-authority.js's preSendBlock — gets the real reason too,
-  // since that path reads `.reason`, not `.error`.
-  if (!current) {
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "INVOICE_UNREADABLE",
-      error: "Invoice could not be re-read before delivery",
-      reason: "Invoice could not be re-read before delivery",
-      validator: "check_invoice_deposit_settlement" };
-  }
-  if (current.send_claim_token !== sendClaimToken
-    || !SEND_FINALIZABLE_STATUSES.includes(current.status)) {
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "send_claim_lost",
-      error: "Invoice send claim changed; delivery not attempted",
-      reason: "Invoice send claim changed; delivery not attempted",
-      validator: "check_invoice_send_claim" };
-  }
-  const scheduledServiceId = await linkedScheduledServiceId(current, database);
-  const terminalVisit = await require("./invoice-helpers")
-    .visitRefusesSettlement(database, scheduledServiceId);
-  if (terminalVisit) {
-    const message = `Linked visit is ${terminalVisit}; delivery not attempted`;
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "INVOICE_VISIT_TERMINAL", error: message, reason: message,
-      validator: "check_invoice_visit_status" };
-  }
-  const ownership = await require("./invoice-helpers").selfPayAtDispatch(current.id, database)();
-  if (ownership.ok !== true) {
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: ownership.code, error: ownership.reason, reason: ownership.reason,
-      validator: "check_invoice_ownership_boundary" };
-  }
-  // Collections DISPUTE hold, re-read at the actual provider boundary on the
-  // locked handle (owner ruling 2026-09-30): a hold that committed after the
-  // sender's own up-front check, during claiming, lock waits or message
-  // preparation, still stops the pay link here - retryable and deferred, never
-  // terminal (savepoint read, fail closed). Payer-billed and the explicit
-  // operator/customer exemptions are skipped; no cross-writer locking (the hold
-  // writer never waits - the accepted millisecond window of collection-hold.js).
-  if (!current.payer_id) {
-    const collectionHold = require("./collections/collection-hold");
-    // A trusted operator / customer exemption skips a plain DISPUTE hold only; a wrong-number /
-    // wrong-party fallback hold (an all-channel outreach block) still stops the pay link.
-    const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, database,
-      { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
-    if (held.held) {
-      const defer = collectionHold.holdDeferOutcome(held);
-      return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
-    }
-  }
-  if (invoiceAmountDue(current) <= 0
-    || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
-    || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
-    const message = "Invoice balance changed while preparing delivery; retry send";
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "INVOICE_BALANCE_CHANGED", error: message, reason: message,
-      validator: "check_invoice_deposit_settlement" };
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null, verifyOwner = null, expectedSmsPhone = undefined }) {
+  const ctx = { database, current, sendClaimToken, sendInvoice, holdExempt, verifyOwner, expectedSmsPhone };
+  for (const check of INVOICE_DELIVERY_CHECKS) {
+    const refusal = await check.test(ctx);
+    if (refusal) return refusal;
   }
   return { ok: true };
 }
@@ -2444,11 +3194,31 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
 // retry rather than a refusal: the immediate send reports it to the operator,
 // a queued replay would otherwise drop the notice on a transient lock
 // conflict.
-async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispatch, { retryableSetupErrors = false } = {}) {
+//
+// `recipientLocks` ({ customerId, phone }, the Intelligence Bar's text) holds the SAME two locks the comms writers take, around
+// the whole handoff, so the phone the precondition re-reads is the phone the provider request goes to. LOCK ORDER (the one
+// billing-channel-email-authority.js dispatchUnderBillingEmailAuthority already uses, and utils/customer-comms-lock.js's
+// contract): customer-comms, then the SMS phone, then the invoice row and its deposit ledger (withInvoiceDepositSettlement,
+// joined on the same connection as a savepoint). Both advisory locks are TRY locks: a writer holding either is a refusal
+// (`recipient_busy`, nothing sent), never a wait, so this handoff cannot join a deadlock cycle with a writer that holds the
+// invoice row and wants comms.
+async function withRecipientLocks(recipientLocks, run) {
+  const { tryLockCustomerComms, tryLockSmsPhone } = require("../utils/customer-comms-lock");
+  return db.transaction(async (trx) => {
+    if (!(await tryLockCustomerComms(trx, recipientLocks.customerId)) || !(await tryLockSmsPhone(trx, recipientLocks.phone))) {
+      const message = "The customer's contact details are being changed; the text was not sent. Try again in a minute.";
+      return { sent: false, blocked: true, deliveryOutcome: "not_sent", code: "recipient_busy", error: message, reason: message,
+        retryable: false, validator: "check_invoice_recipient" };
+    }
+    return run(trx);
+  });
+}
+
+async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispatch, { retryableSetupErrors = false, recipientLocks = null } = {}) {
   let dispatchedOutcome = null;
   let providerStarted = false;
   try {
-    const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+    const settle = (database) => require("./estimate-deposits").withInvoiceDepositSettlement(
       invoiceId,
       async (trx, current) => {
         const verdict = await precondition(trx, current);
@@ -2457,7 +3227,9 @@ async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispat
         dispatchedOutcome = await dispatch();
         return dispatchedOutcome;
       },
+      ...(database ? [database] : []),
     );
+    const outcome = recipientLocks ? await withRecipientLocks(recipientLocks, settle) : await settle();
     return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
       validator: "check_invoice_deposit_settlement" };
@@ -3349,23 +4121,24 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
 // genuinely collectible again, not stuck. Bounded to the one retry the
 // caller's own `_zeroDueRetried` guard allows; omit it (or leave the
 // guard already tripped) to map `not_zero_due` like any other outcome.
-async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null) {
+async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null, { refusalOnly = false } = {}) {
   if (err?.code !== "zero_due_detected") return null;
   const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
   if (outcome.kind === "not_zero_due" && retryOnceFn) return retryOnceFn();
-  return zeroDueWrapperOutcome(invoiceId, outcome);
+  return zeroDueWrapperOutcome(invoiceId, outcome, { refusalOnly });
 }
 
 // Wrapper result shape (sendViaSMSAndEmail): { ok, sms, email, payUrl }.
-async function zeroDueWrapperOutcome(invoiceId, outcome) {
+async function zeroDueWrapperOutcome(invoiceId, outcome, { refusalOnly = false } = {}) {
   if (outcome.kind === "settled") {
     return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
   if (outcome.kind === "terminal") {
     // Same round-6 audit P1 fix, mirrored here for the wrapper shape: a
     // safety-refused void must never be reported the same as a completed
-    // one.
-    const voided = await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    // one. A refusal-only caller (the Intelligence Bar's send_invoice) never
+    // voids: it gets the same held-for-review result as a refused void.
+    const voided = refusalOnly ? false : await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
     if (!voided) {
       logger.warn(`[invoice] ${invoiceId}: zero-due terminal-visit invoice could not be safely voided (a live PaymentIntent, money in flight, or an unverifiable lookup) — held for review, not reported handled`);
       const reason = `${ZERO_DUE_TERMINAL_ERROR}, but the invoice could not be safely voided yet — held for review`;
@@ -3795,120 +4568,221 @@ function collectionHoldRefusalFromClearance() {
   return require("./collections/collection-hold").holdDeferOutcome({ reason: "hold" });
 }
 
+// ── the Intelligence Bar's approved-version checks on a send claim ──────────────────────────────────────────────────────
+// Each owns ONE decision about the row the claim just took and returns the error to throw (or null). They run in order and the
+// first refusal hands the claim back (runApprovedClaimChecks); the visit closeout pin is written only after every check and
+// every other claim-time refusal has passed (recordApprovedPinOrRefusal), so a refused claim never leaves a pin behind.
+// ctx = { invoiceId, invoice (the claimed row), current (the row as read before the flip), expectedVersion, database, token }.
+
+// The amount due and lines of the claimed row are what the card showed (the row is edit-locked from the claim on).
+function approvedDigestRefusal({ invoice, expectedVersion }) {
+  if (!expectedVersion.digest) return null;
+  return require("./invoice-helpers").approvedInvoiceVersionDigest(invoice) === expectedVersion.digest ? null : approvedVersionChangedError(invoice);
+}
+
+// The post-delivery effects the card listed (lead, reminders, closeout, review ...), recomputed on the claimed row with its
+// pre-claim status. Fails closed.
+async function approvedEffectsRefusal({ invoice, current, expectedVersion, database }) {
+  if (!expectedVersion.verifyEffects) return null;
+  let same = false;
+  try { same = await expectedVersion.verifyEffects({ ...invoice, status: current.status }, database); } catch { same = false; }
+  return same ? null : approvedVersionChangedError(invoice);
+}
+
+// The bar sends only an invoice the customer owes, and not an annual-plan one. The payer columns are a snapshot from when the
+// invoice was minted, so the bar's live resolver is asked again here, on the claimed row. A payer, a plan, or an answer that
+// cannot be had refuses (fail closed).
+async function approvedOwnerRefusal({ invoice, current, expectedVersion, database }) {
+  if (!expectedVersion.verifyOwner) return null;
+  let verdict = "The bar could not verify who owes this invoice, so it was not sent.";
+  // The prior status AND the prior scheduled_send_at (the claim's flip clears it): a send the page scheduled is visible to the verifier.
+  try { verdict = await expectedVersion.verifyOwner({ ...invoice, status: current.status, scheduled_send_at: current.scheduled_send_at }, database); } catch { /* keep the fail-closed text */ }
+  if (!verdict) return null;
+  // A verifier may answer with its own refusal code ({ code, message }); a plain string is an approved-version refusal.
+  return typeof verdict === "object" ? Object.assign(new Error(verdict.message), { code: verdict.code }) : approvedClaimRefusal(verdict);
+}
+
+// The card listed the invoice's attachments. An upload that reserved the invoice before this claim and has not inserted yet
+// would change that list after delivery: the send waits for it (the upload refuses once this claim holds the row).
+async function approvedAttachmentRefusal({ invoiceId, expectedVersion, database }) {
+  if (expectedVersion.attachments === undefined) return null;
+  let uploading = true;
+  try { uploading = await require("./invoice-helpers").attachmentUploadInFlight(database, invoiceId); } catch { uploading = true; }
+  return uploading ? approvedClaimRefusal("An attachment upload is still in progress on this invoice, so it was not sent. Try again when the upload finishes.") : null;
+}
+
+const APPROVED_CLAIM_CHECKS = [approvedDigestRefusal, approvedEffectsRefusal, approvedOwnerRefusal, approvedAttachmentRefusal];
+
+async function runApprovedClaimChecks(ctx) {
+  for (const check of APPROVED_CLAIM_CHECKS) {
+    const refusal = await check(ctx);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+// The visit the card said this send closes (or none), written on the invoice inside the claim: the send's own closeout is
+// handed it and the retry sweep reads it back. Written LAST in the claim; a pin that cannot be written refuses.
+async function recordApprovedPinOrRefusal({ invoiceId, expectedVersion, database, token }) {
+  if (!expectedVersion.closeoutTarget) return null;
+  try {
+    await require("./invoice-issued-closeout").recordApprovedCloseoutTarget(invoiceId, expectedVersion.closeoutTarget, {
+      conn: database, claimToken: token, actorTechnicianId: expectedVersion.actorTechnicianId || null,
+    });
+    return null;
+  } catch {
+    return approvedClaimRefusal("The approved visit closeout could not be recorded, so the invoice was not sent.");
+  }
+}
+
+// The Intelligence Bar's claim judges who owes the invoice (verifyOwner), so it holds the customer (and the linked visit) FOR
+// SHARE from before that judgment until the claim commits, exactly as the packet and renewal claims do: a payer assignment
+// (its writer takes these rows FOR UPDATE) either commits first and is seen by the verifier, or waits for the claim and then
+// finds the invoice 'sending' (packetInvoiceSendInFlight) and refuses. The lock ends at commit, before any provider call: the
+// claim row itself is the fence through the delivery. A refusal thrown inside rolls the whole claim back, pin included.
+function claimNeedsOwnerFence(expectedVersion, database, ownerFenced) {
+  return Boolean(expectedVersion?.verifyOwner) && !ownerFenced && !database.isTransaction && typeof database.transaction === "function";
+}
+
+function claimUnderOwnerFence(invoiceId, options, database) {
+  return database.transaction(async (trx) => {
+    const owner = await trx("invoices").where({ id: invoiceId }).first("customer_id", "scheduled_service_id");
+    if (owner?.customer_id) await trx("customers").where({ id: owner.customer_id }).forShare().first("id");
+    if (owner?.scheduled_service_id) await trx("scheduled_services").where({ id: owner.scheduled_service_id }).forShare().first("id");
+    return claimInvoiceForSend(invoiceId, { ...options, database: trx, _ownerFenced: true });
+  });
+}
+
+// A caller that already holds the claim (the scheduled-send worker flips 'scheduled' to 'sending' itself, then calls back in).
+async function claimAlreadyHeld(invoiceId, current, { claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database }) {
+  if (!claimToken || current.send_claim_token !== claimToken) throw sendClaimLostError();
+  if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
+  // Round-0 audit P1 (#4131): a preclaimed caller asking for a first delivery must not lose the already-delivered /
+  // stale-claim-review-hold guards the fresh-claim branch enforces — this row can reach here already fully delivered (a resumed
+  // worker preclaim racing a direct send) or still parked for operator review.
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  // Zero-due re-check for a PRECLAIMED row (#4131 slice 4): processScheduledSends' own settleZeroDueBeforeSend check runs
+  // BEFORE it claims, so this only fires on the rare race where a retotal to $0 lands between that read and this claim.
+  await refuseZeroDuePreclaimedInvoice(invoiceId, current, database);
+  // A preclaimed row still needs the queued-obligation check: an earlier DIRECT send that held its own pay-link text on the
+  // scheduled rail (invoice_send_deferred) is otherwise invisible here and would deliver the same frozen pay link a second
+  // time. previousStatus is current.status itself, so restoreSendClaim's guard never touches the invoice row on a refusal —
+  // only the preclaimer's own claim-token restore may move it; a consumed queue row is still restored.
+  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, claimToken, adoptsQueuedInvoiceSend, database);
+  return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
+}
+
+// The claim's own UPDATE. The guards evaluated before it saw a snapshot; the flip carries them as predicates too, so a
+// same-status ABA transition between the read and the flip (another worker claims, reaches an uncertain outcome, and stale-claim
+// recovery parks the row back to 'scheduled' with a delivery stamp) cannot pass a first delivery or an unauthorized reclaim.
+function buildClaimFlip(database, invoiceId, current, { firstDeliveryOnly, overridesReviewHold, expectedVersion }) {
+  const flip = database("invoices").where({ id: invoiceId, status: current.status });
+  if (firstDeliveryOnly) flip.whereNull("sent_at").whereNull("sms_sent_at").whereNull("email_sent_at");
+  if (!overridesReviewHold) {
+    // COALESCE keeps the predicate NULL-safe: a scheduled row with no error at all would otherwise make the LIKE, and so the
+    // whole NOT, evaluate to NULL and never match the flip.
+    flip.whereRaw(
+      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
+      [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
+    );
+  }
+  if (!expectedVersion) return flip;
+  // The approved edit time, in the claim's own locked UPDATE: an edit after the card was shown stamps updated_at.
+  const atMs = expectedVersion.updatedAtMs;
+  if (atMs === null || atMs === undefined) return flip.whereNull("updated_at");
+  return flip.where("updated_at", ">=", new Date(atMs)).where("updated_at", "<", new Date(Number(atMs) + 1));
+}
+
+// The flip matched no row: say which guard the latest row trips (round-6 P1 #4131), always by throwing.
+async function refuseFailedClaim(invoiceId, current, database, { firstDeliveryOnly, overridesReviewHold, expectedVersion }) {
+  const latest = await database("invoices").where({ id: invoiceId }).first();
+  // Review hold first, then delivered for a first delivery, rather than a generic "not sendable".
+  refuseFirstDeliveryHold(latest, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  // Pre-push audit P1 (PR #4633): neither guard tripped, but the row is 'sending' under SOME claim token — a concurrent first
+  // delivery won this exact race. Distinct from "not sendable": the customer's pay link IS on its way, just not from this request.
+  if (firstDeliveryOnly && latest?.status === "sending" && latest.send_claim_token) throw firstDeliveryInProgressError(latest);
+  // A row that is still claimable but no longer the approved version: report that, not "not sendable". A live claim (status
+  // 'sending') keeps the in-progress error below so a concurrent delivery is never read as a changed invoice.
+  if (expectedVersion && latest && latest.status === current.status && !approvedVersionMatchesTime(latest, expectedVersion)) {
+    throw approvedVersionChangedError(latest);
+  }
+  throw invoiceNotSendableError(latest);
+}
+
+// The refusals a claim makes BEFORE it writes anything (each throws; none returns). Split out of claimInvoiceForSend so that
+// function stays under the complexity cap.
+async function refuseUnclaimableInvoice(invoiceId, current, database, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend }) {
+  // A first delivery that finds the row already delivered (round-6 P1 #4131) is refused atomically here, before the
+  // claimable-statuses check: a delivered row can sit at a claimable status (sent/viewed/overdue) and a plain status check
+  // alone would let a first-delivery request re-claim it as an intentional resend. The stale-claim review hold (same call) is
+  // gated on ONE explicit switch — overridesReviewHold — never inferred from operatorInitiated or firstDeliveryOnly.
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
+  // Nothing due on a visit-linked invoice: detect it here (never settle — settleZeroDueBeforeSend is the ONE place that ever
+  // does) and refuse the claim so the caller resolves the real outcome through the chokepoint.
+  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
+  // A live deferred pay-link text (quiet-hours queue) already owns this invoice's delivery — refuse before claiming, unless
+  // this send is authorized to adopt (consume) its own earlier held leg.
+  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend, database });
+  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
+}
+
+// A first send that waited for the visit summary's handoff (which holds this invoice through the pay-link text) finds the
+// claim free only once the text is out. The invoice is stamped after that release, so the summary's own record is read: a link
+// text that started or was accepted means the customer has the link, and this first send is refused, not repeated. Returns the
+// refusal to give back the claim with, or null.
+async function firstSendAfterSummaryRefusal({ invoiceId, invoice, current, database }, firstDeliveryOnly) {
+  if (!firstDeliveryOnly || !current.visit_completion_packet_id) return null;
+  const started = await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link");
+  return started ? invoiceAlreadyDeliveredError(invoice) : null;
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
   firstDeliveryOnly = false,
   overridesReviewHold = false,
   adoptsQueuedInvoiceSend = false,
+  // Intelligence Bar send_invoice: the approved version the confirm card showed. Null = unchanged for every other caller.
+  expectedVersion = null,
   database = db,
+  // Internal-only: set by the owner-fence re-entry.
+  _ownerFenced = false,
 } = {}) {
   assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimInvoiceForSend");
+  const options = { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion };
+  if (claimNeedsOwnerFence(expectedVersion, database, _ownerFenced)) return claimUnderOwnerFence(invoiceId, options, database);
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
   await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
+  if (allowClaimed) return claimAlreadyHeld(invoiceId, current, { ...options, database });
 
-  if (allowClaimed) {
-    if (!claimToken || current.send_claim_token !== claimToken) throw sendClaimLostError();
-    if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
-    // Round-0 audit P1 (#4131): a preclaimed caller asking for a first
-    // delivery must not lose the already-delivered / stale-claim-review-
-    // hold guards the fresh-claim branch below already enforces — this
-    // row can reach here already fully delivered (a resumed worker
-    // preclaim racing a direct send) or still parked for operator review.
-    refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
-    // Zero-due re-check for a PRECLAIMED row (#4131 slice 4):
-    // processScheduledSends' own settleZeroDueBeforeSend check runs BEFORE
-    // it ever claims, so this only fires on the rare race where a retotal
-    // to $0 lands between that read and this claim.
-    await refuseZeroDuePreclaimedInvoice(invoiceId, current, database);
-    // A preclaimed row (the scheduled-send worker flips 'scheduled' →
-    // 'sending' itself, then calls back in with allowClaimed:true) still
-    // needs the queued-obligation check: an earlier DIRECT send that held
-    // its own pay-link text on the scheduled rail (invoice_send_deferred)
-    // is otherwise invisible to this branch and would deliver the same
-    // frozen pay link a second time. previousStatus here is current.status
-    // itself ('sending', the caller's own preclaim) so restoreSendClaim's
-    // guard never touches the invoice row on a refusal — only the
-    // preclaimer's own claim-token restore may move it; a consumed queue
-    // row is still restored.
-    const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, claimToken, adoptsQueuedInvoiceSend, database);
-    return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
-  }
+  await refuseUnclaimableInvoice(invoiceId, current, database, options);
 
-  // A first delivery that finds the row already delivered (round-6 P1
-  // #4131) is refused atomically here, before the claimable-statuses check
-  // below: a delivered row can sit at a claimable status (sent/viewed/
-  // overdue) and a plain status check alone would let a first-delivery
-  // request re-claim it as if it were an intentional resend. The
-  // stale-claim review hold (same call, see refuseFirstDeliveryHold) is
-  // gated on ONE explicit switch — overridesReviewHold — never inferred
-  // from operatorInitiated or firstDeliveryOnly (third audit P1 #4131).
-  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
-  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
-    throw invoiceNotSendableError(current);
-  }
-
-  // Nothing due on a visit-linked invoice: detect it here (never settle —
-  // settleZeroDueBeforeSend is the ONE place that ever does) and refuse
-  // the claim so the caller resolves the real outcome through the
-  // chokepoint. Never hand out a claim that would text a $0 pay link.
-  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
-
-  // A live deferred pay-link text (quiet-hours queue) already owns this
-  // invoice's delivery — refuse before claiming, unless this send is
-  // authorized to adopt (consume) its own earlier held leg.
-  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend, database });
-  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
-
-  const freshClaimToken = crypto.randomUUID();
-  // The two guards above evaluated a snapshot. The flip below carries them
-  // as predicates too, so a same-status ABA transition between the read and
-  // the flip (another worker claims, reaches an uncertain outcome, and
-  // stale-claim recovery parks the row back to 'scheduled' with a delivery
-  // stamp) cannot pass a first delivery or an unauthorized reclaim through.
-  const claimFlip = database("invoices").where({ id: invoiceId, status: current.status });
-  if (firstDeliveryOnly) {
-    claimFlip.whereNull("sent_at").whereNull("sms_sent_at").whereNull("email_sent_at");
-  }
-  if (!overridesReviewHold) {
-    // COALESCE keeps the predicate NULL-safe: a scheduled row with no error
-    // at all would otherwise make the LIKE, and so the whole NOT, evaluate
-    // to NULL and never match the flip.
-    claimFlip.whereRaw(
-      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
-      [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
-    );
-  }
-  const [invoice] = await claimFlip
-    .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
+  const token = crypto.randomUUID();
+  const [invoice] = await buildClaimFlip(database, invoiceId, current, options)
+    .update({ status: "sending", send_claim_token: token, updated_at: new Date() })
     .returning("*");
-  if (!invoice) {
-    const latest = await database("invoices").where({ id: invoiceId }).first();
-    // The row moved between the read and the flip: report the guard the
-    // latest row trips (review hold first, then delivered for a first
-    // delivery) rather than a generic "not sendable" (round-6 P1 #4131).
-    refuseFirstDeliveryHold(latest, invoiceId, firstDeliveryOnly, overridesReviewHold);
-    // Pre-push audit P1 (PR #4633): neither guard above tripped, but the
-    // row is 'sending' under SOME claim token — a concurrent first
-    // delivery won this exact race. Distinct from "not sendable": the
-    // customer's pay link IS on its way, just not from this request.
-    if (firstDeliveryOnly && latest?.status === "sending" && latest.send_claim_token) {
-      throw firstDeliveryInProgressError(latest);
-    }
-    throw invoiceNotSendableError(latest);
-  }
-  invoice.send_claim_token = freshClaimToken;
-  // A first send that waited for the visit summary's handoff (which holds this invoice through the
-  // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
-  // that release, so the summary's own record is read: a link text that started or was accepted
-  // means the customer has the link, and this first send is refused, not repeated.
-  if (firstDeliveryOnly && current.visit_completion_packet_id && await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link")) {
-    await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
-    throw invoiceAlreadyDeliveredError(invoice);
-  }
+  if (!invoice) await refuseFailedClaim(invoiceId, current, database, options);
+  invoice.send_claim_token = token;
+  const giveBack = async (error) => {
+    await restoreSendClaim(invoiceId, current.status, true, [], database, token);
+    throw error;
+  };
+  const ctx = { invoiceId, invoice, current, expectedVersion, database, token };
+  const approvedRefusal = expectedVersion && await runApprovedClaimChecks(ctx);
+  if (approvedRefusal) await giveBack(approvedRefusal);
+  const summaryRefusal = await firstSendAfterSummaryRefusal(ctx, firstDeliveryOnly);
+  if (summaryRefusal) await giveBack(summaryRefusal);
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
-  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, freshClaimToken, adoptsQueuedInvoiceSend, database);
+  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, token, adoptsQueuedInvoiceSend, database);
+  // The closeout pin is the claim's LAST write: every refusal above (and the ones thrown by the two calls before it) leaves
+  // no pin behind. A pin that cannot be written gives back the claim AND any queued text this claim adopted.
+  const pinRefusal = expectedVersion && await recordApprovedPinOrRefusal(ctx);
+  if (pinRefusal) {
+    await restoreSendClaim(invoiceId, current.status, true, consumedQueuedSendRows, database, token);
+    throw pinRefusal;
+  }
   return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
 }
 
@@ -3941,6 +4815,8 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   // outright with queued_pay_link until the window, instead of adopting
   // (cancelling) that row the way the ordinary claim path already can.
   adoptsQueuedInvoiceSend = false,
+  // Intelligence Bar approved version (see claimInvoiceForSend); null = unchanged.
+  expectedVersion = null,
 } = {}) {
   // requireDue is the scheduled-send worker's claim: an automatic queue
   // send, never a first-delivery request, and never an operator override —
@@ -3981,7 +4857,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       const invoice = await claimDueScheduledInvoiceForSend(trx, invoiceId);
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx }) };
   });
 }
 
@@ -4102,11 +4978,11 @@ async function releaseRefusedRenewalSend(invoiceId, verdict, { allowClaimed = fa
   });
 }
 
-async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
+async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false, expectedVersion = null } = {}) {
   return db.transaction(async (trx) => {
     const payerId = await customerDefaultPayerLocked(customerId, trx);
     if (!payerId) {
-      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx }) };
     }
     if (allowClaimed && claimToken) {
       await trx("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
@@ -4294,16 +5170,39 @@ const FIRST_SEND_STATUSES = ["draft", "scheduled", "sending"];
 // sendViaSMSAndEmail / markDeliverySent, not sendViaSMS) are still covered.
 // Best-effort + idempotent; the resolver only matches open, never-converted
 // leads and never throws.
-async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false }) {
-  // priorDelivered: the invoice carried delivery stamps (sent_at /
-  // sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
-  // with its historical stamps retained, so priorStatus alone would read
-  // its resend as a first delivery and the contact fallback could mark an
-  // unrelated newer lead won (Codex #3493 r7).
-  if (!customerId || priorDelivered || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
+// Whether a send converts the lead at all (convertLeadOnInvoiceSent's own test, shared with the
+// Intelligence Bar's effects plan). priorDelivered: the invoice carried delivery stamps (sent_at /
+// sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
+// with its historical stamps retained, so priorStatus alone would read
+// its resend as a first delivery and the contact fallback could mark an
+// unrelated newer lead won (Codex #3493 r7).
+function leadConversionApplies({ customerId, priorStatus, priorDelivered = false }) {
+  return Boolean(customerId) && !priorDelivered && FIRST_SEND_STATUSES.includes(priorStatus);
+}
+
+// The delivery stamps that mean "delivered before this send" for the lead conversion.
+// The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
+function priorDeliveredForLeadConversion(invoice) {
+  return Boolean(invoice.sent_at
+    || (invoice.sms_sent_at && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+      && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR)));
+}
+
+async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false, approvedLeadSet = null }) {
+  if (!leadConversionApplies({ customerId, priorStatus, priorDelivered })) return;
+  // The Intelligence Bar's card named the leads this send marks won (or none). 'none': nothing is converted. Ids: only
+  // those leads, and a different set converts nothing and is audited.
+  if (approvedLeadSet === "none") return;
   try {
     const { convertLeadFromEvent } = require("./lead-estimate-link");
-    await convertLeadFromEvent({ source: "invoice_sent", customerId });
+    const result = await convertLeadFromEvent({ source: "invoice_sent", customerId, ...(approvedLeadSet ? { expectedLeadSet: approvedLeadSet } : {}) });
+    if (approvedLeadSet && result?.reason === "approved_leads_changed") {
+      logger.warn(`[invoice] lead conversion skipped for ${invoiceId}: the leads changed after the approval`);
+      await require("./audit-log").recordAuditEvent({
+        actor_type: "system", action: "invoice.send_lead_conversion_skipped", resource_type: "invoices", resource_id: invoiceId,
+        metadata: { invoiceId: String(invoiceId), approvedLeadSet, reason: "approved_leads_changed" },
+      });
+    }
   } catch (leadErr) {
     logger.warn(`[invoice] lead conversion on send failed (${invoiceId}): ${leadErr.message}`);
   }
@@ -4501,6 +5400,132 @@ async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
   }
 }
 
+// A caller's last check as sendCustomerMessage's provider-boundary hook (preProviderCheck): anything but
+// `true` blocks the send before the provider request — a definite non-send. {} when there is no check.
+// The check is handed what this send is about to deliver: { channel: 'sms'|'app'|'email', to, amount } —
+// the phone the text goes to (null for App, whose devices the pipeline resolves) and the amount printed in
+// the body — so the caller can bind them to what it approved, with no database read.
+function receiptHandoffCheck(beforeProviderHandoff, { to = null, amount = null } = {}) {
+  if (typeof beforeProviderHandoff !== "function") return {};
+  const LEG_CHANNEL = { push: "app", email: "email" };
+  return {
+    preProviderCheck: async ({ channel } = {}) => {
+      const leg = LEG_CHANNEL[channel] || "sms";
+      return (await beforeProviderHandoff({ channel: leg, to: leg === "sms" ? to : null, amount })) === true
+        ? { ok: true }
+        : { ok: false, code: "RECEIPT_HANDOFF_ABORTED", reason: "receipt handoff aborted by the caller" };
+    },
+  };
+}
+
+// ── the invoice text: facts, template choice, rendering ────────────────────────────────────────────────────────────────
+// The date framing of the text, all on the ET calendar day. Knex returns DATE as a UTC-midnight Date; etCalendarDayOf reads that
+// and a plain YYYY-MM-DD string as the same calendar day (etDateString would shift the Date to the previous ET day and wrongly
+// drop the "today" clause). An unparseable value falls back to undated copy.
+function invoiceSmsDateFacts(invoice, now = new Date()) {
+  let serviceYmd = "";
+  try {
+    serviceYmd = invoice.service_date ? etCalendarDayOf(invoice.service_date) : "";
+  } catch {
+    serviceYmd = "";
+  }
+  const formattedDate = serviceYmd
+    ? new Date(`${serviceYmd}T12:00:00`).toLocaleDateString("en-US", {
+      weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York",
+    })
+    : "";
+  const todayYmd = etDateString(now);
+  // The annual-prepay "Today's visit is the first of N" clause is gated on today: a resend from sent/viewed/overdue or a
+  // delayed/scheduled send can run on a day other than service_date. A service date still in the future (the setup +
+  // first-application invoice auto-sent at estimate acceptance is the common case) must not use the generic "...completed on
+  // {service_date}" copy. ISO YYYY-MM-DD compares lexicographically === chronologically.
+  return { formattedDate, serviceDateIsTodayET: serviceYmd === todayYmd, serviceDateIsFutureET: serviceYmd > todayYmd };
+}
+
+// Pre-service copy: a future service date, or a linked visit that has not completed. An overdue or same-day appointment can
+// still be open, so its completion state decides rather than its date; an unreadable status fails toward the pre-service copy.
+async function invoicePreServiceCopy(invoice, serviceDateIsFutureET) {
+  if (serviceDateIsFutureET || !invoice.scheduled_service_id) return serviceDateIsFutureET;
+  try {
+    const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
+    return visit?.status !== "completed";
+  } catch (err) {
+    logger.warn(`[invoice] Linked visit status lookup failed for ${invoice.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// Which template row renders the text, and the variables it renders with (pure). Annual-prepay invoices use a dedicated,
+// coverage-aware template (the generic copy misframes a full year of prepaid visits as one completed service); an invoice billed
+// before its service uses the pre-service variant; everything else the standard invoice_sent. Both variants sit behind the base
+// `invoice` kill switch (a disabled invoice_sent skips them too, keeping the invoice retryable). A variant whose row is missing
+// or disabled renders nothing, so the caller asks again with `tried` and gets the next choice: the standard copy is last, so a
+// missing variant row never blocks the send. Returns null when every choice has been tried.
+function chooseInvoiceSmsTemplate(invoice, customer, ctx, tried = []) {
+  const firstName = customer?.first_name || "";
+  const serviceType = invoice.service_type || invoice.title || "your service";
+  const choices = [];
+  if (ctx.prepayActive && ctx.invoiceSmsActive) {
+    // A display-only prepay flag (no visit count) still gets the prepay framing, via a generic phrase.
+    const coverage = ctx.coverage;
+    choices.push({
+      key: "invoice_sent_annual_prepay",
+      vars: {
+        first_name: firstName,
+        coverage_summary: coverage?.coverageSummary || "your annual service plan",
+        first_visit_clause: coverage && ctx.serviceDateIsTodayET ? ` Today's visit is the first of ${coverage.coverageCount}.` : "",
+        pay_url: ctx.payUrl,
+      },
+    });
+  }
+  if (ctx.preServiceCopy && ctx.invoiceSmsActive) {
+    choices.push({ key: "invoice_sent_upfront", vars: { first_name: firstName, service_type: serviceType, pay_url: ctx.payUrl } });
+  }
+  choices.push({
+    key: "invoice_sent",
+    vars: { first_name: firstName, service_type: serviceType, service_date: ctx.formattedDate || "today", pay_url: ctx.payUrl },
+  });
+  return choices.find((choice) => !tried.includes(choice.key)) || null;
+}
+
+// The invoice text as it will be sent: which template row renders and its body, with the pay link given. The ONE renderer:
+// sendViaSMS sends what it returns, and the Intelligence Bar's card shows, pins and re-checks it. body is null when no row is
+// enabled (the send skips the text).
+async function renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants = false, audit = true } = {}) {
+  // noVariants: the Intelligence Bar's text is the base template row, the one body its card can show (a weighted variant is random).
+  // audit false: a preview writes nothing (getTemplate otherwise records a template defect in the audit log).
+  const renderOpts = { ...(noVariants ? { noVariants: true } : {}), ...(audit ? {} : { audit: false }) };
+  const dates = invoiceSmsDateFacts(invoice);
+  const preServiceCopy = await invoicePreServiceCopy(invoice, dates.serviceDateIsFutureET);
+  // Annual-prepay: the term is resolved up front; a cancelled/refunded term reverts to the standard copy. coverageActive is the
+  // descriptor's single source of truth for "is this term still covered" (a renewal lapse stays active through term_end).
+  const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
+  const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
+  try {
+    const templates = require("../routes/admin-sms-templates");
+    const tplOpts = { workflow: "invoice_send", entity_type: "invoice", entity_id: invoice.id };
+    // The annual-prepay variant is its own template row, so it would render even when ops disabled the base invoice_sent kill
+    // switch, and the provider would then swallow the send as a fake success. Honor the base switch for the variants.
+    const ctx = {
+      ...dates,
+      preServiceCopy,
+      prepayActive,
+      coverage: prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null,
+      invoiceSmsActive: await templates.isTemplateActive("invoice"),
+      payUrl,
+    };
+    const tried = [];
+    for (let choice = chooseInvoiceSmsTemplate(invoice, customer, ctx, tried); choice; choice = chooseInvoiceSmsTemplate(invoice, customer, ctx, tried)) {
+      const body = await templates.getTemplate(choice.key, choice.vars, tplOpts, renderOpts);
+      if (body) return { body, renderedTemplateKey: choice.key };
+      tried.push(choice.key);
+    }
+  } catch (err) {
+    logger.warn(`[invoice] Template lookup failed: ${err.message}`);
+  }
+  return { body: null, renderedTemplateKey: null };
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -4574,7 +5599,11 @@ const InvoiceService = {
       // undefined (no caller passes it — every internal mint/batch/retry
       // caller included) skips the check, byte-identical to before.
       expectedDiscountStacking = undefined,
+      // Set ONLY by createFromService's dues mint when it wrote the stamp
+      // itself: any other caller's membership_dues_month is dropped below.
+      trustedMembershipDues = false,
     } = createArgs;
+    if (!trustedMembershipDues) lineItems = stripMembershipDuesMarkers(lineItems);
 
     if (
       expectedDiscountStacking !== undefined &&
@@ -5387,7 +6416,14 @@ const InvoiceService = {
           // can commit between this customer read and the invoice INSERT.
           customer_address_snapshot: require('./invoice-address').invoiceAddressSnapshot(customer),
           title,
-          line_items: JSON.stringify(items),
+          // The dues stamp means "this customer's own monthly dues, billed to
+          // the customer". Bill-To is only final HERE, where the payer this row
+          // is about to be inserted for was resolved: a payer assigned after the
+          // completion's snapshot (or the mint's locked read) makes this a payer
+          // obligation that must never cover the customer's self-pay month, so
+          // the marker is dropped (the mint is unstamped, the month stays
+          // collectible).
+          line_items: JSON.stringify(resolvedPayerId ? stripPayerBilledDuesMarker(items, customerId) : items),
           subtotal,
           discount_amount: discountAmount,
           discount_label: discountLabel,
@@ -5497,6 +6533,11 @@ const InvoiceService = {
     // Not a column — the effective deposit credit rides back to the caller
     // so the ledger consume matches what the invoice actually absorbed.
     invoice.applied_deposit_credit = appliedDepositCredit;
+    // A stamped dues invoice that just committed: any manual prepaid marker the
+    // month's other visits already carry needs a person to apply the cash to it.
+    if (trustedMembershipDues && membershipDuesStampMonth(invoice.line_items)) {
+      require("./customer-credit").afterCommit(database, () => alertPrepaidVisitsToApplyToDuesInvoice(invoice));
+    }
     return invoice;
   },
 
@@ -5796,6 +6837,11 @@ const InvoiceService = {
       // a stale amount would silently win over the freshly locked value.
       // Omitted = the amount is its own authority (operator-typed).
       scheduledPriceBasis = undefined,
+      // ET month key (YYYY-MM) when this mint IS a membership month's dues
+      // (completion of an unpriced plan visit billed at monthly_rate):
+      // stamped on the primary line so monthlyDuesCollected can see the
+      // month is covered — dues are owed once per month, not per visit.
+      membershipDuesMonth = null,
       // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
       // create(), which owns the option (see its comment). The backdated
       // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
@@ -5864,6 +6910,7 @@ const InvoiceService = {
           scheduledServiceId: sr.scheduled_service_id,
           customerId: sr.customer_id,
           visitColumns: ["id", "estimated_price"],
+          customerLock: membershipDuesMonth ? "share" : "key_share",
         });
         // Stale-basis refusal (codex #3344 r2): when the caller's amount
         // was derived from the row price, a locked price that no longer
@@ -5895,6 +6942,7 @@ const InvoiceService = {
           await acquireScheduledMintLockChain(conn, {
             scheduledServiceId: sr.scheduled_service_id,
             customerId: sr.customer_id,
+            customerLock: membershipDuesMonth ? "share" : "key_share",
           });
         }
         await recheckInTrx(conn);
@@ -5917,6 +6965,23 @@ const InvoiceService = {
               category: sr.service_type,
             },
           ];
+      let membershipDuesStamped = false;
+      if (membershipDuesMonth && conn && sr.scheduled_service_id) {
+        // The explicit-amount mint's single line IS the visit's primary charge
+        // (the caller derived it from the monthly rate); mark it as the builder
+        // marks a replayed primary so the stamp can find it by identity.
+        if (!scheduledInvoice?.lineItems?.length && lineItems.length === 1 && !lineItems[0].client_id) {
+          lineItems = [{ ...lineItems[0], client_id: `scheduled_${sr.scheduled_service_id}_primary` }];
+        }
+        lineItems = await stampMembershipDuesUnderLock(conn, {
+          customerId: sr.customer_id,
+          scheduledServiceId: sr.scheduled_service_id,
+          month: membershipDuesMonth,
+          lineItems,
+          derivedAmount: amount,
+        });
+        membershipDuesStamped = lineItems.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+      }
       // Retention offer (cancel-flow C1, 15% × 2 charges / $75 cap): a
       // GRANTED offer discounts the VISIT's recurring lines only — computed
       // BEFORE extras (setup fees, operator additions) are appended, so the
@@ -5946,6 +7011,7 @@ const InvoiceService = {
         discountIds: scheduledInvoice?.discountIds || undefined,
         taxRate,
         dueDate,
+        ...(membershipDuesStamped ? { trustedMembershipDues: true } : {}),
         trustedStoredDiscountSources: scheduledInvoice
           ? ["scheduled_service"]
           : [],
@@ -6243,6 +7309,19 @@ const InvoiceService = {
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
     _zeroDueRetried = false,
+    // Intelligence Bar send_invoice only (via sendViaSMSAndEmail): the phone digits
+    // its card showed, or null when the card showed no text. Undefined = unchanged.
+    expectedSmsPhone = undefined,
+    // Intelligence Bar send_invoice only: the digest of the text its card showed (invoiceSmsDigest). Undefined = unchanged.
+    expectedSmsDigest = undefined,
+    // Intelligence Bar send_invoice only: its live owner check, run at this leg's provider boundary.
+    verifyOwner = null,
+    // Intelligence Bar send_invoice only: a leg that did not send is reported on the result and NEVER queued as a later
+    // replay (a replay would deliver outside the approval: its recipient, its total).
+    noReplay = false,
+    // Intelligence Bar send_invoice only: the reminder cadence its card showed (days after the send). The reminders are armed from
+    // it, so a GATE_DUNNING_LADDER_90 flip after the claim cannot change what was approved. Null = today's ladder.
+    approvedCadence = null,
   } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
@@ -6303,7 +7382,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, expectedSmsDigest, verifyOwner, noReplay, approvedCadence,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -6382,6 +7461,14 @@ const InvoiceService = {
       if (restored) await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
     }
+    // The bar's approved text recipient, checked on the row this leg sends to:
+    // a phone changed (or a text the card never showed) is not sent.
+    if (expectedSmsPhone !== undefined
+      && (!expectedSmsPhone || String(customer?.phone || "").replace(/\D/g, "") !== String(expectedSmsPhone))) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw Object.assign(new Error("The customer's phone is not the one the approval showed; the text was not sent"), { code: "recipient_changed" });
+    }
 
     const domain = publicPortalUrl();
     const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, payUrlParams);
@@ -6393,140 +7480,13 @@ const InvoiceService = {
       codePrefix: invoiceShortCodePrefix(invoice),
     });
 
-    const serviceType = invoice.service_type || invoice.title || "your service";
-
-    // Service-date framing, all on the ET calendar day. Knex returns DATE as a
-    // UTC-midnight Date; etCalendarDayOf reads that and a plain YYYY-MM-DD
-    // string as the same calendar day (etDateString would shift the Date to
-    // the previous ET day and wrongly drop the "today" clause). An unparseable
-    // value falls back to undated copy.
-    let serviceYmd = "";
-    try {
-      serviceYmd = invoice.service_date ? etCalendarDayOf(invoice.service_date) : "";
-    } catch {
-      serviceYmd = "";
-    }
-    const todayYmd = etDateString(new Date());
-    // The annual-prepay "Today's visit is the first of N" clause is gated on
-    // today: a resend from sent/viewed/overdue or a delayed/scheduled send can
-    // run on a day other than service_date, where a same-day claim would be false.
-    const serviceDateIsTodayET = serviceYmd === todayYmd;
-    // A service date still in the future — the setup + first-application
-    // invoice auto-sent at estimate acceptance is the common case — must not
-    // use the generic "...completed on {service_date}" copy. ISO YYYY-MM-DD
-    // compares lexicographically === chronologically.
-    const serviceDateIsFutureET = serviceYmd > todayYmd;
-    const formattedDate = serviceYmd
-      ? new Date(`${serviceYmd}T12:00:00`).toLocaleDateString("en-US", {
-        weekday: "long",
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-        timeZone: "America/New_York",
-      })
-      : "";
-
-    // Pre-service copy: a future service date, or a linked visit that has not
-    // completed. An overdue or same-day appointment can still be open, so its
-    // completion state decides rather than its date; an unreadable status
-    // fails toward the pre-service copy.
-    let preServiceCopy = serviceDateIsFutureET;
-    if (!preServiceCopy && invoice.scheduled_service_id) {
-      try {
-        const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
-        preServiceCopy = visit?.status !== "completed";
-      } catch (err) {
-        logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
-        preServiceCopy = true;
-      }
-    }
-
-    // Annual-prepay invoices use a dedicated, coverage-aware template — the
-    // generic invoice_sent copy ("...completed on {service_date}") misframes a
-    // full year of prepaid visits as a single completed service. Resolve the
-    // term up front; a cancelled/refunded term reverts to the standard copy.
-    const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
-    // coverageActive is the descriptor's single source of truth for "is this
-    // term still covered" — it keeps a renewal lapse (cancelled +
-    // renewal_decision='cancel', still covered through term_end) active while
-    // excluding true void/refund terms, matching the billing guard.
-    const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
-    const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
-
-    // Body comes from the editable invoice_sent template (or its annual-prepay
-    // variant). If the row is missing/disabled, we skip the SMS rather than
-    // falling back to inline copy.
-    let body = null;
-    // Tracks whichever of the three rows below actually rendered — never
-    // guessed, so a caught template-lookup error below (body stays null)
-    // leaves this null too.
-    let renderedTemplateKey = null;
-    try {
-      const templates = require("../routes/admin-sms-templates");
-      const tplOpts = {
-        workflow: "invoice_send",
-        entity_type: "invoice",
-        entity_id: invoiceId,
-      };
-      // The annual-prepay variant is its own template row, so it would render
-      // even when ops disabled the base invoice_sent kill switch — and the
-      // provider (messageType 'invoice' → invoice_sent) would then swallow the
-      // send as a fake success and mark the invoice sent without delivery,
-      // blocking retries. Honor the base kill switch here so a disabled
-      // invoice_sent skips the variant too and the invoice stays retryable
-      // (falls through to the null-body skip + restoreSendClaim path below).
-      const invoiceSmsActive = await templates.isTemplateActive("invoice");
-      const firstName = customer.first_name || "";
-      if (prepayActive && invoiceSmsActive) {
-        // Coverage summary is built when a visit count is configured; a
-        // display-only prepay flag (no count) still gets the prepay framing via
-        // a generic phrase instead of the misleading "completed on" copy.
-        const coverageSummary = coverage?.coverageSummary || "your annual service plan";
-        // Only claim "today" when the service date actually is today in ET —
-        // resends and delayed sends run on other days. Off-day sends drop the
-        // clause; the coverage summary still conveys the full-term framing.
-        const firstVisitClause = coverage && serviceDateIsTodayET
-          ? ` Today's visit is the first of ${coverage.coverageCount}.`
-          : "";
-        body = await templates.getTemplate("invoice_sent_annual_prepay", {
-          first_name: firstName,
-          coverage_summary: coverageSummary,
-          first_visit_clause: firstVisitClause,
-          pay_url: payUrl,
-        }, tplOpts);
-        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
-      }
-      // Upfront invoices — the setup + first-application invoice auto-sent at
-      // estimate acceptance, or any invoice billed before its service date —
-      // must not use the generic "...completed on {service_date}" copy, which
-      // asserts a not-yet-performed service AND prints a future date. A future
-      // service date or an uncompleted linked visit selects a pre-service
-      // variant with no completion claim and no date placeholder. Gated on the same base `invoice` kill
-      // switch as the prepay variant (a disabled invoice_sent skips this too,
-      // keeping the invoice retryable); a missing/disabled variant row falls
-      // through to the standard copy below so the send is never blocked.
-      if (!body && preServiceCopy && invoiceSmsActive) {
-        body = await templates.getTemplate("invoice_sent_upfront", {
-          first_name: firstName,
-          service_type: serviceType,
-          pay_url: payUrl,
-        }, tplOpts);
-        if (body) renderedTemplateKey = "invoice_sent_upfront";
-      }
-      if (!body) {
-        // Either an ordinary invoice, or the prepay template was missing/disabled
-        // — fall back to the standard invoice_sent copy so a missing variant row
-        // never blocks the send.
-        body = await templates.getTemplate("invoice_sent", {
-          first_name: firstName,
-          service_type: serviceType,
-          service_date: formattedDate || "today",
-          pay_url: payUrl,
-        }, tplOpts);
-        if (body) renderedTemplateKey = "invoice_sent";
-      }
-    } catch (err) {
-      logger.warn(`[invoice] Template lookup failed: ${err.message}`);
+    const { body, renderedTemplateKey } = await renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants: expectedSmsDigest !== undefined });
+    // The Intelligence Bar's approved text: the card showed (and the claim re-checked) this exact body. A template edited since
+    // is not sent.
+    if (expectedSmsDigest !== undefined && invoiceSmsDigest({ body, renderedTemplateKey }, payUrl) !== expectedSmsDigest) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw Object.assign(new Error("The invoice text is not the one the approval showed; the text was not sent"), { code: "sms_text_changed" });
     }
 
     if (!body) {
@@ -6561,6 +7521,8 @@ const InvoiceService = {
     // return for the pendingChannelQueued flag.
     let pendingChannelToQueue = null;
     let pendingChannelQueued = false;
+    // The Intelligence Bar's no-replay posture: the leg that did not send, reported on the result instead of queued.
+    let replayWarning = null;
     // Post-delivery finalize, extracted so the delivered-SMS recovery in the
     // catch below can retry it once after a transient DB failure. Wrapped in
     // its own transaction (Codex round-3 P1 #4963, pre-push audit): when
@@ -6730,15 +7692,17 @@ const InvoiceService = {
           }
           const current = await database("invoices").where({ id: invoiceId }).first();
           return checkInvoiceDeliveryPreconditions(database, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner,
           });
         },
         withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
           invoiceId,
           (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner, expectedSmsPhone,
           }),
           dispatch,
+          // The bar's approved phone: the final recipient read and the provider request run under the comms writers' locks.
+          { recipientLocks: expectedSmsPhone ? { customerId: invoice.customer_id, phone: expectedSmsPhone } : null },
         ),
       });
       // Available to the catch block's retry call too (declared outside the
@@ -6852,6 +7816,8 @@ const InvoiceService = {
           for (const [uncertainChannel] of uncertainLegs) {
             logger.warn(`[invoice] payment-link ${uncertainChannel} leg for invoice ${invoiceId} outcome uncertain — not requeued (a whole-notice replay would retry it too, risking a double-send)`);
           }
+        } else if (retryableLegs.length && noReplay) {
+          replayWarning = `The ${retryableLegs[0][0]} leg did not send (${String(retryableLegs[0][1]?.reason || retryableLegs[0][1]?.code || "not sent").slice(0, 120)}); send it by hand`;
         } else if (retryableLegs.length) {
           const [, representativeRetryableLeg] = retryableLegs[0];
           const explicitNextAllowedAt = representativeRetryableLeg.nextAllowedAt ? new Date(representativeRetryableLeg.nextAllowedAt) : null;
@@ -6871,7 +7837,7 @@ const InvoiceService = {
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
-        await require("./invoice-followups").scheduleForInvoice(invoiceId);
+        await require("./invoice-followups").scheduleForInvoice(invoiceId, ...(approvedCadence ? [{ approvedCadence }] : []));
       } catch (e) {
         logger.error(
           `[invoice-followups] scheduleForInvoice failed: ${e.message}`,
@@ -6915,6 +7881,7 @@ const InvoiceService = {
 
       return {
         sent: true, payUrl, ...settledEvent, ...queueOutcome,
+        ...(replayWarning ? { replayWarning } : {}),
         ...(pendingChannel ? {
           pendingChannel: pendingChannel[0],
           pendingChannelCode: pendingChannel[1]?.code,
@@ -6956,7 +7923,7 @@ const InvoiceService = {
         // recovered send still gets its collection follow-ups, audit line,
         // and lead conversion instead of silently losing them.
         try {
-          await require("./invoice-followups").scheduleForInvoice(invoiceId);
+          await require("./invoice-followups").scheduleForInvoice(invoiceId, ...(approvedCadence ? [{ approvedCadence }] : []));
         } catch (e) {
           logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
         }
@@ -7066,11 +8033,36 @@ const InvoiceService = {
       // Internal-only: set by the renewal-gate re-entry below so the inner
       // call does not re-read the term link. Never set by a real caller.
       _underRenewalGate = false,
+      // Intelligence Bar send_invoice: { phone, email } its card showed (phone
+      // digits / lowercased email, null = that leg was not on the card). Each
+      // leg refuses a different recipient at its own send. Null = unchanged.
+      expectedRecipients = null,
+      // Intelligence Bar send_invoice: a refusal stays a refusal. A linked visit
+      // found terminal at send never voids the invoice here (held for review,
+      // INVOICE_VISIT_TERMINAL_UNVOIDED, exactly as a safety-refused void), and a
+      // hold refusal never requeues it for a later send outside the approval.
+      refusalOnly = false,
+      // Intelligence Bar send_invoice: { updatedAtMs, digest } of the invoice row its card
+      // showed. The claim refuses (approved_version_changed, nothing sent) when an edit or
+      // a partial credit changed the amount due or the lines after the card. Null = unchanged.
+      expectedVersion = null,
+      // Intelligence Bar send_invoice: ['sms'] = the text leg only (the email leg is never started, never refused into a
+      // retry). Null = both legs, as every other caller. The page never passes it.
+      channels = null,
+      // false = a queued pay-link text (invoice_send_deferred) is never adopted or cancelled by this send: the claim refuses
+      // it (queued_pay_link). The bar passes false; every other caller keeps the default.
+      adoptsQueuedInvoiceSend = true,
     } = {},
   ) {
+    const smsOnly = Array.isArray(channels) && channels.length === 1 && channels[0] === "sms";
+    // The confirming admin rides the version so the claim's closeout pin names them.
+    if (expectedVersion && actorTechnicianId && expectedVersion.actorTechnicianId === undefined) {
+      expectedVersion = { ...expectedVersion, actorTechnicianId };
+    }
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
+      expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
     });
 
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -7093,6 +8085,7 @@ const InvoiceService = {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
           emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
         }));
       }
     }
@@ -7111,9 +8104,10 @@ const InvoiceService = {
     // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
     try {
-      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt });
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, holdExempt, expectedVersion });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
+      if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
       // retryable refusal every unclaimed sender entry returns (nothing claimed, nothing sent).
@@ -7162,9 +8156,10 @@ const InvoiceService = {
     // credit is drawn down — nothing to reverse.
     let claim;
     try {
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
+      if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       throw err;
     }
@@ -7283,6 +8278,12 @@ const InvoiceService = {
           // restore/resolve) any queued pay-link SMS this send supersedes —
           // the nested claim must not adopt it a second time.
           adoptsQueuedInvoiceSend: false,
+          ...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),
+          ...(expectedVersion && expectedVersion.smsDigest !== undefined ? { expectedSmsDigest: expectedVersion.smsDigest } : {}),
+          ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
+          ...(expectedVersion?.followupCadence ? { approvedCadence: expectedVersion.followupCadence } : {}),
+          // The bar never leaves a replay behind (no later text or email outside its approval).
+          ...(refusalOnly ? { noReplay: true } : {}),
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.settled_zero_due) {
@@ -7385,6 +8386,7 @@ const InvoiceService = {
             sms.originalAt = billingLegContactTime(smsResult);
           }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
+          if (smsResult.replayWarning) sms.warning = smsResult.replayWarning;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
           if (smsResult?.code) sms.code = smsResult.code;
@@ -7419,7 +8421,10 @@ const InvoiceService = {
     // never receives it. The queued row replays the exact rendered body at
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
+    // A refusal-only send (the Intelligence Bar) never queues a later text:
+    // that replay would run outside its approval (recipient, total).
     if (!allowClaimed
+      && !refusalOnly
       && REPLAY_HOLD_CODES.includes(sms.code)
       && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
@@ -7511,6 +8516,10 @@ const InvoiceService = {
       email.error = "Linked visit is terminal; email delivery not attempted";
       email.code = "INVOICE_VISIT_TERMINAL";
       email.deliveryOutcome = "not_sent";
+    } else if (smsOnly) {
+      // A text-only send (the Intelligence Bar): the email leg is not part of it. Not an error and not a retry.
+      email.skipped = true;
+      email.code = "email_not_requested";
     } else if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
@@ -7666,6 +8675,9 @@ const InvoiceService = {
     const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
+    let deliveryRecordFailed = false;
+    // The handed-back claim's pin could not be retired (see the retire write below): the visit will not auto-close.
+    let pinRetireFailed = false;
     let queueOutcome = {};
     let adoptedQueueUnrestored = false;
     // Codex round-8 audit P1 (#4131 slice 4): defaults to voided=true for the
@@ -7698,8 +8710,8 @@ const InvoiceService = {
       }
       if (!adoptedQueueUnrestored) {
         const priorSettlement = previouslySettledBillingLegs([sms, email]);
-        const finalized = await whereSendClaimOwned(
-          db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+        const finalizeSent = (conn) => whereSendClaimOwned(
+          conn("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
           claim.invoice.send_claim_token,
         )
           .update({
@@ -7715,15 +8727,34 @@ const InvoiceService = {
             send_claim_token: null,
             updated_at: new Date(),
           });
+        let finalized;
+        if (expectedVersion?.closeoutTarget) {
+          // The Intelligence Bar's send: the delivery marker that binds its closeout pin to this delivery is written in the
+          // SAME transaction that finalizes the invoice as sent, and the write is mandatory. If it fails, the finalization
+          // rolls back (the claim stays held for review) and the send reports that the message went out but is unrecorded;
+          // the sweep can never see a sent invoice without its marker.
+          try {
+            finalized = await db.transaction(async (trx) => {
+              const count = await finalizeSent(trx);
+              if (count !== 0) {
+                await require("./invoice-issued-closeout").recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token, { conn: trx, actorTechnicianId });
+              }
+              return count;
+            });
+          } catch (markerErr) {
+            deliveryRecordFailed = true;
+            finalized = 0;
+            logger.error(`[invoice] delivery of ${claim.invoice.invoice_number} could not be recorded; finalization rolled back, claim held for review: ${markerErr.message}`);
+          }
+        } else {
+          finalized = await finalizeSent(db);
+        }
         ownedDeliveryFinalized = finalized !== 0;
         // First send finalized on SMS and/or email — convert the originating lead.
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
-            // The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
-            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
-              && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: priorDeliveredForLeadConversion(claim.invoice), approvedLeadSet: expectedVersion?.leadTargets ?? null });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -7734,14 +8765,19 @@ const InvoiceService = {
         // re-arm is conditional).
         if (ownedDeliveryFinalized) {
           try {
-            await require("./invoice-followups").scheduleForInvoice(invoiceId);
+            await require("./invoice-followups").scheduleForInvoice(invoiceId, ...(expectedVersion?.followupCadence ? [{ approvedCadence: expectedVersion.followupCadence }] : []));
           } catch (e) {
             logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
           }
         }
       }
     } else if (terminalVisitRefused) {
-      if (claimed) {
+      if (claimed && refusalOnly) {
+        // Refusal-only caller: no void; the claim is retained for review, the
+        // same state as a safety-refused void below.
+        terminalVisitVoided = false;
+        logger.warn(`[invoice] Terminal-visit refusal for ${claim.invoice.invoice_number} on a refusal-only send — not voided, claim retained for review`);
+      } else if (claimed) {
         const scheduledServiceId = await linkedScheduledServiceId(claim.invoice);
         const voided = scheduledServiceId
           ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
@@ -7789,6 +8825,16 @@ const InvoiceService = {
       // its claim (stale-claim recovery parks it for review) rather than
       // requeueing a second send over an unrestored text.
       adoptedQueueUnrestored = !restored && rowsToRestore.length > 0;
+      // The claim ended without a delivery: its closeout pin is finished business, not a delivery with a missing marker.
+      if (restored && expectedVersion?.closeoutTarget) {
+        try {
+          await require("./invoice-issued-closeout").recordApprovedCloseoutRetired(invoiceId, claim.invoice.send_claim_token);
+        } catch (retireErr) {
+          // The claim is handed back, but its pin stays unretired: the visit will not auto-close. Said on the result.
+          pinRetireFailed = true;
+          logger.error(`[invoice] closeout pin retire record failed for ${invoiceId}: ${retireErr.message}`);
+        }
+      }
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
@@ -7806,7 +8852,7 @@ const InvoiceService = {
       }
       // A collections dispute-hold refusal always leaves the invoice SCHEDULED, never a
       // draft nothing sends after the release (the sender holds it, then sends it).
-      if (restored && !allowClaimed && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
+      if (restored && !allowClaimed && !refusalOnly && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
         await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: claim.invoice.customer_id });
       }
     }
@@ -7817,7 +8863,8 @@ const InvoiceService = {
     let issuedCloseout = null;
     if (ownedDeliveryFinalized) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+      // The Intelligence Bar's card named the visit this send closes (or none): the closeout runs for that visit only.
+      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId, approvedTarget: expectedVersion?.closeoutTarget || null });
     }
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the
@@ -7837,14 +8884,26 @@ const InvoiceService = {
     const holdLegs = [sms, email].filter((leg) => leg?.code === "COLLECTION_HOLD_DEFER");
     const holdOnly = !ok && holdLegs.length > 0 && !sms.ok && !email.ok
       && !terminalVisitObserved && !deliveryOutcomeUncertain && !adoptedQueueUnrestored;
-    return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
+    return { ok: ok && !deliveryRecordFailed, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
+      ...(deliveryRecordFailed ? {
+        code: "INVOICE_DELIVERY_RECORD_FAILED", deliveryHeld: true,
+        error: "The invoice went out, but the app could not record it as sent. Check the invoice by hand and do not send it again.",
+      } : {}),
       ...(holdOnly ? {
         code: "COLLECTION_HOLD_DEFER", retryable: true, deferred: true, deliveryOutcome: "not_sent",
         error: holdLegs[0].error || "Customer has an active collections dispute hold; delivery deferred until it is released",
         ...(holdLegs.find((leg) => leg.nextAllowedAt) ? { nextAllowedAt: holdLegs.find((leg) => leg.nextAllowedAt).nextAllowedAt } : {}),
       } : {}),
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
+      ...(pinRetireFailed ? {
+        closeoutPinRetireFailed: true,
+        closeoutPinWarning: "The send did not go out and the invoice is back as it was, but the closeout pin could not be retired; the visit will not auto-close, close it by hand.",
+        ...(!deliveryRecordFailed && !adoptedQueueUnrestored ? {
+          code: "INVOICE_CLOSEOUT_PIN_RETIRE_FAILED",
+          error: "The send did not go out and the invoice is back as it was, but the closeout pin could not be retired; the visit will not auto-close, close it by hand.",
+        } : {}),
+      } : {}),
       ...(terminalVisitRefused
         ? (terminalVisitVoided
           ? { code: "INVOICE_VISIT_TERMINAL" }
@@ -8739,7 +9798,10 @@ const InvoiceService = {
       : "0.00";
   },
 
-  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
+  // beforeProviderHandoff (optional, async, returns true to proceed): the caller's last check, run through the
+  // messaging pipeline's own provider-boundary hook (sendCustomerMessage preProviderCheck, the last callback before
+  // the Twilio request). Anything but `true` blocks the send: a definite non-send.
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false, beforeProviderHandoff } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -8815,6 +9877,7 @@ const InvoiceService = {
       // open. Callers assert it only from verified provenance (the
       // receipt queue's persisted flag; Pay-route enqueues).
       ...(customerInitiated ? { customerInitiated: true } : {}),
+      ...receiptHandoffCheck(beforeProviderHandoff, { to: customer.phone, amount }),
       metadata: {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
@@ -8863,6 +9926,11 @@ const InvoiceService = {
       );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
+      // The messaging layer's own verdict (accepted / not_sent / uncertain),
+      // under the name every caller reads it by (classifyDeliveryCertainty):
+      // a provider timeout is PROVIDER_FAILURE + deliveryOutcome 'uncertain',
+      // which the message text alone cannot tell from a definite failure.
+      err.providerOutcome = { deliveryOutcome: sendResult.deliveryOutcome, blocked: sendResult.blocked === true };
       // Send-window hold: carry the window-open time so the receipt queue
       // schedules its retry there instead of burning generic backoff
       // attempts overnight (an after-8PM payment's receipt must go out at
@@ -9369,6 +10437,18 @@ const InvoiceService = {
       }
     }
 
+    // Dues-stamp handling decides NOTHING before its lock. Whether this edit
+    // touches a dues stamp is read from either side (the pre-read stored row or
+    // the incoming lines) only to choose WHICH month's lock to take first —
+    // the stored month wins (an incoming marker naming another month is
+    // forged/stale and never holds a second lock). The keep-or-strip itself is
+    // judged inside runEdit against the LOCKED row. Stamps exist only from the
+    // mint's insert and can only be removed afterwards, so a pre-read with no
+    // marker anywhere cannot meet a stamped locked row; runEdit still refuses
+    // that case instead of proceeding unlocked.
+    const duesStoredMonth = membershipDuesStampMonth(existing.line_items);
+    const duesIncomingMonth = updates.line_items ? membershipDuesStampMonth(updates.line_items) : null;
+    const duesLockMonth = duesStoredMonth || duesIncomingMonth;
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
@@ -9567,6 +10647,16 @@ const InvoiceService = {
     };
 
     const runEdit = async (client) => {
+      // The dues-month lock is the FIRST lock of the edit (before the invoice
+      // row lock) whenever either side carries a marker.
+      // The owner comes from a fresh UNLOCKED read (a customer merge may have
+      // repointed the invoice since `existing` was read); the lock stays first.
+      let duesLockCustomerId = existing.customer_id;
+      if (duesLockMonth) {
+        const freshOwner = await client("invoices").where({ id }).first("customer_id");
+        if (freshOwner?.customer_id) duesLockCustomerId = freshOwner.customer_id;
+        await acquireMembershipDuesMonthLock(client, duesLockCustomerId, duesLockMonth);
+      }
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
       // fireStep's claim transaction locks this same row before stamping
       // touch_claimed_at, so one of the two strictly precedes the other —
@@ -9580,6 +10670,30 @@ const InvoiceService = {
       if (!lockedRow) {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      // The locked row is the only authority for the dues stamp. A stamp whose
+      // month this edit did not lock (never expected: see above) is a stale
+      // edit, refused rather than run unlocked.
+      const lockedDuesMonth = membershipDuesStampMonth(lockedRow.line_items);
+      if (duesLockMonth && String(lockedRow.customer_id) !== String(duesLockCustomerId)) {
+        // A merge moved the invoice between the owner read and the row lock:
+        // the month lock taken was the old owner's. Refuse, retryable.
+        throw new Error(
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      if (lockedDuesMonth && lockedDuesMonth !== duesLockMonth) {
+        throw new Error(
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      // The dues line of a stamped invoice cannot change (an edit that would
+      // is refused); otherwise the server owns the marker — kept on the stored
+      // dues line, never created (see enforceMembershipDuesLines).
+      if (data.line_items !== undefined) {
+        data.line_items = JSON.stringify(
+          enforceMembershipDuesLines(lockedRow, parseInvoiceLineItems(data.line_items)),
         );
       }
       const inFlightNow = await client("invoice_followup_sequences")
@@ -9865,6 +10979,10 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
+      // A stamped dues invoice's void removes the month's coverage: commit
+      // under the dues-month lock (first lock of this transaction).
+      const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, current);
+      await claimCustomerCollectionForDuesRelease(trx, lockedDues);
       // Codex #4971 pre-push P0 (lock order): voiding a credit-settled
       // ('prepaid') termite annual invoice restores its account credit and
       // COMMITS here, before the term sync below ever runs. A renewal charge
@@ -9911,6 +11029,7 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while voiding — re-check and retry");
       }
+      assertDuesOwnerUnmoved(lockedDues, updated);
       // A voided standard invoice that billed the rodent bait-station setup
       // puts the obligation back on the living series (codex #3591 r44 P1).
       await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);
@@ -9962,6 +11081,7 @@ const InvoiceService = {
       }
       invoice = updated;
     });
+    await alertIfMembershipDuesCoverageReleased(invoice, { releasedBy: "voided" });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -10199,6 +11319,15 @@ const InvoiceService = {
       // fresh read above and this lock moved the invoice to another customer, whose rows were never taken.
       if (String(updated.customer_id) !== String(own.customer_id)) {
         throw new Error("Invoice ownership changed while unvoiding — re-check and retry");
+      }
+      await assertStampedDuesMonthFreeToRestore(trx, updated);
+      // The month is billed on this invoice again: a standing "rebill the
+      // month" alert from its void is stale, so it closes with the restore
+      // (same transaction); a later void raises a fresh one.
+      if (membershipDuesStampMonth(updated.line_items) && require("../config/feature-gates").alertEpisodesLive()) {
+        await require("./admin-alert-episodes").closeAdminAlertKeys(trx, [duesCoverageReleasedKey(id)], "dues invoice restored", {
+          resolution: "The dues invoice was restored, so the month is billed on it again",
+        });
       }
       // The preserved withdrawal stamp is re-judged against LIVE ownership
       // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
@@ -12154,7 +13283,7 @@ const InvoiceService = {
       }
       const candidates = await candidateQuery
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
-          "total", "credit_applied", "line_items");
+          "total", "credit_applied", "line_items", "customer_id", "created_at", "scheduled_service_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
@@ -12230,6 +13359,10 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // A cancelled visit's void of a stamped dues invoice removes the
+            // month's coverage: dues-month lock first.
+            const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, candidate);
+            await claimCustomerCollectionForDuesRelease(trx, lockedDues);
             // Codex #4971 pre-push P0 (lock order): this void can take a
             // credit-settled ('prepaid') invoice and restore its credit, so
             // a termite renewal parent-decision gate tied to it is this
@@ -12310,6 +13443,7 @@ const InvoiceService = {
               .update({ status: "void", send_claim_token: null, updated_at: new Date() })
               .returning("*");
             if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
+            assertDuesOwnerUnmoved(lockedDues, voidedInvoice);
             // Same-transaction ledger restore, matching voidInvoice: a
             // cancelled job's pre-minted first invoice may carry the
             // estimate's deposit credit, which must become available again
@@ -12348,6 +13482,7 @@ const InvoiceService = {
             `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
           );
           // Post-commit side effects, matching voidInvoice.
+          await alertIfMembershipDuesCoverageReleased(result.invoice, { releasedBy: "voided" });
           await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
           try {
             await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -12635,18 +13770,35 @@ InvoiceService._internals = {
 // decision because the service won't happen.
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
+// Shared with the scheduled-invoice mint helper (Charge now's pre-mint).
+InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
+InvoiceService.membershipDuesStampMonth = membershipDuesStampMonth;
+InvoiceService.prepareMembershipDuesRestore = prepareMembershipDuesRestore;
+InvoiceService.reconcileMembershipDuesRestore = reconcileMembershipDuesRestore;
+InvoiceService._prepaidDuesAlert = { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec, filterVisitsCoveredByDues, stripPayerBilledDuesMarker };
+// Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).
+InvoiceService.alertIfMembershipDuesCoverageReleased = alertIfMembershipDuesCoverageReleased;
 
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;
 InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
+module.exports.queuedPayLinkText = queuedPayLinkText;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
+module.exports._convertLeadOnInvoiceSent = convertLeadOnInvoiceSent;
+module.exports._checkInvoiceDeliveryPreconditions = checkInvoiceDeliveryPreconditions;
+module.exports.renderInvoiceSmsBody = renderInvoiceSmsBody;
+module.exports.chooseInvoiceSmsTemplate = chooseInvoiceSmsTemplate;
+// The approved-version claim checks, each one decision (tested on its own).
+module.exports._approvedClaimChecks = {
+  approvedDigestRefusal, approvedEffectsRefusal, approvedOwnerRefusal, approvedAttachmentRefusal, recordApprovedPinOrRefusal, runApprovedClaimChecks,
+};
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
@@ -12674,6 +13826,9 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
+module.exports.leadConversionApplies = leadConversionApplies;
+module.exports.priorDeliveredForLeadConversion = priorDeliveredForLeadConversion;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim

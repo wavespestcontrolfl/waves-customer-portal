@@ -1085,7 +1085,8 @@ describe('future-scheduled-date stale-attempt guard', () => {
     const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, status: 'confirmed', track_state: 'scheduled' };
     const childrenSelect = {
       where: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+      whereRaw: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1', status: 'pending' }]),
     };
     const trackingUpdate = query(1);
     const trx = jest.fn(() => trackingUpdate);
@@ -1098,13 +1099,14 @@ describe('future-scheduled-date stale-attempt guard', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('cancelled');
-    // Narrow filter: only the call pipeline's pending, never-confirmed child.
-    expect(childrenSelect.where).toHaveBeenCalledWith({
-      parent_service_id: 'job-1',
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
-    });
+    // Cancel filter: the call-pipeline child while pending and never
+    // customer-confirmed; the package child pending or confirmed whatever
+    // the customer did — call-booking-catalog applyCallFollowUpCancelFilter.
+    expect(childrenSelect.where).toHaveBeenCalledWith({ parent_service_id: 'job-1' });
+    expect(childrenSelect.whereRaw).toHaveBeenCalledWith(
+      "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed', 'rescheduled')))",
+      ['ai_call_pipeline_followup', 'package_followup_auto'],
+    );
     // Status goes through the sole canonical writer (audit row + broadcast)
     // on the shared trx…
     expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
@@ -1138,7 +1140,8 @@ describe('future-scheduled-date stale-attempt guard', () => {
     const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, status: 'confirmed', track_state: 'scheduled' };
     const childrenSelect = {
       where: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+      whereRaw: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1', status: 'pending' }]),
     };
     db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
     transitionJobStatus.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('boom'));
@@ -1157,7 +1160,8 @@ describe('future-scheduled-date stale-attempt guard', () => {
     const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, status: 'cancelled', track_state: 'cancelled', cancelled_at: cancelledAt };
     const childrenSelect = {
       where: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+      whereRaw: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1', status: 'pending' }]),
     };
     db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
     db
@@ -1198,7 +1202,8 @@ describe('future-scheduled-date stale-attempt guard', () => {
     const fresh = { ...svc, status: 'cancelled', track_state: 'cancelled', cancelled_at: new Date('2026-07-01T15:00:00Z') };
     const childrenSelect = {
       where: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue([{ id: 'child-1' }]),
+      whereRaw: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ id: 'child-1', status: 'pending' }]),
     };
     db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(0))));
     db

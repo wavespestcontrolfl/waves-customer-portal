@@ -149,7 +149,18 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
   const actorTechnicianId = context?.actorTechnicianId || null;
 
   // Expanded tools
-  const customerId = input.customer_id || contextCustomerId;
+  input = input && typeof input === 'object' ? input : {};
+
+  // Model-produced arguments are untrusted input (the same rule as
+  // tools.js). Customer scope comes only from the caller's authenticated
+  // context, never from a tool argument: a customer_id the model supplies
+  // cannot select another customer's property profile, invoices or phone,
+  // and with no customer in context the customer tools below refuse.
+  if (input.customer_id && String(input.customer_id) !== String(contextCustomerId || '')) {
+    logger.warn(`[ai-assistant] blocked cross-customer tool scope tool=${toolName}`);
+    return { error: 'Customer scope mismatch' };
+  }
+  const customerId = contextCustomerId || null;
 
   switch (toolName) {
 

@@ -18,6 +18,7 @@
  */
 
 const db = require("../models/db");
+const { typedPhoneBlocksPreAcceptSms } = require("./estimate-contact-gaps");
 const { estimateGreetingFirstName } = require("../utils/greeting-first-name");
 const EmailTemplateLibrary = require("./email-template-library");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
@@ -418,7 +419,10 @@ async function withFollowupPropertyRow(est, payload) {
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   let smsHold = null;
-  if (est.customer_phone && sms) {
+  // A phone the customer typed on the accept card gets no follow-up text
+  // before acceptance (estimate-contact-gaps typedPhoneBlocksPreAcceptSms);
+  // the email half below still goes.
+  if (est.customer_phone && sms && !typedPhoneBlocksPreAcceptSms(est)) {
     try {
       const result = await sendCustomerMessage({
         to: est.customer_phone,
@@ -938,7 +942,7 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       resolveEstimateInvoiceMode,
       buildPricingBundle,
       resolveEstimateQuoteRequirement,
-      estimateTrenchingReviewRequired,
+      estimatePublicBlockingState,
       reconcileFrozenMembershipSnapshot,
       resolveAcceptOneTimeTotal,
       commercialAcceptDepositExempt,
@@ -971,9 +975,12 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
     // the customer touched the payment step can no longer be accepted
     // online — the endpoints 409 before minting, so don't email the
     // customer back into a card step that's now a dead end.
-    if (estimateTrenchingReviewRequired(estData)) return false;
+    // ONE blocking-state helper (routes/estimate-public.js estimatePublicBlockingState): quote-required,
+    // trenching review, and (B18) a parked estimate - its phone belongs to another customer, so the card
+    // intents always refuse it and a "finish saving your card" email would point at a dead end. Fail closed
+    // like the others: a failed park lookup lands in the outer catch and skips the send.
     const pricingBundle = await buildPricingBundle(est);
-    if (resolveEstimateQuoteRequirement(pricingBundle, estData).quoteRequired) return false;
+    if (await estimatePublicBlockingState(est, { estData, quoteRequirement: resolveEstimateQuoteRequirement(pricingBundle, estData) })) return false;
     // Contact gate, BOTH lanes (codex 2729 r2 + r3): recurring accept is
     // phone-keyed (CUSTOMER_CONTACT_REQUIRED), and a required hold binds a
     // slot/appointment, which accept also refuses without a customer/phone.

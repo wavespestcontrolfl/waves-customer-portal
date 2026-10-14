@@ -56,7 +56,20 @@
  * Never applies to customer-initiated contact bells (inbound_sms, inbound_email,
  * missed_call, voicemail_callback, review) or money-owed/failed/refund alerts:
  * a class is only in the table if its category (plus dedupeKey prefix) is
- * listed below.
+ * listed below. Two customer-contact bells are in it by owner ruling
+ * (2026-10-03), each closed only by the record that answers it: the
+ * promise-chaser bell once the promise it chases is closed, and a portal chat
+ * hand-off about adding a service once an estimate is handed off to that
+ * customer. A self-booked re-service bell (owner 2026-10-05) closes once its
+ * booked visit is completed, cancelled or gone. A phone-booking rain notice
+ * (owner 2026-10-08) closes once its visit is closed, gone, moved off the
+ * date or start it was booked for, or past its date. A call last-name
+ * suggestion (owner 2026-10-08) closes once its customer has a last name or is
+ * gone. Every other missed-call bell and portal chat topic stays a
+ * person's to close. A promise-chaser retirement is final (`rearm: false`),
+ * like the close its own emitter writes inside its 30-minute window: a
+ * promise reopened later is the promise list's and the SLA pager's to
+ * surface, and a later callback rings its own bell.
  */
 
 const db = require('../models/db');
@@ -64,6 +77,11 @@ const logger = require('./logger');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
+// The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
+// SUGGESTION_KEY_PREFIX). Repeated here, not imported: that module pulls in
+// the county parcel lookup, and this one loads in the scheduler, the triggers
+// and Needs Me. A test pins the two together.
+const SUGGESTION_KEY_PREFIX = 'call-last-name-suggestion:';
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
@@ -117,6 +135,12 @@ function refsFromRow(row) {
     estimateId: uuidOrNull(first(meta.estimateId, meta.estimate_id, payload.estimateId, params.get('estimateId'))),
     leadId: uuidOrNull(first(payload.leadId, meta.leadId, params.get('lead'))),
     promiseIds: arr(meta.promise_ids).map(uuidOrNull).filter(Boolean),
+    // The one promise a promise-chaser bell is about (promise-chaser-bell.js).
+    owedPromiseId: meta.triggerKey === 'promise_chaser' ? uuidOrNull(payload.commitmentId) : null,
+    // The customer a last-name suggestion is about (call-last-name-lookup.js):
+    // only that class names one, so no other bell loads a customer.
+    nameCustomerId: String(meta.dedupeKey || '').startsWith(SUGGESTION_KEY_PREFIX)
+      ? uuidOrNull(first(meta.customerId, params.get('customerId'))) : null,
   };
 }
 
@@ -135,10 +159,11 @@ function resolveRefs(row, data) {
   const lead = refs.leadId ? data.leads.get(refs.leadId) : undefined;
   const estimateId = refs.estimateId || (lead?.estimate_id ? String(lead.estimate_id) : null);
   const estimate = estimateId ? data.estimates.get(estimateId) : undefined;
-  return { refs, visit, lead, estimate };
+  const customer = refs.nameCustomerId ? data.customers.get(refs.nameCustomerId) : undefined;
+  return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map(), consents: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), chatQuoted: new Set(), promises: new Map(), consents: new Map(), customers: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -150,9 +175,31 @@ async function loadSubjects(rows, conn = db) {
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
-  const promiseIds = ids((r) => r.promiseIds);
+  const promiseIds = ids((r) => [...r.promiseIds, ...(r.owedPromiseId ? [r.owedPromiseId] : [])]);
+  const nameCustomerIds = ids((r) => (r.nameCustomerId ? [r.nameCustomerId] : []));
+  // The last-name bells' customers, live ones only: a soft-deleted customer
+  // is not in the map, which reads as gone. The name itself is the rule's.
+  if (nameCustomerIds.length) {
+    data.customers = byId(await conn('customers').whereIn('id', nameCustomerIds).whereNull('deleted_at').select('id', 'last_name'));
+  }
   if (promiseIds.length) {
-    data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'reviewed_at'));
+    data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'human_state', 'reviewed_at'));
+  }
+  // Each add-a-service portal chat bell: was an estimate handed off to its
+  // customer after the bell? The promise lane's own handoff witness
+  // (call-commitments.js handedOffWithin: a real delivery or the customer's
+  // acceptance after the boundary) and its estimate-ownership fence, never
+  // sent_at: a suppressed send stamps sent_at with nothing delivered, and an
+  // estimate accepted during its first send is delivered with sent_at still
+  // null. One small query per bell (the class is a handful of rows).
+  for (const row of rows) {
+    const meta = parseMeta(row.metadata);
+    const customerId = isAddServiceChat(meta) ? uuidOrNull(meta.customerId) : null;
+    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
+    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+    const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
+    if (handedOff) data.chatQuoted.add(String(row.id));
   }
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
@@ -231,6 +278,9 @@ function subjectFor(row, data, todayET) {
     // The latest consent the bell's customer recorded at the current text
     // version (loaded for stale-consent bells only).
     consentRecordedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.consents.get(id) : null; })(),
+    // An estimate was handed off to the bell's customer after the bell
+    // (loaded for add-a-service portal chat bells only).
+    chatQuoted: data.chatQuoted.has(String(row.id)),
   };
 }
 
@@ -335,6 +385,75 @@ function promiseMarksSettled(s) {
   return settled ? 'Every promise it named is settled' : null;
 }
 
+// A promise-chaser bell (promise-chaser-bell.js: a caller rang back while a
+// Waves promise to them was still open) is settled once that promise is
+// closed: kept, dismissed, or dismissed by staff while its status stays open
+// (call-commitments.js reads human_state the same way). A promise row that is
+// gone is "unknown", never "closed". Final, never re-armed: the emitter's own
+// close (ringForCall, inside its 30-minute window) is final too, so the two
+// closes read the same; see the module header.
+function chasedPromiseClosed(s) {
+  const promise = s.refs.owedPromiseId ? s.promiseOf(s.refs.owedPromiseId) : undefined;
+  if (!promise) return null;
+  return String(promise.status) !== 'open' || promise.human_state === 'dismissed' ? 'The promise was closed' : null;
+}
+
+// A portal chat hand-off (ai-assistant/assistant.js notifyTeamOfEscalation)
+// about adding a service is answered by an estimate: settled once one is
+// handed off to that customer after the bell (owner 2026-10-03; the witness
+// is loadSubjects'). Any estimate counts, not
+// only one for the service asked about: the bell records the topic, not the
+// service. Every other topic (a cancellation, a complaint, a schedule change)
+// is never judged, and neither is a bell written before the topic was stored.
+const PORTAL_CHAT_PREFIX = 'portal-chat-escalation:';
+function isAddServiceChat(meta) {
+  return String(meta.dedupeKey || '').startsWith(PORTAL_CHAT_PREFIX) && meta.topic === 'add_service';
+}
+function addServiceQuoted(s) {
+  return isAddServiceChat(s.meta) && s.chatQuoted ? 'Estimate was sent' : null;
+}
+
+// A re-service request bell (notification-triggers.js reservice_self_booked)
+// is about its booked visit: done once that visit is completed, cancelled or
+// gone. Its emitter re-raises the same per-visit key only while the visit is
+// open and new (reservice-public.js ringReserviceBooked), so a retire never
+// fights it.
+function reserviceVisitClosed(s) {
+  if (!s.refs.visitId) return null;
+  if (!s.visit) return 'Visit is gone';
+  return CLOSED_VISIT_STATUSES.has(String(s.visit.status)) ? 'Visit is closed' : null;
+}
+
+// A phone-booking rain notice (call-booking-rain-flag.js) is about ONE visit
+// at the date and start it was booked for: done once that visit is closed or
+// gone, was moved off that date or start (the forecast it quoted no longer
+// describes the visit), or its date has passed. Its emitter raises it once
+// per visit and never again, so a retire never fights it.
+function callBookingRainSettled(s) {
+  if (!s.refs.visitId) return null;
+  if (!s.visit) return 'Visit is gone';
+  if (CLOSED_VISIT_STATUSES.has(String(s.visit.status))) return 'Visit is closed';
+  const day = String(s.visit.service_date || '');
+  const bookedDay = String(s.meta.scheduled_date || '');
+  const bookedStart = String(s.meta.window_start || '').slice(0, 5);
+  if (DATE_RE.test(bookedDay) && day !== bookedDay) return 'Visit was moved';
+  if (bookedStart && String(s.visit.window_start || '').slice(0, 5) !== bookedStart) return 'Visit was moved';
+  return DATE_RE.test(day) && day < s.todayET ? 'Visit date has passed' : null;
+}
+
+// A last-name suggestion (call-last-name-lookup.js: one bell per customer who
+// gave a first name on a call) is about that customer's missing last name:
+// done once the customer has a non-blank last name, or is gone (deleted or
+// soft-deleted). A live customer with a blank last name keeps it. The emitter
+// raises it once per customer and never again, so a retire never fights it; a
+// name blanked again inside the re-arm window puts the bell back. A bell naming
+// no usable customer id is never judged.
+function lastNameSaved(s) {
+  if (!s.refs.nameCustomerId) return null;
+  if (!s.customer) return 'Customer is gone';
+  return String(s.customer.last_name ?? '').trim() ? 'Last name was saved' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -356,6 +475,21 @@ const CLASSES = [
   { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
     // raised again (same key) only while a mark is still unsaved.
     key: 'promise_marks', categories: ['alert'], prefix: 'visit-promise-marks:', rule: promiseMarksSettled,
+  },
+  { // promise-chaser-bell.js — one bell per promise and call day
+    key: 'promise_chaser', categories: ['missed_call'], prefix: 'promise_chaser:', match: (meta) => meta.triggerKey === 'promise_chaser', rule: chasedPromiseClosed, rearm: false,
+  },
+  { // reservice-public.js ringReserviceBooked — one bell per self-booked visit
+    key: 'reservice_booked', categories: ['schedule'], prefix: 'reservice-booked:', match: (meta) => meta.triggerKey === 'reservice_self_booked', rule: reserviceVisitClosed,
+  },
+  { // call-booking-rain-flag.js — one notice per phone-booked visit
+    key: 'call_booking_rain', categories: ['schedule'], prefix: 'call-booking-rain:', rule: callBookingRainSettled,
+  },
+  { // call-last-name-lookup.js — one suggestion per customer
+    key: 'call_last_name_suggestion', categories: ['customer'], prefix: SUGGESTION_KEY_PREFIX, rule: lastNameSaved,
+  },
+  { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
+    key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
   },
 ];
 
@@ -556,7 +690,7 @@ async function rearmRelevantAgain(now, todayET) {
     for (const { row, bell } of judged) {
       try {
         const cls = classify(bell);
-        if (!cls || cls.rule(subjectFor(bell, data, todayET))) continue;
+        if (!cls || cls.rearm === false || cls.rule(subjectFor(bell, data, todayET))) continue;
         rearmed += await putBack(row);
       } catch (err) {
         logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${err.message}`);

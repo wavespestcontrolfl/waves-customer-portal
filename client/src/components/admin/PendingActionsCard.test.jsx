@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, expect, it, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import PendingActionsCard from './PendingActionsCard';
 
 const action = { id: '11111111-1111-4111-8111-111111111111', tool: 'create_restock_request', summary: 'Save synthetic restock request', expiresInMs: 600000 };
@@ -179,4 +179,150 @@ it('Codex #5514 r5: a card stored as preview-only (minted before the commit path
   expect(screen.getByText(/Change: false → true/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+});
+
+// Product picker + Show again on stock cards (owner 2026-10-07).
+const stockAction = { ...action, tool: 'adjust_stock', summary: 'Synthetic stock change' };
+const PICKER = {
+  id: '33333333-3333-4333-8333-333333333333', tool: 'adjust_stock', expiresInMs: 600000, contract_hash: 'hash-choice',
+  contract: {
+    tier: 'yellow', action_label: 'Choose the product',
+    effects: [{ kind: 'operational', label: 'Pick the product for this stock change (restock 78 fl_oz). Nothing changes until you pick a product and confirm the next card.' }],
+    product_choices: [
+      { product_id: 'aaaaaaaa-0000-4000-8000-00000000000a', name: 'Zentrovex 10% SC', container_size: '78 fl oz', unit: 'fl_oz', on_hand: 20, stock_after: 98, selectable: true },
+      { product_id: 'aaaaaaaa-0000-4000-8000-00000000000b', name: 'Zentrovex 20% SC', container_size: '1 gal', unit: 'fl_oz', on_hand: null, stock_after: 78, selectable: true },
+      { product_id: 'aaaaaaaa-0000-4000-8000-00000000000c', name: 'Zentrovex Granule', container_size: null, unit: 'lb', on_hand: 4, stock_after: null, selectable: false, reason: 'Cannot convert fl_oz to lb' },
+    ],
+  },
+};
+const NEXT_CARD = {
+  id: '44444444-4444-4444-8444-444444444444', tool: 'adjust_stock', expiresInMs: 600000, contract_hash: 'hash-next',
+  contract: { tier: 'yellow', action_label: 'Adjust inventory stock', effects: [{ kind: 'operational', label: 'Zentrovex 20% SC: restock 78 fl_oz; on hand 0 → 78 fl_oz' }] },
+};
+
+test.each(['light', 'dark'])('a picker card lists the shortlist and sends only the picked product id (%s)', async (variant) => {
+  const fetch = vi.fn().mockResolvedValue(response({ success: true, outcome: 'completed', pendingAction: NEXT_CARD }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={[PICKER]} variant={variant} />);
+  expect(screen.getByText(/Awaiting your confirmation: Choose the product/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+  const use = screen.getByRole('button', { name: 'Use this product' });
+  expect(use).toBeDisabled();
+  const radios = screen.getAllByRole('radio');
+  expect(radios).toHaveLength(3);
+  expect(radios[2]).toBeDisabled();
+  expect(screen.getByText(/Cannot convert fl_oz to lb/)).toBeInTheDocument();
+  expect(screen.getByText(/on hand not counted yet → 78 fl_oz/)).toBeInTheDocument();
+  fireEvent.click(radios[1]);
+  expect(use).toBeEnabled();
+  fireEvent.click(use);
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toContain('/admin/intelligence-bar/choose-product');
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+    pending_action_id: PICKER.id, product_id: 'aaaaaaaa-0000-4000-8000-00000000000b', contract_hash: 'hash-choice',
+  });
+  // The new card shows the exact before and after and is confirmed normally.
+  expect(screen.getByText(/on hand 0 → 78 fl_oz/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+});
+
+test('a refused pick keeps the card and shows why', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({ error: 'That product was not on this card. Nothing was written.' }) }));
+  render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[0]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('That product was not on this card. Nothing was written.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Use this product' })).toBeEnabled();
+});
+
+test.each(['light', 'dark'])('an expired card offers Show again and puts the fresh card below it (%s)', async (variant) => {
+  const fetch = vi.fn().mockResolvedValue(response({ success: true, pendingAction: NEXT_CARD }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={[{ ...stockAction, receipt: { outcome: 'expired', result: null } }]} variant={variant} />);
+  expect(screen.getByText(/Expired — this proposal is no longer confirmable/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Show again' }));
+  expect(await screen.findByText('Shown again below.')).toBeInTheDocument();
+  expect(fetch.mock.calls[0][0]).toContain('/admin/intelligence-bar/show-again');
+  expect(fetch.mock.calls[0][1].method).toBe('POST');
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ pending_action_id: action.id });
+  expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  expect(screen.getByText('Expires in 10:00')).toBeInTheDocument();
+});
+
+test('a card that runs out of time while open offers Show again; a refusal stays on the expired card', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(2000000);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({ error: 'Product not found' }) }));
+  render(<PendingActionsCard actions={[{ ...stockAction, receivedAt: 2000000 }]} variant="light" />);
+  expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
+  vi.setSystemTime(2600001);
+  act(() => { vi.advanceTimersByTime(1500); });
+  expect(await screen.findByRole('button', { name: 'Show again' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Show again' }));
+  expect(await screen.findByText('Product not found')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Show again' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+});
+
+test('a lost choose response replays the same request and shows the card the server already made', async () => {
+  const fetch = vi.fn().mockRejectedValueOnce(new TypeError('Network lost'))
+    .mockResolvedValueOnce(response({ success: true, replayed: true, pendingAction: NEXT_CARD }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[1]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch.mock.calls[1][0]).toContain('/admin/intelligence-bar/choose-product');
+  expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body);
+  expect(screen.getByText(/on hand 0 → 78 fl_oz/)).toBeInTheDocument();
+});
+
+test('a follow-up card that the host list also carries after a refresh renders once', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ success: true, outcome: 'completed', pendingAction: NEXT_CARD })));
+  const view = render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[1]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  view.rerender(<PendingActionsCard actions={[PICKER, NEXT_CARD]} variant="light" />);
+  expect(screen.getAllByRole('button', { name: 'Confirm' })).toHaveLength(1);
+});
+
+test('a refreshed host entry for a follow-up card wins: its settled receipt replaces the cached pending card', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ success: true, outcome: 'completed', pendingAction: NEXT_CARD })));
+  const view = render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[1]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  view.rerender(<PendingActionsCard actions={[PICKER, { ...NEXT_CARD, receipt: { outcome: 'canceled', result: null } }]} variant="light" />);
+  expect(screen.getByText('Cancelled')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+});
+
+test('Show again cannot be sent twice while its request is in flight', async () => {
+  let release;
+  const fetch = vi.fn(() => new Promise((resolve) => { release = () => resolve(response({ success: true, pendingAction: NEXT_CARD })); }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={[{ ...stockAction, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Show again' }));
+  const busy = await screen.findByRole('button', { name: 'Showing again…' });
+  expect(busy).toBeDisabled();
+  fireEvent.click(busy);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  release();
+  expect(await screen.findByText('Shown again below.')).toBeInTheDocument();
+});
+
+test('an expired task card points to the task Continue action instead of Show again', () => {
+  render(<PendingActionsCard actions={[{ ...stockAction, receipt: { outcome: 'expired', result: null } }]} variant="light" inTask />);
+  expect(screen.getByText(/Continue the request to get a fresh card/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
+});
+
+test('an expired card of any other tool keeps the ask-again line and offers no Show again', () => {
+  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  expect(screen.getByText('Expired — this proposal is no longer confirmable. Ask again to re-propose it.')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
 });

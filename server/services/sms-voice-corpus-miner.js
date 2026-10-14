@@ -295,7 +295,7 @@ async function mineSmsPairs({ since, until, skipped }) {
       .where('created_at', '>=', since)
       .where('created_at', '<', until)
       .whereNotNull('customer_id')
-      .whereNotIn('status', ['failed', 'undelivered', 'scheduled']),
+      .whereNotIn('status', ['failed', 'undelivered', 'scheduled', 'canceled', 'cancelled']),
   )
     .select('id', 'customer_id', 'admin_user_id', 'message_body', 'to_phone', 'created_at')
     .orderBy('created_at', 'asc');
@@ -677,5 +677,6 @@ module.exports = {
     redactCorpusText,
     PAIR_WINDOW_HOURS,
     OUTCOME_WINDOW_DAYS,
+    mineSmsPairs,
   },
 };

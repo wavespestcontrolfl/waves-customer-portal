@@ -7,22 +7,70 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
-import { UNIT_CHOICES } from '../../lib/fast-complete-products';
+import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
+import { elapsedSince } from '../../lib/on-site-time';
+import { isMlUnit } from '../../lib/measure-units';
+import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
-import FastCompleteProductPicker from './FastCompleteProductPicker';
-import { UiSurface, ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
+import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
+import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
+import { UiSurface, ActionFeedback, Button, Field, Input, Select, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Tips shown before the tech searches or opens the whole list.
-const TIP_PREVIEW_COUNT = 4;
 // Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
 // longer line, never trims it.
 const CUSTOM_TIP_MAX_CHARS = 240;
-const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
+// The mic on the light sheet: ink outline at rest, filled ink while it listens
+// (`red` is DictationButton's listening colour; the admin look keeps red for errors).
+const MIC_PALETTE = { accent: '#1c1917', muted: '#d6d3d1', red: '#1c1917', card: '#ffffff' };
+
+export const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
+export const methodLabel = (value) => {
+  const text = String(value || '').replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
+
+// A rate goes on the record only in a unit /complete accepts: the server's
+// own list (shared/rate-units.json, read by inventory-units.js), matched
+// trimmed and case-blind as it matches them, less its mL units, which this
+// sheet never shows (owner ruling 2026-09-27) — a rate the tech can't see
+// is not one they confirmed. Any other unit (a catalog oddity such as
+// "percent_solution") leaves the row without a rate rather than have the
+// server refuse the whole visit.
+const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => !isMlUnit(unit)));
+export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
+/**
+ * A rate unit as the record spells it, or null when /complete would refuse
+ * it: the catalog and the plan engine spell a unit with spaces ("fl oz",
+ * "Fl Oz") where shared/rate-units.json spells it fl_oz, and the server's own
+ * normalizer reads both as one unit; a rate sent in the record's spelling is
+ * the same rate, in a form the limit checks can sum.
+ */
+export const rateUnitForRecord = (unit) => {
+  const spelled = String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
+  return SENDABLE_RATE_UNITS.has(spelled) ? spelled : null;
+};
+
+// A catalog row with the stock on hand a fresh read has for it.
+export function withFreshStock(product, fresh) {
+  const row = fresh.get(String(product.id));
+  return row ? { ...product, inventory_on_hand: row.inventory_on_hand, inventory_unit: row.inventory_unit } : product;
+}
+
+// The photo manager opens over the sheet. While it is up the sheet is inert
+// and hidden from assistive tech, the way the photo manager treats its own
+// marks dialog; `version` moves on each close so the count is read again.
+export function usePhotoManager() {
+  const [state, setState] = useState({ isOpen: false, version: 0 });
+  const open = useCallback(() => setState((prev) => ({ ...prev, isOpen: true })), []);
+  const close = useCallback(() => setState((prev) => ({ isOpen: false, version: prev.version + 1 })), []);
+  return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
+}
 
 export function toggleInSet(set, value) {
   const next = new Set(set);
@@ -80,12 +128,17 @@ export function customerNameOf(visit, service) {
 // width. A tap on the backdrop dismisses it. `overlay` renders beside the
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, children }) {
+// `dialogClassName` (the lawn sheet): a class on the dialog, for its scoped look.
+// `suspended` (owner 2026-10-09): the appointment details sheet is open over
+// this visit. The sheet stays mounted, so everything entered is kept, but it is
+// hidden and inert until Details closes.
+export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, suspended = false, children }) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
     <UiSurface
       density="touch"
+      {...(suspended ? { style: { display: 'none' }, 'aria-hidden': true, inert: '' } : {})}
       className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onDismiss(); }}
     >
@@ -94,7 +147,7 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
+        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen', dialogClassName)}
         {...hiddenProps}
       >
         {children}
@@ -106,19 +159,87 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
+// Details opens the appointment details sheet on the schedule row the sheet was
+// opened from. That row is trusted only once the live visit has loaded and
+// matches it: while the context is loading or failed to load, the row is
+// unverified, and when the visit drifted (customer, date, property, service or
+// status: the sheet's blockedReason) it is stale. A cancel or move there would
+// act on the current visit by id while showing the old one, so Details is
+// withheld in all three cases.
+export function detailsHandler(ctx, onViewDetails) {
+  return ctx?.loading || ctx?.loadError || ctx?.blockedReason ? undefined : onViewDetails;
+}
+
+// Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
+// reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
+export const PartBusyContext = createContext(() => {});
+// Every call reports under its OWN key (this hook instance + its source), so two parts, or two sources of one part, can
+// never clear each other's entry however their work overlaps.
+export function usePartBusy(source, busy) {
+  const report = useContext(PartBusyContext);
+  const instance = useId();
+  useEffect(() => {
+    const key = `${instance}:${source}`;
+    report(key, busy);
+    return () => report(key, false);
+  }, [report, instance, source, busy]);
+}
+
+// A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
+// container cannot close or unmount it mid-write). One place covers every present and future write of the sheet,
+// whichever control sends it. Outside a container (`enabled` false) the request is returned as it is.
+export function useWriteTracking(request, enabled) {
+  const [writes, setWrites] = useState(0);
+  usePartBusy('writes', writes > 0);
+  return useMemo(() => (enabled ? async (path, options) => {
+    if (String(options?.method || 'GET').toUpperCase() === 'GET') return request(path, options);
+    setWrites((n) => n + 1);
+    try { return await request(path, options); } finally { setWrites((n) => n - 1); }
+  } : request), [request, enabled]);
+}
+
+// A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
+// dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
+// body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).
+export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, dialogClassName, children }) {
+  return (
+    <>
+      <section ref={dialogRef} aria-labelledby={titleId} className={cn('tech-visit-embedded-part', dialogClassName)} {...hiddenProps}>
+        {children}
+      </section>
+      {overlay}
+    </>
+  );
+}
+
+// `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
+// form button until the sheet itself says the visit needs the full form.
+// `onViewDetails` (owner 2026-10-09): a Details pill, shown while the visit is
+// open, that opens the appointment details sheet (quick move, cancel,
+// reschedule, price edit) — the same one the full form's Details pill and the
+// lawn sheet open. Absent (the tech portal mounts no such sheet) = no pill.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
-      <div>
+      <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">{title}</h2>
         <p className="tech-visit-muted">
           {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+      {/* Details and Full form share one group that wraps (stacks) on a narrow
+          phone, so neither is clipped beside the title and the close button. */}
+      {!done && (onViewDetails || fullFormOffered) && (
+        <div className="tech-visit-header-actions">
+          {onViewDetails && (
+            <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={locked || dictationPending}>Details</Button>
+          )}
+          {fullFormOffered && (
+            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+          )}
+        </div>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
     </header>
@@ -127,18 +248,41 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
 
 // What the tech sees once the visit is saved; `children` carries a sheet's
 // own line under the summary (the pest sheet's sent-text result).
-export function SavedView({ service, summary, onCompleted, children }) {
+export function SavedView({ service, summary, notice, onCompleted, children }) {
   return (
     <div className="tech-visit-body">
       <div className="tech-visit-card">
         <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
         <p>{summary}</p>
+        {notice && <p className="tech-visit-muted tech-visit-status--warn" role="status">{notice}</p>}
         {children}
       </div>
       <div className="tech-visit-actions">
         <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
       </div>
     </div>
+  );
+}
+
+// "Time on-site", as the full form's Complete service page shows it: a small
+// label over the live elapsed time since check-in (h:mm:ss), ticking every
+// second. The page shows the card only when the visit has a check-in time, and so
+// does this: no check-in time, no card. `onSiteAt` is that time (the on-site
+// status-log entry, else checkInTime; see lib/on-site-time.js), passed by Dispatch.
+// Shared by the lawn sheet and (with the Wrap-up) the Tree & Shrub sheet.
+export function TimeOnSite({ since }) {
+  const [elapsed, setElapsed] = useState(() => elapsedSince(since));
+  useEffect(() => {
+    setElapsed(elapsedSince(since));
+    const iv = setInterval(() => setElapsed(elapsedSince(since)), 1000);
+    return () => clearInterval(iv);
+  }, [since]);
+  if (!since) return null;
+  return (
+    <section className="tech-visit-choice-section tech-visit-on-site" aria-label="Time on-site">
+      <h3 className="tech-visit-section-title">Time on-site</h3>
+      <p className="tech-visit-on-site-time">{elapsed}</p>
+    </section>
   );
 }
 
@@ -188,6 +332,168 @@ export function AmountEntry({ id, row, locked, inputRef, onChange }) {
   );
 }
 
+// "Edit amounts": every product's amount in its own measure's units, and
+// its rate. A label rate in mL is neither shown nor recorded (owner ruling
+// 2026-09-27): rowRate leaves such a row without a rate unit.
+export function AmountRow({ row, rate, onChange }) {
+  const inputId = useId();
+  const rateId = useId();
+  const overLabel = rate.max != null && parseFloat(rate.rate) > rate.max;
+  return (
+    <div className="tech-visit-amount-block">
+      <div className="tech-visit-amount-row">
+        <label htmlFor={inputId} className="tech-visit-amount-label">{row.name}</label>
+        <Input
+          id={inputId}
+          className="tech-visit-control"
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step="any"
+          value={row.totalAmount ?? ''}
+          // amountPicked: the tech's own entry, even when it equals the seeded amount
+          onChange={(e) => onChange({ totalAmount: e.target.value, amountPicked: true })}
+        />
+        <select
+          className="ui-control tech-visit-control"
+          aria-label={`Unit for ${row.name}`}
+          value={row.amountUnit}
+          onChange={(e) => onChange({ amountUnit: e.target.value, amountPicked: true })}
+        >
+          {UNIT_CHOICES[row.dimension].map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </select>
+      </div>
+      {rate.rateUnit ? (
+        <div className="tech-visit-amount-row">
+          <label htmlFor={rateId} className="tech-visit-amount-label">{`${row.name} rate`}</label>
+          <Input
+            id={rateId}
+            className="tech-visit-control"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="any"
+            value={rate.rate ?? ''}
+            onChange={(e) => onChange({ rateInput: e.target.value })}
+          />
+          <span className="tech-visit-amount-label">{unitLabel(rate.rateUnit)}</span>
+        </div>
+      ) : null}
+      {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
+    </div>
+  );
+}
+
+// The common lawn methods the sheets fall back to when the context offers none
+// (an older server): the three every lawn visit uses, in screen order. The
+// server's list (lawn-reservice-fast-context LAWN_METHODS) is the authority
+// when it is there.
+export const COMMON_LAWN_METHODS = [
+  { value: 'spot_treatment', label: 'Spot treatment', common: true },
+  { value: 'broadcast_spray', label: 'Broadcast spray', common: true },
+  { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
+];
+
+/** The context's method list, or the common three when it has none. */
+export function methodChoicesOf(data) {
+  const offered = (Array.isArray(data?.methods) ? data.methods : []).filter((choice) => choice?.value);
+  return offered.length ? offered : COMMON_LAWN_METHODS;
+}
+
+// How a product went down. Two readings, shared by the two lawn sheets:
+// `layout="chips"` (the lawn re-service sheet) puts the common methods as chips
+// under "How" and the rest in a "More methods" select; `layout="select"` (the
+// lawn sheet, owner 2026-10-05) is one dropdown with every method, the common
+// ones first. `footnote` is the sheet's own line under the control, if any.
+export function MethodSection({ row, methods, locked, onChange, footnote = null, layout = 'chips' }) {
+  const methodId = useId();
+  if (layout === 'select') {
+    const ordered = [...methods.filter((choice) => choice.common), ...methods.filter((choice) => !choice.common)];
+    const known = ordered.some((choice) => choice.value === row.method);
+    return (
+      <div>
+        <label htmlFor={methodId} className="tech-product-editor-label">How</label>
+        <Select
+          id={methodId}
+          aria-label={`Method for ${row.name}`}
+          className="tech-visit-control"
+          disabled={locked}
+          value={known ? row.method : ''}
+          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+        >
+          {!known && <option value="">Choose a method</option>}
+          {ordered.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </Select>
+        {footnote && <p className="tech-visit-muted">{footnote}</p>}
+      </div>
+    );
+  }
+  // An older context without `common` shows every method as a button.
+  const hasCommon = methods.some((choice) => choice.common);
+  const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
+  const more = hasCommon ? methods.filter((choice) => !choice.common) : [];
+  return (
+    <div>
+      <span id={methodId} className="tech-product-editor-label">How</span>
+      <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
+        {common.map((choice) => (
+          <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
+        ))}
+      </div>
+      {more.length > 0 && (
+        <Select
+          aria-label={`More methods for ${row.name}`}
+          className="tech-visit-control"
+          disabled={locked}
+          value={more.some((choice) => choice.value === row.method) ? row.method : ''}
+          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+        >
+          <option value="">More methods</option>
+          {more.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </Select>
+      )}
+      {footnote && <p className="tech-visit-muted">{footnote}</p>}
+    </div>
+  );
+}
+
+// A product tile's shell, shared by every sheet's tiles: the name, the detail
+// line under it (an amount, "Tap if applied"), and the zero-stock flag. Each
+// sheet decides its own detail text, the states that dim or mark the tile and
+// its aria attributes (`ariaProps`: pressed for a toggle, expanded for a tile
+// that opens an editor).
+export function ProductTileButton({ tileRef, row, detail, off = false, added = false, editing = false, ariaProps, disabled, onClick }) {
+  const outOfStock = row.active && isOutOfStock(row.product);
+  return (
+    <Button
+      ref={tileRef}
+      type="button"
+      variant="secondary"
+      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
+        'tech-visit-product--off': off,
+        'tech-visit-product--added': added,
+        'tech-visit-product--editing': editing,
+        'tech-visit-product--stock': outOfStock,
+      })}
+      disabled={disabled}
+      onClick={onClick}
+      {...ariaProps}
+    >
+      {/* Two lines on the tile (the amount never wraps apart from its unit);
+          one name for assistive tech: "Taurus SC — 4 fl oz". */}
+      <span className="tech-visit-product-name">{row.name}</span>
+      <span className="sr-only"> — </span>
+      <span className="tech-visit-product-amount">{detail}</span>
+      {outOfStock && (
+        <>
+          {' '}
+          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
+        </>
+      )}
+    </Button>
+  );
+}
+
 export function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expanded, popover }) {
   return (
     <div className="tech-product-other">
@@ -212,7 +518,10 @@ export function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expa
 // list loaded it opens the full completion screen, as it always did.
 // `commonProducts` is the picker's "Used most" list, already without the
 // products the sheet starts with; `rows` are the products on the sheet.
-export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick, line }) {
+// `inline` (the lawn sheet) also returns `inlineSearch`: a search box that
+// lives in the Products section itself and adds a product on one tap, with no
+// sheet to open. With no catalog it is null and the button's full-form hand-off stays.
+export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick, line, inline = false }) {
   const buttonRef = useRef(null);
   const [open, setOpen] = useState(false);
   const hasCatalog = products.length > 0;
@@ -231,6 +540,17 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
       onClose={() => setOpen(false)}
     />
   ) : null;
+  const inlineSearch = inline && hasCatalog ? (
+    <FastCompleteProductPicker
+      variant="inline"
+      {...(line ? { line } : {})}
+      products={products}
+      commonProducts={commonProducts}
+      onSheetIds={onSheetIds}
+      locked={locked}
+      onPick={onPick}
+    />
+  ) : null;
   const onClick = (event) => {
     if (!hasCatalog) {
       onFullForm?.();
@@ -242,6 +562,7 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
   };
   return {
     button: { buttonRef, locked, onClick, hasPicker: hasCatalog, expanded: shown },
+    inlineSearch,
     popover: isMobile ? null : picker,
     sheet: isMobile ? picker : null,
     // What the phone sheet covers is out of reach until it closes.
@@ -251,25 +572,113 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 
 // The reason sits above full-width actions, so neither squeezes the other on
 // a phone or beside an extra action (`children`, e.g. "Check stock").
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children }) {
+// `reasonInButton` (the lawn sheet): a short reason is the disabled button's
+// own label instead of a line above it.
+// Prepare mode (a part of a grouped stop): the action saves the part for the
+// stop instead of completing the visit.
+const preparedLabel = (submission, label) => {
+  if (!submission.preparing) return label;
+  return submission.prepared ? 'Update for this stop' : 'Save for this stop';
+};
+
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-      {missingReason && !submission.failure && (
+      {submission.storageWarning && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.storageWarning}</ActionFeedback>}
+      {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
+      {submission.prepared && <p className="tech-visit-muted" role="status">Saved for this stop</p>}
       <div className="tech-visit-actions">
         {children}
         <Button
           className="tech-visit-action tech-visit-complete tech-visit-wide"
           onClick={onSubmit}
           loading={submission.submitting}
-          disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
+          disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.retryPending ? 'Retry' : label}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : (isAction ? label : preparedLabel(submission, label))}
         </Button>
       </div>
     </footer>
+  );
+}
+
+// Nothing on a sheet is editable while it checks for a saved attempt, while
+// a save is in flight, or while an attempt is unresolved or refused for good.
+export function submissionHolds(submission) {
+  return submission.recovering || submission.submitting || submission.failure !== null;
+}
+
+// A refusal the server gave a recovered attempt stays on screen when the
+// visit's live details cannot be shown (loading, unreadable or blocked);
+// once they load, the form's footer carries it (GitHub Codex P2 on #5972).
+export function refusalWithoutContext(submission, ctx) {
+  if (submission.failure !== 'terminal' || !submission.error) return null;
+  if (!(ctx.loading || ctx.loadError || ctx.blockedReason)) return null;
+  return <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{submission.error}</ActionFeedback>;
+}
+
+// A reload may recover a committed request before (or even when) its live
+// context can be read. The retry does not rebuild from that context: this
+// compact view sends only the exact stored body when the tech taps Retry.
+export function RecoveredCompletion({ submission }) {
+  if (submission.prompt) {
+    return (
+      <div className="tech-visit-form-area">
+        <div className="tech-visit-body">
+          <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
+            <p className="tech-visit-section-title">Before this goes out</p>
+            {String(submission.prompt.message || '').split('\n').filter(Boolean).map((line) => (
+              <p key={line} className="tech-visit-muted">{line}</p>
+            ))}
+            {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+            <div className="tech-visit-tile-grid">
+              <Chip label="Go back" disabled={submission.submitting} onClick={submission.dismissPrompt} />
+              <Chip label="Send as is" disabled={submission.submitting} onClick={submission.confirm} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (submission.failure === 'unreadable') {
+    return (
+      <div className="tech-visit-body">
+        <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.recheck}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
+  const canRetry = submission.hasPendingBody() && submission.retryPending;
+  // A request refused for good whose saved copy would not clear keeps it here
+  // to discard, never to retry.
+  const canDiscard = submission.hasPendingBody() && (submission.retryPending || submission.failure === 'terminal');
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body">
+        <ActionFeedback className="tech-visit-feedback">
+          {submission.pendingSummary
+            ? `Saved completion: ${submission.pendingSummary}`
+            : 'An unfinished completion is saved on this device.'}
+        </ActionFeedback>
+      </div>
+      <CompleteFooter
+        submission={submission}
+        label="Retry completion"
+        onSubmit={submission.retry}
+        missingReason={canRetry ? '' : 'Close and reopen this visit to make a new completion.'}
+      >
+        {canDiscard && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        )}
+      </CompleteFooter>
+    </div>
   );
 }
 
@@ -290,10 +699,40 @@ export function ChoiceSection({ title, action, columns = 2, children }) {
 // (DictationButton's upload fallback), and renders nothing where neither works.
 // `children` (the report flow's photos, GATE_NOTE_BOX_PHOTOS) sit inside the
 // note's box under the words; without them the note is exactly as before.
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, children }) {
+// `onClip` (voice fill on the report flow): the mic records and the clip goes to
+// our own transcriber, which answers the words for this box.
+// `micInside` (the lawn sheet): the mic sits in the box's bottom-right corner
+// instead of beside it, and the box keeps clear padding so words never run under it.
+// The note's box grows with its words (owner 2026-10-08: a dictated note ran
+// past the three lines and its fourth line showed cut in half), up to
+// NOTE_MAX_LINES whole lines; a longer note scrolls inside the box.
+const NOTE_MAX_LINES = 10;
+function noteMaxHeight(el) {
+  if (!el || typeof window === 'undefined') return undefined;
+  const style = window.getComputedStyle(el);
+  const px = (value) => parseFloat(value) || 0;
+  const line = px(style.lineHeight) || px(style.fontSize) * 1.5;
+  if (!line) return undefined;
+  return Math.ceil(line * NOTE_MAX_LINES + px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth));
+}
+
+// A part of a grouped stop (GATE_COMBO_FAST_COMPLETE) reads the stop's one note in place of its own: the form with
+// its `note` replaced by `sharedNote`. Without a shared note (undefined or null) the form is returned as it is.
+export function useSharedNoteForm(ownForm, sharedNote) {
+  return useMemo(() => (sharedNote == null ? ownForm : { ...ownForm, note: String(sharedNote) }), [ownForm, sharedNote]);
+}
+
+// `shared` (a part of a grouped stop): the stop's one note box lives in the container, so this one
+// shows neither its text box nor its mic, only what sits inside it (the note-box photos).
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false, shared = false }) {
   const noteId = useId();
+  const noteRef = useRef(null);
+  const maxHeight = useCallback(() => noteMaxHeight(noteRef.current), []);
+  useAutoGrowTextarea(noteRef, note, maxHeight);
+  if (shared) return children ? <section className="tech-visit-choice-section">{children}</section> : null;
   const text = (
     <Textarea
+      ref={noteRef}
       id={noteId}
       className="tech-visit-control"
       rows={3}
@@ -308,9 +747,20 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
       </div>
-      <div className="tech-visit-note-row">
-        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
-        {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
+      <div className={cn('tech-visit-note-row', micInside && 'tech-visit-note-row--inside')}>
+        {micInside ? (
+          <>
+            {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
+            <span className="tech-visit-note-mic">
+              <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={40} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
+            </span>
+          </>
+        ) : (
+          <>
+            <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
+            {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
+          </>
+        )}
       </div>
     </section>
   );
@@ -318,16 +768,20 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
 
 // The tip library, read on its own: the picker is optional, so a slow or
 // failed read never holds the sheet. null until it arrives, and when the
-// read fails or the tips gate is off.
-export function useTipLibrary({ base, request }) {
+// read fails or the tips gate is off. `refreshKey` reads it again when it
+// changes (the lawn sheet passes its confirmed assessment, which re-ranks the
+// list). A re-read that FAILS keeps the tips on screen; one that answers
+// unavailable (the tips gate went off) clears them, since the server would drop
+// the pick.
+export function useTipLibrary({ base, request, refreshKey = null }) {
   const [library, setLibrary] = useState(null);
   useEffect(() => {
     let active = true;
     request(`${base}/tech-tips`)
       .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
-      .catch(() => { if (active) setLibrary(null); });
+      .catch(() => {});
     return () => { active = false; };
-  }, [base, request]);
+  }, [base, request, refreshKey]);
   return library;
 }
 
@@ -348,15 +802,6 @@ function tipMark(tip, library) {
   return day ? techTipSentLabel(day) : null;
 }
 
-// The tips on screen: search results, the whole list, or the short list,
-// with the pick always kept in view. `noMatch` is about the search alone, so
-// a pinned pick never hides that a search found nothing.
-function visibleTips(allTips, { query, showAll, tipId }) {
-  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
-  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
-  return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
-}
-
 function TipOption({ tip, library, pressed, locked, onPick }) {
   return (
     <Button
@@ -375,48 +820,115 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
   );
 }
 
-// One tip per service visit, from this visit's options: a short list first,
-// the whole list behind "Show all", search across all of it, or the tech's
-// own line. Only the id (or the typed line) goes on the wire; the server
-// resolves and freezes the copy.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom }) {
+// One tip per service visit, found the way the blog post is (owner 2026-10-12):
+// no tip is listed until the tech searches, a search reads the whole library
+// (the visit's list and `library.more`), and a pick shows alone with "Remove tip".
+// The tech's own line stays behind "Write your own". Only the id (or the typed
+// line) goes on the wire; the server resolves and freezes the copy.
+// `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
+// hint; the search box keeps its name as an aria-label and the section keeps the
+// hint as its aria-description. The one-tip limit is unchanged.
+// Two mics on one sheet (the note's and the tip's own line) report one
+// "dictating" state up: the sheet holds Complete while either records. Each
+// source has its own setter, so one mic stopping never clears the other.
+export function useDictationSources(onDictationPending) {
+  const pending = useRef({ note: false, tip: false });
+  const report = useCallback((key, on) => {
+    pending.current[key] = !!on;
+    onDictationPending?.(pending.current.note || pending.current.tip);
+  }, [onDictationPending]);
+  const note = useCallback((on) => report('note', on), [report]);
+  const tip = useCallback((on) => report('tip', on), [report]);
+  return { note, tip };
+}
+
+// The tech's own line. With `mic`, the note's microphone sits beside it and
+// each dictated chunk joins what is already on the line.
+function OwnTipField({ customTip, onCustom, locked, mic }) {
+  const ownRef = useRef({ customTip, onCustom });
+  ownRef.current = { customTip, onCustom };
+  // Stable for the mic.
+  const appendOwn = useCallback((text) => {
+    const said = String(text || '').trim();
+    const own = ownRef.current;
+    if (said) own.onCustom(own.customTip.trim() ? `${own.customTip.trimEnd()} ${said}` : said);
+  }, []);
+  const ownId = useId();
+  const field = (
+    <Input id={ownId} className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
+  );
+  return (
+    <>
+      {mic ? (
+        // Field labels its one child; here the label must name the box, not the row.
+        <div className="ui-field tech-visit-field">
+          <label className="ui-label" htmlFor={ownId}>Your own tip (one sentence)</label>
+          <div className="tech-visit-note-row tech-visit-tip-own-row">
+            <DictationButton onAppend={appendOwn} onPendingChange={mic.onPendingChange} palette={MIC_PALETTE} size={48} title="Say your own tip" disabled={locked} uploadServiceId={mic.serviceId} clipHandler={mic.onClip} />
+            {field}
+          </div>
+        </div>
+      ) : (
+        <Field label="Your own tip (one sentence)" className="tech-visit-field">{field}</Field>
+      )}
+      {customTip.length > CUSTOM_TIP_MAX_CHARS && (
+        <p className="tech-visit-muted tech-visit-status--warn" role="status">Too long. Keep it to one sentence, {CUSTOM_TIP_MAX_CHARS} characters.</p>
+      )}
+      {mic?.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{mic.error}</p>}
+    </>
+  );
+}
+
+// `mic` (optional): the note's own microphone on the tech's own line, so the
+// line is spoken the way the visit note is (owner 2026-10-09): `serviceId`,
+// `onClip` (our own transcriber, where the sheet's note uses it),
+// `onPendingChange`, `error`.
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, quiet = false, mic = null }) {
   const [query, setQuery] = useState('');
-  const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
-  const allTips = useMemo(
-    () => (library?.groups || []).flatMap((group) => group.tips || []),
+  const q = query.trim().toLowerCase();
+  const everyTip = useMemo(
+    () => [...(library?.groups || []).flatMap((group) => group.tips || []), ...(library?.more || [])],
     [library],
   );
-  const q = query.trim().toLowerCase();
-  const { tips: visible, noMatch } = visibleTips(allTips, { query: q, showAll, tipId });
+  const picked = tipId ? everyTip.find((tip) => tip.id === tipId) : null;
+  const results = q ? rankTechTips(everyTip, q) : [];
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (
-    <section className="tech-visit-choice-section">
+    <section className="tech-visit-choice-section" {...(quiet ? { 'aria-description': 'Pick 1 (optional)' } : {})}>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Tip for the customer</h3>
-        <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>
+        {(!quiet || hasPick) && <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>}
       </div>
-      <Field label="Search tips" className="tech-visit-field">
-        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
-      </Field>
-      <div className="tech-visit-tip-list">
-        {visible.map((tip) => (
-          <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
-        ))}
-        {noMatch && <p className="tech-visit-muted">No tips match.</p>}
-      </div>
+      {picked ? (
+        <div className="tech-visit-tip-list">
+          <TipOption tip={picked} library={library} pressed locked={locked} onPick={onPick} />
+        </div>
+      ) : (
+        <>
+          {quiet ? (
+            <div className="ui-field tech-visit-field">
+              <Input className="tech-visit-control" type="search" aria-label="Search tips" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
+            </div>
+          ) : (
+            <Field label="Search tips" className="tech-visit-field">
+              <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
+            </Field>
+          )}
+          <div className="tech-visit-tip-list">
+            {results.map((tip) => (
+              <TipOption key={tip.id} tip={tip} library={library} pressed={false} locked={locked} onPick={onPick} />
+            ))}
+            {!!q && !results.length && <p className="tech-visit-muted">No tips match.</p>}
+          </div>
+        </>
+      )}
       <div className="tech-visit-tile-grid">
-        {!q && allTips.length > TIP_PREVIEW_COUNT && (
-          <Chip disabled={locked} label={showAll ? 'Show fewer' : 'Show all'} onClick={() => setShowAll((on) => !on)} />
-        )}
+        {picked && <Chip disabled={locked} label="Remove tip" onClick={() => onPick(picked.id)} />}
         {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
       </div>
-      {writingOwn && (
-        <Field label="Your own tip (one sentence)" className="tech-visit-field">
-          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
-        </Field>
-      )}
+      {writingOwn && <OwnTipField customTip={customTip} onCustom={onCustom} locked={locked} mic={mic} />}
     </section>
   );
 }

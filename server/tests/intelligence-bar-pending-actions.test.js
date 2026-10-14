@@ -13,7 +13,12 @@ const {
   createPendingAction,
   claimForConfirm,
   cancelPendingAction,
+  ttlMinutesFor,
+  TTL_MINUTES,
+  LONG_TTL_MINUTES,
+  LONG_TTL_TOOL_NAMES,
 } = require('../services/intelligence-bar/pending-actions');
+const { UI_GATED_WRITE_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 
 function insertBuilder(returningRow) {
   const q = {
@@ -36,8 +41,16 @@ function claimBuilder({ claimedRow, lookupRow }) {
     first: jest.fn(async () => lookupRow),
     update: jest.fn(async () => 1),
   };
+  // The claim first peeks at the row to see whether its tool has a supersede
+  // rule; these tools have none, so the claim then runs the plain UPDATE.
+  const peekChain = {
+    where: jest.fn(() => peekChain),
+    first: jest.fn(async () => (claimedRow || lookupRow
+      ? { tool_name: 'create_customer', params: {}, requested_by: 'admin-1', status: 'pending', expires_at: new Date(Date.now() + 60000) } : undefined)),
+  };
   let call = 0;
-  db.mockImplementation(() => (call++ === 0 ? updateChain : lookupChain));
+  db.mockImplementation(() => [peekChain, updateChain, lookupChain][Math.min(call++, 2)]);
+  db.fn = db.fn || { now: jest.fn(() => 'NOW()') };
   return { updateChain, lookupChain };
 }
 
@@ -119,6 +132,51 @@ describe('pending-actions service', () => {
     expect(stored.requested_by).toBe('admin-1');
     expect(stored.status).toBe('pending');
     expect(new Date(stored.expires_at).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test('card life is 10 minutes, or 60 for the tools that re-check at commit', () => {
+    expect(TTL_MINUTES).toBe(10);
+    expect(LONG_TTL_MINUTES).toBe(60);
+    expect(ttlMinutesFor('send_sms')).toBe(10);
+    expect(ttlMinutesFor('add_customer_property')).toBe(60);
+    expect(ttlMinutesFor('some_future_tool')).toBe(10);
+    expect(ttlMinutesFor(undefined)).toBe(10);
+  });
+
+  test.each([['send_sms', 10], ['create_appointment', 10], ['update_customer', 10], ['add_customer_property', 60], ['update_lead_status', 60]])(
+    'createPendingAction for %s expires %i minutes out', async (toolName, minutes) => {
+      const inserted = insertBuilder({ id: 'pa-ttl', tool_name: toolName });
+      db.mockImplementation(() => inserted);
+      const before = Date.now();
+      await createPendingAction({ toolName, params: { note: 'synthetic' }, requestedBy: 'admin-1', context: 'customers' });
+      const lifeMs = new Date(inserted.insert.mock.calls[0][0].expires_at).getTime() - before;
+      expect(lifeMs).toBeGreaterThanOrEqual(minutes * 60000);
+      expect(lifeMs).toBeLessThan(minutes * 60000 + 5000);
+    });
+
+  // Policy snapshot: change this list on purpose, with the commit-time check
+  // named in pending-actions.js. Customer messages, money, deletes, merges,
+  // schedule and booking changes, outside-service writes and any write with
+  // no commit-time pin must stay at the short life.
+  test('the 60-minute class is exactly the reviewed list and excludes comms, money and unpinned writes', () => {
+    expect([...LONG_TTL_TOOL_NAMES].sort()).toEqual([
+      'add_customer_property', 'adjust_stock', 'create_customer', 'create_restock_request', 'set_primary_property',
+      'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'update_customer_property', 'update_lead_contact',
+      'update_lead_status', 'update_property_access', 'update_restock_request',
+    ]);
+    for (const tool of LONG_TTL_TOOL_NAMES) {
+      expect(UI_GATED_WRITE_TOOL_NAMES.has(tool)).toBe(true);
+      expect(OUTSIDE_WRITE_TOOL_NAMES.has(tool)).toBe(false);
+    }
+    const stayShort = [
+      'send_sms', 'reply_via_sms', 'send_email_reply', 'send_invoice', 'resend_receipt', 'trigger_review_request',
+      'submit_review_reply', 'approve_price', 'cancel_plan', 'remove_saved_payment_method', 'cancel_queued_message',
+      'merge_customers', 'delete_duplicate_customer', 'remove_customer_property', 'update_customer', 'bulk_update_customers',
+      'bulk_update_leads', 'create_appointment', 'reschedule_appointment', 'cancel_appointment', 'switch_appointment_property',
+      'save_customer_estimate', 'reprice_future_visits', 'block_sender', 'create_pending_estimate',
+      'set_railway_gate', 'redeploy_railway_service',
+    ];
+    for (const tool of stayShort) expect(ttlMinutesFor(tool)).toBe(10);
   });
 
   test('storage replaces full raw-recipient context with exact-action authorization proof', async () => {

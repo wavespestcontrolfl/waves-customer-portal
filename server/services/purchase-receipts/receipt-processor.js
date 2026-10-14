@@ -119,8 +119,10 @@ const MULTIPACK_PATTERNS = [
 // "(2) jugs", a second marker. The title claims a unit count this lane
 // can't read, so the line goes to a person.
 // A SiteOne line's unit of measure other than EA (each) — "UOM:CS" is a
-// case — is the same kind of claim.
-const PACK_CLAIM_RE = /(?:\b|(?<=\d))(?:packs?|pks?|count|ct|qty|twin|bundle|cases?|sets?)\b|(?:^|[^a-z])[x×]\s*\d|\d\s*[x×](?![a-z])|\(\s*\d+\s*\)|\buom:\s*(?!ea\b)[a-z]+/i;
+// case — is the same kind of claim. BG (bag) is not one: sweep.js's
+// siteOneHold lets a BG line through only when its title names one bag, and
+// holds every other, so a "UOM:BG" that reaches sizing counts containers.
+const PACK_CLAIM_RE = /(?:\b|(?<=\d))(?:packs?|pks?|count|ct|qty|twin|bundle|cases?|sets?)\b|(?:^|[^a-z])[x×]\s*\d|\d\s*[x×](?![a-z])|\(\s*\d+\s*\)|\buom:\s*(?!(?:ea|bg)\b)[a-z]+/i;
 
 // Plural containers with no recognized marker ("2 Bottles", "4 tubes / 30
 // g"): more than one unit, in a form this lane doesn't count.
@@ -140,7 +142,7 @@ const SIZE_UNITS = [
   [/^(?:qt|qts|quarts?)$/, 'qt'],
   [/^(?:pt|pts|pints?)$/, 'pt'],
   [/^(?:lbs?|pounds?)$/, 'lb'],
-  [/^(?:g|grams?)$/, 'g'],
+  [/^(?:g|gm|gms|grams?)$/, 'g'], // SiteOne prints grams as "500 GM."
   [/^(?:kg|kilograms?)$/, 'kg'],
   [/^(?:ml|cc|millilit(?:er|re)s?)$/, 'ml'],
   [/^(?:l|ltrs?|lit(?:er|re)s?)$/, 'l'],
@@ -160,13 +162,49 @@ function parseSizeNumber(text) {
   return parts.length ? Number(parts[0]) + value : value;
 }
 
+// A granular product's formulation code ("Dylox 6.2 G", "Merit 0.5 G": the
+// percent of active ingredient, then G for granular) reads like a size in
+// grams, and beside the real size ("30 LB. BAG") it made every such title
+// two conflicting sizes. A bare
+// "<number> G" is that code, not a size, only when all of these hold: the
+// title says granular/granules, the number is under 100 (a percentage), and
+// a LATER weight claim is at least 100 times bigger. "30 g ... 5 lb" (75x)
+// and anything spelled "grams"/"gm" stay real sizes.
+const GRANULAR_WORD_RE = /\bgranul(?:ar|es?)\b/i;
+const FORMULATION_CODE_MIN_RATIO = 100;
+
+function claimUnit(first, second) {
+  return (second && sizeUnit(`${first} ${second}`)) || sizeUnit(first);
+}
+
+function isFormulationCode([, number, first, second], laterMatches) {
+  if (first.toLowerCase() !== 'g' || claimUnit(first, second) !== 'g') return false;
+  const percent = parseSizeNumber(number);
+  if (!(percent > 0 && percent < 100)) return false;
+  return laterMatches.some(([, laterNumber, laterFirst, laterSecond]) => {
+    const unit = claimUnit(laterFirst, laterSecond);
+    const grams = unit ? convertInventoryQuantity(parseSizeNumber(laterNumber), unit, 'g') : null;
+    return grams != null && grams >= percent * FORMULATION_CODE_MIN_RATIO;
+  });
+}
+
+// Every TITLE_SIZE_RE match in `text` that can be a size claim: all of them,
+// minus a granular formulation code (above). The one list both this lane's
+// titleSizes and inventory-agent.js's parsedSizeClaims read sizes from.
+function sizeClaimMatches(text) {
+  const title = String(text || '');
+  const matches = [...title.matchAll(TITLE_SIZE_RE)];
+  if (!GRANULAR_WORD_RE.test(title)) return matches;
+  return matches.filter((match, index) => !isFormulationCode(match, matches.slice(index + 1)));
+}
+
 // Every size claim in `text`, converted to the container's unit and
 // de-duplicated ("1 Gallon (128 fl oz)" is one size). null when a claim
 // can't be converted to that unit, so it can't be checked at all.
 function titleSizes(text, containerUnit) {
   const sizes = [];
-  for (const [, number, first, second] of text.matchAll(TITLE_SIZE_RE)) {
-    const unit = (second && sizeUnit(`${first} ${second}`)) || sizeUnit(first);
+  for (const [, number, first, second] of sizeClaimMatches(text)) {
+    const unit = claimUnit(first, second);
     if (!unit) continue;
     const amount = convertInventoryQuantity(parseSizeNumber(number), unit, containerUnit);
     if (amount == null) return null;
@@ -269,7 +307,9 @@ async function classifyUnderLock(item, trx) {
 // this lane would:
 //   - a person-facing hold (holdAs: a return, an unverified invoice, …)
 //     applies once a product matched; an unmatched held line keeps its own
-//     classification;
+//     classification, and carries the hold it would have had as
+//     unmatchedHold so sweep.js can still ring for an unverified one (it
+//     never reaches the agent, so nothing else would name it);
 //   - otherwise, with the agent on, one of the three statuses it resolves
 //     is handed off instead of held for a person: no bell (agent_pending
 //     isn't in sweep.js's HELD_REASONS), no movement, product_id kept when
@@ -287,6 +327,7 @@ function lineDisposition(found, { forcedStatus, holdAs } = {}, { agentOn = false
   if (!forcedStatus && !holdAs && AGENT_HANDOFF_STATUSES.includes(found.status) && agentOn) {
     return { status: 'agent_pending', productId: found.productId, product: found.product, handoffFrom: found.status };
   }
+  if (holdAs && !forcedStatus && found.status === 'unmatched') return { ...found, unmatchedHold: holdAs };
   return found;
 }
 
@@ -329,7 +370,10 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
     if (!claim) return { ...ALREADY_PROCESSED };
     const outcome = classified.status === 'logged'
       ? await performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item })
-      : { status: classified.status, inserted: true, product: classified.product || null };
+      : {
+        status: classified.status, inserted: true, product: classified.product || null,
+        ...(classified.unmatchedHold ? { unmatchedHold: classified.unmatchedHold } : {}),
+      };
     await ringBell({ ...outcome, lineId: claim.id }, trx);
     return { ...outcome, lineId: claim.id };
   });
@@ -406,7 +450,8 @@ module.exports = {
   // Title-size-claim and pack-marker parsing primitives, reused (not
   // duplicated) by inventory-agent.js's deterministic reading validation —
   // see this module's header for what each one does.
-  TITLE_SIZE_RE, SIZE_UNITS, sizeUnit, parseSizeNumber, sizesAgree, round4,
+  TITLE_SIZE_RE,
+  sizeClaimMatches, SIZE_UNITS, sizeUnit, parseSizeNumber, sizesAgree, round4,
   MULTIPACK_PATTERNS, parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
   AGENT_HANDOFF_STATUSES,
 };

@@ -25,7 +25,7 @@ test.each([15, 20, 30, 40, 90])('keeps a %i-minute allowance without rounding it
   const fit = evaluateArrivalPlacement(context(), options(600, duration));
   expect(fit.feasible).toBe(true);
   const arrival = fit.arrivals.find(row => row.id === '__candidate__');
-  expect(arrival).toEqual({ id: '__candidate__', arrival: '10:00', departure: clock(600 + duration) });
+  expect(arrival).toEqual({ id: '__candidate__', arrival: '10:00', departure: clock(600 + duration), drive: 0 });
 });
 
 test('the complete route may finish exactly at 18:00, including its final return', () => {
@@ -98,7 +98,7 @@ test('existing blocked time interrupts work and travel', () => {
   const result = simulateArrivalRoute(optimizer, effectiveWindowRange, [stop('job', 600, 40)], {
     blockedIntervals: [{ startMin: 615, endMin: 660 }], dayEndMin: 1080, includeReturnInFinish: true,
   });
-  expect(result.arrivals[0]).toEqual({ id: 'job', arrivalMin: 660, departureMin: 700 });
+  expect(result.arrivals[0]).toEqual({ id: 'job', arrivalMin: 660, departureMin: 700, driveMin: 0 });
 
 });
 

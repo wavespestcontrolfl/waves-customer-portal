@@ -14,6 +14,7 @@ const {
   staffTokenVersionMatches,
 } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
+const { sessionMfaBlock } = require('../services/staff-mfa');
 const {
   buildSurchargeAmountDetails,
   computeSurchargeCents,
@@ -71,6 +72,11 @@ async function terminalAuthenticate(req, res, next) {
     if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
       return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
     }
+    // Every token here follows the two-step rule (GATE_ADMIN_MFA), judged
+    // now: a terminal-scoped token carries the minting session's proof
+    // through the handoff (staff_mfa -> mfa).
+    const mfaBlock = sessionMfaBlock(decoded, tech);
+    if (mfaBlock) return res.status(mfaBlock.status).json({ error: mfaBlock.error, code: mfaBlock.code });
     req.technician = tech;
     req.technicianId = tech.id;
     req.techRole = tech.role;
@@ -349,6 +355,9 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         invoice_id: invoice.id,
         amount_cents,
         expires_at,
+        // Two-step proof of the minting session (GATE_ADMIN_MFA); this row is
+        // the authority at validation, not the claim.
+        staff_mfa: req.staffToken.mfa === true,
       });
 
       mintedJti = jti;
@@ -403,6 +412,9 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         amount_cents,
         tech_user_id: req.technicianId,
         staff_token_version: req.staffToken.tokenVersion,
+        // Two-step proof of the minting session (GATE_ADMIN_MFA), carried
+        // into the terminal token so the current policy is applied to it.
+        staff_mfa: req.staffToken.mfa === true,
         jti: mintedJti,
       },
       secret,
@@ -517,7 +529,7 @@ router.post('/validate-handoff', async (req, res) => {
       .whereNull('used_at')
       .where('expires_at', '>', db.fn.now())
       .update({ used_at: db.fn.now() })
-      .returning(['jti', 'tech_user_id', 'invoice_id', 'amount_cents']);
+      .returning(['jti', 'tech_user_id', 'invoice_id', 'amount_cents', 'staff_mfa']);
 
     if (burned.length === 0) {
       // Disambiguate. Three reasons the UPDATE hit nothing:
@@ -565,7 +577,8 @@ router.post('/validate-handoff', async (req, res) => {
     const claimInvoiceMatches = String(handoffRow.invoice_id) === String(claims.invoice_id);
     const claimAmountMatches = Number(handoffRow.amount_cents) === Number(claims.amount_cents);
     const claimTechMatches = String(handoffRow.tech_user_id) === String(claims.tech_user_id);
-    if (!claimInvoiceMatches || !claimAmountMatches || !claimTechMatches) {
+    const claimMfaMatches = (handoffRow.staff_mfa === true) === (claims.staff_mfa === true);
+    if (!claimInvoiceMatches || !claimAmountMatches || !claimTechMatches || !claimMfaMatches) {
       logger.error(
         `[stripe-terminal] validate-handoff claim/db mismatch jti=${claims.jti} ` +
           `inv_claim=${claims.invoice_id} inv_db=${handoffRow.invoice_id} ` +
@@ -640,7 +653,7 @@ router.post('/validate-handoff', async (req, res) => {
         code: 'technician_not_active',
       });
     }
-    if (!handoffStaffSessionMatches(claims, tech)) {
+    if (!handoffStaffSessionMatches(claims, tech) || sessionMfaBlock({ mfa: handoffRow.staff_mfa === true }, tech)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: invoice.id,
@@ -683,6 +696,7 @@ router.post('/validate-handoff', async (req, res) => {
         scope: 'terminal',
         type: 'access',
         tokenVersion: Number(tech.auth_token_version),
+        ...(handoffRow.staff_mfa === true ? { mfa: true } : {}),
       },
       config.jwt.secret,
       { expiresIn: '15m' },
@@ -1272,6 +1286,7 @@ router.post('/capture', adminAuthenticate, requireAdmin, async (req, res) => {
 module.exports = router;
 module.exports._test = {
   handoffStaffSessionMatches,
+  terminalAuthenticate,
   technicianMayCollectInvoice,
   technicianMayCollectInvoiceLocked,
   terminalChargeFenceResponse,

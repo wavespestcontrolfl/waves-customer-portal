@@ -1729,3 +1729,68 @@ describe('grouped send claim uses the locked anchor offer', () => {
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
   });
 });
+
+describe('impossible US phone is refused before any provider call', () => {
+  // Synthetic: ten digits whose area code starts with 1 can never be texted.
+  const BAD_PHONE = '+11035550123';
+
+  test.each(['both', 'sms'])('POST send (%s) refuses the whole send with 400 before the claim, the email and the text', async (sendMethod) => {
+    row.status = 'draft';
+    row.customer_phone = BAD_PHONE;
+    const response = await invoke('/:id/send', 'post', { sendMethod });
+    expect(response.statusCode).toBe(400);
+    expect(response.body.code).toBe('INVALID_SMS_PHONE');
+    expect(response.body.error).toContain(BAD_PHONE);
+    expect(response.body.error).toMatch(/Nothing was sent/);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(mutations).toHaveLength(0);
+    expect(row.status).toBe('draft');
+  });
+
+  test('POST send (email only) is unaffected by a bad saved phone', async () => {
+    row.status = 'draft';
+    row.customer_phone = BAD_PHONE;
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.statusCode).toBe(200);
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the scheduled-send request is refused too', async () => {
+    row.status = 'draft';
+    row.customer_phone = BAD_PHONE;
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'both', scheduledAt: new Date(Date.now() + 86400000).toISOString(),
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.body.code).toBe('INVALID_SMS_PHONE');
+    expect(mutations).toHaveLength(0);
+  });
+
+  test('a caller with nobody to refuse to (cron, auto-send) still never reaches the provider for the text leg', async () => {
+    row.customer_phone = '1035550123';
+    const result = await router.sendEstimateNow(structuredClone(row), 'both', { callerPreClaimed: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result.channels.sms.ok).toBe(false);
+    expect(result.channels.sms.error).toMatch(/not a valid US phone number/);
+    expect(result.channels.email.ok).toBe(true);
+  });
+
+  test('a valid number still sends the text', async () => {
+    row.customer_phone = '(203) 555-0123';
+    const result = await router.sendEstimateNow(structuredClone(row), 'sms', { callerPreClaimed: true });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].to).toBe('+12035550123');
+    expect(result.channels.sms.ok).toBe(true);
+  });
+
+  test('the send preview carries the refusal reason for the dialog', async () => {
+    row.customer_phone = BAD_PHONE;
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.smsBlockReason).toMatch(/not a valid US phone number/);
+    row.customer_phone = '+12035550123';
+    const ok = await invoke('/:id/send-preview', 'get');
+    expect(ok.body.smsBlockReason).toBeNull();
+  });
+});

@@ -283,6 +283,83 @@ const SKIP = !process.env.DATABASE_URL;
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
   }, 30000);
 
+  test.each([
+    { decidedOn: 'off', retryOn: 'on' },
+    { decidedOn: 'on', retryOn: 'off' },
+  ])('GATE_IRRIGATION_OWNER_RATES flipped $decidedOn -> $retryOn after publication keeps the plan, its minutes and the pending email', async ({ decidedOn }) => {
+    const setOwnerRates = (on) => { if (on) process.env.GATE_IRRIGATION_OWNER_RATES = 'true'; else delete process.env.GATE_IRRIGATION_OWNER_RATES; };
+    try {
+      setOwnerRates(decidedOn === 'on');
+      await resetDraft();
+      EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'synthetic-rejection' });
+      expect(await runWeeklyIrrigationEmailSweep({ now })).toMatchObject({ published: 1, sent: 0, failed: 1 });
+      const original = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+      const inputs = typeof original.weather_inputs === 'string' ? JSON.parse(original.weather_inputs) : original.weather_inputs;
+      expect(inputs.rateTable).toBe(decidedOn === 'on' ? 'owner' : undefined);
+      const firstCall = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+      const before = await loadCustomerWateringPlan(customerId, { now });
+      expect(before).not.toBeNull();
+      // The gate flips with the plan published and its email pending.
+      setOwnerRates(decidedOn !== 'on');
+      const after = await loadCustomerWateringPlan(customerId, { now });
+      expect(after).toEqual(before);
+      await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ claimed_at: new Date(Date.now() - 180000) });
+      fetchServiceWeekWeather.mockRejectedValue(new Error('A retry must use frozen weather'));
+      const retry = await runWeeklyIrrigationEmailSweep({ now: new Date('2026-09-07T15:00:00Z') });
+      expect(retry).toMatchObject({ published: 0, sent: 1, failed: 0 });
+      expect(retry.plan.unavailable).toBe(0);
+      expect(EmailTemplateLibrary.sendTemplate.mock.calls[1][0].payload).toEqual(firstCall.payload);
+      const final = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+      expect(final.decision_hash).toBe(original.decision_hash);
+      expect(final.sent_at).not.toBeNull();
+    } finally {
+      delete process.env.GATE_IRRIGATION_OWNER_RATES;
+    }
+  }, 30000);
+
+  // Codex round 2 on #6236: a moved customer whose stale turf reading is the fallback. Spray 60 min x 4 days is 6.0 in on
+  // the package table (past the 5 in ceiling, so the confirmed schedule yields nothing and the plan is events-only) and
+  // 4.0 in on the owner table (derives, so the schedule sizes the plan). The move guard must use the decision's table.
+  test.each([
+    { decidedOn: 'off', unconfirmed: true },
+    { decidedOn: 'on', unconfirmed: false },
+  ])('a moved customer on a stale fallback, 60 min x 4 days: gate $decidedOn at publication, then flipped, keeps the plan and the pending email', async ({ decidedOn, unconfirmed }) => {
+    const setOwnerRates = (on) => { if (on) process.env.GATE_IRRIGATION_OWNER_RATES = 'true'; else delete process.env.GATE_IRRIGATION_OWNER_RATES; };
+    try {
+      await mockTransaction('property_preferences').where({ customer_id: customerId }).update({
+        irrigation_run_minutes: 60, watering_days: JSON.stringify(['Mon', 'Tue', 'Thu', 'Fri']),
+        irrigation_home_changed_at: new Date('2026-08-20T00:00:00Z'),
+        irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'turf_county', 'turf_grass', 'rain_sensor']),
+      });
+      await mockTransaction('customer_turf_profiles').where({ customer_id: customerId }).update({ irrigation_inches_per_week: 1 });
+      setOwnerRates(decidedOn === 'on');
+      await resetDraft();
+      EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'synthetic-rejection' });
+      expect(await runWeeklyIrrigationEmailSweep({ now })).toMatchObject({ published: 1, sent: 0, failed: 1 });
+      const original = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+      const inputs = typeof original.weather_inputs === 'string' ? JSON.parse(original.weather_inputs) : original.weather_inputs;
+      expect(inputs.scheduleUnconfirmed).toBe(unconfirmed);
+      expect(inputs.rateTable).toBe(decidedOn === 'on' ? 'owner' : undefined);
+      const firstCall = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+      const before = await loadCustomerWateringPlan(customerId, { now });
+      expect(before).not.toBeNull();
+      // The gate flips with the plan published and its email pending.
+      setOwnerRates(decidedOn !== 'on');
+      expect(await loadCustomerWateringPlan(customerId, { now })).toEqual(before);
+      await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ claimed_at: new Date(Date.now() - 180000) });
+      fetchServiceWeekWeather.mockRejectedValue(new Error('A retry must use frozen weather'));
+      const retry = await runWeeklyIrrigationEmailSweep({ now: new Date('2026-09-07T15:00:00Z') });
+      expect(retry).toMatchObject({ published: 0, sent: 1, failed: 0 });
+      expect(retry.plan.unavailable).toBe(0);
+      expect(EmailTemplateLibrary.sendTemplate.mock.calls[1][0].payload).toEqual(firstCall.payload);
+      const final = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+      expect(final.decision_hash).toBe(original.decision_hash);
+      expect(final.sent_at).not.toBeNull();
+    } finally {
+      delete process.env.GATE_IRRIGATION_OWNER_RATES;
+    }
+  }, 30000);
+
   test('reads repair a published plan email stamp after both post-send writes fail, preserving its availability pin', async () => {
     await resetDraft();
     mockFailedSentWrites = 2;

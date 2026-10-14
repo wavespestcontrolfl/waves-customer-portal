@@ -18,6 +18,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const db = require('../models/db');
 const seeder = require('../services/content/intercept-brief-seeder');
+const path = require('path');
 const { route } = require('../services/content/decision-router');
 const queue = require('../services/content/opportunity-queue');
 const refreshAudit = require('../services/seo/refresh-audit');
@@ -712,5 +713,34 @@ describe('sourcing directives reach the writer (the snapshot step never archives
     // The must-link REQUIRED SOURCES list never contains a directive sentence.
     const requiredLine = op.binding_instructions.find((l) => /REQUIRED SOURCES/.test(l)) || '';
     expect(requiredLine).not.toContain('Orkin published terms');
+  });
+});
+
+describe('sprinkler app refresh manifest', () => {
+  const file = path.join(__dirname, '../data/sprinkler-app-refresh-briefs-v1.json');
+
+  test('two add-only refreshes of the live timer posts, ids distinct from the intercept set', () => {
+    const manifest = seeder.loadManifest(file);
+    const interceptIds = new Set(seeder.loadManifest().briefs.map((b) => b.id));
+    expect(manifest.briefs.map((b) => b.page_url)).toEqual([
+      'https://www.wavespestcontrol.com/lawn-care/rain-bird-sprinkler-timer-guide/',
+      'https://www.wavespestcontrol.com/lawn-care/hunter-sprinkler-timer-guide/',
+    ]);
+    for (const b of manifest.briefs) {
+      expect(interceptIds.has(b.id)).toBe(false);
+      const row = seeder._internals.rowForBrief(b, manifest);
+      expect(row.action_type).toBe('refresh_existing_page');
+      expect(row.service).toBe('lawn');
+      expect(row.score).toBeGreaterThanOrEqual(75); // non-blog floor
+    }
+  });
+
+  test('the overlay keeps the live title and carries the add-only rule', () => {
+    const manifest = seeder.loadManifest(file);
+    const row = seeder._internals.rowForBrief(manifest.briefs[0], manifest);
+    const overlay = seeder.buildOperatorOverlay({ opportunity: row, pageType: 'refresh' });
+    const lines = overlay.operator_brief.binding_instructions.join('\n');
+    expect(lines).toContain('Rain Bird Sprinkler Timers: How to Run Yours by Hand');
+    expect(lines).toMatch(/REFRESH = ADD ONLY/);
   });
 });

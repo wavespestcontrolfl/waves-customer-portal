@@ -89,7 +89,7 @@ describe('accept route wiring (source pins)', () => {
 
   test('terminal pass 2: the whole after-visit cohort accepts through the React view (only it attests the timing); the legacy URL redirects there', () => {
     expect(src).toMatch(/if \(viewPolicy\.afterVisitCard === true\) \{\s*pafExistingForcesReactView = true;\s*return true;\s*\}\s*if \(viewPolicy\.required\) return true;/);
-    expect(src).toMatch(/if \(acceptanceTermsForcesReactView \|\| contactGapsForceReactView \|\| pafExistingForcesReactView\) \{\s*const qs = [^\n]*\n\s*return res\.redirect\(302, `\/estimate\/\$\{encodeURIComponent\(estimate\.token\)\}\$\{qs\}`\);/);
+    expect(src).toMatch(/if \(acceptanceTermsForcesReactView \|\| contactGapsForceReactView \|\| pafExistingForcesReactView \|\| parkedForcesReactView\) \{\s*const qs = [^\n]*\n\s*return res\.redirect\(302, `\/estimate\/\$\{encodeURIComponent\(estimate\.token\)\}\$\{qs\}`\);/);
   });
 
   test('r7 audit: a dropped capture is retired AFTER the transaction rolls back (no Stripe I/O under row locks), fail-closed 503', () => {

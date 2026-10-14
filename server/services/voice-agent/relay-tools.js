@@ -119,7 +119,9 @@ const TOOLS = [
     description:
       'Look up the soonest open appointment windows near a service location. Use ' +
       'this when the caller asks when you can come out and has not named a ' +
-      'specific day. Requires the service address or at least the city/ZIP. ' +
+      'specific day. Requires the service address or at least the city/ZIP — ' +
+      'except for a caller a KNOWN CALLER block says is already a customer: call ' +
+      'it with NO address and it uses the property on their account. ' +
       'READ-ONLY: this does NOT book anything — it only returns times you can ' +
       'offer; a team member confirms the appointment.',
     input_schema: {
@@ -138,7 +140,9 @@ const TOOLS = [
       'Find open appointment windows matching a natural-language time request ' +
       '(e.g. "next Thursday morning", "sometime next week after lunch", "a week ' +
       'from Friday"). Use this when the caller names a preferred day or timeframe. ' +
-      'Requires the service address or at least the city/ZIP. READ-ONLY: returns ' +
+      'Requires the service address or at least the city/ZIP — except for a caller ' +
+      'a KNOWN CALLER block says is already a customer: call it with NO address and ' +
+      'it uses the property on their account. READ-ONLY: returns ' +
       'times to offer; it does NOT book anything.',
     input_schema: {
       type: 'object',
@@ -414,6 +418,21 @@ const BOOKING_TOOLS = [
  * GATE_VOICE_AI_BOOKING (both checked at call time, not module load, so an
  * env flip takes effect without a restart of the test/process).
  */
+// capture_lead's one account-aware input. It exists only while the
+// caller-context lane is on (a known caller needs that lane), so the gate-off
+// tool surface stays exactly as it was.
+const USE_ACCOUNT_DETAILS_PROPERTY = {
+  type: 'boolean',
+  description: 'ONLY with estimate_requested, and ONLY after the caller answered YES to "Should it go to the '
+    + 'email and service address on your account?". The tool then uses the name, email and service address '
+    + 'on their account for whatever they did not give on the call. Never set it without that yes, and '
+    + 'never read the account\'s details aloud.',
+};
+const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_lead' ? tool : {
+  ...tool,
+  input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, use_account_details: USE_ACCOUNT_DETAILS_PROPERTY } },
+}));
+
 function activeTools({ officeOpen = null } = {}) {
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
@@ -422,7 +441,9 @@ function activeTools({ officeOpen = null } = {}) {
   const transfer = isTransferAvailable(officeOpen) ? TRANSFER_TOOLS : [];
   if (!isContextEnabled()) return [...TOOLS, ...transfer];
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer] : [...TOOLS, ...CONTEXT_TOOLS, ...transfer];
+  return isBookingEnabled()
+    ? [...TOOLS_WITH_ACCOUNT_DETAILS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer]
+    : [...TOOLS_WITH_ACCOUNT_DETAILS, ...CONTEXT_TOOLS, ...transfer];
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -465,7 +486,103 @@ function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
  * natural-language parser (find_slots); omit it for the soonest-windows path
  * (get_availability). Returns a status the executor turns into model-facing text.
  */
-async function resolveAvailability({ address_line1, city, zip, when }) {
+/**
+ * ⭐ A KNOWN CUSTOMER'S OPEN TIMES ARE FOR THE PROPERTY ON THEIR ACCOUNT
+ * (owner ruling 2026-10-03). For a verified full-tier caller (the calling
+ * number IS the account's own customers.phone) the location is not the
+ * caller's words: it is the account's, resolved by the SAME helper
+ * request_booking re-checks and books at (relay-booking's
+ * resolveAccountBookingLocation), so a time is never offered at one pin and
+ * committed at another, and a known customer is not asked for an address the
+ * account already holds.
+ *   null                       → the ordinary stated-location path (not a
+ *                                full-tier caller, or an account whose
+ *                                property a person must sort out — booking
+ *                                refuses those itself)
+ *   { kind: 'account', … }     → build times at the account's pin
+ *   { kind: 'other_property' } → the caller named a DIFFERENT property: no
+ *                                times; the request goes to a person
+ *   { kind: 'which_property' } → a city or ZIP alone, the account's own: it
+ *                                does not say WHICH property there (a rental
+ *                                in the same town), so no times until the
+ *                                agent calls again with no address (the
+ *                                account's) or the other property's street
+ * The address is never returned — the agent must not have it to recite.
+ */
+async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
+  if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
+  // The scheduling kill switch answers before any account read or geocode.
+  if (!require('../../config/feature-gates').isEnabled('selfBooking')) return null;
+  try {
+    const db = require('../../models/db');
+    const customer = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
+      .first('id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    if (!customer) return null;
+    const located = await require('./relay-booking').resolveAccountBookingLocation(db, customer);
+    if (located.status !== 'ok') return null;
+    const text = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
+    const stated = { street: text(input.address_line1), city: text(input.city), zip: text(input.zip) };
+    const account = { kind: 'account', customerId: customer.id, coords: located.coords };
+    if (!stated.street && !stated.city && !stated.zip) return account;
+    // Every part the caller stated must agree with the account; a part the
+    // account cannot be compared on is not agreement.
+    const zip5 = (v) => (String(v || '').match(/\d{5}/) || [null])[0];
+    const sameCity = !stated.city || (text(customer.city) && text(customer.city).toLowerCase() === stated.city.toLowerCase());
+    const sameZip = !stated.zip || (zip5(customer.zip) && zip5(customer.zip) === zip5(stated.zip));
+    if (!(sameCity && sameZip)) return { kind: 'other_property' };
+    // Only a STREET proves it is the account's property.
+    if (!stated.street) return { kind: 'which_property' };
+    // …and a UNIT the account does not hold is another premise at that
+    // street. booking's matcher accepts a submitted unit against a unitless
+    // record (its legacy rule for /book); here the visit would be written at
+    // the stored address WITHOUT the unit, so it goes to a person instead.
+    // The unit is read with the address normalizer's own parser, the one
+    // that matcher peels units with, so the two can never disagree on what
+    // a unit is.
+    const { splitStreetLineUnit } = require('../../utils/address-normalizer');
+    const accountHasUnit = Boolean(text(customer.address_line2)) || Boolean(splitStreetLineUnit(customer.address_line1 || '').unit);
+    if (splitStreetLineUnit(stated.street).unit && !accountHasUnit) return { kind: 'other_property' };
+    return require('../../routes/booking')._internals.addressMatchesCustomer(customer, stated.street, stated.zip)
+      ? account : { kind: 'other_property' };
+  } catch (err) {
+    // Fail to the ordinary path: its offers are not account offers, and
+    // request_booking refuses to book those for this caller.
+    logger.warn(`[voice-relay] account location for availability failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    return null;
+  }
+}
+
+// The address itself is never put in the result — the agent must not recite it.
+const ACCOUNT_LOCATION_NOTE = ' These times are for the service address on the caller\'s account. If the caller says the '
+  + 'visit is for a different property, call this tool again with that property\'s address.';
+// "will call you back" is wording the close's commitment extractor records as
+// an owed callback (call-commitments RELAY_PROMISE_PATTERNS): a lifecycle
+// customer gets no lead, so that commitment is what the office works from.
+const OTHER_PROPERTY_TEXT = 'That is not the service address on this caller\'s account, so do NOT offer any times and do '
+  + 'NOT place a booking request. Capture the lead (capture_lead) with that property\'s address and their preferred '
+  + 'day and time, and tell the caller a Waves team member will call you back to confirm a time. Do not say '
+  + 'anything is booked.';
+const WHICH_PROPERTY_TEXT = 'A city or ZIP alone does not say which property the visit is for, so no times were looked '
+  + 'up. If the visit is for the service address on this caller\'s account, call this tool again with NO address. If '
+  + 'it is for a different property, call it again with that property\'s street address.';
+
+/**
+ * The tool text for a known caller whose location is not the account's, else
+ * null. ⭐ A STATED LOCATION NOT PROVEN TO BE THE ACCOUNT'S REVOKES EARLIER
+ * ACCOUNT OFFERS — a different property, a city or ZIP that does not say
+ * which, and a lookup that could not answer (a failed read, an account a
+ * person must sort out) alike. Without it an earlier slot_ref would still
+ * book the account's address for a visit the caller placed somewhere else.
+ */
+function knownCallerRefusal(account, input = {}, ctx = {}) {
+  if (account && account.kind === 'account') return null;
+  const statedAny = [input.address_line1, input.city, input.zip].some((v) => v != null && String(v).trim() !== '');
+  if (statedAny && typeof ctx.revokeAccountSlots === 'function') ctx.revokeAccountSlots();
+  if (!account) return null;
+  return account.kind === 'which_property' ? WHICH_PROPERTY_TEXT : OTHER_PROPERTY_TEXT;
+}
+
+async function resolveAvailability({ address_line1, city, zip, when, account = null }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'unavailable' };
 
@@ -480,11 +597,16 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
   // city-only caller, pass just `city` so resolveBookingCoords uses its
   // service_zones fallback instead of throwing on a city-only geocode (which
   // would skip the fallback the public /book route relies on).
-  const coords = await booking.resolveBookingCoords({
+  // A known customer's times are built at the account's own pin (see
+  // knownCallerAvailabilityLocation); everyone else's from what they stated.
+  const coords = account ? account.coords : await booking.resolveBookingCoords({
     address: (street || zipStr) && addrParts.length ? `${addrParts.join(', ')}, FL` : null,
     city: cityStr || null,
   });
   if (!coords.lat || !coords.lng) return { status: 'need_location' };
+  // Which account's property these times were scored at (null = a stated
+  // location): request_booking books a known caller only from their own.
+  const accountCustomerId = account ? account.customerId : null;
 
   const today = new Date();
   const duration = config.slot_duration_minutes || 60;
@@ -513,7 +635,7 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
       // per-day cap, so the re-check loses a slot that is still open.
       offerContext: {
         lat: coords.lat, lng: coords.lng, duration,
-        timeOfDay: w.timeOfDay || 'any', expandOpenDays: true,
+        timeOfDay: w.timeOfDay || 'any', expandOpenDays: true, accountCustomerId,
       },
     };
   }
@@ -528,7 +650,7 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
     status: 'ok',
     availability,
     summary: null,
-    offerContext: { lat: coords.lat, lng: coords.lng, duration, timeOfDay: 'any', expandOpenDays: false },
+    offerContext: { lat: coords.lat, lng: coords.lng, duration, timeOfDay: 'any', expandOpenDays: false, accountCustomerId },
   };
 }
 
@@ -889,9 +1011,6 @@ async function executeTool(name, input = {}, ctx = {}) {
       // An email must be DELIVERABLE, not merely non-empty (hook P1): an
       // ASR-garbled or syntactically invalid address is reported as missing.
       const { isValidEmail } = require('../../utils/internal-email-recipients');
-      // Fields accumulate across captures on this call (hook P1): a retry that
-      // supplies only the missing piece keeps what earlier captures gave.
-      const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
       // Whitespace-only is EMPTY (hook P1): a field must carry real text to
       // count toward a deliverable request.
       const nz = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
@@ -904,29 +1023,19 @@ async function executeTool(name, input = {}, ctx = {}) {
         logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
         extracted.email = null;
       }
-      const estimateFields = {
-        first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
-        last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
-        email: emailNow || nz(priorEstimateFields.email),
-        address_line1: nz(extracted.address_line1) || nz(priorEstimateFields.address_line1),
-        city: nz(extracted.city) || nz(priorEstimateFields.city),
-        zip: nz(extracted.zip) || nz(priorEstimateFields.zip),
-        // Service context accumulates too (hook P1): a retry that only adds
-        // the email must not file a card that has forgotten what they asked
-        // about.
-        requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
-        pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
-      };
-      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
+      // What this request has, and where each part came from: what the caller
+      // said on the call, plus — after a yes to the one question — the
+      // details on an established customer's account (relay-estimate-details).
+      const estimateDetails = require('./relay-estimate-details');
+      const { estimateFields, detailsFromAccount, estimateMissing, offerAccountQuestion, callbackPhone: estimateCallbackPhone } = await estimateDetails.resolveEstimateDetails({
+        input, extracted, emailNow, estimateRequested, callerPhone, callerPhoneValid: isLikelyE164(callerPhone), isValidEmail, ctx,
+      });
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
       // address the FIRST capture gave, not just this retry's new piece.
-      for (const k of ['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']) {
+      for (const k of estimateDetails.CARRIED) {
         if (!extracted[k] && estimateFields[k]) extracted[k] = estimateFields[k];
       }
-      const estimateMissing = estimateRequested
-        ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
-        : [];
       // The spoken turnaround is decided HERE, from the office clock, and
       // travels with the artifact (hook P1): open ⇒ "usually about 15
       // minutes" (urgent for staff); closed ⇒ "when the office opens";
@@ -936,9 +1045,18 @@ async function executeTool(name, input = {}, ctx = {}) {
       // proves the office is open right now may say it.
       const { isContextEnabled: contextOn } = require('./relay-context');
       const officeOpen = contextOn() && typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
-      const spokenExpectation = officeOpen === true
-        ? 'about_15_minutes'
-        : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible');
+      // ⭐ A PROMISE ALREADY SPOKEN ON THIS CALL STANDS, WITH ITS OWN TIMING.
+      // An estimate an earlier capture queued was promised aloud: a later
+      // capture that corrects the details (even one that leaves them
+      // incomplete, or whose card write fails) does not withdraw it, and it
+      // does not restart its clock or reword its turnaround.
+      const priorPromise = typeof ctx.getPromise === 'function' ? ctx.getPromise('send_estimate') : null;
+      const promiseStands = estimateRequested && Boolean(priorPromise && priorPromise.verdict === true);
+      const spokenExpectation = promiseStands && priorPromise.expectation
+        ? priorPromise.expectation
+        : (officeOpen === true
+          ? 'about_15_minutes'
+          : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible'));
       if (estimateRequested) {
         extracted.quote_requested = true;
         extracted.quote_promised = estimateMissing.length === 0;
@@ -1504,47 +1622,36 @@ async function executeTool(name, input = {}, ctx = {}) {
       // the call as before once the agent is done.
       const holdOpen = estimateRequested && estimateMissing.length > 0;
       if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated, holdOpen });
-      // ⭐ A PROMISED ESTIMATE NEEDS AN ARTIFACT (codex #3569). A new lead IS
-      // the artifact (the office works it). A lifecycle customer gets no lead,
-      // so the promise would otherwise rest on a call summary nobody is paged
-      // about — file the estimate-request card, and let the result below tell
-      // the model whether the promise may be spoken.
-      let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
-      if (estimateRequested && estimateMissing.length) {
-        estimateQueued = false;
-      } else if (estimateRequested) {
-        if (leadCreated) {
-          estimateQueued = true;
-        } else if (leadResult && leadResult.customerId) {
-          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
-          const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
-            : { persisted: false };
-          estimateQueued = surfaced && surfaced.persisted === true;
-        } else {
-          estimateQueued = false;
-        }
+      // The artifact behind the promise: the lead, or the office card (filed,
+      // or revised when a correction leaves the request incomplete).
+      const { estimateQueued, cardRevised, superseded: cardSuperseded } = await estimateDetails.fileEstimateRequest({
+        estimateRequested,
+        estimateMissing,
+        leadCreated,
+        customerId: (leadResult && leadResult.customerId) || null,
+        details: { ...extracted, ...estimateFields },
+        cardOpts: { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount },
+      });
+      // The card write re-proves call ownership (its fence). A reconnect that
+      // took the call between the lead write and here gets the same hard stop
+      // as a superseded lead write: this socket says and starts nothing more.
+      if (cardSuperseded) {
+        return 'This session was superseded by a reconnect — NOTHING was saved. Do NOT call any more '
+          + 'tools and do not answer account questions; say goodbye briefly.';
       }
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
-      if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      if (!promiseStands) {
+        if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      }
       const expectationCopy = {
         about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',
         as_soon_as_possible: 'Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.',
       }[spokenExpectation];
-      const estimateNote = estimateQueued === true
-        ? ` The estimate request IS on the office queue. ${expectationCopy}`
-        : (estimateQueued === false
-          ? (estimateMissing.length
-            ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
-              + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
-              + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
-              + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
-              + 'and end the call normally.'
-            : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
-              + 'Waves team member will follow up, nothing stronger.')
-          : '');
+      const estimateNote = estimateDetails.estimateResultNote({
+        estimateQueued, estimateMissing, promiseStands, cardRevised, offerAccountQuestion, expectationCopy,
+      }, ctx);
       logger.info(
         `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `
         + `callSid=${ctx.callSid || 'n/a'}`
@@ -1606,14 +1713,22 @@ async function executeTool(name, input = {}, ctx = {}) {
     }
 
     if (name === 'get_availability') {
-      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip });
-      return availabilityResultToText(res, ctx);
+      const account = await knownCallerAvailabilityLocation(input, ctx);
+      const refusal = knownCallerRefusal(account, input, ctx);
+      if (refusal) return refusal;
+      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account });
+      return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
     if (name === 'find_slots') {
+      // The location is judged FIRST: a call that names another property but
+      // omits the timeframe must still revoke the account's earlier offers.
+      const account = await knownCallerAvailabilityLocation(input, ctx);
+      const refusal = knownCallerRefusal(account, input, ctx);
+      if (refusal) return refusal;
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
-      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip });
-      return availabilityResultToText(res, ctx);
+      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account });
+      return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
     // The name is MODEL-supplied; bound and flatten it rather than echoing an

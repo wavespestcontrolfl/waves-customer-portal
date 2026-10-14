@@ -7,6 +7,7 @@ import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
 import {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 } from "./SchedulePage";
@@ -48,7 +49,13 @@ function adminFetch(path, options = {}) {
 const CONDITIONAL_LINE_RE =
   /^if\s|\bif\b|\bonly\b|\bwhere\b|\binstead\b|\brescue\b|\bcurative\b|\bthreshold\b|\bspot treat|\bpremium\b|\bfor (whitefly|scale|aphid|caterpillar|mite|borer|confirmed)/i;
 
-function parseProductLines(text) {
+// The v13 lawn payload carries its own safety_rules (GATE_LAWN_V13); with the gate off the
+// payload has none and the legacy descriptions (Celsius max 3x/year) apply.
+function productDescriptionsFor(trackData) {
+  return trackData?.safety_rules ? { ...PRODUCT_DESCRIPTIONS, ...PRODUCT_DESCRIPTIONS_V13 } : PRODUCT_DESCRIPTIONS;
+}
+
+function parseProductLines(text, descriptions = PRODUCT_DESCRIPTIONS) {
   if (!text) return [];
   return text
     .split("\n")
@@ -96,7 +103,7 @@ function parseProductLines(text) {
       const lookupName = name.toLowerCase();
       const lookupLine = clean.toLowerCase();
       let description = null;
-      for (const [key, val] of Object.entries(PRODUCT_DESCRIPTIONS)) {
+      for (const [key, val] of Object.entries(descriptions)) {
         // Word-boundary match — bare `includes` matched "pillar" inside
         // "caterpillar" and hung fungicide copy on an insecticide line.
         const keyRe = new RegExp(
@@ -144,7 +151,7 @@ function TierDotV2({ active, label }) {
   );
 }
 
-function TierDotsV2({ tiers, tier4x, tier6x }) {
+function TierDotsV2({ tiers, tier4x, tier6x, tier9x }) {
   if (tiers) {
     return (
       <div className="flex items-center flex-wrap gap-1">
@@ -156,7 +163,18 @@ function TierDotsV2({ tiers, tier4x, tier6x }) {
       </div>
     );
   }
-  if (tier4x === undefined && tier6x === undefined) return null;
+  if (tier4x === undefined && tier6x === undefined && tier9x === undefined) return null;
+  // Tree & Shrub sells 6 and 9 visits a year; the 4x tier was retired
+  // 2026-09-24, so a program that carries tier_9x shows 6x and 9x.
+  if (tier9x !== undefined) {
+    return (
+      <div className="flex items-center gap-1">
+        {" "}
+        <TierDotV2 active={tier6x} label="6x" />{" "}
+        <TierDotV2 active={tier9x} label="9x" />{" "}
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-1">
       {" "}
@@ -264,10 +282,10 @@ function CalendarLine({ line, muted }) {
   );
 }
 
-function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted }) {
+function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted, descriptions }) {
   if (!visit) return null;
-  const primaryProducts = parseProductLines(visit.primary);
-  const secondaryProducts = parseProductLines(visit.secondary);
+  const primaryProducts = parseProductLines(visit.primary, descriptions);
+  const secondaryProducts = parseProductLines(visit.secondary, descriptions);
   const materialCost = parseFloat(visit.material_cost);
   // Lawn material_cost is the 10,000 sqft basis while conditional_cost
   // reserves derive from ~4,500 sqft inline line costs — normalize before
@@ -324,6 +342,7 @@ function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted }
           tiers={visit.tiers}
           tier4x={visit.tier_4x}
           tier6x={visit.tier_6x}
+          tier9x={visit.tier_9x}
         />{" "}
       </div>{" "}
       <div className="px-4 py-3">
@@ -555,6 +574,17 @@ export function ProtocolMixCard({
                 <Badge tone="neutral">Surfactant Required</Badge>
               )}
             </div>
+            {item.unavailable && (
+              <div className="text-11 text-alert-fg leading-normal mt-1">
+                {item.unavailable.reason}
+              </div>
+            )}
+            {item.spot && (
+              <div className="text-11 text-ink-secondary leading-normal mt-1">
+                {item.spot.reference ? `${item.spot.reference}. ` : ""}
+                {item.spot.note}
+              </div>
+            )}
           </div>
         </div>
       ),
@@ -625,6 +655,22 @@ export function ProtocolMixCard({
 
   return (
     <div className="flex flex-col gap-3">
+      {plan.blocks?.length > 0 && (
+        <div
+          role="alert"
+          className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2"
+        >
+          <div className="text-13 font-medium text-alert-fg">Mix on hold</div>
+          {plan.blocks.map((b) => (
+            <div
+              key={`${b.code}-${b.productId}`}
+              className="text-12 text-alert-fg leading-normal"
+            >
+              {b.message}
+            </div>
+          ))}
+        </div>
+      )}
       {plan.warnings?.length > 0 && (
         <div className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2">
           {plan.warnings.map((w) => (
@@ -708,7 +754,7 @@ export function ProtocolMixCard({
           <div className="text-12 text-ink-secondary leading-normal mb-4">
             {plan.visit?.objective || "No objective available for this visit."}
           </div>{" "}
-          {!hasAnyMix && (
+          {!hasAnyMix && !plan.blocks?.length && (
             <div className="mb-3 text-12 text-ink-tertiary">
               Area mix, material cost and tank amounts appear once calibrated
               equipment is selected.
@@ -833,6 +879,10 @@ export function ProtocolMixCard({
                 </div>{" "}
               </div>
             ))
+          ) : plan.blocks?.length ? (
+            <div className="text-13 text-alert-fg">
+              {plan.blocks.map((b) => b.message).join(" ")}
+            </div>
           ) : (
             <div className="text-13 text-ink-secondary">
               Select calibrated equipment and products to build a mixing order.
@@ -840,6 +890,29 @@ export function ProtocolMixCard({
           )}
         </div>{" "}
       </Card>{" "}
+      {plan.bermudaMixingOrder?.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50">
+            <div className="text-14 font-medium text-zinc-900">Bermuda backpack mix</div>
+          </div>
+          <div className="p-4 space-y-2">
+            {plan.bermudaMixingOrder.map((step) => (
+              <div
+                key={`${step.step}-${step.productId}`}
+                className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
+              >
+                <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
+                  {step.step}
+                </div>
+                <div>
+                  <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
+                  <div className="text-14 text-ink-secondary leading-normal mt-1">{step.instruction}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
       <ProductLabelsCard items={plan.items} />{" "}
     </div>
   );
@@ -1117,8 +1190,11 @@ export default function ProtocolReferenceTabV2() {
   const currentVisit =
     trackData?.visits?.find((v) => v.month === currentMonthAbbr) ||
     (isServiceProgram ? trackData?.visits?.[0] : null);
+  // A lawn track whose catalog payload carries its own safety_rules (the v13
+  // program, GATE_LAWN_V13) shows those; every other lawn track keeps the
+  // static list.
   const safetyRules = isLawnTrack
-    ? TRACK_SAFETY_RULES[selectedTrack] || []
+    ? trackData?.safety_rules || TRACK_SAFETY_RULES[selectedTrack] || []
     : trackData?.safety_rules || [];
 
   return (
@@ -1321,6 +1397,7 @@ export default function ProtocolReferenceTabV2() {
               trackName={trackData.name}
               isLawnTrack={isLawnTrack}
               pricingRestricted={pricingRestricted}
+              descriptions={productDescriptionsFor(trackData)}
             />
           )}
           {!currentVisit && trackData.visits?.length > 0 && (
@@ -1444,12 +1521,12 @@ export default function ProtocolReferenceTabV2() {
                             )}
                           </td>
                           <td className="px-2.5 py-2 text-12 text-ink-primary align-top">
-                            {parseProductLines(v.primary).map((p, pi) => (
+                            {parseProductLines(v.primary, productDescriptionsFor(trackData)).map((p, pi) => (
                               <CalendarLine key={pi} line={p} />
                             ))}
                           </td>
                           <td className="px-2.5 py-2 text-12 text-ink-secondary align-top">
-                            {parseProductLines(v.secondary).map((p, pi) => (
+                            {parseProductLines(v.secondary, productDescriptionsFor(trackData)).map((p, pi) => (
                               <CalendarLine key={pi} line={p} muted />
                             ))}
                             {!v.secondary && "\u2014"}
@@ -1486,6 +1563,7 @@ export default function ProtocolReferenceTabV2() {
                               tiers={v.tiers}
                               tier4x={v.tier_4x}
                               tier6x={v.tier_6x}
+                              tier9x={v.tier_9x}
                             />{" "}
                           </td>
                           <td className="px-2.5 py-2 text-11 text-ink-tertiary whitespace-pre-wrap align-top">

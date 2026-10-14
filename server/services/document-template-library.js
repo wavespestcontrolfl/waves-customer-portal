@@ -135,14 +135,33 @@ async function lockActiveVersionForIssue(trx, { template = {}, activeVersion = {
   const live = await trx('document_templates')
     .where({ id: template.id })
     .forUpdate()
-    .first('active_version_id', 'status');
+    .first('active_version_id', 'status', 'template_key');
   if (!live || live.status !== 'active' || live.active_version_id !== activeVersion.id) {
     const err = new Error('Document template changed while issuing — reload and try again.');
     err.status = 409;
     err.code = 'DOCUMENT_TEMPLATE_CHANGED';
     throw err;
   }
+  await assertTermiteAfterInstallIssueAllowed(trx, live);
   return live;
+}
+
+// GATE_PAF_TERMITE issue fence, at the one boundary every issuer crosses
+// (the admin issue route, the bulk send; the estimate accept path applies
+// the same rule in termite-program-agreement.js): the termite annual
+// agreement wording that charges after installation is only handed to a
+// customer while its gate is on. A signed agreement is charged by its own
+// text, so the gate has to stand at issue.
+async function assertTermiteAfterInstallIssueAllowed(trx, live) {
+  const TermiteAgreement = require('./termite-program-agreement');
+  if (live.template_key !== TermiteAgreement.ANNUAL_TEMPLATE_KEY) return;
+  if (require('../config/feature-gates').pafTermiteLive()) return;
+  const version = await trx('document_template_versions').where({ id: live.active_version_id }).first('body');
+  if (!TermiteAgreement.agreementAuthorizesAfterInstallCharge(version?.body)) return;
+  const err = new Error('This termite agreement charges after installation, and that billing is not turned on yet (GATE_PAF_TERMITE).');
+  err.status = 409;
+  err.code = 'TERMITE_AFTER_INSTALL_GATE_OFF';
+  throw err;
 }
 
 function validateTemplatePayload(body = {}, { partial = false } = {}) {

@@ -3,6 +3,7 @@
 const { createHash } = require('crypto');
 const db = require('../models/db');
 const { addressKey } = require('./customer-properties');
+const { normalizeZip, normStreet } = require('./customer-property-address-keys');
 const { gateEnvValue } = require('../config/feature-gates');
 const { technicianCurrentVisitFilter, lockOwnedLiveVisit } = require('./technician-visit-scope');
 const logger = require('./logger');
@@ -44,10 +45,23 @@ function areaVersion(property, primaryLawnSqft = null) {
   ])).digest('hex');
 }
 
+// The customer row and its primary property name the same address. addressKey
+// keys locality on the ZIP when there is one, else the city, so a ZIP on only
+// one side never matches (prod 10-06: a property saved without its ZIP hid the
+// customer's lawn size and the lawn sheet asked the tech). With a ZIP on one
+// side only, street + unit + city decide; two different ZIPs still differ.
+function sameCustomerAddress(customer, property) {
+  if (!customer || !property) return false;
+  if (addressKey(customer) === addressKey(property)) return true;
+  if (!normalizeZip(customer.zip) === !normalizeZip(property.zip)) return false;
+  if (!normStreet(customer.city) || !normStreet(property.city)) return false;
+  return addressKey({ ...customer, zip: null }) === addressKey({ ...property, zip: null });
+}
+
 async function primaryLawnArea(property, knex) {
   if (!property.is_primary) return null;
   const customer = await knex('customers').where({ id: property.customer_id }).first();
-  if (addressKey(customer) !== addressKey(property)) return null;
+  if (!sameCustomerAddress(customer, property)) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: property.customer_id }).first();
   return areaNumber(profile?.lawn_sqft);
 }
@@ -77,11 +91,18 @@ function validateAreaChanges(input) {
   return changes;
 }
 
-async function visitProperty(visit, knex) {
+// The property a visit is for: the visit's own link, else the address or sole-property evidence (lawn-assessment-history scopeForAssessment).
+// null = it cannot be resolved. The ONE resolver: the area flow below, and the lawn places (lawn-trouble-areas.js propertyOf), use it.
+async function resolveVisitPropertyId(visit, knex) {
   const history = require('./lawn-assessment-history');
   const scope = await history.scopeForAssessment(history.visitEvidence(visit.customer_id, visit), knex);
-  if (!scope.propertyId) throw fail('The service property needs to be resolved before saving areas.', 409);
-  return scope.propertyId;
+  return scope.propertyId || null;
+}
+
+async function visitProperty(visit, knex) {
+  const propertyId = await resolveVisitPropertyId(visit, knex);
+  if (!propertyId) throw fail('The service property needs to be resolved before saving areas.', 409);
+  return propertyId;
 }
 
 async function loadAreaProperty(scope, req, knex = db, { lock = false } = {}) {
@@ -134,9 +155,11 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
     // A repeat refresh inside the cooldown reuses the cached lookup.
     const liveRefresh = refresh && await claimRefresh(address);
     const performLookup = lookup || require('../routes/property-lookup-v2').performPropertyLookup;
+    // Scope decision: lookup-callers.js (property_service_areas: area editor, no suite sizing).
+    const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
     // A missing/offline cache cannot hide already saved measurements or
     // turn a successful review save into an apparent failure.
-    const result = await performLookup(address, liveRefresh ? { refresh: true } : { cacheOnly: true, persist: false })
+    const result = await performLookup(address, lookupOptionsFor('property_service_areas', liveRefresh ? { refresh: true } : { cacheOnly: true, persist: false }))
       .catch(error => {
         if (!liveRefresh) return null;
         // Upstream messages can name providers, keys, URLs or the street
@@ -183,7 +206,7 @@ async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
     const customer = await trx('customers').where({ id: property.customer_id }).first();
     // Existing primary-property readers keep using their existing columns.
     // A secondary property's measurement can never overwrite those mirrors.
-    if (property.is_primary && addressKey(customer) === addressKey(property)) {
+    if (property.is_primary && sameCustomerAddress(customer, property)) {
       if (changes.beds) await trx('customers').where({ id: property.customer_id }).update({ bed_sqft: changes.beds.sqft, updated_at: trx.fn.now() });
       if (changes.lawn) {
         await trx('customers').where({ id: property.customer_id }).update({ property_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
@@ -211,19 +234,25 @@ async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvid
     throw fail('Review the area treated for this service.', 400);
   }
   const property = await loadAreaProperty({ serviceId: service.id, propertyId: input.propertyId }, req, knex);
-  if (input.version !== areaVersion(property, await primaryLawnArea(property, knex))) throw fail('Property areas changed. Reload and review the job coverage.', 409);
+  const lawnSqft = await primaryLawnArea(property, knex);
+  if (input.version !== areaVersion(property, lawnSqft)) throw fail('Property areas changed. Reload and review the job coverage.', 409);
   const measured = reviewedAreas(property)[kind];
+  // A lawn visit treats the whole recorded lawn, reviewed or not (the same
+  // legacy fallback readAreaMeasurements shows), so that is the default an
+  // untreated incomplete visit must not freeze. The snapshot itself stays
+  // honest: an unreviewed default records no property area or source.
+  const defaultSqft = measured?.sqft ?? (kind === 'lawn' ? (lawnSqft !== null ? lawnSqft : areaNumber(property.property_sqft)) : null);
   // An untreated (incomplete, no products) visit only records coverage the
   // tech set for this visit (explicitVisitArea, or a value that differs from
   // the reviewed default); it never freezes
   // the default as if it had been treated.
-  if (!treatmentEvidence && input.explicitVisitArea !== true && measured?.sqft === input.treatedSqft) return null;
+  if (!treatmentEvidence && input.explicitVisitArea !== true && defaultSqft === input.treatedSqft) return null;
   return { propertyId: property.id, kind, treatedSqft: input.treatedSqft,
     propertyAreaSqft: measured?.sqft ?? null, measurementSource: measured?.source ?? null,
     reviewedAt: measured?.reviewedAt ?? null };
 }
 
-module.exports = { AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
+module.exports = { resolveVisitPropertyId, AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
   validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea,
-  hasAreaMeasurementsColumn,
+  hasAreaMeasurementsColumn, sameCustomerAddress,
   _resetAreaColumnCache: () => { areaColumnKnown = false; } };

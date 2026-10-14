@@ -1,12 +1,19 @@
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { getHourlyRainOutlook } = require('./weather-forecast');
+
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+
+const HQ = { lat: 27.4217, lng: -82.4065 };
+
+// Tomorrow's Eastern calendar date. The server clock is UTC; service dates
+// and windows are Eastern (Codex #6119 r2).
+const etTomorrow = () => etDateString(addETDays(new Date(), 1));
 
 class ForecastAnalyzer {
   async analyzeTomorrow() {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    const tomorrowStr = etTomorrow();
 
     const services = await db('scheduled_services')
       .where('scheduled_date', tomorrowStr)
@@ -17,39 +24,30 @@ class ForecastAnalyzer {
 
     if (!services.length) return { date: tomorrowStr, services: [], needsReschedule: [], canProceed: [], caution: [] };
 
-    // Fetch weather from NWS
+    // Hourly forecast at HQ from the shared reader: NWS, Open-Meteo when
+    // NWS fails (weather-forecast.js). Fail open: no forecast, no flags.
     let forecast = null;
     try {
-      const res = await fetch('https://api.weather.gov/points/27.4217,-82.4065', {
-        headers: { 'User-Agent': 'WavesPortal/1.0 (waves@wavespestcontrol.com)' },
-      });
-      if (res.ok) {
-        const pointData = await res.json();
-        const forecastUrl = pointData.properties?.forecastHourly;
-        if (forecastUrl) {
-          const fRes = await fetch(forecastUrl, {
-            headers: { 'User-Agent': 'WavesPortal/1.0 (waves@wavespestcontrol.com)' },
-          });
-          if (fRes.ok) {
-            const fData = await fRes.json();
-            forecast = (fData.properties?.periods || []).map(p => ({
-              datetime: new Date(p.startTime),
-              temp_f: p.temperature,
-              wind_speed_mph: parseInt(p.windSpeed) || 0,
-              rain_probability_pct: p.probabilityOfPrecipitation?.value || 0,
-              rain_mm: 0, // NWS doesn't give mm directly
-              short_forecast: p.shortForecast,
-            }));
-          }
-        }
-      }
+      const hours = await getHourlyRainOutlook(HQ.lat, HQ.lng);
+      forecast = (hours || []).map((h) => ({
+        datetime: new Date(h.startTime),
+        // The hour's Eastern date and clock hour: every comparison below
+        // uses these, never the Date's server-local (UTC) parts.
+        et_date: etDateString(new Date(h.startTime)),
+        et_hour: etParts(new Date(h.startTime)).hour,
+        temp_f: h.temperatureF,
+        wind_speed_mph: h.windMph || 0,
+        rain_probability_pct: h.rainChance || 0,
+        rain_mm: 0, // the hourly forecast carries no amount
+        short_forecast: h.shortForecast,
+      }));
     } catch (e) { logger.error(`Forecast fetch failed: ${e.message}`); }
 
     const results = services.map(service => this.analyzeServiceWeather(service, forecast || []));
 
     return {
       date: tomorrowStr,
-      overallConditions: { summary: this.buildSummary(forecast || [], tomorrow) },
+      overallConditions: { summary: this.buildSummary(forecast || [], tomorrowStr) },
       services: results,
       needsReschedule: results.filter(r => r.recommendation === 'RESCHEDULE'),
       canProceed: results.filter(r => r.recommendation === 'GO'),
@@ -74,13 +72,10 @@ class ForecastAnalyzer {
     const windowStart = parseInt((service.window_start || '08:00').split(':')[0]);
     const windowEnd = parseInt((service.window_end || '17:00').split(':')[0]);
 
-    const tomorrowDate = new Date();
-    tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-
-    const serviceHours = forecast.filter(h => {
-      const hour = h.datetime.getHours();
-      return h.datetime.toDateString() === tomorrowDate.toDateString() && hour >= windowStart && hour <= windowEnd;
-    });
+    const tomorrowStr = etTomorrow();
+    const serviceHours = forecast.filter(h => (
+      h.et_date === tomorrowStr && h.et_hour >= windowStart && h.et_hour <= windowEnd
+    ));
 
     const issues = [];
     let recommendation = 'GO';
@@ -141,14 +136,18 @@ class ForecastAnalyzer {
     return 'pest_exterior';
   }
 
-  buildSummary(forecast, date) {
-    const hours = forecast.filter(h => h.datetime.toDateString() === date.toDateString());
+  // `etDate` = the Eastern calendar date ('YYYY-MM-DD') to summarize.
+  buildSummary(forecast, etDate) {
+    const hours = forecast.filter(h => h.et_date === etDate);
     if (!hours.length) return 'Forecast unavailable.';
-    const hi = Math.max(...hours.map(h => h.temp_f));
-    const lo = Math.min(...hours.map(h => h.temp_f));
+    // Finite readings only (the backup reports a missing hour as null, which
+    // Math.min would read as 0), rounded (its readings are unrounded).
+    const temps = hours.map(h => h.temp_f).filter(t => Number.isFinite(t));
+    const hi = temps.length ? Math.round(Math.max(...temps)) : null;
+    const lo = temps.length ? Math.round(Math.min(...temps)) : null;
     const maxWind = Math.max(...hours.map(h => h.wind_speed_mph));
     const maxRain = Math.max(...hours.map(h => h.rain_probability_pct));
-    return `${lo}-${hi}°F, wind up to ${maxWind} mph, ${maxRain}% max rain chance. ${maxRain > 80 ? 'Rain likely.' : maxRain > 50 ? 'Rain possible.' : 'Mostly dry.'}`;
+    return `${temps.length ? `${lo}-${hi}°F` : 'Temperature unavailable'}, wind up to ${maxWind} mph, ${maxRain}% max rain chance. ${maxRain > 80 ? 'Rain likely.' : maxRain > 50 ? 'Rain possible.' : 'Mostly dry.'}`;
   }
 }
 

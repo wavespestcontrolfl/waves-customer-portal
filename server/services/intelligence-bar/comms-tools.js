@@ -33,6 +33,9 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // own cancel uses, so this tool can never bypass it with a bare status flip).
 const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
+// The manual-send wrapper's refusal of THIS attempt because an earlier text on
+// the thread is unresolved (send-manual-customer-sms.js defines the code inline).
+const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -313,22 +316,39 @@ async function executeCommsTool(toolName, input, actionContext = {}) {
   }
 }
 
+// This send's provider outcome is UNKNOWN: report it as unknown (outcome_unknown
+// is what executionOutcome reads), never as a blocked send, and forbid a retry.
+// The one exception is the wrapper's own interlock refusing THIS attempt because
+// an earlier text on the thread is unresolved: that is a refusal (blocked), the
+// unknown outcome belongs to the earlier text.
 function uncertainManualSmsResponse(outcome) {
+  const code = outcome?.code || 'SMS_DELIVERY_UNCERTAIN';
   return {
     success: false,
     error: 'The carrier did not confirm this text. It may still go out; check the thread and do not retry it.',
-    blocked: true,
-    code: outcome?.code || 'SMS_DELIVERY_UNCERTAIN',
+    ...(code === INTERLOCK_REFUSAL_CODE ? { blocked: true } : { outcome_unknown: true }),
+    code,
     mayHaveSent: true,
     retry: false,
     retryable: false,
   };
 }
 
+// Did this send's outcome come back ambiguous? Two canonical readings, no local
+// rule: the manual-send wrapper's own interlock state (manualSmsDeliveryState),
+// or classifyDeliveryCertainty on the result or on the outcome a thrown error
+// carries. The classification is asked only of a value that states a
+// deliveryOutcome: a legacy provider receipt without one ({ sent, providerMessageId },
+// the accepted-but-unaudited shape above) is accepted evidence, not ambiguity.
 function isUncertainManualSmsOutcome(outcome) {
   return manualSmsDeliveryState(outcome) === 'uncertain'
-    || outcome?.deliveryOutcome === 'uncertain'
-    || outcome?.providerOutcome?.deliveryOutcome === 'uncertain';
+    || [outcome, outcome?.providerOutcome].some((o) => o?.deliveryOutcome && classifyDeliveryCertainty(o) === 'unknown');
+}
+
+// Required at call time: send-customer-message pulls the Twilio provider and
+// its route module, which the schema-only tests stub (CI on 4bf528bbb5).
+function classifyDeliveryCertainty(outcome) {
+  return require('../messaging/send-customer-message').classifyDeliveryCertainty(outcome);
 }
 
 
@@ -747,6 +767,7 @@ async function commitCancelSms(input, preview, technicianId) {
     expectedBodyDigest: fresh._version.body_digest,
     expectedCustomerId: fresh.customer_id,
     simpleOnly: true,
+    keepRow: true, // the row stays with status 'canceled' (workflow contract W7), never deleted
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
     // 'forbidden' cannot happen (techRole is always 'admin' here); 'not_found'
@@ -812,8 +833,8 @@ async function getUnansweredThreads(input) {
   // phone — applicants are answered from Recruiting.
   const inbound = await db('sms_log')
     .modify((qb) => excludeRecruitingSmsLog(qb))
-    .where('direction', 'inbound')
-    .where('created_at', '>=', since)
+    .where('sms_log.direction', 'inbound')
+    .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(
       'sms_log.from_phone', 'sms_log.to_phone', 'sms_log.message_body',
@@ -869,6 +890,45 @@ async function getUnansweredThreads(input) {
 }
 
 
+// What a stored sms_log status means for "did the customer get this text".
+// A kept cancelled text (cancel_queued_message keeps its row) and a still-queued
+// or failed one must never read as a sent Waves message in a thread or search
+// result, or the model could tell the operator "we already texted them that".
+// Sent-like statuses and inbound rows carry the plain status only.
+function deliveryLabel(row) {
+  const status = String(row.status || '').toLowerCase();
+  const out = { status: row.status || null };
+  if (row.direction !== 'outbound') return out;
+  if (status === 'canceled' || status === 'cancelled') {
+    return { ...out, canceled: true, note: 'Scheduled text, cancelled before it was sent. The customer never received it.' };
+  }
+  // 'sending' means a worker claimed it and the provider outcome is unknown. A
+  // 'scheduled' row that carries a prior-attempt marker was requeued after a
+  // send attempt (smsIneligibilityReason reads the same markers), so the
+  // provider may already have accepted it. Only a never-attempted scheduled row
+  // is definitely unsent.
+  if (status === 'sending' || (status === 'scheduled' && hasPriorSendAttempt(row.metadata))) {
+    return { ...out, delivery_uncertain: true, note: 'A send was attempted and the outcome is not known. The customer may have received it.' };
+  }
+  if (status === 'scheduled') {
+    return { ...out, not_sent_yet: true, note: 'Scheduled text, not sent yet. The customer has not received it.' };
+  }
+  if (['failed', 'undelivered', 'blocked'].includes(status)) {
+    return { ...out, not_delivered: true, note: 'This text did not reach the customer.' };
+  }
+  return out;
+}
+
+// The prior-attempt evidence smsIneligibilityReason refuses on: finalize_only
+// (already reached the provider), a review-ask reservation or exhausted
+// uncertain delivery, or any worker-claim / stale-recovery / provider-retry key.
+function hasPriorSendAttempt(metadata) {
+  const meta = parseSmsMetadata(metadata);
+  const flag = (v) => v === true || v === 'true';
+  return flag(meta.finalize_only) || flag(meta.review_ask_reservation) || flag(meta.review_delivery_uncertain_exhausted)
+    || Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
+}
+
 async function getConversationThread(input) {
   const { limit: rawLimit } = input;
   const limit = Math.max(1, Math.min(Math.trunc(rawLimit || 20), 50));
@@ -899,13 +959,14 @@ async function getConversationThread(input) {
     // Unresolved review-ask reservations excluded BEFORE the limit (Codex
     // #4331 P2): the in-flight placeholder must not displace a real message
     // out of this bounded conversation window — a resolved row still shows.
-    .modify(excludeUnresolvedSendReservations)
+    // A cancelled-and-kept text stays visible here on purpose, labelled below.
+    .modify((qb) => excludeUnresolvedSendReservations(qb, 'sms_log', { keepNeverSent: true }))
     // Recruiting rows stay out of the Intelligence Bar (Codex #4623 r29 P1).
     .modify((qb) => excludeRecruitingSmsLog(qb))
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
-      'sms_log.message_type', 'sms_log.created_at',
+      'sms_log.message_type', 'sms_log.created_at', 'sms_log.status', 'sms_log.metadata',
       'customers.first_name', 'customers.last_name',
     )
     .orderBy('sms_log.created_at', 'desc')
@@ -925,6 +986,7 @@ async function getConversationThread(input) {
       type: m.message_type,
       time: m.created_at,
       from: m.direction === 'inbound' ? (customerName || m.from_phone) : 'Waves',
+      ...deliveryLabel(m),
     })),
     returned_count: messages.length,
     has_more: fetched.length > limit,
@@ -951,7 +1013,7 @@ async function searchMessages(input) {
   // Unresolved review-ask reservations excluded BEFORE the limit (Codex
   // #4331 P2): a still in-flight placeholder must not surface here as a
   // real sent message — a resolved row still shows.
-  let query = excludeRecruitingSmsLog(excludeUnresolvedSendReservations(db('sms_log')))
+  let query = excludeRecruitingSmsLog(excludeUnresolvedSendReservations(db('sms_log'), 'sms_log', { keepNeverSent: true }))
     .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(
@@ -997,6 +1059,7 @@ async function searchMessages(input) {
       customer: m.first_name ? `${m.first_name} ${m.last_name}` : null,
       phone: m.direction === 'inbound' ? m.from_phone : m.to_phone,
       time: m.created_at,
+      ...deliveryLabel(m),
     })),
     search_params: { search, direction, message_type, days_back },
   };
@@ -1187,88 +1250,93 @@ function mapCommsMessageTypeToPurpose(messageType) {
   }
 }
 
-async function sendSms(input) {
-  const { customer_name, customer_id, phone: directPhone, message, message_type = 'manual' } = input;
-
-  let phone = directPhone;
-  let customerName = null;
-  let custId = customer_id;
-
-  // Resolve identity carefully — never cross-wire a customerId to a different
-  // recipient phone. The wrapper's consent + identity validators trust
-  // customerId, so attaching a customerId that belongs to a different person
-  // than the destination phone bypasses that customer's opt-out.
-  //
-  //   1. Only customer_id given: look up by id, use that record's phone.
-  //   2. Only phone given: look up by phone (last-10 digits) — only attach
-  //      the customerId if the phones genuinely match. Phone-format
-  //      mismatches skip the indexed lookup; wrapper falls back to phone-
-  //      match consent, which is the safe degraded mode.
-  //   3. Only customer_name given: resolve by name, use that record's phone.
-  //   4. BOTH phone AND id (or phone AND name): trust the phone as
-  //      destination AND only keep the customerId when its record's phone
-  //      matches the typed phone. A name-or-id-attached record with a
-  //      DIFFERENT phone gets dropped — wrapper does phone-only consent
-  //      lookup. This is the codex P1 fix.
-  if (!custId && !phone) {
+// The recipient of a send, resolved carefully — never cross-wire a customerId
+// to a different recipient phone. The wrapper's consent + identity validators
+// trust customerId, so attaching a customerId that belongs to a different
+// person than the destination phone bypasses that customer's opt-out.
+//
+//   1. Only customer_id given: look up by id, use that record's phone.
+//   2. Only phone given: look up by phone (last-10 digits) — only attach
+//      the customerId if the phones genuinely match. Phone-format
+//      mismatches skip the indexed lookup; wrapper falls back to phone-
+//      match consent, which is the safe degraded mode.
+//   3. Only customer_name given: resolve by name, use that record's phone.
+//   4. BOTH phone AND id (or phone AND name): trust the phone as
+//      destination AND only keep the customerId when its record's phone
+//      matches the typed phone. A name-or-id-attached record with a
+//      DIFFERENT phone gets dropped — wrapper does phone-only consent
+//      lookup. This is the codex P1 fix.
+// Returns { phone, custId, customerName } or a tool { error } result.
+async function resolveSmsRecipient(input) {
+  const { customer_id, phone: directPhone } = input;
+  const fullName = (customer) => `${customer.first_name} ${customer.last_name}`;
+  if (!customer_id && !directPhone) {
     const customer = await resolveCustomer(input);
     if (!customer) return { error: 'Customer not found' };
     if (customer.error) return customer;
-    customerName = `${customer.first_name} ${customer.last_name}`;
-    custId = customer.id;
-    phone = customer.phone;
-  } else if (custId && !phone) {
-    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
+    return { phone: customer.phone, custId: customer.id, customerName: fullName(customer) };
+  }
+  if (customer_id && !directPhone) {
+    const customer = await db('customers').where('id', customer_id).whereNull('deleted_at').first();
     if (!customer) return { error: 'Customer not found' };
     if (!customer.phone) return { error: 'Customer has no phone number' };
-    customerName = `${customer.first_name} ${customer.last_name}`;
-    phone = customer.phone;
-  } else if (!custId && phone) {
+    return { phone: customer.phone, custId: customer_id, customerName: fullName(customer) };
+  }
+  if (!customer_id) {
     // Phone given but no customer_id. Try to find a customer record whose
     // phone matches the typed phone (last 10 digits, format-agnostic).
-    const inputDigits = phone.replace(/\D/g, '').slice(-10);
-    if (inputDigits.length === 10) {
-      const customer = await db('customers')
+    const inputDigits = directPhone.replace(/\D/g, '').slice(-10);
+    const customer = inputDigits.length === 10
+      ? await db('customers')
         .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [inputDigits])
         .whereNull('deleted_at')
-        .first();
-      if (customer) {
-        customerName = `${customer.first_name} ${customer.last_name}`;
-        custId = customer.id;
-      }
-    }
-  } else {
-    // BOTH custId and phone given. Verify they belong to the same record;
-    // if not, trust the typed phone and drop the id. Prevents cross-wired
-    // consent (codex P1).
-    // deleted_at filter: a customer archived/merged-away after the card was
-    // proposed must NOT pass the pin check just because the phone is
-    // unchanged — the lookup misses, phonesMatch is false, and a pinned
-    // confirmation refuses (codex P1 on the drift-guard round). Un-pinned
-    // sends degrade to phone-only consent, never an archived identity.
-    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
-    const inputDigits = phone.replace(/\D/g, '').slice(-10);
-    const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
-    const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
-    // _require_phone_match rides on a proposal-pinned confirmation: the card
-    // showed a specific person + phone last4, so if the record's phone
-    // changed (or the record vanished) inside the pending window, REFUSE and
-    // make the operator rebuild the card — never silently send to a number
-    // nobody approved (codex P1 on the pinning round).
-    if (input._require_phone_match && !phonesMatch) {
-      return {
-        error: 'Customer phone changed after the card was approved. Rebuild the confirmation card.',
-        preview_changed: true,
-      };
-    }
-    if (phonesMatch) {
-      customerName = `${customer.first_name} ${customer.last_name}`;
-    } else {
-      custId = null;
-    }
+        .first()
+      : null;
+    // inferred: the id is only what the number matched (first row), not a pick
+    // — the customer-link guard does not trust it (customerLinkSendRefusal).
+    return { phone: directPhone, custId: customer ? customer.id : customer_id, customerName: customer ? fullName(customer) : null, inferred: true };
   }
+  // BOTH custId and phone given. Verify they belong to the same record;
+  // if not, trust the typed phone and drop the id. Prevents cross-wired
+  // consent (codex P1).
+  // deleted_at filter: a customer archived/merged-away after the card was
+  // proposed must NOT pass the pin check just because the phone is
+  // unchanged — the lookup misses, phonesMatch is false, and a pinned
+  // confirmation refuses (codex P1 on the drift-guard round). Un-pinned
+  // sends degrade to phone-only consent, never an archived identity.
+  const customer = await db('customers').where('id', customer_id).whereNull('deleted_at').first();
+  const inputDigits = directPhone.replace(/\D/g, '').slice(-10);
+  const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
+  const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
+  // _require_phone_match rides on a proposal-pinned confirmation: the card
+  // showed a specific person + phone last4, so if the record's phone
+  // changed (or the record vanished) inside the pending window, REFUSE and
+  // make the operator rebuild the card — never silently send to a number
+  // nobody approved (codex P1 on the pinning round).
+  if (input._require_phone_match && !phonesMatch) {
+    return {
+      error: 'Customer phone changed after the card was approved. Rebuild the confirmation card.',
+      preview_changed: true,
+    };
+  }
+  return phonesMatch
+    ? { phone: directPhone, custId: customer_id, customerName: fullName(customer) }
+    : { phone: directPhone, custId: null, customerName: null };
+}
+
+async function sendSms(input) {
+  const { message, message_type = 'manual' } = input;
+  const recipient = await resolveSmsRecipient(input);
+  if (recipient.error) return recipient;
+  const { phone, custId, customerName, inferred } = recipient;
 
   if (!phone) return { error: 'No phone number' };
+
+  // A customer link the composer's send seam must carry stays with the
+  // composer (claims, activation, sent marks live in its /sms route);
+  // re-checked at commit, like consent, since a card can sit open.
+  const linkRefusal = await customerLinkSendRefusal(message, phone, custId || null, { recipientSelected: !inferred });
+  if (linkRefusal) return linkRefusal;
 
   // Routed through the customer-message middleware. This is Virginia's
   // daily-driver send path, so the validators apply consistently:
@@ -1328,11 +1396,17 @@ async function sendSms(input) {
   // failure) and /execute success is `!result.error`. Without an explicit
   // error field, blocked sends would be reported as successful tool
   // executions at the API layer.
-  // CHANNEL_EMAIL_ONLY on a billing reminder is a REDIRECT, not a dead end:
-  // the operator is the email fallback on this manual path (DECISIONS
-  // round-4 ruling) — spell out the next step so the model relays it as an
-  // instruction rather than a generic failure.
-  const actionableError = result.code === 'CHANNEL_EMAIL_ONLY' && message_type === 'billing_reminder'
+  return blockedSmsResponse(result, { messageType: message_type, phone, customerName });
+}
+
+// The refusal a blocked send returns. Shared by the execution-time block and the
+// proposal-time refusal, so the operator reads the same words at both points.
+// CHANNEL_EMAIL_ONLY on a billing reminder is a REDIRECT, not a dead end:
+// the operator is the email fallback on this manual path (DECISIONS
+// round-4 ruling) — spell out the next step so the model relays it as an
+// instruction rather than a generic failure.
+function blockedSmsResponse(result, { messageType, phone, customerName }) {
+  const actionableError = result.code === 'CHANNEL_EMAIL_ONLY' && messageType === 'billing_reminder'
     ? 'This customer has Billing Reminder Delivery set to EMAIL — the text was not sent. Send this reminder to their billing/account email instead.'
     : null;
   return {
@@ -1344,6 +1418,203 @@ async function sendSms(input) {
     sent_to: phone,
     customer: customerName,
   };
+}
+
+// Lookup failures are transient, not a refusal: the card may still be offered and
+// the execution-time check decides.
+const TRANSIENT_CONSENT_CODES = new Set(['CONSENT_LOOKUP_FAILED', 'SUPPRESSION_LOOKUP_FAILED']);
+
+/**
+ * Would the send path refuse this text for consent or suppression (opted out,
+ * STOP or wrong-number on file, do-not-contact)? Asks the validators the send
+ * pipeline asks, on the input sendSms builds, and sends nothing. Null = not
+ * refused (or could not tell: the execution-time check still stands).
+ */
+async function smsConsentVerdict({ customerId, phone, message, messageType }) {
+  try {
+    const { loadContactState, checkConsentForPurpose } = require('../messaging/validators/consent');
+    const { loadSuppressionState, checkSuppression } = require('../messaging/validators/suppression');
+    const { resolvePolicy } = require('../messaging/policy');
+    const purpose = mapCommsMessageTypeToPurpose(messageType);
+    const input = {
+      audience: 'customer', channel: 'sms', purpose, customerId, to: phone, body: message,
+      hasEmailLeg: messageType === 'billing_reminder' ? true : undefined,
+      metadata: { original_message_type: messageType, adminUserId: 'intelligence_bar' },
+    };
+    const policy = resolvePolicy('customer', purpose);
+    let state = await loadContactState(input);
+    state = await loadSuppressionState(input, state);
+    for (const check of [checkSuppression, checkConsentForPurpose]) {
+      const verdict = await check(input, policy, state);
+      if (!verdict.ok) return TRANSIENT_CONSENT_CODES.has(verdict.code) ? null : { ...verdict, blocked: true };
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:comms] proposal consent check unavailable (code=${err.code || 'unknown'})`);
+    return null;
+  }
+}
+
+// The composer's /sms route is the ONE sender that verifies and records the
+// customer links its Insert Link sheet builds (composer-customer-links.js):
+// an Auto Pay setup link is re-checked and reclassified there; a card
+// request's one-text-ever claim, a prepared contract's activation, prep-guide
+// and statement sent marks, a project report's delivery claim and a
+// consultation's lead binding all happen in that route. The bar's text tools
+// can reach none of that bookkeeping, so a body carrying one of those links is
+// refused here with a pointer to the composer (or, for Auto Pay, the
+// Customers page button). Links the seam only verifies (appointment page,
+// service report, receipt) are verified the same way and allowed; a
+// verification failure refuses with the seam's own words. Any other text
+// passes untouched (the checks read nothing for a body with no portal link).
+// Fail closed on an unreadable check, as the route does (503).
+//
+// Three phases (Codex r3 on #6266 P1 + security P2): 'proposal' runs only
+// the READ-ONLY checks (composerOnlyLinkPresence, autopayLinkSendCheck) so
+// that asking for a card can never commit anything; 'commit' adds the seam's
+// ownership verification (bearerLinkSendCheck) for the links it only
+// verifies — by then every composer-only kind has already been refused, so
+// its stateful card-request branch (requestCardForAppointment) is never
+// reached; 'email' (send_email_reply) has no recipient phone to bind a
+// bearer to — Gmail answers the sender's address, which attribution does not
+// prove is the customer's — so it refuses EVERY owned portal link (the
+// verify-only bearers, unknown short codes, all of it) and runs no seam check.
+const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it. Text it from the composer. Nothing was sent.';
+const EMAIL_BEARER_REFUSAL = 'An email reply cannot carry a portal link (appointment page, report, receipt, pay, estimate, card request, contract, prep guide, statement, project report, consultation, or a short link) — the reply goes to the sender\'s address, which may not be the customer\'s. Text it to the customer\'s own number instead (send_sms, or the Communications composer). Nothing was sent.';
+const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — send it from the Customers page Auto Pay button or the Communications composer, which verifies the link at send time. Nothing was sent.';
+const links = () => require('../composer-customer-links');
+// The checks, in order; the first refusal wins. Each is read-only except the
+// seam's own verification, which only the 'commit' phase runs.
+async function composerOnlyLinkCheck({ body, email }) {
+  const found = await links().composerOnlyLinkPresence(body, { includeVerifyOnly: email });
+  return found.present ? { error: email ? EMAIL_BEARER_REFUSAL : COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+}
+async function autopayLinkCheck({ body, toLast10, customerId, email }) {
+  const autopay = await links().autopayLinkSendCheck(body, toLast10, { trustedCustomerId: customerId });
+  return autopay.present ? { error: email ? EMAIL_BEARER_REFUSAL : AUTOPAY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+}
+// Every generated bearer the seam does not verify itself (reschedule, track,
+// re-service, pay, estimate, referral) must belong to the recipient's account
+// — a link built for one customer never rides a text to another, whatever the
+// model paired. A text recipient is matched to a customer by the LAST TEN
+// digits, so a non-US number sharing a customer's ten digits would pass the
+// account check; the seam's own non-US refusal covers only the bearers it
+// counts, so a text carrying any of these links goes to a US number only.
+const NON_US_LINK_REFUSAL = 'This text carries a customer link, and customer links go to US numbers only — send it to the customer\'s own US number. Nothing was sent.';
+// A customer attached only because the typed number matched a row (no pick)
+// is trusted as the link's recipient only when that number names exactly one
+// live customer account; two accounts on it, or an unreadable count, mean the
+// operator must pick the customer.
+const PICK_CUSTOMER_REFUSAL = 'This text carries a customer link, but the number is on file for more than one customer account (or could not be checked) — pick the customer instead of typing the number. Nothing was sent.';
+async function numberNamesOneAccount(toLast10) {
+  try {
+    const rows = await db('customers').whereNull('deleted_at')
+      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
+      .select('id', 'account_id');
+    return new Set(rows.map((row) => String(row.account_id || row.id))).size === 1;
+  } catch {
+    return false;
+  }
+}
+async function linkOwnerCheck({ body, customerId, email, usDestination, recipientSelected, toLast10 }) {
+  const { owners, unresolved } = await links().linkOwnersInBody(body);
+  if (unresolved.length) return { error: 'A customer link in this text matches no customer record — remove it and build a fresh one. Nothing was sent.', code: 'customer_link_unverified' };
+  if (!owners.length) return null;
+  if (!email && !usDestination) return { error: NON_US_LINK_REFUSAL, code: 'customer_link_recipient' };
+  if (!customerId) return { error: 'This text carries a customer link, but the recipient is not a known customer — send it to that customer\'s own number (pick the customer). Nothing was sent.', code: 'customer_link_recipient' };
+  if (recipientSelected === false && !(await numberNamesOneAccount(toLast10))) return { error: PICK_CUSTOMER_REFUSAL, code: 'customer_link_recipient' };
+  const accountKey = (row) => String(row?.account_id || row?.id || '');
+  const recipient = await db('customers').where({ id: customerId }).first('id', 'account_id');
+  const ownerRows = await db('customers').whereIn('id', [...new Set(owners.map((o) => o.customerId))]).select('id', 'account_id');
+  const byId = new Map(ownerRows.map((r) => [String(r.id), r]));
+  const foreign = owners.some((o) => accountKey(byId.get(o.customerId)) !== accountKey(recipient));
+  return !recipient || foreign
+    ? { error: 'A customer link in this text belongs to a different customer than the recipient — remove it; build the link for this customer instead. Nothing was sent.', code: 'customer_link_owner_mismatch' }
+    : null;
+}
+// A customer attached only because the typed number matched them is not a
+// trusted recipient for the seam either (appointment, report and receipt links
+// carry no owner for linkOwnerCheck to judge): unless that number names one
+// account, the seam runs its own phone-only ambiguity checks, as the composer
+// does for an unpicked number.
+async function bearerSeamCheck({ body, toLast10, customerId, usDestination, recipientSelected }) {
+  // A text with no owned link has nothing for the seam to bind: no count is read for it.
+  const inferredWithLink = recipientSelected === false && links().nestedOwnedLinkRuns(body).length > 0;
+  const trusted = inferredWithLink && !(await numberNamesOneAccount(toLast10)) ? null : customerId;
+  const bearer = await links().bearerLinkSendCheck(body, toLast10, { trustedCustomerId: trusted, usDestination });
+  if (!bearer.ok) return { error: `${bearer.error} Nothing was sent.`, code: 'customer_link_refused' };
+  const composerRecorded = bearer.cards || bearer.contracts || bearer.statements || bearer.preps || bearer.projectReports || bearer.consultationLeadId;
+  return composerRecorded ? { error: COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+}
+// A portal link wrapped inside another site's URL ("https://other.example/?next=
+// https://portal…/pay/<tok>", raw or percent-encoded) reads to every check
+// above as ONE foreign link, so the bearer inside would skip the owner and
+// seam checks and reach the outer site too. A text never carries one: the
+// link goes in the text as itself: every token holding an owned-host link must
+// PARSE to an owned host with no userinfo and nothing nested in its path,
+// query or fragment (composer-customer-links.js wrappedOwnedLinkIn). (The
+// email phase surfaces nested links in renderedTextForLinkCheck and refuses
+// every owned link.)
+const WRAPPED_LINK_REFUSAL = 'This text has a Waves customer link wrapped inside another web address — put the customer link in the text as itself. Nothing was sent.';
+// A token still percent-decoding past the scan's cap cannot be vouched for:
+// refused in every phase, the email phase included.
+function unverifiableLinkCheck({ body }) {
+  return links().linkTextUnstable(body)
+    ? { error: 'Could not verify a link in this message (it is encoded too many times) — nothing was sent. Put the link in as itself.', code: 'customer_link_unverified' }
+    : null;
+}
+function wrappedOwnedLinkCheck({ body }) {
+  return links().wrappedOwnedLinkIn(body) ? { error: WRAPPED_LINK_REFUSAL, code: 'customer_link_refused' } : null;
+}
+const LINK_CHECKS_BY_PHASE = {
+  proposal: [unverifiableLinkCheck, wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  email: [unverifiableLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  commit: [unverifiableLinkCheck, wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
+};
+async function customerLinkSendRefusal(message, phone, customerId, { phase = 'commit', recipientSelected = true } = {}) {
+  const body = String(message || '');
+  if (!body.trim()) return null;
+  const digits = String(phone || '').replace(/\D/g, '');
+  const toLast10 = digits.slice(-10);
+  // Masked: the refusal rides into model context (and the email path's result).
+  const refuse = (error, code) => ({ success: false, error, blocked: true, code, sent_to: toLast10.length >= 4 ? `***${toLast10.slice(-4)}` : null });
+  const ctx = {
+    body, toLast10, customerId: customerId || null, email: phase === 'email', recipientSelected,
+    usDestination: digits.length === 10 || (digits.length === 11 && digits.startsWith('1')),
+  };
+  try {
+    for (const check of LINK_CHECKS_BY_PHASE[phase] || LINK_CHECKS_BY_PHASE.commit) {
+      const refusal = await check(ctx);
+      if (refusal) return refuse(refusal.error, refusal.code);
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:comms] customer link pre-send check failed — refusing: ${err.message}`);
+    return refuse('Could not verify a customer link in this message — nothing was sent. Try again in a moment.', 'customer_link_unverified');
+  }
+}
+
+/**
+ * Proposal-time refusal for send_sms, so no card is offered for a text that
+ * cannot go out: an opted-out or suppressed number, in the same wording the
+ * execution-time block uses. Takes the pinned proposal params (customer_id and
+ * phone set by the route), or a direct phone with no customer. The recipient is
+ * resolved the way sendSms resolves it, so a direct number in a different
+ * format from the stored one still finds the customer's consent record (last
+ * ten digits), instead of reading NO_CONSENT_RECORD against the raw text.
+ * Null = the card may be offered.
+ */
+async function sendSmsProposalRefusal(params = {}) {
+  const messageType = params.message_type || 'manual';
+  if (!params.phone && !params.customer_id) return null;
+  if (!params.message) return null;
+  const recipient = await resolveSmsRecipient(params);
+  if (recipient.error || !recipient.phone) return null;
+  const linkRefusal = await customerLinkSendRefusal(params.message, recipient.phone, recipient.custId || null, { phase: 'proposal', recipientSelected: !recipient.inferred });
+  if (linkRefusal) return linkRefusal;
+  const verdict = await smsConsentVerdict({ customerId: recipient.custId || null, phone: recipient.phone, message: params.message, messageType });
+  if (!verdict) return null;
+  return blockedSmsResponse(verdict, { messageType, phone: recipient.phone, customerName: recipient.customerName || params.customer_name || null });
 }
 
 
@@ -1755,4 +2026,4 @@ async function getPartnerCallHistory(input = {}) {
   };
 }
 
-module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer, sendSmsProposalRefusal, customerLinkSendRefusal };

@@ -26,6 +26,7 @@ jest.mock('../services/estimate-slot-availability', () => ({
 }));
 jest.mock('../services/slot-reservation', () => ({
   reserveSlot: jest.fn(),
+  extendReservation: jest.fn(),
   releaseReservation: jest.fn(),
 }));
 jest.mock('../services/estimate-membership-context', () => ({
@@ -66,6 +67,14 @@ jest.mock('../routes/estimate-public', () => ({
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
+  resolveEstimateInvoiceMode: jest.fn(() => false),
+  // B18 park (the real implementations are pinned in estimate-public-accept-phone-match / -atomicity).
+  resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
+  estimatePublicBlockingState: jest.fn(async () => null),
+  ACCEPT_OFFICE_REVIEW_MESSAGE: 'parked-message',
+  retireOrDenyDroppedCapture: jest.fn(async () => undefined),
+  refuseParkedWrite: jest.fn(async () => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
+  acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
 }));
@@ -360,6 +369,926 @@ describe('bermuda-suppression money/slot gate', () => {
     getAvailableSlots.mockResolvedValue([]);
     const slots = await fetch(`${base}/${TOKEN}/available-slots`);
     expect(slots.status).not.toBe(409);
+  });
+});
+
+// Same boundaries for a persisted area add-on treatment (GATE_AREA_ADDONS): own code, same 409, nothing touched.
+describe('area add-on money/slot gate (GATE_AREA_ADDONS)', () => {
+  const ADDON_ESTIMATE = {
+    id: 'est-addon',
+    status: 'sent',
+    expires_at: null,
+    archived_at: null,
+    estimate_data: JSON.stringify({
+      result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Pool Cage, Lanai & Eave Web Sweep', price: 59 }], specItems: [] } },
+    }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('gate off: availability, card hold and recurring card intent 409 with AREA_ADDONS_GATED', async () => {
+    delete process.env.GATE_AREA_ADDONS;
+    currentEstimate = ADDON_ESTIMATE;
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).toBe(409);
+    expect((await slots.json()).code).toBe('AREA_ADDONS_GATED');
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    for (const leg of ['card-hold-intent', 'recurring-card-intent']) {
+      const res = await fetch(`${base}/${TOKEN}/${leg}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('AREA_ADDONS_GATED');
+    }
+  });
+
+  test('gate on: the add-on gate does not fire on the slot path', async () => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    currentEstimate = ADDON_ESTIMATE;
+    getAvailableSlots.mockResolvedValue([]);
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).not.toBe(409);
+  });
+});
+
+// Area add-ons are booked and billed by the one-time accept only: a recurring-mode reserve of an estimate that
+// carries one is refused before any hold exists (the matching accept refusal is in the atomicity suite).
+describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () => {
+  const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
+  const ONE_TIME_ONLY = {
+    id: 'est-addon-ot', status: 'sent', expires_at: null, archived_at: null,
+    estimate_data: JSON.stringify({ result: { oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const WITH_RECURRING = {
+    id: 'est-addon-rec', status: 'sent', expires_at: null, archived_at: null, monthly_total: 88,
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 }, oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  const reserve = (body) => fetch(`${base}/${TOKEN}/reserve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slotId: '2030-01-01_09-00_unassigned', ...body }),
+  });
+  beforeEach(() => { process.env.GATE_AREA_ADDONS = 'true'; });
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('a recurring-mode reserve of an estimate with an add-on is refused with the office hand-off and holds nothing', async () => {
+    currentEstimate = WITH_RECURRING;
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+      code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+    });
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+  });
+
+  test('a structurally one-time estimate (add-ons only) reserves in one-time mode, whatever mode the body asks for', async () => {
+    currentEstimate = ONE_TIME_ONLY;
+    // The real predicate (estimate-public.js isStructuralOneTimeOnlyEstimate, pinned with real add-on rows in
+    // area-addon-flow.test.js) is mocked in this suite.
+    require('../routes/estimate-public').isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: null });
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ serviceMode: 'one_time' }));
+  });
+
+  test('a mixed estimate reserves when the customer asked for the one-time mode', async () => {
+    currentEstimate = WITH_RECURRING;
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-2', expiresAt: null });
+    const res = await reserve({ serviceMode: 'one_time' });
+    expect(res.status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ serviceMode: 'one_time' }));
+  });
+
+  test('an estimate with no add-on is untouched by the rule', async () => {
+    currentEstimate = { id: 'est-plain', status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }) };
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-3', expiresAt: null });
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(201);
+  });
+});
+
+// Codex round 11 P1 on #6135: /recurring-card-intent checked the park and the quote gates but not the add-on rule, so an
+// add-on estimate with a linked appointment (checkout bypasses /reserve) minted a SetupIntent and saved the customer's card,
+// and only then did the accept refuse. The same refusal now comes first, before any Stripe work.
+describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_ADDONS on)', () => {
+  const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
+  const WITH_RECURRING = {
+    id: 'est-addon-rec', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, customer_id: 'cust-1',
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 }, oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const REFUSAL = {
+    error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+    code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+  };
+  const stripeObjects = () => {
+    const { createRecurringCardSetupIntentForEstimate, replaceRecurringCardIntent } = require('../services/recurring-card-on-file');
+    return [createRecurringCardSetupIntentForEstimate, replaceRecurringCardIntent];
+  };
+  let spies = [];
+  beforeEach(() => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    const recurring = require('../services/recurring-card-on-file');
+    spies = [
+      jest.spyOn(recurring, 'createRecurringCardSetupIntentForEstimate').mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'seti_new' }),
+      jest.spyOn(recurring, 'replaceRecurringCardIntent').mockResolvedValue({ ok: true, intent: { clientSecret: 'cs', setupIntentId: 'seti_new' } }),
+    ];
+  });
+  afterEach(() => {
+    spies.forEach((spy) => spy.mockRestore());
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('a recurring-mode request for an add-on estimate answers the one-time-only 409 and creates or replaces no intent', async () => {
+    currentEstimate = WITH_RECURRING;
+    for (const body of [{}, { serviceMode: 'recurring' }, { replaceSetupIntentId: 'seti_old' }]) {
+      const res = await post('recurring-card-intent', body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(REFUSAL);
+    }
+    for (const fn of stripeObjects()) expect(fn).not.toHaveBeenCalled();
+  });
+
+  // Codex round 22 (two P0): the estimate can gain an add-on, or the gate can turn off, after the route's first read.
+  describe('the add-on rules are re-judged on the freshly read row (locked reserve row, post-mint reload)', () => {
+    const { lockedAreaAddOnRuleRefusal } = require('../routes/estimate-slots-public')._internals;
+    test('a recurring-mode request for a row that now carries an add-on is refused; one-time mode and a plain row are not', () => {
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, 'recurring')).toEqual({ status: 409, body: REFUSAL });
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, '')).toEqual({ status: 409, body: REFUSAL });
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, 'one_time')).toBeNull();
+      expect(lockedAreaAddOnRuleRefusal({ ...WITH_RECURRING, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] } } }) }, 'recurring')).toBeNull();
+      // the card-hold route passes no mode: only the gate is judged
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, undefined)).toBeNull();
+    });
+    test('the gate turned off: every mode is refused with the gated code', () => {
+      process.env.GATE_AREA_ADDONS = 'false';
+      for (const mode of ['one_time', 'recurring', undefined]) {
+        expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, mode)).toMatchObject({ status: 409, body: { code: 'AREA_ADDONS_GATED' } });
+      }
+    });
+    test('source: the reserve callback and the post-mint recheck both ask it; the recurring success exit passes the requested mode', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const callback = src.slice(src.indexOf('revalidateEstimate: async (row, trx, { date } = {}) => {'));
+      expect(callback.slice(0, 900)).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
+      const recheck = src.slice(src.indexOf('async function postMintRefusal('), src.indexOf('async function refuseParkedRecurringIntent('));
+      expect(recheck).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
+      expect(src).toContain("{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? '' }");
+      // Codex round 35: every projected estimate read of this router carries pricing_authority (the gates read the authoritative result).
+      expect(src).toMatch(/const SLOT_ESTIMATE_COLUMNS = \[[^\]]*'pricing_authority'/);
+      // Codex round 34: the card-hold success exit passes the requested mode too (an estimate revised into a recurring plan
+      // with an add-on while the intent was minted).
+      const cardHold = src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'"));
+      expect(cardHold).toContain("}, { requestedServiceMode: req.body?.serviceMode ?? '' });");
+    });
+  });
+
+  test('a stale intent the tab submits for replacement is retired, as every other exempt answer does', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+    const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
+    const refusal = route.indexOf('recurringAreaAddOnRefusalBody(estimate,');
+    expect(refusal).toBeGreaterThan(route.indexOf('const serviceMode = resolveSlotServiceMode('));
+    // Before the contact check, the policy, the replace and the mint: nothing reaches Stripe first.
+    for (const later of ['resolveRecurringCardPolicyForEstimate', 'replaceRecurringCardIntent({', 'createRecurringCardSetupIntentForEstimate(estimate)']) {
+      expect(route.indexOf(later)).toBeGreaterThan(refusal);
+    }
+    expect(route.slice(refusal, refusal + 500)).toContain('{ retireSetupIntentId: replaceSetupIntentId }');
+  });
+
+  test('a one-time-mode request is not refused by the rule, and an estimate with no add-on is untouched by it', async () => {
+    currentEstimate = WITH_RECURRING;
+    const oneTime = await post('recurring-card-intent', { serviceMode: 'one_time' });
+    expect(await oneTime.json()).not.toEqual(REFUSAL);
+    currentEstimate = { ...WITH_RECURRING, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }) };
+    const plain = await post('recurring-card-intent', {});
+    expect(await plain.json()).not.toEqual(REFUSAL);
+  });
+
+  test('card-hold-intent is unreachable for a recurring-mode add-on estimate: the policy owes no hold before any intent is created', async () => {
+    const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+    resolveCardHoldPolicy.mockImplementation(({ treatAsOneTime }) => (treatAsOneTime ? { required: true } : { enforced: true, required: false, exemptReason: 'recurring' }));
+    createCardHoldSetupIntentForEstimate.mockClear();
+    currentEstimate = WITH_RECURRING;
+    const res = await post('card-hold-intent', {});
+    expect(res.status).toBe(409);
+    expect((await res.json()).exemptReason).toBe('recurring');
+    expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    resolveCardHoldPolicy.mockReset();
+    createCardHoldSetupIntentForEstimate.mockReset();
+  });
+});
+
+// Codex round 11 P1 on #6135: the reserve read a customer's add-on history without that customer's booking fence.
+describe('the reserve fences the customer before it reads the add-on history', () => {
+  const limits = require('../services/area-addon-limits');
+  const { lockedAreaAddOnLimitRefusal } = require('../routes/estimate-slots-public')._internals;
+  const ROW = { id: 'est-1', customer_id: 'cust-1', customer_phone: null };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('the recheck is asked to fence the named customer and the found one, with the transaction\'s own non-blocking take', async () => {
+    const refusal = jest.spyOn(limits, 'areaAddOnLimitRefusal').mockResolvedValue(null);
+    const fence = jest.spyOn(limits, 'fenceCustomerBookings').mockResolvedValue(undefined);
+    const trx = { isTransaction: true };
+    expect(await lockedAreaAddOnLimitRefusal(ROW, trx, '2030-01-01')).toBeNull();
+    const options = refusal.mock.calls[0][1];
+    expect(refusal.mock.calls[0][0]).toBe(trx);
+    expect(options).toMatchObject({ estimate: ROW, appliedOn: '2030-01-01', fenceNamed: true });
+    await options.fenceCustomer('cust-1');
+    expect(fence).toHaveBeenCalledWith(trx, 'cust-1');
+  });
+
+  test('a busy account is the existing retryable 409 with nothing reserved; a limit refusal passes through; any other failure is thrown', async () => {
+    const busy = Object.assign(new Error('busy'), { status: 409, code: 'CUSTOMER_BUSY_RETRY' });
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockRejectedValueOnce(busy);
+    expect(await lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).toEqual({
+      status: 409,
+      body: { error: 'This account is being updated right now \u2014 please retry your acceptance in a moment.', code: 'CUSTOMER_BUSY_RETRY' },
+    });
+    const limitRefusal = { status: 409, body: { error: 'x', code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' } };
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockResolvedValueOnce(limitRefusal);
+    expect(await lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).toBe(limitRefusal);
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockRejectedValueOnce(new Error('boom'));
+    await expect(lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).rejects.toThrow('boom');
+  });
+});
+
+describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
+  const { estimatePublicBlockingState } = require('../routes/estimate-public');
+  const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+  const PARKED_ESTIMATE = { id: 'est-parked', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, customer_id: null, customer_phone: '(941) 555-0123', estimate_data: {} };
+  const PARKED = { state: 'contact_review', rejectedCustomerId: 'cust-bob' };
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  test.each(['card-hold-intent', 'recurring-card-intent'])('%s refuses with the coded park 409 before any intent or policy work', async (leg) => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const res = await post(leg);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+    expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    expect(resolveCardHoldPolicy).not.toHaveBeenCalled();
+    // The helper gets the estimate row (phone/email/address columns included) and the resolved estimate data.
+    expect(estimatePublicBlockingState).toHaveBeenCalledWith(PARKED_ESTIMATE, expect.objectContaining({ estData: expect.anything() }));
+  });
+
+  test('reserve hands the service a locked-row predicate (trenching review, then contact_review) and maps its refusal to the SAME 409 the route check returns', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    // The route's own pre-transaction check passes (the estimate was not parked yet) ...
+    estimatePublicBlockingState.mockResolvedValueOnce(null);
+    // ... then the locked row inside the service says contact_review.
+    slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+      const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} });
+      const err = new Error('estimate cannot be self-booked');
+      err.code = 'ESTIMATE_NO_BOOKING';
+      err.response = refusal;
+      throw err;
+    });
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const res = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-parked', revalidateEstimate: expect.any(Function) }));
+  });
+
+  test('the reserve predicate carries the trenching refusal (from the one helper) and passes a clean row', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    let predicate;
+    slotReservation.reserveSlot.mockImplementationOnce(async (args) => { predicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
+    const ok = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(ok.status).toBe(201);
+    estimatePublicBlockingState.mockResolvedValue(null);
+    await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toBeNull();
+    estimatePublicBlockingState.mockResolvedValueOnce({ state: 'termite_trenching_review' });
+    await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toMatchObject({ status: 409, body: { reason: 'termite_trenching_review' } });
+  });
+
+  describe('trenching review is decided by the ONE blocking-state call on every slot route, byte-identical to main for a trenching-only estimate', () => {
+    const TRENCH = { state: 'termite_trenching_review' };
+    const TRENCH_BROWSE = {
+      primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true,
+      message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
+    };
+    const TRENCH_409 = {
+      error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit \u2014 this quote can\u2019t be booked online.',
+      reviewBeforeBooking: true, reason: 'termite_trenching_review',
+    };
+    const HOLD = '11111111-1111-4111-8111-111111111111';
+    afterEach(() => estimatePublicBlockingState.mockResolvedValue(null));
+
+    test('trenching-only: available-slots / find-slots 200 shape, reserve / extend 409 body, locked predicates - exactly the bodies main answers', async () => {
+      const { refuseParkedWrite } = require('../routes/estimate-public');
+      refuseParkedWrite.mockClear();
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValue(TRENCH);
+      process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(200);
+      expect(await browse.json()).toEqual(TRENCH_BROWSE);
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 200) expect(await found.json()).toEqual(TRENCH_BROWSE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toEqual(TRENCH_409);
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect(extended.status).toBe(409);
+      expect(await extended.json()).toEqual(TRENCH_409);
+      expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+      expect(refuseParkedWrite).not.toHaveBeenCalled(); // no park side effects for a non-contact state
+      const { lockedContactReviewRefusal } = require('../routes/estimate-slots-public')._internals;
+      await expect(lockedContactReviewRefusal({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true, raw: async () => ({}) })).resolves.toEqual({ status: 409, body: TRENCH_409 });
+    });
+
+    test('quote-required AND trenching: quote_required wins on every route (the inline trenching shortcut no longer runs ahead of it)', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValue({ state: 'quote_required' });
+      const INACTIVE = { error: 'Estimate is no longer active' };
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(409);
+      expect(await browse.json()).toEqual(INACTIVE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toEqual(INACTIVE);
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect(extended.status).toBe(409);
+      expect(await extended.json()).toEqual(INACTIVE);
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 409) expect(await found.json()).toEqual(INACTIVE);
+      // Even with the (mocked) legacy predicate saying trenching: the route no longer consults it.
+      require('../routes/estimate-public').estimateTrenchingReviewRequired.mockReturnValue(true);
+      try {
+        const again = await fetch(`${base}/${TOKEN}/available-slots`);
+        expect(again.status).toBe(409);
+        expect(await again.json()).toEqual(INACTIVE);
+      } finally { require('../routes/estimate-public').estimateTrenchingReviewRequired.mockReturnValue(false); }
+    });
+  });
+
+  describe('a replace-payment-method request on the park path retires the submitted intent first', () => {
+    const { retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    beforeEach(() => { retireOrDenyDroppedCapture.mockClear(); retireOrDenyDroppedCapture.mockResolvedValue(undefined); });
+
+    test('retires replaceSetupIntentId (trimmed, for THIS estimate) BEFORE the 409', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      const res = await post('recurring-card-intent', { replaceSetupIntentId: ' seti_old ' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      expect(retireOrDenyDroppedCapture).toHaveBeenCalledTimes(1);
+      expect(retireOrDenyDroppedCapture).toHaveBeenCalledWith(PARKED_ESTIMATE, 'seti_old');
+    });
+
+    test('Stripe cannot confirm: the existing 503, never the 409 (the client keeps nothing it cannot retry)', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      retireOrDenyDroppedCapture.mockRejectedValueOnce(Object.assign(new Error('We could not update your payment terms just now. Please try again in a moment.'), { code: 'RECURRING_CARD_RETIRE_FAILED' }));
+      const res = await post('recurring-card-intent', { replaceSetupIntentId: 'seti_old' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ code: 'RECURRING_CARD_RETIRE_FAILED' });
+    });
+
+    test('no replace intent = no Stripe call; /card-hold-intent has no equivalent field, so it never retires one', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await post('recurring-card-intent', {})).status).toBe(409);
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await post('card-hold-intent', { replaceSetupIntentId: 'seti_old' })).status).toBe(409);
+      expect(retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the reserve / extend locked callback reads the phone candidate on the reservation transaction, FOR SHARE NOWAIT', () => {
+    const TRX = { isTransaction: true, raw: jest.fn(async () => ({})) }; // raw: the SAVEPOINT statements
+    const lockedRow = { ...PARKED_ESTIMATE, estimate_data: {} };
+    const capture = async () => {
+      let predicate;
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.reserveSlot.mockImplementationOnce(async (args) => { predicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
+      await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      return predicate;
+    };
+
+    test('the helper gets the reservation transaction and the lock flag; a candidate edited to contradict refuses', async () => {
+      const predicate = await capture();
+      estimatePublicBlockingState.mockClear();
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      await expect(predicate(lockedRow, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'ACCEPT_NEEDS_OFFICE_REVIEW' } });
+      expect(estimatePublicBlockingState).toHaveBeenCalledWith(lockedRow, expect.objectContaining({ database: TRX, lock: true }));
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      await expect(predicate(lockedRow, TRX)).resolves.toBeNull();
+    });
+
+    test('a customer row another writer holds right now (55P03) is the accept\'s existing retryable refusal, not a wait and not a pass', async () => {
+      const predicate = await capture();
+      TRX.raw.mockClear();
+      estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+      await expect(predicate(lockedRow, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'CUSTOMER_BUSY_RETRY' } });
+      // The locked read ran in a SAVEPOINT that was rolled back to (waves-db 5b), so the outer transaction survives.
+      const statements = TRX.raw.mock.calls.map((c) => String(c[0]));
+      expect(statements[0]).toMatch(/^SAVEPOINT scope_/);
+      expect(statements.some((q) => /^ROLLBACK TO SAVEPOINT scope_/.test(q))).toBe(true);
+      // Any other failure still propagates (the route's own 500).
+      estimatePublicBlockingState.mockRejectedValueOnce(new Error('db down'));
+      await expect(predicate(lockedRow, TRX)).rejects.toThrow('db down');
+    });
+  });
+
+  describe('every public WRITE path refuses a parked estimate through the ONE function (office alert + hold release); reads do not', () => {
+    const { refuseParkedWrite } = require('../routes/estimate-public');
+    beforeEach(() => refuseParkedWrite.mockClear());
+
+    test.each([
+      ['card-hold-intent', 'card-hold-intent', {}],
+      ['recurring-card-intent', 'recurring-card-intent', {}],
+      ['reserve (pre-transaction check)', 'reserve', { slotId: '2030-01-01_09-00_unassigned' }],
+    ])('%s', async (_label, leg, body) => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      const res = await post(leg, body);
+      expect(res.status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      expect(refuseParkedWrite).toHaveBeenCalledWith(PARKED_ESTIMATE, 'cust-bob');
+    });
+
+    test('reserve (locked row inside the service) and extend (pre-transaction and locked) too - the side effects run after the transaction, in the route', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true, raw: async () => ({}) });
+        const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
+      });
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      refuseParkedWrite.mockClear();
+      // extend, pre-transaction read
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      const pre = await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+      expect(pre.status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      refuseParkedWrite.mockClear();
+      // extend, locked row
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.extendReservation.mockImplementationOnce(async (args) => {
+        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true, raw: async () => ({}) });
+        const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
+      });
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' })).status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+    });
+
+    test('the slot READS and the scheduler gate never run the side effects', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('EXTEND never discards a valid hold over a briefly held customer row; RESERVE keeps the retryable refusal', () => {
+    const TRX = { isTransaction: true, raw: jest.fn(async () => ({})) }; // raw: the SAVEPOINT statements
+    test('55P03 on the extend predicate extends (null), on the reserve predicate it is CUSTOMER_BUSY_RETRY', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      let extendPredicate;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.extendReservation.mockImplementationOnce(async (args) => { extendPredicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
+      await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+      estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+      await expect(extendPredicate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX)).resolves.toBeNull();
+      // A real park on the locked extend row still refuses.
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      await expect(extendPredicate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX)).resolves.toMatchObject({ status: 409, park: { rejectedCustomerId: 'cust-bob' } });
+    });
+  });
+
+  describe('no client secret leaves the server for an estimate parked while the intent was being minted', () => {
+    const { refuseParkedWrite } = require('../routes/estimate-public');
+    test('card-hold-intent re-runs the park AUTHORITATIVELY (fresh) after minting and withholds the secret', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+      createCardHoldSetupIntentForEstimate.mockResolvedValue({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      refuseParkedWrite.mockClear();
+      estimatePublicBlockingState.mockClear();
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce(PARKED); // pre-check clean, post-mint parked
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(JSON.parse(text)).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      expect(estimatePublicBlockingState).toHaveBeenCalledTimes(2);
+      expect(estimatePublicBlockingState.mock.calls[0][1]).not.toHaveProperty('fresh');
+      expect(estimatePublicBlockingState.mock.calls[1][1]).toEqual(expect.objectContaining({ fresh: true }));
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      // Control: still clean at the re-check -> the secret is returned as before.
+      estimatePublicBlockingState.mockResolvedValue(null);
+      const ok = await post('card-hold-intent', {});
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).clientSecret).toBe('cs_SECRET');
+    });
+
+    test('recurring-card-intent: the success exit sits after minting and stamping, re-checks first and retires the minted intent (source order)', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
+      const mint = route.indexOf('createRecurringCardSetupIntentForEstimate(estimate)');
+      const exit = route.indexOf('return await sendRecheckedIntentResponse(res, estimate, 200, {');
+      expect(mint).toBeGreaterThan(0);
+      expect(exit).toBeGreaterThan(mint);
+      expect(route.slice(exit)).toContain('{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? \'\' }');
+      // The exit function re-checks (reloaded row) BEFORE it sends, retiring first when asked.
+      const fn = src.slice(src.indexOf('async function sendRecheckedIntentResponse'), src.indexOf('// What a slot route answers') > 0 ? undefined : undefined);
+      const body = fn.slice(0, fn.indexOf('\n}\n') + 3);
+      expect(body.indexOf('await postMintRefusal(estimate, { requestedServiceMode })')).toBeGreaterThan(0);
+      expect(body.indexOf('await postMintRefusal(estimate, { requestedServiceMode })')).toBeLessThan(body.indexOf('res.status(status).json(body)'));
+      expect(body.indexOf('retireOrDenyDroppedCapture')).toBeLessThan(body.indexOf('respondNoBookingRefusal'));
+    });
+
+    test('EVERY response of both card-intent routes that carries customer-derived content (success body, client secret, any exemptReason) leaves through the ONE re-checking exit - a new return added outside it fails here', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const routes = {
+        'card-hold-intent': src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'")),
+        'recurring-card-intent': src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'")),
+      };
+      for (const [name, routeWithComments] of Object.entries(routes)) {
+        const route = routeWithComments.replace(/^\s*\/\/.*$/gm, ''); // statements only, not comments
+        // No bare success-shaped send: a 200 is only ever sent by the exit.
+        expect(route).not.toMatch(/res\.json\(/);
+        expect(route).not.toMatch(/res\.status\(2\d\d\)/);
+        // Every statement that mentions exemptReason / a client secret is a call of the exit.
+        const statements = route.split(/;\s*\n/);
+        for (const st of statements.filter((x) => /exemptReason|clientSecret/.test(x))) {
+          expect(`${name}: ${st}`).toMatch(/sendRecheckedIntentResponse\(/);
+        }
+      }
+      // The re-check helper appears twice: its definition and its one call, inside the exit.
+      expect(src.split('postMintRefusal(estimate, {').length - 1).toBe(2);
+      expect(src.split('sendRecheckedIntentResponse(res, estimate').length - 1).toBeGreaterThanOrEqual(6);
+      // Every exit is AWAITED inside the route's try: a rejected final recheck must reach the catch (Express 4
+      // does not handle a rejected handler promise, so an un-awaited return would hang the request).
+      expect(src).not.toMatch(/return sendRecheckedIntentResponse\(/);
+      expect(src.split('return await sendRecheckedIntentResponse(').length - 1).toBeGreaterThanOrEqual(6);
+    });
+
+    test('card-hold-intent: a candidate that turned contradictory AFTER the early check is parked even on the exemption path (no exemptReason leaks, alert + release)', async () => {
+      const { refuseParkedWrite } = require('../routes/estimate-public');
+      currentEstimate = PARKED_ESTIMATE;
+      resolveCardHoldPolicy.mockReturnValue({ required: false, exemptReason: 'saved_method_like' });
+      refuseParkedWrite.mockClear();
+      estimatePublicBlockingState.mockClear();
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce(PARKED);
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('exemptReason');
+      expect(JSON.parse(text)).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      expect(estimatePublicBlockingState.mock.calls[1][1]).toEqual(expect.objectContaining({ fresh: true }));
+      // Control: still clean at the exit -> the exemption answers exactly as before.
+      estimatePublicBlockingState.mockResolvedValue(null);
+      const ok = await post('card-hold-intent', {});
+      expect(ok.status).toBe(409);
+      expect(await ok.json()).toEqual({ error: 'No card hold is required for this estimate', exemptReason: 'saved_method_like' });
+    });
+  });
+
+  describe('quote_required outranks a contradicted phone on every slot route (the wrapper never maps a reported state to "unblocked")', () => {
+    const { refuseParkedWrite, isEstimateAcceptActive } = require('../routes/estimate-public');
+    const QUOTE = { state: 'quote_required' };
+    const INACTIVE = { error: 'Estimate is no longer active' };
+    const HOLD = '11111111-1111-4111-8111-111111111111';
+    beforeEach(() => { refuseParkedWrite.mockClear(); currentEstimate = PARKED_ESTIMATE; estimatePublicBlockingState.mockResolvedValue(QUOTE); });
+    afterEach(() => estimatePublicBlockingState.mockResolvedValue(null));
+
+    test('available-slots, find-slots and reserve (pre-transaction) answer the intent routes\' 409; no slots read, no hold, no office alert', async () => {
+      process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(409);
+      expect(await browse.json()).toEqual(INACTIVE);
+      const found = await post('find-slots', { query: 'next week please' });
+      // (askToken gating may answer before the check in this harness: assert only that no search ran.)
+      if (found.status === 409) expect(await found.json()).toEqual(INACTIVE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toEqual(INACTIVE);
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+      expect(findEstimateSlots).not.toHaveBeenCalled();
+      expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+
+    test('the LOCKED reserve and extend predicates refuse it too (no park payload, so no alert or hold release)', async () => {
+      const TRX = { isTransaction: true, raw: async () => ({}) };
+      let reserveRefusal; let extendRefusal;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+        reserveRefusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX);
+        const err = new Error('x'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = reserveRefusal; throw err;
+      });
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.extendReservation.mockImplementationOnce(async (args) => {
+        extendRefusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX);
+        const err = new Error('x'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = extendRefusal; throw err;
+      });
+      expect((await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })).status).toBe(409);
+      for (const refusal of [reserveRefusal, extendRefusal]) {
+        expect(refusal).toEqual({ status: 409, body: INACTIVE });
+      }
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+
+    test('the texting AI\'s gate offers nothing for it; and a state-free (quote-required ALONE) estimate is not refused, exactly as on main', async () => {
+      const { offerableEstimateSlots, slotBlockingRefusal } = require('../routes/estimate-slots-public')._internals;
+      currentEstimate = { ...PARKED_ESTIMATE, customer_id: 'cust-1' };
+      customersById = { 'cust-1': { phone: '(941) 555-0123' } };
+      await expect(offerableEstimateSlots('est-parked', 'cust-1')).resolves.toBeNull();
+      estimatePublicBlockingState.mockResolvedValue(null);
+      await expect(slotBlockingRefusal(PARKED_ESTIMATE, {})).resolves.toBeNull();
+      expect(isEstimateAcceptActive).toBeDefined();
+    });
+  });
+
+  describe('the post-mint check re-reads the ESTIMATE row (staff edits during the Stripe mint)', () => {
+    const { refuseParkedWrite, retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+    const EDITED = { ...PARKED_ESTIMATE, customer_phone: '(941) 555-0199', customer_email: 'edited@example.invalid' };
+    beforeEach(() => {
+      refuseParkedWrite.mockClear();
+      retireOrDenyDroppedCapture.mockClear?.();
+      currentEstimate = PARKED_ESTIMATE;
+      resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+      estimatePublicBlockingState.mockClear();
+    });
+    afterEach(() => { estimatePublicBlockingState.mockResolvedValue(null); require('../routes/estimate-public').isEstimateAcceptActive.mockImplementation(() => true); });
+
+    test('card-hold-intent: the second verdict is judged on the RELOADED row (edited identity), fresh, and withholds the secret on a park', async () => {
+      createCardHoldSetupIntentForEstimate.mockImplementationOnce(async () => {
+        currentEstimate = EDITED; // staff edit lands while Stripe mints
+        return { clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 };
+      });
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce(PARKED);
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(estimatePublicBlockingState.mock.calls[0][0].customer_phone).toBe('(941) 555-0123');
+      expect(estimatePublicBlockingState.mock.calls[1][0].customer_phone).toBe('(941) 555-0199');
+      expect(estimatePublicBlockingState.mock.calls[1][1]).toEqual(expect.objectContaining({ fresh: true }));
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+    });
+
+    test('an estimate that stopped being active during the mint is withheld too (no secret, no park alert)', async () => {
+      const { isEstimateAcceptActive } = require('../routes/estimate-public');
+      createCardHoldSetupIntentForEstimate.mockResolvedValue({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      estimatePublicBlockingState.mockResolvedValue(null);
+      isEstimateAcceptActive.mockImplementationOnce(() => true).mockImplementationOnce(() => false);
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(JSON.parse(text)).toEqual({ error: 'Estimate is no longer active' });
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+
+    test('a quote-required estimate after the mint is withheld with that state\'s own 409 (not the office-review body)', async () => {
+      createCardHoldSetupIntentForEstimate.mockResolvedValue({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce({ state: 'quote_required' });
+      const res = await post('card-hold-intent', {});
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'Estimate is no longer active' });
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+  });
+
+  test('every slot-route estimate read selects estimate_group_id (the park verdict exempts a grouped sibling the accept resolves through its accepted sibling)', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValue(null);
+    await fetch(`${base}/${TOKEN}/available-slots`);
+    await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+    const estimateReads = firstArgsHistory.filter((cols) => cols.includes('estimate_data'));
+    expect(estimateReads.length).toBeGreaterThanOrEqual(3);
+    for (const cols of estimateReads) expect(cols).toContain('estimate_group_id');
+  });
+
+  describe('the card-intent routes judge the park BEFORE the Bermuda gate, without pricing a suppression-shaped estimate (r9 follow-up)', () => {
+    const { refuseParkedWrite, retireOrDenyDroppedCapture, buildPricingBundle } = require('../routes/estimate-public');
+    const SUPPRESSED = { ...PARKED_ESTIMATE, estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }) };
+    const BERMUDA = { error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.', code: 'BERMUDA_SUPPRESSION_GATED' };
+    const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+    beforeEach(() => {
+      delete process.env.GATE_BERMUDA_SUPPRESSION;
+      currentEstimate = SUPPRESSED;
+      refuseParkedWrite.mockClear(); retireOrDenyDroppedCapture.mockClear(); buildPricingBundle.mockClear();
+      estimatePublicBlockingState.mockClear();
+      createCardHoldSetupIntentForEstimate.mockClear();
+    });
+    afterEach(() => {
+      estimatePublicBlockingState.mockResolvedValue(null);
+      if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION; else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+    });
+
+    test.each(['card-hold-intent', 'recurring-card-intent'])('%s: Bermuda-gated AND parked -> the park (coded 409, alert + release), and the estimate is never priced', async (leg) => {
+      estimatePublicBlockingState.mockResolvedValue(PARKED);
+      const res = await post(leg, leg === 'recurring-card-intent' ? { replaceSetupIntentId: ' seti_old ' } : {});
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      expect(estimatePublicBlockingState).toHaveBeenCalledWith(SUPPRESSED, expect.objectContaining({ suppressionGated: true }));
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+      if (leg === 'recurring-card-intent') expect(retireOrDenyDroppedCapture).toHaveBeenCalledWith(SUPPRESSED, 'seti_old');
+      expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    });
+
+    test.each(['card-hold-intent', 'recurring-card-intent'])('%s: Bermuda-gated, NOT parked -> main\'s gated 409 exactly (any other state the helper might report is ignored for it)', async (leg) => {
+      for (const reported of [null, { state: 'quote_required' }, { state: 'termite_trenching_review' }]) {
+        estimatePublicBlockingState.mockResolvedValue(reported);
+        const res = await post(leg, {});
+        expect([res.status, await res.json()]).toEqual([409, BERMUDA]);
+      }
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+    });
+
+    test('the same holds on the slot routes: a gated parked estimate is never priced for the park, a gated trenching/quote one is main\'s gated 409', async () => {
+      estimatePublicBlockingState.mockResolvedValue(PARKED);
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      expect(estimatePublicBlockingState).toHaveBeenCalledWith(SUPPRESSED, expect.objectContaining({ suppressionGated: true }));
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+      for (const reported of [{ state: 'quote_required' }, { state: 'termite_trenching_review' }]) {
+        estimatePublicBlockingState.mockResolvedValue(reported);
+        const res = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+        expect([res.status, await res.json()]).toEqual([409, BERMUDA]);
+      }
+    });
+
+    test('source order: on both intent routes the blocking decision precedes the Bermuda gate and any pricing; the gate answers only from inside that block', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const routes = {
+        'card-hold-intent': src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'")),
+        'recurring-card-intent': src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'")),
+      };
+      for (const [name, route] of Object.entries(routes)) {
+        const gatedBlock = route.indexOf('if (isSuppressionGatedEstimate(estimate)) {');
+        expect([name, gatedBlock > 0]).toEqual([name, true]);
+        expect(gatedBlock).toBeLessThan(route.indexOf('buildPricingBundle(estimate)'));
+        expect(gatedBlock).toBeLessThan(route.indexOf('reconcileFrozenMembershipSnapshot(estimate)'));
+        expect(route.indexOf('isEstimateAcceptActive(estimate)')).toBeLessThan(gatedBlock);
+        expect(route.indexOf("contactReviewState(estimate, {})", gatedBlock)).toBeGreaterThan(gatedBlock);
+        // The gate's answer is only reachable after the park decision inside that block, and nowhere else in the route.
+        expect(route.split('rejectGatedSuppressionEstimate(res, estimate)').length - 1).toBe(1);
+        expect(route.indexOf('rejectGatedSuppressionEstimate(res, estimate)')).toBeGreaterThan(route.indexOf("contactReviewState(estimate, {})"));
+      }
+    });
+  });
+
+  describe('the shared blocking-state check runs BEFORE every no-booking / alternative-payload shortcut on the four slot routes (r9: ordering class)', () => {
+    const { refuseParkedWrite, isRodentGuaranteeOnlyEstimate } = require('../routes/estimate-public');
+    const HOLD = '11111111-1111-4111-8111-111111111111';
+    const COMMERCIAL = { ...PARKED_ESTIMATE, estimate_data: { commercialEstimatedPricing: true } };
+    const SUPPRESSED = { ...PARKED_ESTIMATE, estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }) };
+    const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+    const SHORTCUTS = [
+      ['commercial auto', () => { currentEstimate = COMMERCIAL; }],
+      ['guarantee-only renewal', () => { currentEstimate = PARKED_ESTIMATE; isRodentGuaranteeOnlyEstimate.mockReturnValue(true); }],
+      ['bermuda-suppressed (gate off)', () => { currentEstimate = SUPPRESSED; delete process.env.GATE_BERMUDA_SUPPRESSION; }],
+    ];
+    beforeEach(() => { refuseParkedWrite.mockClear(); process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test'; });
+    afterEach(() => {
+      isRodentGuaranteeOnlyEstimate.mockReturnValue(false);
+      estimatePublicBlockingState.mockResolvedValue(null);
+      if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION; else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+    });
+
+    test.each(SHORTCUTS)('%s AND parked: every route answers the park (browse shape / coded 409), with the park side effects on the writes', async (_label, arrange) => {
+      arrange();
+      estimatePublicBlockingState.mockResolvedValue(PARKED);
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(200);
+      expect(await browse.json()).toMatchObject({ reviewBeforeBooking: true, reason: 'contact_review' });
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 200) expect(await found.json()).toMatchObject({ reviewBeforeBooking: true, reason: 'contact_review' });
+      refuseParkedWrite.mockClear();
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect(extended.status).toBe(409);
+      expect(await extended.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(2); // reserve + extend: alert + hold release
+      expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    });
+
+    test('commercial auto, NOT parked: main\'s bodies exactly (browse / find-slots 200, reserve / extend 409)', async () => {
+      currentEstimate = COMMERCIAL;
+      const COMMERCIAL_BROWSE = { primary: [], expander: [], availableSlots: [], summary: null, commercialManualScheduling: true, message: 'A Waves team member will reach out to schedule your commercial service.' };
+      const COMMERCIAL_409 = { error: 'Commercial service is scheduled by our team \u2014 no self-booking.', commercialManualScheduling: true };
+      expect(await (await fetch(`${base}/${TOKEN}/available-slots`)).json()).toEqual(COMMERCIAL_BROWSE);
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 200) expect(await found.json()).toEqual(COMMERCIAL_BROWSE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect([reserved.status, await reserved.json()]).toEqual([409, COMMERCIAL_409]);
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect([extended.status, await extended.json()]).toEqual([409, COMMERCIAL_409]);
+    });
+
+    test('guarantee-only renewal, NOT parked: main\'s bodies exactly', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      isRodentGuaranteeOnlyEstimate.mockReturnValue(true);
+      const BROWSE = { primary: [], expander: [], availableSlots: [], summary: null, invoiceOnlyAcceptance: true, message: 'No appointment is needed \u2014 this renewal is accepted with an invoice.' };
+      const R409 = { error: 'No appointment is needed for this renewal \u2014 accept without booking.', invoiceOnlyAcceptance: true };
+      expect(await (await fetch(`${base}/${TOKEN}/available-slots`)).json()).toEqual(BROWSE);
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 200) expect(await found.json()).toEqual(BROWSE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect([reserved.status, await reserved.json()]).toEqual([409, R409]);
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect([extended.status, await extended.json()]).toEqual([409, R409]);
+    });
+
+    test('bermuda-suppressed (gate off), NOT parked: main\'s 409 body on all four routes', async () => {
+      currentEstimate = SUPPRESSED;
+      delete process.env.GATE_BERMUDA_SUPPRESSION;
+      const BERMUDA = { error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.', code: 'BERMUDA_SUPPRESSION_GATED' };
+      for (const [status, body] of [
+        await (async () => { const r = await fetch(`${base}/${TOKEN}/available-slots`); return [r.status, await r.json()]; })(),
+        await (async () => { const r = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' }); return [r.status, await r.json()]; })(),
+        await (async () => { const r = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' }); return [r.status, await r.json()]; })(),
+      ]) expect([status, body]).toEqual([409, BERMUDA]);
+    });
+
+    test('true viewability refusals stay AHEAD of it: a non-viewable parked estimate gets the generic 404, never the park', async () => {
+      currentEstimate = { ...PARKED_ESTIMATE, archived_at: '2026-07-01T00:00:00Z' };
+      estimatePublicBlockingState.mockResolvedValue(PARKED);
+      expect((await fetch(`${base}/${TOKEN}/available-slots`)).status).toBe(404);
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(404);
+      expect((await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })).status).toBe(404);
+      currentEstimate = { ...PARKED_ESTIMATE, status: 'accepted' };
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+  });
+
+  test('available-slots answers the review shape (no times) and never reaches the slot service', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const res = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ primary: [], availableSlots: [], reviewBeforeBooking: true, reason: 'contact_review', message: 'parked-message' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('find-slots answers the review shape and reserve answers the coded 409; no slot is searched or held', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const found = await post('find-slots', { query: 'next week please' });
+    // (askToken gating may answer before the park check in this harness: assert only that no search ran.)
+    expect(findEstimateSlots).not.toHaveBeenCalled();
+    if (found.status === 200) expect(await found.json()).toMatchObject({ reviewBeforeBooking: true, reason: 'contact_review' });
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(reserved.status).toBe(409);
+    expect(await reserved.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+  });
+
+  test('extend refuses on the pre-transaction read AND hands the service the same predicate for the locked row', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValue(PARKED);
+    try {
+      const res = await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    } finally { estimatePublicBlockingState.mockResolvedValue(null); }
+  });
+
+  test('the texting AI\'s gate (slotBrowseRefusal) inherits it: no times offered for a parked estimate, and none when the verdict cannot be read', async () => {
+    const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+    currentEstimate = { ...PARKED_ESTIMATE, customer_id: 'cust-1' };
+    customersById = { 'cust-1': { phone: '(941) 555-0123' } };
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    await expect(offerableEstimateSlots('est-parked', 'cust-1')).resolves.toBeNull();
+    estimatePublicBlockingState.mockRejectedValueOnce(new Error('phone lookup down'));
+    await expect(offerableEstimateSlots('est-parked', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 });
 

@@ -102,10 +102,12 @@ async function filterTreeShrubDefaults({ db, scheduled, entries }) {
     .leftJoin('service_products as applied', 'applied.id', 'history.service_product_id')
     .leftJoin('products_catalog as product', 'product.id', 'history.product_id')
     .where('history.customer_id', scheduled.customer_id).whereNull('history.retracted_at')
-    .select('history.application_date', 'history.application_rate', 'history.rate_unit', 'visit.property_id',
+    .select('history.application_date', 'history.application_rate', 'history.rate_unit', 'history.property_id as ledger_property_id', 'visit.property_id',
       'product.name as catalog_name', 'applied.product_name',
       'applied.total_amount', 'applied.amount_unit', 'applied.area_value', 'applied.area_unit');
-  const normalized = history.map(row => ({ ...row, product_name: row.product_name || row.catalog_name }));
+  // The treated property is the one frozen on the ledger row; only a legacy row without one falls back to
+  // its visit's property (which a later address correction can change).
+  const normalized = history.map(row => ({ ...row, property_id: row.ledger_property_id || row.property_id, product_name: row.product_name || row.catalog_name }));
   if (normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id))) {
     return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: 'Review an application with an unidentified product.' })) };
   }

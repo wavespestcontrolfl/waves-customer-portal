@@ -83,8 +83,9 @@ function sanitizeNotificationValue(value, key = '') {
   // Opaque row ids (emailId, callLogId, customer_id…) are not contact
   // details — masking `emailId` to '[email]' broke the reclaim dedupe that
   // looks the bell up by it (codex r6). Verbatim: the digit redactor would
-  // otherwise mangle a UUID's digit runs like a card number.
-  if (/(?:^|_)id$|Id$/.test(key)) return value;
+  // otherwise mangle a UUID's digit runs like a card number. A list of ids
+  // (allocationInvoiceIds, *_ids) passes each element with its parent key.
+  if (/(?:^|_)ids?$|Ids?$/.test(key)) return value;
   if (/phone/i.test(key)) return maskPhone(value);
   if (/email/i.test(key)) return maskEmail(value);
   if (/address/i.test(key)) return '[address]';
@@ -290,6 +291,72 @@ const TRIGGER_REGISTRY = {
       link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
     }),
   },
+  // A customer booked their own free re-service from the self-serve link
+  // (owner 2026-10-05): the request is a customer telling us about a
+  // problem, so it rings and pushes like a text. The headline names who and
+  // when, the why quotes their words (or the pests they picked), and the
+  // whole request rides in the detail. Fired by reservice-public.js.
+  reservice_self_booked: {
+    label: 'Customer booked a re-service',
+    category: 'schedule',
+    priority: 'high',
+    group: 'Communication',
+    // Composed through docs/admin-notifications.md: `alert` carries the
+    // structured parts (area, severity, subject, done-when, who) into the
+    // row's metadata. A customer's own words that trip a copy rule never
+    // cost the alert (the composer's own fallback shape, as raiseAdminAlert).
+    build: (p) => {
+      const names = require('./admin-alert-names');
+      const compose = require('./admin-alert-compose');
+      const named = p.name || 'a customer';
+      const when = p.when ? ` for ${p.when}` : '';
+      const pests = p.pests ? `${p.pests}: ` : '';
+      const words = p.request ? names.redactedWords(p.request) : '';
+      const spec = {
+        area: 'Schedule',
+        action: names.fitAction('Schedule', named, [
+          (n) => `read ${n}'s re-service request${when}`,
+          (n) => `read ${n}'s re-service request`,
+        ]),
+        why: words
+          ? names.whyWithQuote({ lead: pests, quote: words })
+          : (p.pests ? `Picked ${p.pests.toLowerCase()} and typed no description.` : 'They typed no description of the problem.'),
+        severity: 'needs-you',
+        // The booked visit on the schedule (its job card shows the request);
+        // the customer only when the visit is not known.
+        link: p.scheduledServiceId && p.serviceDate
+          ? `/admin/dispatch?tab=schedule&date=${encodeURIComponent(p.serviceDate)}&appointment=${encodeURIComponent(p.scheduledServiceId)}`
+          : (p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/schedule'),
+        subject: p.scheduledServiceId ? { type: 'visit', id: p.scheduledServiceId } : { type: 'customer', id: p.customerId },
+        // Closed by the relevance sweep (admin-alert-relevance.js
+        // reservice_booked) once the visit is completed, cancelled or gone.
+        doneWhen: 'visit_closed',
+        who: 'person',
+      };
+      const detail = words ? [p.pests ? `Pests: ${p.pests}` : null, p.when ? `Visit: ${p.when}` : null, `Request: ${words}`].filter(Boolean).join('\n') : null;
+      let composed;
+      try {
+        composed = compose.composeAdminAlert(spec);
+      } catch (err) {
+        // Even under test: only the customer's words can break a rule here
+        // (the copy tests prove our own text passes), so this is data, not a bug.
+        if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+        composed = {
+          headline: compose.cutAtWord(`${spec.area} — ${spec.action}`, compose.MAX_HEADLINE_CHARS),
+          why: spec.why,
+          link: spec.link,
+          metadata: { ...compose.validStructuredFields(spec), ruleViolations: err.violations },
+        };
+      }
+      return {
+        title: composed.headline,
+        body: composed.why,
+        ...(detail ? { detail } : {}),
+        link: composed.link,
+        alert: composed.metadata,
+      };
+    },
+  },
   sms_reply: {
     label: 'SMS reply received',
     category: 'inbound_sms',
@@ -468,6 +535,25 @@ const TRIGGER_REGISTRY = {
         link: callLink(p),
       };
     },
+  },
+  // Sandy (the AI phone agent) took a real call, the caller spoke, and the
+  // call ended with no booking, no lead and no transfer — gated by
+  // GATE_RELAY_UNBOOKED_HANDOFF. See services/voice-agent/relay-unbooked-handoff.js.
+  relay_unbooked_call: {
+    label: 'Sandy call ended without a booking',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    // Same owner ruling as the voicemail bell: a callback number must be
+    // dialable. The payload is built by the hand-off module from the
+    // PAN-scrubbed call summary, not free model text.
+    allowContactDetails: true,
+    build: (p) => ({
+      title: 'Sandy call ended without a booking',
+      body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : 'The caller spoke with Sandy, then the call ended.']
+        .filter(Boolean).join(' - '),
+      link: callLink(p),
+    }),
   },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
@@ -956,6 +1042,9 @@ function pushTagFor(triggerKey, payload = {}) {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
   }
+  if (triggerKey === 'relay_unbooked_call') {
+    return `waves-relay_unbooked_call-${payload.callSid || payload.callLogId || 'unknown-call'}`;
+  }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
   }
@@ -976,6 +1065,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // renotify:false, so two customers' failures before the first is
     // dismissed must not collapse into one banner (codex P2 on #4392).
     return `waves-payment_failed-${payload.attemptId || payload.paymentIntentId}`;
+  }
+  if (triggerKey === 'reservice_self_booked') {
+    // Per-visit tag: two customers booking before the first banner is
+    // dismissed must not collapse into one (renotify:false in the worker).
+    return `waves-reservice_self_booked-${payload.scheduledServiceId || crypto.randomUUID()}`;
   }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,
@@ -1099,7 +1193,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // dispatcher after the canonical send already delivered. promise_chaser:
     // its sweep is stateless and never retries a push, so a dedupe hit can
     // only be a concurrent dispatch of the same (promise, ET day) that
-    // already pushed.
+    // already pushed. property_lookup_canary_failed: keyed per ET day, and a
+    // hit is the deploy-kill retry of a run that already alerted.
+    // reservice_self_booked: keyed per booking, so a hit is the customer's
+    // idempotent replay of a booking whose bell already landed.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1138,7 +1235,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             trigger.category,
             built.title,
             built.body,
-            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
+            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
               // A standing thread row (sms_reply, one per customer) is rewritten
               // in place by each new message instead of inserting another row.
@@ -1169,7 +1266,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellWritten = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

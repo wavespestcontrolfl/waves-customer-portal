@@ -671,6 +671,13 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
   if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
+  // resend_receipt (and send_invoice) may name the invoice by number: bind it as
+  // the invoice record so a customer-scoped task proves the invoice is its own customer's.
+  if (['resend_receipt', 'send_invoice'].includes(toolName) && params.invoice_number && !params.invoice_id) {
+    const invoice = await db('invoices').where({ invoice_number: String(params.invoice_number).trim().toUpperCase() }).first('id');
+    if (!invoice) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
+    references.invoice_id = invoice.id;
+  }
   const pair = customerPairIds(params, toolName);
   if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];
   const resolved = await readReferences(references);
@@ -907,11 +914,33 @@ async function prepareReadInput(params, context, options) {
   return prepared;
 }
 
+// A general admin read (read_admin_data) is as narrow as the reviewed row of
+// the endpoint it names: a customer or invoice row reads one record, so inside
+// a task for a specific customer its id must be that task's customer's own
+// (same check, same refusal as every record reader); a broad row keeps the
+// tool's `broad` class and is refused there. No customer task: nothing to
+// compare against, the read runs as before.
+async function prepareCatalogRead(params, context, binding, toolName) {
+  if (!customerSpecific(context)) return { input: { ...params } };
+  const bag = binding.inPath ? params.params : params.query;
+  const raw = bag && typeof bag === 'object' ? bag[binding.param] : undefined;
+  if (typeof raw !== 'string' || !UUID_RE.test(raw.trim())) {
+    return { error: 'Give the customer or invoice id this read is about, so it can be checked against the customer in this task', code: 'customer_scope_required' };
+  }
+  const id = raw.trim().toLowerCase();
+  const invalid = await validateRecordTarget({ [binding.kind]: id }, context, { toolName });
+  if (invalid) return invalid;
+  const input = { ...params, [binding.inPath ? 'params' : 'query']: { ...bag, [binding.param]: id } };
+  return { input };
+}
+
 async function prepareScopedReadInput(params, context, { toolName, schema }) {
   // A refused cohort never widens into an unscoped read; an unresolved
   // explicit name is handled by readScopeRefusal, which still admits a
   // reader that carries its own selector or record identifier.
   if (context.ambiguous) return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
+  const binding = toolName === 'read_admin_data' ? require('./admin-read-tools').scopeBinding(params) : null;
+  if (binding) return prepareCatalogRead(params, context, binding, toolName);
   const policy = require('./action-policy.json')[toolName];
   const scope = validScope(policy) ? policy.scope : null;
   if (!scope) return UNCLASSIFIED;
@@ -928,7 +957,11 @@ async function prepareScopedReadInput(params, context, { toolName, schema }) {
     if (resolved.error) return resolved;
     readContext = resolved.readContext;
   }
-  const inherited = inheritTaskCustomer(input, context, schema);
+  // A `scoped` reader is already confined to every task customer by the
+  // task's read scope (readCustomerIds), so its optional customer_id is a
+  // narrower filter the caller may add, never one to inherit: inheriting
+  // would refuse a two-customer task that the read scope serves today.
+  const inherited = scope === 'scoped' ? null : inheritTaskCustomer(input, context, schema);
   if (inherited) return inherited;
   const invalid = await validateRecordTarget(input, readContext, { toolName });
   return invalid || { input };
