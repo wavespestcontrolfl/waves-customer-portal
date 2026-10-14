@@ -58,7 +58,10 @@ const hasCredentialPart = (identifier) => isCredentialName(identifier, FREE_TEXT
 const PIN_NAME_RE = /(?:^|[_.-])(?:pin|passcode)(?:$|[_.-])/i;
 const ACCESS_NAME_RE = /(?:^|[_.-])(?:gate|door|lockbox|garage|keypad|callbox)(?:$|[_.-])/i;
 const isPinName = (identifier) => PIN_NAME_RE.test(identifier);
-const accessPinName = (identifier, text, offset, valueEnd) => ACCESS_NAME_RE.test(identifier) || accessCodeLine(text, offset, valueEnd);
+// An account word inside the name (PORTAL_PIN, APP_PASSCODE) makes it an
+// account credential whatever the clause says about a gate or door.
+const accessPinName = (identifier, text, offset, valueEnd) => !ACCOUNT_WORD_RE.test(identifier.replace(/[_.-]/g, ' '))
+  && (ACCESS_NAME_RE.test(identifier) || accessCodeLine(text, offset, valueEnd));
 
 // The value after the separator: to the closing quote, else its first token
 // plus up to 20 plain words that follow it in the same clause, so a dotenv
@@ -68,7 +71,9 @@ const accessPinName = (identifier, text, offset, valueEnd) => ACCESS_NAME_RE.tes
 const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:}\]](?:[ \t]+[A-Za-z0-9][A-Za-z0-9'!@#$%^&*+-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:}\]]*(?=[\s"'`,;]|$)))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
 // An optional quote on each side of the identifier covers a JSON or JS key ("password": "x", 'api_key': 'x').
-const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])["'\`]?([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)["'\`]?(${AFTER_SEPARATOR})`, 'g');
+// A bare or quoted identifier; a QUOTED key may also hold spaces, as JSON
+// keys do ({"api key":"..."}, {"access key":"..."}).
+const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])(?:(["'\`])([A-Za-z][A-Za-z0-9]*(?:[ _.-][A-Za-z0-9]+){0,5})\\1|([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*))(${AFTER_SEPARATOR})`, 'g');
 
 // Returns { text, removed }. A non-credential identifier ("Pasted:") does not
 // swallow what follows it, so the next identifier is still examined.
@@ -90,7 +95,7 @@ function scrubIdentifierAssignments(input) {
   IDENT_SEP_RE.lastIndex = 0;
   let match;
   while ((match = IDENT_SEP_RE.exec(input)) !== null) {
-    const identifier = match[1];
+    const identifier = match[2] || match[3];
     const valueStart = match.index + match[0].length;
     const pinName = isPinName(identifier);
     if (!pinName && !hasCredentialPart(identifier)) continue;

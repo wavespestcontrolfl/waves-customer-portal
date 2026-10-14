@@ -1413,3 +1413,22 @@ test.each(['Door passcode: 7788. Phone customer on arrival.', 'Gate PIN: 4821. E
   const { redactSecrets } = require('../utils/signed-link-redaction');
   expect(redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 })).toBe(text);
 });
+
+// Codex r11: account-named PINs beside a gate word, and JSON keys with spaces.
+describe('account PIN names and spaced JSON keys', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  test.each(['PORTAL_PIN=4821 for the gate', 'APP_PASSCODE=998877 at the door'])('removed: %s', (text) => {
+    expect(scrub(text)).not.toMatch(/4821|998877/);
+  });
+  test('a gate PIN name stays', () => {
+    expect(scrub('GATE_PIN=4821')).toBe('GATE_PIN=4821');
+  });
+  const secret = ['K9d', '82', 'SECRET'].join('');
+  test.each([`{"api key":"${secret}"}`, `{"access key":"${secret}"}`])('removed: %s', (text) => {
+    expect(scrub(text)).not.toContain(secret);
+  });
+  test('a spaced non-credential JSON key stays', () => {
+    expect(scrub('{"service type":"quarterly pest"}')).toBe('{"service type":"quarterly pest"}');
+  });
+});
