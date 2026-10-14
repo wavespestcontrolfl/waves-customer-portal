@@ -111,6 +111,9 @@ function partsOf(body) {
 // Words that introduce an hour, and the hours a person spells out (an
 // all-caps note "DO NOT COME BEFORE NINE" loses both to the mask: r4).
 const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|than|past';
+// Words that tie a date to the visit or the access; never taken for the
+// credential either ("access code expires 10/20": r8).
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|on|valid|good';
 const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
@@ -129,7 +132,9 @@ const TIME_WORDS_RE = new RegExp([
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
   // note's own stamp and does not count.
-  `\\b(?:${HOUR_LEADS}|expires?|expiring|through|thru|starting|starts?|on)\\s{1,5}(?:\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?![\\w/]))`,
+  `\\b(?:${HOUR_LEADS}|${DATE_LEADS})\\s{1,5}(?:\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))`,
+  // AM or PM on its own ("PM ONLY"): r8.
+  '\\b(?:am|pm|a\\.m\\.|p\\.m\\.)(?![\\w])',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   '\\b(?:today|tonight|tomorrow|yesterday|weekly|biweekly|daily|holidays?)(?![\\w])',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
@@ -140,7 +145,14 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])',
   '\\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?(?![\\w])',
 ].join('|'), 'gi');
-const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
+// Counted in constant memory: a long stored text builds no array of matches
+// (Codex security r8).
+function timeWords(text) {
+  const re = new RegExp(TIME_WORDS_RE.source, 'gi');
+  let n = 0;
+  while (re.exec(text)) n += 1;
+  return n;
+}
 
 // The value that directly follows a code noun is the credential itself, not
 // a statement about when: "gate code Friday", "password is noon". It is left
@@ -151,14 +163,14 @@ const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
 // after the noun is taken: a passphrase of several words that are day or time
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
-const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}["'\\u201d\\u2019]?`, 'gi');
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}["'\\u201d\\u2019]?`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
 // code" (r3, r7).
 // Bounded tokens and gaps in both credential patterns: an unbounded run was
 // retried at every byte of a long stored text (a 64 KB entry took 5.9 s on
 // the event loop: Codex security r5; the forward one's spaces: r7).
-const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|was|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:[A-Za-z]{1,30}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
+const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|was|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:(?!(?:when|what|day|days|date|dates|time|times|hours?|until|before|after|only)\b)[A-Za-z]{1,30}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
 const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
 
 // The mask removed at least one word that can say when. The list is the
@@ -167,7 +179,10 @@ const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_
 // product names in capitals), against 4 with this list (measured
 // 2026-10-13); a statement the list misses is the known limit.
 function maskHidTime(raw, masked) {
-  return raw !== masked && timeWords(masked) < timeWords(withoutCredentialValues(raw));
+  // A text past the whole record's limit makes the record too long (no model
+  // is asked, the verdict is unknown): it is not scanned (security r8).
+  if (raw === masked || raw.length > MAX_RECORD_CHARS) return false;
+  return timeWords(masked) < timeWords(withoutCredentialValues(raw));
 }
 
 // The entries of one stored text: one, or its parts when it is long. `ms`
