@@ -133,23 +133,11 @@ describe('leadServiceDisplay', () => {
     expect(name('Recurring Lawn Care + One-Time Lawn Treatment')).toBe('Monthly Lawn Care Service');
   });
 
-  test('a keyed lead names its first service from the key, after a rename and after an upsell', () => {
-    const keyed = { catalogNames, firstName: 'Quarterly Pest Control Service' };
-    expect(leadServiceDisplay('General Pest Program', keyed)).toBe('Quarterly Pest Control Service');
-    expect(leadServiceDisplay('General Pest Program + Recurring Lawn Care', keyed))
-      .toBe('Quarterly Pest Control Service + Monthly Lawn Care Service');
-    // the stored text's cadence survives a rename to a name with none
-    expect(leadServiceDisplay('Quarterly Pest Control + One-Time Lawn Care Service', { catalogNames, firstName: 'General Pest Program' }))
-      .toBe('General Pest Program + Monthly Lawn Care Service');
-    // recurring wins: a keyed one-time first part beside recurring work
-    expect(leadServiceDisplay('One-Time Pest Control Service + Tree & Shrub Care', { catalogNames, firstName: 'One-Time Pest Control Service' }))
-      .toBe('Quarterly Pest Control Service + Bi-Monthly Tree & Shrub Care Service');
-    // staff edited a keyed pest lead to another service: the text wins
-    expect(leadServiceDisplay('WDO Inspection Service', { catalogNames, firstName: 'Quarterly Pest Control Service' }))
-      .toBe(leadServiceDisplay('WDO Inspection Service', { catalogNames }));
-    // a configured package name stays as written; an upsell after it is named
-    expect(leadServiceDisplay('Roach Package + Lawn Care', { catalogNames, firstName: 'Roach Package' }))
-      .toBe('Roach Package + Waves Assessment (Lawn)');
+  test('a configured package name (by key) is shown as written; an upsell after it is named', () => {
+    const opts = { catalogNames, firstAsWritten: true };
+    expect(leadServiceDisplay('Roach Package', opts)).toBe('Roach Package');
+    expect(leadServiceDisplay('Roach Package + Lawn Care', opts)).toBe('Roach Package + Waves Assessment (Lawn)');
+    expect(leadServiceDisplay('Roach Package + Recurring Lawn Care', opts)).toBe('Roach Package + Monthly Lawn Care Service');
   });
 
   test('a default name the live catalog does not have is not shown', () => {

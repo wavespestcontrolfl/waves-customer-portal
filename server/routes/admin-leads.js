@@ -30,11 +30,7 @@ const { leadServiceDisplayLive } = require('../config/feature-gates');
 async function serviceDisplayCatalog() {
   if (!leadServiceDisplayLive()) return null;
   try {
-    const services = await db('services').select('name', 'service_key');
-    return {
-      catalogNames: catalogNameIndex(services.map((service) => service.name)),
-      nameByKey: new Map(services.filter((service) => service.service_key).map((service) => [service.service_key, service.name])),
-    };
+    return { catalogNames: catalogNameIndex(await db('services').pluck('name')) };
   } catch (err) {
     logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
     return null;
@@ -47,10 +43,10 @@ async function serviceDisplayCatalog() {
 const CONFIGURED_NAME_KEYS = new Set(['cockroach_control']);
 
 function serviceDisplayFor(catalog, serviceInterest, serviceKey) {
-  const firstName = CONFIGURED_NAME_KEYS.has(serviceKey)
-    ? String(serviceInterest || '').split(/\s+\+\s+/)[0]
-    : (serviceKey && catalog.nameByKey.get(serviceKey)) || null;
-  return leadServiceDisplay(serviceInterest, { catalogNames: catalog.catalogNames, firstName });
+  return leadServiceDisplay(serviceInterest, {
+    catalogNames: catalog.catalogNames,
+    firstAsWritten: CONFIGURED_NAME_KEYS.has(serviceKey),
+  });
 }
 
 async function withServiceDisplay(leads) {

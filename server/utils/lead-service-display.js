@@ -244,26 +244,12 @@ const PLACE = {
   },
 };
 
-const partTopic = (part) => part.topic || part.topics?.[0] || null;
-
-// The key's name replaces the first part, which keeps its stated frequency,
-// except when the lead's frequency changes that part (a one-time first part
-// beside recurring work is named as recurring) or the stored text names
-// another service than the key (staff edited the lead's service).
-function applyFirstName(parts, firstName, recurring, catalogNames) {
-  const first = parts[0];
-  if (first.kind === 'assessment' || (recurring && first.frequency === 'one_time')) return;
-  const keyedTopic = partTopic(classify(firstName, catalogNames));
-  const storedTopic = partTopic(first);
-  if (keyedTopic && storedTopic && keyedTopic.key !== storedTopic.key) return;
-  parts[0] = { kind: 'other', name: firstName, frequency: first.frequency, topic: storedTopic };
-}
-
-// firstName: how the FIRST part is shown, set from the lead's service_key
-// (an upsell appends after it): the key's current catalog name, or the
-// stored text for a configured package name. The part keeps the frequency
-// and topic its stored text states, and the rest is named part by part.
-function leadServiceDisplay(serviceInterest, { catalogNames = null, firstName = null } = {}) {
+// firstAsWritten: the lead's key says its first part is an admin-configured
+// package name with no catalog row (the standalone roach package), shown as
+// written; an upsell after it is named part by part. The part keeps its
+// stated frequency, and a one-time first part beside recurring work is
+// still named as recurring.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, firstAsWritten = false } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
 
@@ -274,7 +260,10 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null, firstName = 
   // A one-time request is never an assessment.
   const assessmentBooked = !oneTime && parts.some((part) => part.kind === 'assessment');
   const plan = { recurring, oneTime, assessmentBooked, assess: assessmentBooked || (!recurring && !oneTime), catalogNames };
-  if (firstName) applyFirstName(parts, clean(firstName), recurring, catalogNames);
+  const first = parts[0];
+  if (firstAsWritten && first.kind !== 'assessment' && !(recurring && first.frequency === 'one_time')) {
+    parts[0] = { kind: 'other', name: first.text || first.name, frequency: first.frequency, topic: first.topic || first.topics?.[0] || null };
+  }
 
   const out = [];
   const shorts = [];
