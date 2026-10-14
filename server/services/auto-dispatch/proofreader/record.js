@@ -132,6 +132,9 @@ const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\
 // hour word or before "hours / hrs", never alone (a four-digit number alone
 // is most often a code or a house number): r16.
 const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
+// The shapes of a calendar date: ISO, slash, month name (with an optional
+// ordinal), or an ordinal day alone (with an optional "the"): r7 to r19.
+const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))';
 const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
@@ -159,9 +162,9 @@ const TIME_WORDS_RE = new RegExp([
   // note's own stamp and does not count.
   // A day of the month after a word that limits the visit to it ("ONLY ON
   // THE 20TH", "except the 5th"): r17. "on the 20th" alone is history.
-  '\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))',
+  `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
   // A connector may stand between ("expires on 10/20"): r14.
-  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])))`,
+  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
   // "8 onwards"): r9.
   // A look-ahead: the phrase is not consumed, so its own time word still
