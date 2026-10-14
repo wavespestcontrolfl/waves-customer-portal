@@ -249,6 +249,9 @@ const TIME_WORDS_RE = new RegExp([
   // Spanish standing statements): weekdays, months, parts of the day and
   // the usual time words ("SOLO LOS MARTES", "NUNCA ANTES DE LAS DIEZ"): r42.
   '\\b(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?|ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|hoy|aviso)(?![\\w\u00c0-\u024f])',
+  // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
+  // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
+  `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?)(?![\\w]))`,
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
