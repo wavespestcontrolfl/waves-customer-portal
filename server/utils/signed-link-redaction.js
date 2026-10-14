@@ -294,10 +294,11 @@ function newState() {
 // The 3-2-4 shape with one separator used twice (dashes or spaces). A phone
 // number is 3-3-4 and does not match.
 const SSN_DASHED_RE = /(?<![\d-])\d{3}([- ])\d{2}\1\d{4}(?![\d-])/g;
+// Only "SSN" or the whole phrase "Social Security" is a label ("Social media ID" is not).
 // "SSN", "Social Security", "Social Security Number", "Social Security No.", "SSN #": the label may be
 // followed by "number"/"no", ordinary punctuation (". : #") and spaces, or by up to 20 other characters
 // that hold no digit, period or line break ("SSN on file is ").
-const SSN_LABELLED_RE = /\b(ssn|social(?:\s+security)?)\b((?:\s+(?:number|num|no)\b)?[\s.:#]{0,8}|[^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
+const SSN_LABELLED_RE = /\b(ssn|social\s+security)\b((?:\s+(?:number|num|no)\b)?[\s.:#]{0,8}|[^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
 const CARD_WORD = '(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|cc|credit|debit|pan|visa|master\\s?card|amex|american\\s+express|discover)';
 const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b([^\\d\\n.;!?]{0,24})(\\d(?:[ -]?\\d)*)(?!\\d)`, 'gi');
 const PAN_LENGTHS = [16, 15, 19, 14, 13];
@@ -319,7 +320,8 @@ function scrubGroupedCard(text) {
   });
   return { text: clean, removed };
 }
-const CVV_RE = /\b(cvv2?|cvc2?|csc|security code|card code|card verification(?: (?:value|code))?)\b(\D{0,15}?)(\d{3,4})(?!\d)/gi;
+// The code must sit in the label's own clause: "Security code missing. ID 123" keeps 123.
+const CVV_RE = /\b(cvv2?|cvc2?|csc|security code|card code|card verification(?: (?:value|code))?)\b([^\d.;!?\n]{0,15}?)(\d{3,4})(?!\d)/gi;
 const CARD_CONTEXT_RE = /\b(?:card|credit|debit|visa|mastercard|master card|amex|discover|paid|payment)\b/i;
 function scrubCvv(text) {
   let removed = 0;

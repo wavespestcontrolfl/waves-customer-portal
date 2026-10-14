@@ -1101,3 +1101,16 @@ describe('card codes, grouped card numbers, multi-line labels, URL credentials a
     expect(scrub(text)).toBe(text);
   });
 });
+
+// Codex r5: the SSN label is "SSN" or the whole phrase "Social Security", and a
+// CVV must sit in its label's clause.
+describe('SSN and CVV labels do not over-remove', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  test.each(['Social media ID: 123456789', 'Security code missing. ID 123', 'Security code missing; order 4521'])('stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+  test('a CVV in its own clause is still removed', () => {
+    expect(scrub('Paid by card, security code 123.')).not.toMatch(/123/);
+  });
+});
