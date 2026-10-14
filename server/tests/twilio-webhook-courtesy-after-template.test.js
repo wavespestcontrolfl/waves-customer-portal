@@ -32,8 +32,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-const { lastOutboundAskedQuestion } = require('../routes/twilio-webhook')._internals;
-const { isCourtesyOnly } = require('../services/sms-intent');
+const fs = require('fs');
+const path = require('path');
+const { lastOutboundAskedQuestion, isAffirmativeReactionToAutomatedText, AUTOMATED_VISIT_TEXT_TYPES } = require('../routes/twilio-webhook')._internals;
+const { isCourtesyOnly, isQuietSmsReaction } = require('../services/sms-intent');
 
 const GATE = 'GATE_SMS_COURTESY_AFTER_TEMPLATE';
 const CUSTOMER = '+19415550100';
@@ -137,5 +139,83 @@ describe('gate on', () => {
     expect(calls).toContainEqual(['whereIn', 'status', ['queued', 'sent', 'delivered']]);
     expect(calls.some(([m, col]) => m === 'where' && col === 'created_at')).toBe(true);
     expect(calls).toContainEqual(['first', 'message_body', 'message_type']);
+  });
+});
+
+describe('tapbacks on an automated visit text', () => {
+  const ZW = '\u200b';
+  const android = (emoji, target) => ` ${ZW}${emoji}${ZW} to \u201c ${target} \u201d `;
+  // What the webhook does for a reaction.
+  const quiet = async (body) => isQuietSmsReaction(body) || isAffirmativeReactionToAutomatedText(body, CUSTOMER, WAVES);
+
+  test('the confirmation template asks for a reply, so a plain tapback on it rings today', async () => {
+    mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };
+    expect(isQuietSmsReaction(android('👍', CONFIRMATION))).toBe(false);
+    process.env[GATE] = 'true';
+    expect(isQuietSmsReaction(android('👍', CONFIRMATION))).toBe(false); // the recognizer itself is unchanged
+  });
+
+  test('gate off: unchanged (loud)', async () => {
+    mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };
+    expect(await quiet(android('👍', CONFIRMATION))).toBe(false);
+    expect(mockState.wheres).toEqual([]); // no thread read at all
+  });
+
+  test('gate on: an affirmative tapback is quiet when the last Waves text was automated', async () => {
+    process.env[GATE] = 'true';
+    mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };
+    expect(await quiet(android('👍', CONFIRMATION))).toBe(true);
+    expect(await quiet(`Liked \u201c${REMINDER}\u201d`)).toBe(true);
+    expect(await quiet(`Reacted ❤️ to "${REMINDER}"`)).toBe(true);
+  });
+
+  test('gate on: ❓ / 👎 / disliked stay loud even after an automated text', async () => {
+    process.env[GATE] = 'true';
+    mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };
+    for (const body of [android('❓', CONFIRMATION), android('👎', CONFIRMATION), android('🚨', CONFIRMATION), `Disliked \u201c${REMINDER}\u201d`, `Questioned \u201c${REMINDER}\u201d`]) {
+      expect([body, await quiet(body)]).toEqual([body, false]);
+    }
+  });
+
+  test('gate on: after a person\'s text, or with no row or a failed read, a tapback on a reply-asking text rings', async () => {
+    process.env[GATE] = 'true';
+    mockState.last = { message_type: 'manual', message_body: PERSON_ASK };
+    expect(await quiet(android('👍', 'Reply YES to confirm Thursday'))).toBe(false);
+    mockState.last = null;
+    expect(await quiet(android('👍', CONFIRMATION))).toBe(false);
+    mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };
+    mockState.throwOnRead = true;
+    expect(await quiet(android('👍', CONFIRMATION))).toBe(false);
+  });
+});
+
+describe('automated type list matches what the code persists', () => {
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('every completion message type written by complete-scheduled-service.js / delivery.js is classified', () => {
+    const completion = read('services/complete-scheduled-service.js');
+    const delivery = read('services/service-report/delivery.js');
+    const written = new Set([
+      ...[...completion.matchAll(/sentSmsType = '([a-z0-9_]+)'/g)].map((m) => m[1]),
+      ...[...delivery.matchAll(/\? '(service_report_v1[a-z0-9_]*)' : '(service_report_v1[a-z0-9_]*)'/g)].flatMap((m) => [m[1], m[2]]),
+    ]);
+    expect(written.size).toBeGreaterThanOrEqual(8); // the scan itself found the family
+    const missing = [...written].filter((t) => !AUTOMATED_VISIT_TEXT_TYPES.has(t));
+    expect(missing).toEqual([]);
+  });
+
+  test('the visit-notice types from the purpose map are classified', () => {
+    const { mapPurposeToMessageType } = require('../services/messaging/providers/twilio-sms');
+    for (const purpose of ['appointment', 'appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation', 'tech_en_route', 'tech_arrived', 'service_completion']) {
+      expect([purpose, AUTOMATED_VISIT_TEXT_TYPES.has(mapPurposeToMessageType(purpose))]).toEqual([purpose, true]);
+    }
+  });
+
+  test('a completion text with an invoice or receipt is courtesy-eligible after the gate', async () => {
+    process.env[GATE] = 'true';
+    for (const type of ['service_complete_with_invoice', 'service_complete_paid_receipt', 'service_complete_prepaid', 'service_complete_annual_prepay', 'service_complete_annual_prepay_after_first_visit', 'service_report_v1', 'service_report_v1_with_invoice']) {
+      mockState.last = { message_type: type, message_body: 'Your report is ready. Pay here: https://wav.es/ab12c' };
+      expect([type, await wouldBeCourtesy('Thanks')]).toEqual([type, true]);
+    }
   });
 });

@@ -72,7 +72,9 @@ const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s
 // here, in the pattern, rather than stripped from the body: the quote-boundary
 // rule above stays untouched. The emoji capture excludes the padding, so the
 // affirmative check below sees the bare emoji.
-const ZERO_WIDTH_PAD = '[\\s\\u200b\\u200c\\u200d\\ufeff]';
+// No U+200D here: it belongs to EMOJI_SEQ_RE, and two adjacent quantified parts
+// that can match the same character backtrack cubically (codex #6331 r1).
+const ZERO_WIDTH_PAD = '[\\s\\u200b\\u200c\\ufeff]';
 const ANDROID_EMOJI_SMS_REACTION_RE = new RegExp(`^${ZERO_WIDTH_PAD}*(${EMOJI_SEQ_RE})${ZERO_WIDTH_PAD}*to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 
 // Pure conversation-closers: the whole message is courtesy — "Thanks!",
@@ -112,9 +114,12 @@ const COURTESY_MAX_CHARS = 60;
 // (❓ 🚨) express something and stay loud; removals are undo events (quiet).
 const AFFIRMATIVE_SMS_REACTION_RE = new RegExp(`^(?:liked|loved)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
 const ACK_EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+(${EMOJI_SEQ_RE})\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+// A tapback quotes one of OUR texts (an SMS is at most 1600 characters), so a
+// longer body is not a reaction; the cap also bounds the regex work (codex #6331 r1).
+const SMS_REACTION_MAX_CHARS = 4000;
 function isAffirmativeSmsReaction(body) {
   const text = String(body || '').trim();
-  if (!text) return false;
+  if (!text || text.length > SMS_REACTION_MAX_CHARS) return false;
   if (AFFIRMATIVE_SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text)) return true;
   const m = ACK_EMOJI_SMS_REACTION_RE.exec(text) || ANDROID_EMOJI_SMS_REACTION_RE.exec(text);
   if (!m) return false;
@@ -209,6 +214,7 @@ function hasSchedulingIntent(body) {
 function isSmsReaction(body) {
   if (!body || typeof body !== 'string') return false;
   const text = body.trim();
+  if (text.length > SMS_REACTION_MAX_CHARS) return false;
   return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text)
     || EMOJI_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text)
     || ANDROID_EMOJI_SMS_REACTION_RE.test(text);

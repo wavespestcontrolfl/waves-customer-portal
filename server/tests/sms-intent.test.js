@@ -178,3 +178,35 @@ describe('Android emoji tapback shape (no "Reacted")', () => {
     expect(isQuietSmsReaction('Liked \u201cSee you Thursday between 2 and 4\u201d')).toBe(true);
   });
 });
+
+// codex #6331 r1: pad and emoji parts that can match the same character
+// backtrack cubically — 1600 zero-width joiners then 'x' took ~4.6 s.
+describe('reaction recognizers stay linear on adversarial input', () => {
+  const { isQuietSmsReaction, isAffirmativeSmsReaction } = require('../services/sms-intent');
+  const time = (fn) => { const t = process.hrtime.bigint(); const out = fn(); return [out, Number(process.hrtime.bigint() - t) / 1e6]; };
+  const units = ['\u200d', '\u200b', '\u200c', '\ufeff', ' ', '\u{1F3FD}', '\ufe0f', '👍', '1\ufe0f\u20e3'];
+  const inputs = {
+    zwj: '\u200d'.repeat(1600) + 'x',
+    zwsp: '\u200b'.repeat(1600) + 'x',
+    zwjThenQuote: ` \u200b${'\u200d'.repeat(1600)} to \u201cx\u201dx`,
+    emojiRun: '👍'.repeat(1600) + 'x',
+    modifierRun: '\u{1F3FD}'.repeat(1600) + 'x',
+    reactedZwj: `Reacted ${'\u200d'.repeat(1600)}x`,
+    mixed: Array.from({ length: 1600 }, (_, i) => units[i % units.length]).join('') + 'x',
+  };
+
+  test.each(Object.entries(inputs))('%s returns false quickly', (_name, body) => {
+    for (const fn of [isSmsReaction, isQuietSmsReaction, isAffirmativeSmsReaction]) {
+      const [out, ms] = time(() => fn(body));
+      expect(out).toBe(false);
+      expect(ms).toBeLessThan(50);
+    }
+  });
+
+  test('a body over the cap is not a reaction', () => {
+    const long = `Liked \u201c${'a'.repeat(5000)}\u201d`;
+    expect(isSmsReaction(long)).toBe(false);
+    expect(isAffirmativeSmsReaction(long)).toBe(false);
+    expect(isSmsReaction(`Liked \u201c${'a'.repeat(1600)}\u201d`)).toBe(true); // a full-length quoted text still counts
+  });
+});

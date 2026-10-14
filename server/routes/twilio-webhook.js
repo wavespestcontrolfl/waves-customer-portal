@@ -14,6 +14,7 @@ const {
   hasSchedulingIntent,
   isSmsReaction,
   isQuietSmsReaction,
+  isAffirmativeSmsReaction,
   isCourtesyOnly,
   hasRescheduleOrAwayIntent,
   outboundAsksForReply,
@@ -336,7 +337,8 @@ router.post('/sms', async (req, res) => {
     // (hook P1 ×2). Loud reactions take a dedicated path below: persisted
     // unread + the same guarded bell a text gets, never the business
     // automations (reschedule, lead intake, estimator).
-    const quietReaction = smsReaction && isQuietSmsReaction(Body);
+    const quietReaction = smsReaction && (isQuietSmsReaction(Body)
+      || await isAffirmativeReactionToAutomatedText(Body, From, To));
     // Hoisted from the AI-reply section: the reaction path below needs it too.
     const AI_ASSISTANT_NUMBER = '+18559260203';
     const toClean = (To || '').replace(/\D/g, '');
@@ -2296,40 +2298,70 @@ async function ringSmsReplyBell(args) {
 }
 
 // sms_log.message_type of the automated visit notices the system sends on its
-// own (appointment-reminders.js, twilio.js, reschedule-sms.js; names from
-// mapPurposeToMessageType and the reminder kind maps).
+// own. Names come from the code that writes them: mapPurposeToMessageType and
+// appointment-reminders.js (confirmation, reminders, en route, arrival),
+// reschedule-sms.js, and the completion texts persisted by
+// complete-scheduled-service.js (sentSmsType) + service-report/delivery.js.
+// A test scans those sources, so a new completion type must be classified here.
 const AUTOMATED_VISIT_TEXT_TYPES = new Set([
   'confirmation', 'appointment_confirmation',
   'appointment_reminder', 'appointment_reminder_72h', 'appointment_reminder_24h',
   'reminder_72h', 'reminder_24h',
-  'tech_en_route', 'tech_arrived', 'service_complete',
+  'tech_en_route', 'tech_arrived',
+  'service_complete', 'service_complete_with_invoice', 'service_complete_paid_receipt',
+  'service_complete_prepaid', 'service_complete_annual_prepay', 'service_complete_annual_prepay_after_first_visit',
+  'service_report_v1', 'service_report_v1_with_invoice',
 ]);
+
+// The last text Waves sent on this thread (scoped to the Waves number the
+// customer replied on: a question asked from a different line is a different
+// thread — hook P1). Throws on a failed read; callers fail closed.
+async function lastOutboundOnThread(toPhone, ourNumber) {
+  return db('sms_log')
+    .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
+    .whereIn('status', ['queued', 'sent', 'delivered']) // a failed/blocked send never reached them (hook P1)
+    .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
+    .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+    .orderBy('created_at', 'desc')
+    .first('message_body', 'message_type');
+}
+
+// GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14): an automated visit text
+// asks nothing a person is waiting to hear back on, even when its template
+// carries a "reply"/"confirm" line. Only the explicit allowlist counts; a
+// person's text ('manual', AI-approved drafts) and every unlisted type keep
+// the question check.
+function isAutomatedVisitText(row) {
+  return require('../config/feature-gates').smsCourtesyAfterTemplateLive()
+    && AUTOMATED_VISIT_TEXT_TYPES.has(String(row?.message_type || '').toLowerCase());
+}
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {
   try {
-    // Scoped to the Waves number the customer replied on: a question asked
-    // from a different line is a different thread (hook P1).
-    const last = await db('sms_log')
-      .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
-      .whereIn('status', ['queued', 'sent', 'delivered']) // a failed/blocked send never reached them (hook P1)
-      .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
-      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-      .orderBy('created_at', 'desc')
-      .first('message_body', 'message_type');
+    const last = await lastOutboundOnThread(toPhone, ourNumber);
     if (!last) return true;
-    // GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14): an automated visit
-    // text asks nothing a person is waiting to hear back on, even when its
-    // template carries a "reply"/"confirm" line, so "Ok" after it is a closer.
-    // Only the explicit allowlist counts; a person's text ('manual', AI-approved
-    // drafts) and every unlisted type keep the question check below.
-    if (require('../config/feature-gates').smsCourtesyAfterTemplateLive()
-      && AUTOMATED_VISIT_TEXT_TYPES.has(String(last.message_type || '').toLowerCase())) return false;
+    if (isAutomatedVisitText(last)) return false;
     // A question mark OR an explicit reply directive ("Reply YES to confirm",
     // "let us know", "text back") — templates ask without "?" (hook P1).
     return outboundAsksForReply(last.message_body);
   } catch (e) {
     logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
     return true;
+  }
+}
+
+// Gate on: an affirmative tapback (Liked/Loved/👍-type emoji, the same ACK
+// list as isQuietSmsReaction) on a thread whose last Waves text was automated
+// is quiet even though that template quoted a "reply"/"confirm" line. ❓/👎
+// and every other reaction keep their loud path. Fails closed (loud).
+async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
+  if (!require('../config/feature-gates').smsCourtesyAfterTemplateLive()) return false;
+  if (!isAffirmativeSmsReaction(body)) return false;
+  try {
+    return isAutomatedVisitText(await lastOutboundOnThread(toPhone, ourNumber));
+  } catch (e) {
+    logger.warn(`[twilio-webhook] reaction thread lookup failed: ${e.message}; leaving the reaction loud`);
+    return false;
   }
 }
 
@@ -2345,6 +2377,8 @@ router._internals = {
   intakeOutcome,
   shouldReserveCorrectionJob,
   lastOutboundAskedQuestion,
+  isAffirmativeReactionToAutomatedText,
+  AUTOMATED_VISIT_TEXT_TYPES,
 };
 
 module.exports = router;
