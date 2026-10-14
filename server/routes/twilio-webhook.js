@@ -2324,7 +2324,7 @@ async function lastOutboundOnThread(toPhone, ourNumber) {
     .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
     .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
     .orderBy('created_at', 'desc')
-    .first('message_body', 'message_type');
+    .first('message_body', 'message_type', 'status');
   return last;
 }
 
@@ -2332,9 +2332,13 @@ async function lastOutboundOnThread(toPhone, ourNumber) {
 // asks nothing a person is waiting to hear back on, even when its template
 // carries a "reply"/"confirm" line. Only the explicit allowlist counts; a
 // person's text ('manual', AI-approved drafts) and every unlisted type keep
-// the question check.
+// the question check. Only a text with delivery evidence counts: a 'queued'
+// row has not reached the phone, so the customer is still answering whatever
+// came before it (Codex #6331).
+const DELIVERED_STATUSES = new Set(['sent', 'delivered']);
 function isAutomatedVisitText(row) {
   return require('../config/feature-gates').smsCourtesyAfterTemplateLive()
+    && DELIVERED_STATUSES.has(String(row?.status || '').toLowerCase())
     && AUTOMATED_VISIT_TEXT_TYPES.has(String(row?.message_type || '').toLowerCase());
 }
 
