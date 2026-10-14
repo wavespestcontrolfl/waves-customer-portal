@@ -245,3 +245,16 @@ describe('authorization headers and Basic credentials', () => {
     expect(scrubSecretText(text).text).toBe(text);
   });
 });
+
+// Codex: a labelled secret at the start of a long unpunctuated line is still removed.
+describe('labelled secret in a long line', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  test('the value goes even when the line has no sentence end within 120 characters', () => {
+    const value = ['hun', 'ter', '2x9'].join('');
+    const tail = ' and then the customer explained at length that the side yard floods every summer so the technician should plan around it'.repeat(3);
+    const out = scrubSecretText(`password is ${value}${tail}`).text;
+    expect(out).not.toContain(value);
+    expect(out.startsWith('password is [removed]')).toBe(true);
+    expect(out).toContain('plan around it');
+  });
+});

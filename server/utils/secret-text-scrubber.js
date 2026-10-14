@@ -116,7 +116,9 @@ const LABEL_WORDS = '(?:password|passcode|passphrase|passwd|pwd|pin|secret|token
 // passphrase is several words: "token: alpha beta gamma"), at most 120
 // characters. A "." inside a value ("abc.def") does not end it; a "." followed
 // by a space or the end does.
-const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()([^\\n]{1,120}?)(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))`, 'gi');
+// A line that runs on for more than 120 characters with no sentence end still
+// loses the value: the first 120 characters after the label are removed.
+const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()((?:[^\\n]{1,120}?(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))|[^\\n]{120}))`, 'gi');
 // "gate PIN: 1234", "lockbox pin 1234": a PIN or passcode that opens a gate,
 // door or lockbox is the same kept data as a gate code.
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
