@@ -18,6 +18,55 @@ const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const logger = require('../services/logger');
 const { nanpPhoneProblem } = require('../utils/phone');
+const { leadServiceDisplay, catalogNameIndex } = require('../utils/lead-service-display');
+const { leadServiceDisplayLive } = require('../config/feature-gates');
+
+// GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
+// way the booking catalog names it. Read-only: service_interest is untouched,
+// and with the gate off the field is absent so the screen shows the stored text.
+// The live catalog names, or null when the gate is off or the catalog cannot
+// be read. Without the catalog a name would be a guess, so callers then show
+// the stored text.
+async function serviceDisplayCatalog() {
+  if (!leadServiceDisplayLive()) return null;
+  try {
+    return catalogNameIndex(await db('services').pluck('name'));
+  } catch (err) {
+    logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
+    return null;
+  }
+}
+
+async function withServiceDisplay(leads) {
+  const catalogNames = leads.length ? await serviceDisplayCatalog() : null;
+  if (!catalogNames) return leads;
+  return leads.map((lead) => ({
+    ...lead,
+    service_display: leadServiceDisplay(lead.service_interest, { catalogNames }),
+  }));
+}
+
+// Search matches what the screen shows: the stored service texts whose
+// display name contains the term, for applyLeadSearch to OR in. The
+// text → name index is rebuilt at most every five minutes (the Leads screen
+// re-runs an active search every 10 s) and one search adds at most 100 texts.
+const SHOWN_AS_TTL_MS = 5 * 60 * 1000;
+const SHOWN_AS_MAX_TEXTS = 100;
+let shownAsIndex = { builtAt: 0, rows: [] };
+
+async function serviceTextsShownAs(search) {
+  const term = String(search).trim().replace(/\s+/g, ' ').toLowerCase();
+  const catalogNames = term ? await serviceDisplayCatalog() : null;
+  if (!catalogNames) return [];
+  if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS) {
+    const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest').distinct().pluck('service_interest');
+    shownAsIndex = {
+      builtAt: Date.now(),
+      rows: stored.map((text) => [text, (leadServiceDisplay(text, { catalogNames }) || '').toLowerCase()]),
+    };
+  }
+  return shownAsIndex.rows.filter(([, shown]) => shown.includes(term)).slice(0, SHOWN_AS_MAX_TEXTS).map(([text]) => text);
+}
 
 // Format/length validation for manual lead creation. Permissive by design — it
 // validates shape (email/phone format, string caps, types) without changing
@@ -90,7 +139,7 @@ function parseInclusiveStart(startDate) {
 
 // One predicate for both rows and totals: full names and formatted phones
 // must have the same membership before pagination.
-function applyLeadSearch(query, search) {
+function applyLeadSearch(query, search, serviceTexts = []) {
   const term = String(search).trim().replace(/\s+/g, ' ');
   const pattern = `%${term}%`;
   const digits = term.replace(/\D/g, '');
@@ -102,6 +151,7 @@ function applyLeadSearch(query, search) {
       .orWhereILike('leads.email', pattern)
       .orWhereILike('leads.address', pattern)
       .orWhereILike('leads.service_interest', pattern);
+    if (serviceTexts.length) this.orWhereIn('leads.service_interest', serviceTexts);
     if (digits && /^[+\d\s().-]+$/.test(term)) {
       this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
     }
@@ -706,7 +756,8 @@ router.get('/', async (req, res, next) => {
     const endDt = parseInclusiveEnd(end_date);
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
-    if (search) query.modify(applyLeadSearch, search);
+    const shownAs = search ? await serviceTextsShownAs(search) : [];
+    if (search) query.modify(applyLeadSearch, search, shownAs);
     // The estimate tool's lookup lists only leads a NEW estimate can attach to:
     //   - no customer record (a lead that has one is found through that customer);
     //   - no estimate yet (a save against a lead already linked to an estimate
@@ -771,7 +822,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(query);
       excludeInternal(countQuery);
     }
-    if (search) countQuery.modify(applyLeadSearch, search);
+    if (search) countQuery.modify(applyLeadSearch, search, shownAs);
     if (attachableOnly) whereEstimateAttachable(countQuery);
     const { count } = await countQuery.count('* as count').first();
 
@@ -782,7 +833,7 @@ router.get('/', async (req, res, next) => {
       .offset((pg - 1) * lim);
 
     res.json({
-      leads,
+      leads: await withServiceDisplay(leads),
       total: parseInt(count, 10),
       page: pg,
       limit: lim,
@@ -1013,7 +1064,7 @@ router.get('/:id', async (req, res, next) => {
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    const response = { lead, activities, calls };
+    const response = { lead: (await withServiceDisplay([lead]))[0], activities, calls };
     if (req.query.leadReview === '1') {
       response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
       try {
