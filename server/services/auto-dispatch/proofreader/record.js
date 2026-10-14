@@ -183,7 +183,12 @@ const TIME_WORDS_RE = new RegExp([
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
   // (r17); "every week" is read below.
-  '\\b(?:today|tonight|tomorrow|yesterday|holidays?)(?![\\w])',
+  // Only with a word that makes it a limit ("TOMORROW ONLY", "NOT ON
+  // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
+  '\\b(?:today|tonight|tomorrow|holidays?)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no)(?=\\s{1,5}(?:today|tonight|tomorrow|holidays?)(?![\\w]))',
+  // A named window of the day ("BUSINESS HOURS ONLY"): r18.
+  '\\b(?:business|office|working|opening|open|normal|regular|school)(?=\\s{1,5}hours\\b)',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
