@@ -158,7 +158,8 @@ const QTY = `(?:\\d{1,3}|a|an|half|an?\\s{1,3}half|${SPELLED_HOURS}|fifteen|twen
 const HOUR = `(?:[01]?\\d|2[0-3])(?![\\w:/%-])(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
 // Times a person names instead of an hour ("AFTER LUNCH ONLY", "before
 // sunset", "after work"): r5.
-const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk|daylight|dark|work|school';
+// Not work / school: "AT WORK" is a place; "after work" is read below (r39).
+const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk|daylight|dark';
 // The words a lead word may point at that count by their own pattern too
 // ("BEFORE noon", "after DARK", "by Friday"): r12, r21.
 const TIME_ANCHORS = `(?:${NAMED_TIMES}|noon|midnight|mornings?|afternoons?|evenings?|night|weekdays?|weekends?|(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?)\\b`;
@@ -208,15 +209,15 @@ const TIME_WORDS_RE = new RegExp([
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
   `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|warning|lead[\\s-]{0,3}time|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
-  `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
+  `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
   '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
   // PM alone only before a word that makes it a time ("PM ONLY", "PM is
-  // best") or at the end of a sentence; any other word is the property
-  // manager ("PM approved access": r24).
-  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b|[.,;!)]|$))',
+  // best"); otherwise it is the property manager ("PM approved access",
+  // "SPOKE TO PM": r24, r39).
+  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b))',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
   // (r17); "every week" is read below.
@@ -239,6 +240,8 @@ const TIME_WORDS_RE = new RegExp([
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
   `(?<![\\d:/.-])\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  // "after work", "before school" (not "at work": a place): r39.
+  '\\b(?:before|after|until|till|til|by)(?=\\s{1,5}(?:work|school)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -260,7 +263,7 @@ const TIME_WORDS_RE = new RegExp([
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|avoid|avoids|skip|do|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
