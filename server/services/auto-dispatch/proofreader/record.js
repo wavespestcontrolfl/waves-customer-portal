@@ -227,6 +227,12 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:only|not|never|except|after|before|until|by|from|on|no)(?=\\s{1,5}(?:today|tonight|tomorrow|holidays?)(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
+  // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
+  // "late in the day"): r49.
+  '\\b(?:early|earlier|late|later)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
+  '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
+  // A week of the month ("FIRST WEEK OF THE MONTH ONLY"): r49.
+  '\\b(?:first|second|third|fourth|last|\\d(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
   // "AS EARLY AS 9", "as late as 5": r35.
   `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
@@ -254,7 +260,11 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
   // A hold with no end date ("NO SERVICE UNTIL FURTHER NOTICE", "ON HOLD"): r48.
   '\\b(?:until|till|til)(?=\\s{1,5}(?:further|notified|told|advised|we\\s{1,3}call|they\\s{1,3}call|i\\s{1,3}call)\\b)',
-  '\\b(?:on\\s{1,3}hold|indefinitely|paused|suspended)(?![\\w])',
+  // paused / suspended only of the service or the visits ("SERVICE
+  // SUSPENDED"; not "SUSPENDED CEILING"): r49.
+  '\\b(?:on\\s{1,3}hold|indefinitely)(?![\\w])',
+  '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?)(?:paused|suspended)(?![\\w])',
+  '\\b(?:pause|suspend|paused|suspended)(?=\\s{1,3}(?:the\\s{1,3})?(?:service|services|visits?|appointments?|account|treatments?|program|plan)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -276,7 +286,7 @@ const TIME_WORDS_RE = new RegExp([
   // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
