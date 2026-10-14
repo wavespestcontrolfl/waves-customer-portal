@@ -236,7 +236,10 @@ const TIME_WORDS_RE = new RegExp([
   // Night only as a limit ("NIGHT ONLY"); "NIGHT LIGHT" is a thing (r25).
   '\\b(?:nights?|overnight)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service)\\b|[,;!)]|\\.(?:\\s|$)|$))',
   // "FIRST APPOINTMENT ONLY", "last stop", "1st appointment": r25, r30.
-  '\\b(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
+  // ...only as a wish or a limit ("FIRST APPOINTMENT ONLY", "want the 1st
+  // appointment"): "FIRST APPOINTMENT COMPLETED" is history (r41).
+  '\\b(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\s{0,3}(?:(?:only|please|preferred|ok|okay|works?|of\\s{1,3}the\\s{1,3}day|if\\s{1,3}possible)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|need|needs|want|wants|prefer|prefers|book|schedule|must|always|be|as|request|requests|requested)\\s{1,5}(?:the\\s{1,5})?)(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
   `(?<![\\d:/.-])\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
@@ -262,8 +265,8 @@ const TIME_WORDS_RE = new RegExp([
   // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|avoid|avoids|skip|do|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|avoid|avoids|skip|do|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:available|unavailable|free|busy|closed|off|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
@@ -306,14 +309,17 @@ const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_
 // the mask removes flagged 37 of 244 production records (technicians'
 // product names in capitals), against 4 with this list (measured
 // 2026-10-13); a statement the list misses is the known limit.
-function maskHidTime(raw, masked) {
+// `lineMasked`: the same text masked with its line breaks kept, when it has
+// any. The neighbor rule must hold there too, so a break ends a clause
+// ("ask MANAGER\nFriday works": r34). The model never reads that form.
+function maskHidTime(raw, masked, lineMasked = null) {
   if (raw === masked) return false;
   // A text past the whole record's limit is not scanned (security r8). Its
   // masked form decides: still past the limit, the record is too long and no
   // model is asked; shorter (the mask took a long credential run), it is
   // counted as not fully read, unscanned (r9).
   if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
-  return timeWords(masked) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked);
+  return timeWords(masked) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked, lineMasked);
 }
 
 // The broad rule beside the count (Codex #6328 r22, after 21 rounds that each
@@ -360,7 +366,8 @@ function lastClause(text) {
   return text.slice(end);
 }
 
-function maskBesideTimeWord(masked) {
+function maskBesideTimeWord(masked, lineMasked = null) {
+  if (lineMasked != null && lineMasked !== masked && !maskBesideTimeWord(lineMasked)) return false;
   let at = masked.indexOf(MARK);
   while (at !== -1) {
     // Within the mask's own sentence (r25): "ask [redacted]. Friday works" is
@@ -402,36 +409,28 @@ function maskBesideTimeWord(masked) {
 const { AsyncLocalStorage } = require('async_hooks');
 const scanBudget = new AsyncLocalStorage();
 
-// The mask runs on the text with its line breaks, and the scan reads that
-// same masked text (a break ends a clause for the neighbor rule: "ask
-// MANAGER\nFriday works", r34). The model gets those masked words on one
-// line (with the one-line mask on top), and the scan judges each step, so it
-// always judges what the model reads (pre-push r34).
+// The model reads the one-line text with the one-line mask, as before this
+// check existed: a mask run on the line-kept text first can let a multi-word
+// password on the next line through (Codex security r41). The line-kept mask
+// only tells the neighbor rule where a clause ends.
 const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n\s*/g, '\n').trim();
 
-// One entry is charged once against the record's budget, for all its
-// steps (r36): each step scans a text of about the same length.
-function hiddenTimeIn(steps) {
-  const changed = steps.filter(([raw, masked]) => raw !== masked);
-  if (!changed.length) return false;
-  const length = changed[0][0].length;
+// One entry is charged once against the record's budget (r36).
+function hiddenTimeIn(text, raw, masked) {
+  if (raw === masked) return false;
   const budget = scanBudget.getStore();
-  if (budget && length > budget.left) return true;
-  if (budget) budget.left -= length;
-  return changed.some(([raw, masked]) => maskHidTime(raw, masked));
+  if (budget && raw.length > budget.left) return true;
+  if (budget) budget.left -= raw.length;
+  const lines = keepLines(text);
+  return maskHidTime(raw, masked, lines.includes('\n') ? redactAccessCodes(lines) : null);
 }
 
 function entry(channel, from, at, text) {
-  const raw = keepLines(text);
-  const masked = redactAccessCodes(raw);
-  // The one-line mask runs again on the result: a code split across lines
-  // ("is the\ngate code") is masked in the one-line form too, as before.
-  // The scan checks both steps.
-  const once = clean(masked);
-  const body = redactAccessCodes(once);
+  const raw = clean(text);
+  const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
-  const hidden = hiddenTimeIn([[raw, masked], [once, body]]);
+  const hidden = hiddenTimeIn(text, raw, body);
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
     ...(hidden && i === 0 ? { maskedTime: true } : {}),

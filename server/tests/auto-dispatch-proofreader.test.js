@@ -473,6 +473,9 @@ describe('the customer record', () => {
       'GATE CODE 4821 EXPIRES 10-20-2026',
       "GATE CODE 4821, NEED ONE DAY'S NOTICE",
       'GATE CODE 4821, 800 HRS ONLY',
+      'GATE CODE 4821, NOT AVAILABLE MONDAY',
+      'GATE CODE 4821, MONDAY UNAVAILABLE',
+      'Gate code 4821, want the 1st appointment',
       'Gate code 4821, ON MONDAY',
       'Gate code 4821, MONDAY WORKS',
       'CODE 4821 MON-FRI ONLY',
@@ -528,6 +531,7 @@ describe('the customer record', () => {
       'Gate code 4821, OWNER IS AT WORK',
       'Gate code 4821, KEY IS AT SCHOOL',
       'Gate code 4821, SPOKE TO PM',
+      'GATE CODE 4821, FIRST APPOINTMENT COMPLETED',
       'Gate code 4821, ask MANAGER\nFriday works.',
       'Gate code 4821, ask MANAGER. Friday works.',
       'Gate code 4821, owner called YESTERDAY',
@@ -578,6 +582,15 @@ describe('the customer record', () => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
       expect(record.tooLong).toBe(false);
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a multi-word password on the next line is masked as before in the text the model reads', async () => {
+      const plain = 'Gate password below blue house today';
+      const note = 'Gate password below\nblue house today';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      const entry = record.entries.find((row) => row.text.includes('password'));
+      expect(entry.text).toBe(redactAccessCodes(plain));
+      expect(entry.text).not.toContain('blue house');
     });
 
     test('a code split across lines is still masked in the text the model reads', async () => {
