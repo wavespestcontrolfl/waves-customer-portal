@@ -36,12 +36,13 @@
  * select or build such values out of the catalog.
  */
 const { isCredentialField, isCredentialName } = require('./credential-fields');
-const { scrubSecretText } = require('./secret-text-scrubber');
-const { scrubPansDetailed } = require('./pan-scrub');
+const { scrubSecretText, clauseAt, ACCESS_WORD_RE } = require('./secret-text-scrubber');
+const { scrubPansDetailed, luhnValid } = require('./pan-scrub');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
 const REDACTED_FIELD = '[removed]';
+const REDACTED_CREDENTIALS = '[credentials removed]';
 
 // Query keys that mark a credential in a LINK. The general rule is the shared
 // credential-name test (credential-fields.js: token, secret, password, session,
@@ -231,7 +232,20 @@ function absoluteLinkVerdict(href) {
   return isOwnPrivateLink(url) || isPrivateLink(href) ? REDACTED_PRIVATE_LINK : null;
 }
 
-function redactString(text, state) {
+// "postgres://admin:pw@host/db", "ftp://user:pw@host", "mysql://:pw@host": a scheme other than http(s)
+// with a password in its userinfo. The scheme and host stay; the userinfo goes. (An http(s) link with
+// userinfo is judged as a whole by absoluteLinkVerdict.)
+const USERINFO_URL_RE = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^\s/@?#"'<>\\:]*):([^\s/@?#"'<>\\]*)@/g;
+function scrubUserinfo(text, state) {
+  return text.replace(USERINFO_URL_RE, (match, scheme) => {
+    if (/^https?:\/\/$/i.test(scheme)) return match;
+    state.fields += 1;
+    return `${scheme}${REDACTED_CREDENTIALS}@`;
+  });
+}
+
+function redactString(rawText, state) {
+  const text = scrubUserinfo(rawText, state);
   const count = (verdict) => { if (verdict === REDACTED_LINK) state.links += 1; else state.privateLinks += 1; return verdict; };
   const absolute = text.replace(URL_IN_TEXT_RE, (match) => {
     const { link, tail } = splitTail(match);
@@ -271,16 +285,59 @@ function newState() {
 
 // Credentials pasted into free text (best effort; see secret-text-scrubber.js).
 // Card numbers and CVVs go through the shared card scrubber (Luhn-checked, so
-// phone numbers, invoice numbers and ids stay), and a Social Security number
-// in its dashed form or after its label is removed.
+// phone numbers, invoice numbers and ids stay), then three passes of this path:
+//  - a card number written like a phone number ("Card number: 424 242 4242 424242"),
+//    removed when a card word leads the run in its clause and the digits pass Luhn;
+//  - a CVV after its label, removed unless the clause names a physical entry device and
+//    no card or payment word ("Security code for the gate: 4455" stays; a card wins);
+//  - a Social Security number in its dashed form or after its label.
 // The 3-2-4 shape with one separator used twice (dashes or spaces). A phone
 // number is 3-3-4 and does not match.
 const SSN_DASHED_RE = /(?<![\d-])\d{3}([- ])\d{2}\1\d{4}(?![\d-])/g;
-const SSN_LABELLED_RE = /\b(ssn|social(?:\s+security)?(?:\s+(?:number|no\.?|#))?)\b([^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
+// "SSN", "Social Security", "Social Security Number", "Social Security No.", "SSN #": the label may be
+// followed by "number"/"no", ordinary punctuation (". : #") and spaces, or by up to 20 other characters
+// that hold no digit, period or line break ("SSN on file is ").
+const SSN_LABELLED_RE = /\b(ssn|social(?:\s+security)?)\b((?:\s+(?:number|num|no)\b)?[\s.:#]{0,8}|[^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
+const CARD_WORD = '(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|cc|credit|debit|pan|visa|master\\s?card|amex|american\\s+express|discover)';
+const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b([^\\d\\n.;!?]{0,24})(\\d(?:[ -]?\\d)*)(?!\\d)`, 'gi');
+const PAN_LENGTHS = [16, 15, 19, 14, 13];
+function scrubGroupedCard(text) {
+  let removed = 0;
+  const clean = text.replace(CARD_RUN_RE, (match, word, between, run) => {
+    const digits = run.replace(/\D/g, '');
+    if (digits.length < 13) return match;
+    for (const length of PAN_LENGTHS) {
+      if (length > digits.length || !luhnValid(digits.slice(0, length))) continue;
+      // the run's characters up to and including its `length`-th digit
+      let seen = 0;
+      let end = 0;
+      while (seen < length) { if (/\d/.test(run[end])) seen += 1; end += 1; }
+      removed += 1;
+      return `${word}${between}[card ending ${digits.slice(length - 4, length)}]${run.slice(end)}`;
+    }
+    return match;
+  });
+  return { text: clean, removed };
+}
+const CVV_RE = /\b(cvv2?|cvc2?|csc|security code|card code|card verification(?: (?:value|code))?)\b(\D{0,15}?)(\d{3,4})(?!\d)/gi;
+const CARD_CONTEXT_RE = /\b(?:card|credit|debit|visa|mastercard|master card|amex|discover|paid|payment)\b/i;
+function scrubCvv(text) {
+  let removed = 0;
+  const clean = text.replace(CVV_RE, (match, label, between, _digits, offset) => {
+    const clause = clauseAt(text, offset);
+    if (ACCESS_WORD_RE.test(clause) && !CARD_CONTEXT_RE.test(clause)) return match;
+    removed += 1;
+    return `${label}${between}[code removed]`;
+  });
+  return { text: clean, removed };
+}
 function scrubFinancialIdentifiers(text) {
   const cards = scrubPansDetailed(text);
   let removed = cards.count;
-  const clean = cards.text
+  const grouped = scrubGroupedCard(cards.text);
+  const cvv = scrubCvv(grouped.text);
+  removed += grouped.removed + cvv.removed;
+  const clean = cvv.text
     .replace(SSN_DASHED_RE, () => { removed += 1; return '[SSN removed]'; })
     .replace(SSN_LABELLED_RE, (_match, label, between) => { removed += 1; return `${label}${between}[SSN removed]`; });
   return { text: clean, removed };

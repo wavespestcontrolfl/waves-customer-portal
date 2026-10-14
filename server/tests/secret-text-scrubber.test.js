@@ -108,8 +108,12 @@ describe('labelled secrets in prose', () => {
     expect(scrubSecretText(text)).toEqual({ text, removed: 0 });
   });
 
-  test('a separator across a line break does not swallow the next line', () => {
-    expect(scrubSecretText('password:\nnext line stays').text).toBe('password:\nnext line stays');
+  // Codex round 4 on #6324: "Password:\nhunter2" is a label with its value on the next line. ONE line
+  // break after ":" or "=" is allowed; the value is that line only, and a blank line ends the search.
+  test('a value on the line after "label:" is removed, and only that line', () => {
+    expect(scrubSecretText('password:\nnext line goes\nthis line stays').text).toBe('password:\n[removed]\nthis line stays');
+    expect(scrubSecretText('password:\n\nnext line stays').text).toBe('password:\n\nnext line stays');
+    expect(scrubSecretText('password is\nnext line stays').text).toBe('password is\nnext line stays');
   });
 });
 

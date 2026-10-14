@@ -116,9 +116,11 @@ const LABEL_WORDS = '(?:password|passcode|passphrase|passwd|pwd|pin|secret|token
 // passphrase is several words: "token: alpha beta gamma"), at most 120
 // characters. A "." inside a value ("abc.def") does not end it; a "." followed
 // by a space or the end does.
+// After ':' or '=' ONE line break (with spaces or tabs around it) may come before the value
+// ("Password:\nhunter2"); after " is " it may not.
 // A line that runs on for more than 120 characters with no sentence end still
 // loses the value: the first 120 characters after the label are removed.
-const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()((?:[^\\n]{1,120}?(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))|[^\\n]{120}))`, 'gi');
+const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*(?:\\r?\\n[ \\t]*)?|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()((?:[^\\n]{1,120}?(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))|[^\\n]{120}))`, 'gi');
 // "gate PIN: 1234", "lockbox pin 1234": a PIN or passcode that opens a gate,
 // door or lockbox is the same kept data as a gate code.
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
@@ -133,12 +135,17 @@ const ACCESS_WORD_RE = /\b(?:gate|gates|door|doors|lockbox|lock\s?box|garage|key
 // another sentence and is still removed. A clause that names an account
 // (portal, bank, app, login, wifi, ...) is never an access code.
 const ACCOUNT_WORD_RE = /\b(?:portal|bank|banking|app|account|login|log-in|online|website|wifi|wi-fi|email|card|debit|credit|atm|voicemail|phone|zoom|meeting|conference|call-in|dial-in|webinar|teams)\b/i;
-function accessCodeLine(text, offset) {
+// The clause around `offset`: from the nearest "\n", ". ", ";", "! " or "? " before it to the
+// nearest "\n", ";" or sentence end after it.
+function clauseAt(text, offset) {
   const before = text.slice(0, offset);
   const start = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
   const rest = text.slice(offset);
   const end = rest.search(/\n|;|[.!?](?:\s|$)/);
-  const clause = text.slice(start, end === -1 ? text.length : offset + end);
+  return text.slice(start, end === -1 ? text.length : offset + end);
+}
+function accessCodeLine(text, offset) {
+  const clause = clauseAt(text, offset);
   return ACCESS_WORD_RE.test(clause) && !ACCOUNT_WORD_RE.test(clause);
 }
 // After ":" / "=" these are not values; after "is" the value must also look
@@ -197,4 +204,4 @@ function scrubSecretText(input) {
   return { text, removed };
 }
 
-module.exports = { SECRET_PATTERNS, REMOVED, scrubSecretText };
+module.exports = { SECRET_PATTERNS, REMOVED, scrubSecretText, clauseAt, ACCESS_WORD_RE };

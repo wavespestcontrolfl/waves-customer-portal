@@ -1026,3 +1026,78 @@ describe('financial identifiers and access PINs in returned text', () => {
     expect(scrub(text)).toBe(expected);
   });
 });
+
+// Codex round 4 on #6324: five concrete shapes. Fake secrets are built by concatenation.
+describe('card codes, grouped card numbers, multi-line labels, URL credentials and SSN labels', () => {
+  const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, newState());
+  const secret = 'hunter' + '2';
+  const grouped = ['424', '242', '4242', '424242'];
+
+  test.each([
+    ['Gate is open. Paid with credit card. Security code: 123.', 'Gate is open. Paid with credit card. Security code: [code removed].'],
+    ['Card ending 4242, security code: 123; gate code 7777.', 'Card ending 4242, security code: [code removed]; gate code 7777.'],
+    ['Paid by visa, CVV 4821 at the gate', 'Paid by visa, CVV [code removed] at the gate'],
+    ['cvc: 987', 'cvc: [code removed]'],
+  ])('a CVV is removed when a card or payment word is in its clause, or no entry device is: %s', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+  test.each(['Security code for the gate: 4455', 'Keypad security code is 7788', 'Door security code: 2468 (lockbox on the side)'])('a security code for a physical entry device stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+
+  test.each([
+    ['Password:\n' + secret, 'Password:\n[removed]'],
+    ['Password: \n  ' + secret, 'Password: \n  [removed]'],
+    ['API key:\nabc' + 'DEF123456', 'API key:\n[removed]'],
+    ['token=\r\n' + secret + ' and more words', 'token=\r\n[removed]'],
+  ])('a value on the next line after ":" or "=" is removed: %j', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+  test('after " is " a line break does not carry the label to the next line, and an empty value stays', () => {
+    expect(scrub('password is\n' + secret)).toBe('password is\n' + secret);
+    expect(scrub('Password:\n\nsee the front desk')).toBe('Password:\n\nsee the front desk');
+    expect(scrub('Gate code:\n7777')).toBe('Gate code:\n7777');
+  });
+
+  test.each([
+    [`Card number: ${grouped.join(' ')}`, 'Card number: [card ending 4242]'],
+    [`Card number: ${grouped.join('-')} exp 12/28`, 'Card number: [card ending 4242] exp 12/28'],
+    [`CC ${grouped.join(' ')}.`, 'CC [card ending 4242].'],
+    [`Pay with the visa: ${grouped.join(' ')}`, 'Pay with the visa: [card ending 4242]'],
+  ])('a card number written like a phone number is removed after a card word: %s', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+  test.each(['Call 941 555 0100 after 3 pm', 'Card on file, call 424 242 4242', 'Phone 424 242 4242 424243', 'Card number: 1234 5678 9012 3456'])('a phone number or a run that fails Luhn stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+
+  test.each([
+    ['postgres://admin:' + secret + '@db.example.com/prod', 'postgres://[credentials removed]@db.example.com/prod'],
+    ['mysql://root:s3' + 'cret@host/app', 'mysql://[credentials removed]@host/app'],
+    ['ftp://user:pass' + 'word@example.com/file', 'ftp://[credentials removed]@example.com/file'],
+    ['redis://:pw0' + 'rd@cache:6379', 'redis://[credentials removed]@cache:6379'],
+    ['amqp+ssl://svc:' + secret + '@mq.example.com:5671/vhost and then text', 'amqp+ssl://[credentials removed]@mq.example.com:5671/vhost and then text'],
+  ])('a non-HTTP URL loses its userinfo, keeping the scheme and host: %s', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+  test.each(['See http://example.com/page for the schedule', 'ssh://git@example.com/repo.git', 'Call tel://9415550100'])('a link with no password in it stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+  test('an http link with userinfo is still removed as a whole', () => {
+    expect(scrub('https://user:' + 'pw@example.com/x')).toBe('[signed link removed]');
+  });
+
+  test.each([
+    ['Social Security No. 123456789', 'Social Security No. [SSN removed]'],
+    ['SSN: 123456789', 'SSN: [SSN removed]'],
+    ['ssn # 123456789 on file', 'ssn # [SSN removed] on file'],
+    ['Social Security Number: 123-45-6789', 'Social Security Number: [SSN removed]'],
+    ['SSN on file is 123456789', 'SSN on file is [SSN removed]'],
+  ])('a labelled SSN is removed whatever punctuation follows the label: %s', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+  test.each(['Order number 123456789 shipped', 'Invoice no. 123456789', 'Call 941-555-0100'])('a nine-digit number with no SSN label stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+});
