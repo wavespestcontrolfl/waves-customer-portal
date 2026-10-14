@@ -124,14 +124,15 @@ const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
 // "PIN is 4821 at the front gate", "Use PIN: 4821 for the gate": the access
 // word may follow the label. A PIN or passcode whose own line names a gate,
-// door, lockbox, garage, keypad, entry, callbox, clubhouse, lobby, elevator or pool is a property
+// door, lockbox, garage, keypad or callbox (a physical entry device; a word such
+// as "lobby" or "entry" proves nothing: "Zoom PIN for the meeting lobby") is a property
 // access code, which the owner reads through the bar like a gate code.
-const ACCESS_WORD_RE = /\b(?:gate|gates|door|doors|lockbox|lock\s?box|garage|keypad|entry|entrance|callbox|call\s?box|clubhouse|lobby|elevator|pool)\b/i;
+const ACCESS_WORD_RE = /\b(?:gate|gates|door|doors|lockbox|lock\s?box|garage|keypad|callbox|call\s?box)\b/i;
 // Only the PIN's own clause counts (to the nearest ".", ";", "!" , "?" or line
 // break on each side): "Portal PIN is 4821. Gate is open." names the gate in
 // another sentence and is still removed. A clause that names an account
 // (portal, bank, app, login, wifi, ...) is never an access code.
-const ACCOUNT_WORD_RE = /\b(?:portal|bank|banking|app|account|login|log-in|online|website|wifi|wi-fi|email|card|debit|credit|atm|voicemail|phone)\b/i;
+const ACCOUNT_WORD_RE = /\b(?:portal|bank|banking|app|account|login|log-in|online|website|wifi|wi-fi|email|card|debit|credit|atm|voicemail|phone|zoom|meeting|conference|call-in|dial-in|webinar|teams)\b/i;
 function accessCodeLine(text, offset) {
   const before = text.slice(0, offset);
   const start = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;

@@ -1009,6 +1009,13 @@ describe('financial identifiers and access PINs in returned text', () => {
     expect(out).not.toMatch(/CVV: 123/);
     expect(out).toContain('Call 941-555-0100 first.');
   });
+  test('an unlabelled SSN with spaces is removed; a phone number and a spaced amount stay', () => {
+    expect(scrub('Customer provided 123 45 6789 for verification')).toBe('Customer provided [SSN removed] for verification');
+    expect(scrub('Call 941 555 0100 after 3 pm')).toBe('Call 941 555 0100 after 3 pm');
+  });
+  test.each([['Zoom PIN is 4821 for the meeting lobby', 'Zoom PIN is [removed]'], ['Elevator app passcode: 5521', 'Elevator app passcode: [removed]']])('a PIN without a physical entry device is removed: %s', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
   test('a labelled SSN without dashes is removed', () => {
     expect(scrub('social security number is 123 45 6789')).toBe('social security number is [SSN removed]');
   });

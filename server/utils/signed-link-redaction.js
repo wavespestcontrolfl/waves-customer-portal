@@ -273,7 +273,9 @@ function newState() {
 // Card numbers and CVVs go through the shared card scrubber (Luhn-checked, so
 // phone numbers, invoice numbers and ids stay), and a Social Security number
 // in its dashed form or after its label is removed.
-const SSN_DASHED_RE = /\b\d{3}-\d{2}-\d{4}\b/g;
+// The 3-2-4 shape with one separator used twice (dashes or spaces). A phone
+// number is 3-3-4 and does not match.
+const SSN_DASHED_RE = /(?<![\d-])\d{3}([- ])\d{2}\1\d{4}(?![\d-])/g;
 const SSN_LABELLED_RE = /\b(ssn|social(?:\s+security)?(?:\s+(?:number|no\.?|#))?)\b([^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
 function scrubFinancialIdentifiers(text) {
   const cards = scrubPansDetailed(text);
