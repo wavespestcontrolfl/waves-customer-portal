@@ -379,6 +379,9 @@ describe('the customer record', () => {
       'Gate code 4821, TOMORROW ONLY',
       'CODE 4821 NOT ON HOLIDAYS',
       'CODE 4821 NEXT WEEK',
+      'ACCESS CODE 4821 EXPIRES 10/20',
+      'CODE 4821 UNTIL OCT 20',
+      'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
       expect(redactAccessCodes(text)).not.toContain('4821');
@@ -402,6 +405,8 @@ describe('the customer record', () => {
       'Friday is the gate code',
       // A quantity is not a time.
       'Gate code 4821, dog weighs about 50 lbs',
+      'Gate code 4821, about 5 dogs roam the yard',
+      'Friday is the front door access code',
       'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
     ])('nothing about when is hidden: %s', (text) => {
@@ -410,8 +415,13 @@ describe('the customer record', () => {
 
     test('a long stored text is scanned in bounded time (no retry at every byte)', () => {
       const text = `Gate code 1234. ${'A'.repeat(64 * 1024)}`;
+      // A long run of spaces: the record collapses white space before the mask
+      // runs (record.js clean), so only this check sees it raw. Timed alone.
+      const spaces = `Gate code${' '.repeat(32 * 1024)}!`;
+      const spacesMasked = redactAccessCodes(spaces.replace(/\s+/g, ' '));
       const started = Date.now();
       hid(text);
+      maskHidTime(spaces, spacesMasked);
       expect(Date.now() - started).toBeLessThan(500);
     });
 
