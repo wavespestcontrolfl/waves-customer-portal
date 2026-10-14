@@ -139,7 +139,8 @@ const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
 const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
-const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)`;
+// "TWO AND A HALF HOURS": r22.
+const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
 // A word after the number must be one that goes with a time ("before 9
@@ -203,6 +204,8 @@ const TIME_WORDS_RE = new RegExp([
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
   '\\b(?:today|tonight|tomorrow|holidays?)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
   '\\b(?:only|not|never|except|after|before|until|by|from|on|no)(?=\\s{1,5}(?:today|tonight|tomorrow|holidays?)(?![\\w]))',
+  // "AFTER HOURS": r22.
+  '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
   '\\b(?:business|office|working|opening|open|normal|regular|school)(?=\\s{1,5}hours\\b)',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
@@ -258,7 +261,53 @@ function maskHidTime(raw, masked) {
   // model is asked; shorter (the mask took a long credential run), it is
   // counted as not fully read, unscanned (r9).
   if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
-  return timeWords(masked) < timeWords(withoutCredentialValues(raw));
+  return timeWords(masked) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked);
+}
+
+// The broad rule beside the count (Codex #6328 r22, after 21 rounds that each
+// named a new phrase): a masked word right next to a visible word that only
+// says when ("every [redacted] Tuesday", "[redacted] A.M.", "[redacted]
+// Fridays", "expires [redacted] October") hid part of a statement about when.
+// The credential's own mask (right after a code noun, or before "is the
+// ... code") is left out: it sits next to a time word whenever the note
+// states one ("gate code [redacted] after 9").
+const NEIGHBOR_TIME_WORDS = new Set([
+  'mon', 'monday', 'mondays', 'tue', 'tues', 'tuesday', 'tuesdays', 'wed', 'wednesday', 'wednesdays', 'thu', 'thur', 'thurs', 'thursday', 'thursdays',
+  'fri', 'friday', 'fridays', 'sat', 'saturday', 'saturdays', 'sun', 'sunday', 'sundays', 'weekday', 'weekdays', 'weekend', 'weekends',
+  'am', 'pm', 'a.m', 'p.m', 'noon', 'midnight', 'morning', 'mornings', 'afternoon', 'afternoons', 'evening', 'evenings', 'night', 'nights', 'tonight',
+  'today', 'tomorrow', 'lunch', 'lunchtime', 'breakfast', 'dinner', 'supper', 'sunrise', 'sunset', 'dawn', 'dusk',
+  'hour', 'hours', 'hrs', 'notice', "o'clock", 'oclock', 'ish',
+]);
+// A month counts only after the mask ("expires [redacted] October"): before
+// it ("Aug [redacted]") is a month-first date, which the count reads after a
+// lead word, and a note's own date stamp otherwise.
+const NEXT_MONTHS = new Set(['january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec']);
+// A word that limits a time, before the mask ("every [redacted]"); not when a
+// unit follows the mask ("after [redacted] seconds"): a quantity.
+const PREV_LIMITS = new Set(['until', 'till', 'before', 'after', 'except', 'never', 'every', 'only']);
+const UNIT_WORDS = new Set(['second', 'seconds', 'sec', 'secs', 'minute', 'minutes', 'min', 'mins', 'foot', 'feet', 'ft', 'inch', 'inches', 'in', 'lb', 'lbs',
+  'pound', 'pounds', 'gallon', 'gallons', 'gal', 'yard', 'yards', 'yd', 'step', 'steps', 'times', 'miles', 'mile', 'acres', 'acre', 'sq']);
+const MARK = '[redacted]';
+const CODE_NOUN_BEFORE_RE = /\b(?:code|password|passcode|passphrase|pin|combo|combination)\b\s{0,5}(?:(?:is|=|:|#|-)\s{0,5})?$/i;
+const CODE_NOUN_AFTER_RE = /^\s{0,5}(?:is|=)\s{1,5}(?:\S{1,30}\s{1,5}){0,4}?(?:code|password|passcode|passphrase|pin|combo|combination)\b/i;
+const wordsOf = (text) => (text.replace(/\[redacted\]/g, ' ').toLowerCase().match(/[a-z][a-z.']*/g) || []).map((w) => w.replace(/\.+$/, ''));
+
+function maskBesideTimeWord(masked) {
+  let at = masked.indexOf(MARK);
+  while (at !== -1) {
+    const before = masked.slice(Math.max(0, at - 60), at);
+    const after = masked.slice(at + MARK.length, at + MARK.length + 80);
+    const own = CODE_NOUN_BEFORE_RE.test(before) || CODE_NOUN_AFTER_RE.test(after);
+    if (!own) {
+      const prev = wordsOf(before).pop();
+      const next = wordsOf(after)[0];
+      if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) return true;
+      if (PREV_LIMITS.has(prev) && !UNIT_WORDS.has(next)) return true;
+    }
+    at = masked.indexOf(MARK, at + MARK.length);
+  }
+  return false;
 }
 
 // The entries of one stored text: one, or its parts when it is long. `ms`
