@@ -141,7 +141,7 @@ const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // r19, r28, r31.
 // Whole month names and their short forms only: "JANITOR" is not January (r33).
 const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const DATE_SHAPES = `(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
+const DATE_SHAPES = `(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
@@ -202,7 +202,7 @@ const TIME_WORDS_RE = new RegExp([
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
-  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
   `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
@@ -245,7 +245,10 @@ const TIME_WORDS_RE = new RegExp([
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
   '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])',
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?(?![\\w])',
+  // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
+  // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
 // (Codex security r8).
@@ -305,8 +308,9 @@ function maskHidTime(raw, masked) {
 // ... code") is left out: it sits next to a time word whenever the note
 // states one ("gate code [redacted] after 9").
 const NEIGHBOR_TIME_WORDS = new Set([
-  'mon', 'monday', 'mondays', 'tue', 'tues', 'tuesday', 'tuesdays', 'wed', 'wednesday', 'wednesdays', 'thu', 'thur', 'thurs', 'thursday', 'thursdays',
-  'fri', 'friday', 'fridays', 'sat', 'saturday', 'saturdays', 'sun', 'sunday', 'sundays', 'weekday', 'weekdays', 'weekend', 'weekends',
+  // No short forms that are also words (mon, wed, sat, sun): r34.
+  'monday', 'mondays', 'tue', 'tues', 'tuesday', 'tuesdays', 'wednesday', 'wednesdays', 'thu', 'thur', 'thurs', 'thursday', 'thursdays',
+  'fri', 'friday', 'fridays', 'saturday', 'saturdays', 'sunday', 'sundays', 'weekday', 'weekdays', 'weekend', 'weekends',
   'am', 'pm', 'a.m', 'p.m', 'noon', 'midnight', 'morning', 'mornings', 'afternoon', 'afternoons', 'evening', 'evenings', 'night', 'nights', 'tonight',
   'today', 'tomorrow', 'lunch', 'lunchtime', 'breakfast', 'dinner', 'supper', 'sunrise', 'sunset', 'dawn', 'dusk',
   'hour', 'hours', 'hrs', 'notice', "o'clock", 'oclock', 'ish',
@@ -382,12 +386,18 @@ function maskBesideTimeWord(masked) {
 const { AsyncLocalStorage } = require('async_hooks');
 const scanBudget = new AsyncLocalStorage();
 
-function hiddenTimeIn(raw, body) {
+// The scan reads the text with its line breaks (a break ends a clause for
+// the neighbor rule: "ask MANAGER\nFriday works", r34); the model gets the
+// one-line form.
+const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\s]*/g, '\n').trim();
+
+function hiddenTimeIn(text, raw, body) {
   if (raw === body) return false;
   const budget = scanBudget.getStore();
   if (budget && raw.length > budget.left) return true;
   if (budget) budget.left -= raw.length;
-  return maskHidTime(raw, body);
+  const lines = keepLines(text);
+  return lines === raw ? maskHidTime(raw, body) : maskHidTime(lines, redactAccessCodes(lines));
 }
 
 function entry(channel, from, at, text) {
@@ -395,7 +405,7 @@ function entry(channel, from, at, text) {
   const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
-  const hidden = hiddenTimeIn(raw, body);
+  const hidden = hiddenTimeIn(text, raw, body);
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
     ...(hidden && i === 0 ? { maskedTime: true } : {}),
