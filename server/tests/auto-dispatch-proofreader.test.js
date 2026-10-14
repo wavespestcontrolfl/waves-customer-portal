@@ -486,6 +486,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, TUESDAY WILL NOT WORK',
       'GATE CODE 4821, DO NOT COME FOR TWO WEEKS',
       'GATE CODE 4821, COME BACK IN TWO WEEKS',
+      'GATE CODE 4821, COME BACK IN 30 MINUTES',
+      'GATE CODE 4821, WAIT 10 MINS',
       'Gate code 4821, ON MONDAY',
       'Gate code 4821, MONDAY WORKS',
       'CODE 4821 MON-FRI ONLY',
