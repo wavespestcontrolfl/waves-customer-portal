@@ -188,12 +188,14 @@ function statesRecurring(text) {
 // that row ("Monthly pest control" → Monthly Pest Control Service); the
 // topic's default cadence when none, or more than one, is stated or no such
 // row exists.
+// With the live catalog, a name it does not have (a renamed or retired
+// program) is not shown: the part is shown as written instead.
 function recurringName(topic, text, catalogNames) {
+  if (!catalogNames) return topic.recurring;
   const inText = CADENCES.filter(([, re]) => re.test(text));
-  const stated = inText.length === 1 ? inText[0] : null;
-  if (!stated || !catalogNames || !CADENCE_PREFIX_RE.test(topic.recurring)) return topic.recurring;
-  const wanted = topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `);
-  return catalogNames.get(wanted.toLowerCase()) || topic.recurring;
+  const stated = inText.length === 1 && CADENCE_PREFIX_RE.test(topic.recurring) ? inText[0] : null;
+  const wanted = stated ? catalogNames.get(topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `).toLowerCase()) : null;
+  return wanted || catalogNames.get(topic.recurring.toLowerCase()) || text;
 }
 
 // Parts are joined by " + ", but a few catalog names contain one
@@ -242,16 +244,19 @@ const PLACE = {
   },
 };
 
-// keyedName: the current catalog name of the lead's service_key. The key
-// names the FIRST service (an upsell appends after it), so a catalog rename
-// reaches that part and the rest is named part by part.
-function leadServiceDisplay(serviceInterest, { catalogNames = null, keyedName = null } = {}) {
+// firstName: how the FIRST part is shown, set from the lead's service_key
+// (an upsell appends after it): the key's current catalog name, or the
+// stored text for a configured package name. The part keeps the frequency
+// and topic its stored text states, and the rest is named part by part.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, firstName = null } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
 
-  const pieces = splitParts(text, catalogNames);
-  if (keyedName) pieces[0] = clean(keyedName);
-  const parts = pieces.map((part) => classify(part, catalogNames));
+  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames));
+  if (firstName && parts[0].kind !== 'assessment') {
+    const first = parts[0];
+    parts[0] = { kind: 'other', name: clean(firstName), frequency: first.frequency, topic: first.topic || first.topics?.[0] || null };
+  }
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.

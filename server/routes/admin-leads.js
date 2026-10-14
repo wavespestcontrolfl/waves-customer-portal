@@ -47,11 +47,10 @@ async function serviceDisplayCatalog() {
 const CONFIGURED_NAME_KEYS = new Set(['cockroach_control']);
 
 function serviceDisplayFor(catalog, serviceInterest, serviceKey) {
-  if (CONFIGURED_NAME_KEYS.has(serviceKey)) return String(serviceInterest || '').trim() || null;
-  return leadServiceDisplay(serviceInterest, {
-    catalogNames: catalog.catalogNames,
-    keyedName: serviceKey ? catalog.nameByKey.get(serviceKey) : null,
-  });
+  const firstName = CONFIGURED_NAME_KEYS.has(serviceKey)
+    ? String(serviceInterest || '').split(/\s+\+\s+/)[0]
+    : (serviceKey && catalog.nameByKey.get(serviceKey)) || null;
+  return leadServiceDisplay(serviceInterest, { catalogNames: catalog.catalogNames, firstName });
 }
 
 async function withServiceDisplay(leads) {

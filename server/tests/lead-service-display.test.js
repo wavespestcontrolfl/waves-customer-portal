@@ -15,7 +15,7 @@ const catalogNames = catalogNameIndex([
   'WDO Inspection Service', 'Bee / Wasp Nest Removal Service', 'Flea Control Service',
   'Termite Inspection Service', 'Termite Monitoring Service', 'Rodent Trapping Service',
   'Quarterly Rodent Bait Station Service', 'Waves Assessment', 'Semiannual Pest Control Service',
-  'Every 6 Weeks Lawn Care Service', 'Seasonal Mosquito Control Service', 'Monthly Mosquito Control Service',
+  'Every 6 Weeks Lawn Care Service', 'Semiannual Palm Injection Service', 'Termite Bait Station Service', 'Seasonal Mosquito Control Service', 'Monthly Mosquito Control Service',
   'Every 6 Weeks Tree & Shrub Care Service', 'Bi-Monthly Tree & Shrub Care Service', 'Bi-Monthly Pest Control Service', 'Lawn + Tree & Shrub Service',
 ]);
 const name = (text) => leadServiceDisplay(text, { catalogNames });
@@ -134,10 +134,21 @@ describe('leadServiceDisplay', () => {
   });
 
   test('a keyed lead names its first service from the key, after a rename and after an upsell', () => {
-    const keyed = { catalogNames, keyedName: 'Quarterly Pest Control Service' };
+    const keyed = { catalogNames, firstName: 'Quarterly Pest Control Service' };
     expect(leadServiceDisplay('General Pest Program', keyed)).toBe('Quarterly Pest Control Service');
     expect(leadServiceDisplay('General Pest Program + Recurring Lawn Care', keyed))
       .toBe('Quarterly Pest Control Service + Monthly Lawn Care Service');
+    // the stored text's cadence survives a rename to a name with none
+    expect(leadServiceDisplay('Quarterly Pest Control + One-Time Lawn Care Service', { catalogNames, firstName: 'General Pest Program' }))
+      .toBe('General Pest Program + Monthly Lawn Care Service');
+    // a configured package name stays as written; an upsell after it is named
+    expect(leadServiceDisplay('Roach Package + Lawn Care', { catalogNames, firstName: 'Roach Package' }))
+      .toBe('Roach Package + Waves Assessment (Lawn)');
+  });
+
+  test('a default name the live catalog does not have is not shown', () => {
+    const renamed = catalogNameIndex(['Monthly Lawn Care Service']);
+    expect(leadServiceDisplay('Palm Injections', { catalogNames: renamed })).toBe('Palm Injections');
   });
 
   test('empty text has no name, and a missing catalog still passes a "… Service" pick through', () => {
