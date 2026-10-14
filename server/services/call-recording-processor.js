@@ -3819,6 +3819,35 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   return out;
 }
 
+const CSR_ROLE_LABELS = new Set(['office manager', 'waves', 'unknown']);
+// The staff member who answered an inbound call is never one of the caller's
+// people. Call audit 2026-10-13: at the end of a call the caller asked "what was
+// your first name?", the speaker labels swapped, and the answer was saved on the
+// new customer as her husband's name, beside the husband's real email. When a
+// contact's first name is the answering staff member's (the forward-acceptance
+// record, written by the phone system, not by a model), the NAME is dropped and
+// the phone, email and role stay; a contact that was only that name is dropped.
+// The secondary_contact_captured card still files from the extraction, so the
+// office confirms the name. Inbound only: an outbound call has no acceptance
+// record. Known limit: a real contact who shares the first name of the person
+// who answered loses the name on the slot until the office adds it.
+function withoutAnsweringStaffName(contacts = [], call = {}) {
+  if (isOutboundCall(call)) return contacts;
+  let meta = call.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  const first = (v) => String(v || '').trim().toLowerCase().split(/\s+/)[0];
+  const csrName = meta?.forward_acceptance?.accepted === true ? String(meta.forward_acceptance.csr_name || '').trim() : '';
+  // A role label is not a person's name: the webhook writes one for a number
+  // that WAVES_CSR_NUMBER_MAP does not name (its env fallbacks). No name is
+  // known then, so nothing is filtered; map the number to a first name there
+  // for this guard to cover it.
+  if (!csrName || CSR_ROLE_LABELS.has(csrName.toLowerCase())) return contacts;
+  const staff = first(csrName);
+  return contacts
+    .map((c) => (first(c.first_name) === staff ? { ...c, first_name: null, last_name: null } : c))
+    .filter((c) => c.first_name || c.last_name || c.phone || c.email);
+}
+
 // Third-party payer (Bill-To) linkage from a call (GATE_CALL_PAYER_LINKING):
 // when the caller named a DISTINCT paying party (is_billing_party) with a usable
 // AP email, find-or-create a `payers` Bill-To and return its id so it can be
@@ -3829,7 +3858,7 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
 // without a payer) rather than mint an unroutable Bill-To. Gated behind BOTH the
 // payer-linking gate AND secondary-contact capture (the payer IS a secondary
 // party). Never throws — a payer-lookup blip must not block the booking.
-async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, caller = null) {
+async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, caller = null, call = null) {
   if (!isEnabled('callPayerLinking') || process.env.GATE_CALL_SECONDARY_CONTACT !== 'true') return null;
   const candidates = Array.isArray(secondaryContacts) ? [...secondaryContacts] : [];
   // A V2-extracted billing party can be PRUNED from the merged list when its
@@ -3842,7 +3871,9 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
     const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
     const v2Single = mapSecondaryContactToLegacy(v2Extraction.secondary_contact);
     const v2Arr = mapSecondaryContactsToLegacy(v2Extraction.secondary_contacts);
-    for (const c of [v2Single, ...v2Arr]) if (c) candidates.push(c);
+    // The raw V2 parties bypass the merged list's staff-name guard, and the
+    // name here becomes payers.display_name: same guard, same call.
+    for (const c of withoutAnsweringStaffName([v2Single, ...v2Arr].filter(Boolean), call || {})) candidates.push(c);
   }
   const norm = (v) => String(v || '').trim().toLowerCase();
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -13961,7 +13992,7 @@ const CallRecordingProcessor = {
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
-    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    const callSecondaryContacts = withoutAnsweringStaffName(resolveCallSecondaryContacts(extracted, v2CanonicalExtraction), call);
     // The caller asked not to be contacted: no on-site opt-in ask for any
     // contact on this call (the slot may still be written).
     // Either extractor hearing a do-not-contact request blocks the on-site
@@ -19488,6 +19519,7 @@ const CallRecordingProcessor = {
                   emails: [callerEmailPreScrub, extracted.email, v2CallerForPayer.email],
                   phones: [contactPhone, extracted.phone, v2CallerForPayer.phone_e164, v2CallerForPayer.phone_raw_spoken],
                 },
+                call,
               );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
@@ -25291,6 +25323,7 @@ CallRecordingProcessor._test = {
   rerunAssessmentPreDraftAfterQuarantineClear,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
+  withoutAnsweringStaffName,
   isFreshInboundCall,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
