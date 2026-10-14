@@ -1088,30 +1088,15 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } };
   const { raiseAdminAlert } = require('./admin-alert-compose');
-  // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. While the
-  // promise's row is still open, a later check never makes a new row and never
-  // rings; a row a person marked done, with the promise still overdue, rings
-  // once more through the normal path below.
-  let notification;
-  let handled = false;
-  if (require('../config/feature-gates').alertRingOnceLive?.()) {
-    const keyed = () => trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
-    const newest = await keyed().orderBy('created_at', 'desc').first('id', 'done_at');
-    if (newest && !newest.done_at) {
-      // The standing row is the newest one: refresh its text without a ring
-      // (read state, done state and push are left alone). No window, so the
-      // row is found at any age.
-      handled = true;
-      notification = await raiseAdminAlert('alert', spec, { ...ringOpts, dedupeWindowMs: undefined, ringOnRefresh: () => false });
-    } else {
-      // An older row of this promise is still open (a leftover from before the
-      // gate): keep it, make nothing new.
-      const standing = newest ? await keyed().whereNull('done_at').orderBy('created_at', 'desc').first('id') : null;
-      if (standing) return { id: standing.id, deduped: true };
-    }
-  }
-  if (!handled) notification = await raiseAdminAlert('alert', spec, ringOpts);
+  // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
+  // looks only at OPEN rows, at any age: an open row is refreshed without a
+  // ring (read state, done state and push stay), so a later check never makes
+  // a new row. With no open row (first time, or a person marked it done and
+  // the promise is still overdue) the insert is fresh: one new row, one bell.
+  const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
+  const notification = await raiseAdminAlert('alert', spec, ringOnce
+    ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
+    : ringOpts);
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   // The 24h window rolls from created_at, so a promise still overdue after a
   // day gets a NEW row and the old one stayed open: one promise piled up four
