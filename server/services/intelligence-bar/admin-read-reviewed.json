@@ -1,5 +1,5 @@
 {
-  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params declares the kind of EVERY path parameter: \"uuid\" (a record id), \"int\" (a serial id) or \"text\" (free text, up to 120 characters). Only a text parameter can spell a route segment, so only text parameters feed the committed blockedRoutes list. query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the module-scope constants declared in the same file as a followed function and referenced by it (transitively within that file), and the import statement text of each imported binding; never the content of an imported file and never anything under server/config/. freeText maps each response field that holds unrestricted text to a kind. \"note\" = text staff or customers typed about a record (notes, reasons, instructions, details): the run-time read WITHHOLDS its value (only its length is shown), because people paste passwords and links into notes. \"content\" = business-authored reference text that is the point of the read (scripts, label text, offer copy, templates): returned, and still passed through link redaction and the secret scrubber. A key is the RESPONSE key (what the handler returns after any alias, rename or nesting), not the table column. Under the run-time default (Codex round 10) a response key whose NAME looks free text (note, notes, reason, description, message, details ... see FREE_TEXT_WORDS in utils/signed-link-redaction.js) is withheld on EVERY endpoint unless the row declares it \"content\", so \"content\" is an explicit opt-in. Declaring every free-text field a response returns is a review duty.",
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params declares the kind of EVERY path parameter: \"uuid\" (a record id), \"int\" (a serial id) or \"text\" (free text, up to 120 characters). Only a text parameter can spell a route segment, so only text parameters feed the committed blockedRoutes list. query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the module-scope constants declared in the same file as a followed function and referenced by it (transitively within that file), and the import statement text of each imported binding; never the content of an imported file and never anything under server/config/. Free text: every string of every response, notes included, passes link redaction and the secret scrubber at run time (owner ruling 2026-10-13: the read returns notes), so a row declares no free-text fields.",
   "exclude": [],
   "reviewed": [
     {
@@ -22,9 +22,6 @@
       "endpoint": "/admin/communications/blocked-numbers",
       "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end.",
       "scope": "broad",
-      "freeText": {
-        "reason": "note"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "6bf3dfd7c9419b27a7b802fccd127503"
@@ -38,11 +35,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "5e718afcf11382ca2fdfa8ae26482348",
-      "freeText": {
-        "lossReasons": "content",
-        "reason": "content"
-      }
+      "hash": "5e718afcf11382ca2fdfa8ae26482348"
     },
     {
       "endpoint": "/admin/customers/:id/autopay-state",
@@ -51,10 +44,6 @@
       "scopeParam": "id",
       "params": {
         "id": "uuid"
-      },
-      "freeText": {
-        "pause_reason": "note",
-        "details": "note"
       },
       "signals": [],
       "unresolved": [],
@@ -68,9 +57,6 @@
       "params": {
         "id": "uuid"
       },
-      "freeText": {
-        "note": "note"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "6326825368d33876d8097e45a1334987"
@@ -79,9 +65,6 @@
       "endpoint": "/admin/discounts",
       "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end.",
       "scope": "broad",
-      "freeText": {
-        "description": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "0475bbf9300cad99ce10d3d31666452a"
@@ -106,24 +89,6 @@
       "endpoint": "/admin/dispatch/products/catalog",
       "reviewed": "Handler + stripCatalogOwnerPricing: select from products_catalog where active (product, label and price columns; no credential column); read end to end.",
       "scope": "broad",
-      "freeText": {
-        "compatibility_notes": "content",
-        "mixing_instructions": "content",
-        "ppe_text": "content",
-        "pollinator_precautions": "content",
-        "reentry_text": "content",
-        "reentry_summary": "content",
-        "customer_safety_summary": "content",
-        "pet_kid_guidance_text": "content",
-        "service_report_summary": "content",
-        "customer_precaution_summary": "content",
-        "irrigation_notes": "content",
-        "label_source_note": "content",
-        "label_note": "content",
-        "rate_notes": "content",
-        "public_summary": "content",
-        "portal_summary": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "f88497ea5ae17d07f02c66165b81c9d3"
@@ -224,10 +189,6 @@
       "params": {
         "serviceType": "text"
       },
-      "freeText": {
-        "description": "content",
-        "sections": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "221af5cdec979b70c219d9f873ac8b98"
@@ -239,9 +200,6 @@
       "scopeParam": "customerId",
       "params": {
         "customerId": "uuid"
-      },
-      "freeText": {
-        "instructions": "note"
       },
       "signals": [],
       "unresolved": [],
@@ -255,9 +213,6 @@
         "includeInactive",
         "search"
       ],
-      "freeText": {
-        "notes": "note"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "540cc69b1344a9c1c68abfa6e2362e40"
@@ -268,9 +223,6 @@
       "scope": "broad",
       "params": {
         "id": "int"
-      },
-      "freeText": {
-        "notes": "note"
       },
       "signals": [],
       "unresolved": [],
@@ -290,10 +242,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "5e57ce7ce2c7a16d84755913c70e237f",
-      "freeText": {
-        "notes": "note"
-      }
+      "hash": "5e57ce7ce2c7a16d84755913c70e237f"
     },
     {
       "endpoint": "/admin/pricing-config/lawn-brackets",
@@ -307,12 +256,6 @@
       "endpoint": "/admin/pricing/offers",
       "reviewed": "Handler: select from offer_packages (pricing offer text and prices); read end to end.",
       "scope": "broad",
-      "freeText": {
-        "description": "content",
-        "guarantee_text": "content",
-        "scarcity_text": "content",
-        "urgency_text": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "fe2b2b2a68347493bca1a1822f5c9ab0"
@@ -321,9 +264,6 @@
       "endpoint": "/admin/pricing/upsell-rules",
       "reviewed": "Handler: select from upsell_rules; read end to end.",
       "scope": "broad",
-      "freeText": {
-        "message_template": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "9b7e5c2eed99d3bcb23ca0ee8d0b8be5"
@@ -336,10 +276,6 @@
         "service_line",
         "service_type"
       ],
-      "freeText": {
-        "notes": "content",
-        "checklist_items": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "9adf0c5e553e03e9e07be962e217d45e"
@@ -352,11 +288,6 @@
         "scenario",
         "service_line"
       ],
-      "freeText": {
-        "scripts": "content",
-        "script": "content",
-        "tone_notes": "content"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "c813d3a9baaf9670d177a04067af63d1"
@@ -371,11 +302,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "c5af7288d4d3647b38c5d4b0e1123ad3",
-      "freeText": {
-        "description": "content",
-        "treatment_if_found": "content"
-      }
+      "hash": "c5af7288d4d3647b38c5d4b0e1123ad3"
     },
     {
       "endpoint": "/admin/referrals/payouts",
@@ -384,9 +311,6 @@
       "query": [
         "status"
       ],
-      "freeText": {
-        "admin_notes": "note"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "2867707178acb6d4f1dff44f69801c70"
@@ -395,9 +319,6 @@
       "endpoint": "/admin/revenue/settings",
       "reviewed": "Handler: latest company_financials row (cost and margin settings; technicians get a field subset); read end to end.",
       "scope": "broad",
-      "freeText": {
-        "notes": "note"
-      },
       "signals": [],
       "unresolved": [],
       "hash": "b30ef0152427d3828bf50b862de3da03"
