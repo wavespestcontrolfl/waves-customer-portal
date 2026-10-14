@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage, normalizeRecipient, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
-const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const { renderSmsTemplate } = require('./sms-template-renderer');
 const { gsmSafeName } = require('./messaging/gsm-normalize');
 const { countSegments } = require('./messaging/segment-counter');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
@@ -253,15 +253,22 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
 // in the admin UI.
 // The lead text is one SMS segment. A typed first name must not break that:
 // a letter outside GSM-7 (the ë in "Zoë") would flip the whole body to
-// UCS-2, and a very long name would add a segment. The name is
-// folded to GSM-7 first; if the body still runs past one segment, the
-// greeting falls back to "there".
+// UCS-2, and a very long name would add a segment. The name is folded to
+// GSM-7 first; if the body still runs past one segment, the greeting falls
+// back to "there". Both renders pin the base row (noVariants): a weighted
+// variant re-rolled for the fallback could be a different, longer creative
+// (Codex #6336 P2).
 async function renderLeadAutoReply(firstName, customerId) {
-  const render = (name) => renderRequiredSmsTemplate(
-    'lead_auto_reply_biz',
-    { first_name: name },
-    { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customerId }
-  );
+  const render = async (name) => {
+    const body = await renderSmsTemplate(
+      'lead_auto_reply_biz',
+      { first_name: name },
+      { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customerId },
+      { noVariants: true }
+    );
+    if (!body) throw new Error('SMS template lead_auto_reply_biz is missing, inactive, or invalid');
+    return body;
+  };
   const body = await render(gsmSafeName(firstName));
   if (countSegments(body).segmentCount <= 1) return body;
   return render('there');

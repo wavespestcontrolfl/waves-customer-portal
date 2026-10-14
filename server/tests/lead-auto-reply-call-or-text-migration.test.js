@@ -44,7 +44,7 @@ describe('renderLeadAutoReply keeps the lead text to one GSM-7 segment', () => {
     jest.doMock('../models/db', () => jest.fn());
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/sms-template-renderer', () => ({
-      renderRequiredSmsTemplate: jest.fn(async (_key, vars) => BODY.replace('{first_name}', vars.first_name)),
+      renderSmsTemplate: jest.fn(async (_key, vars) => BODY.replace('{first_name}', vars.first_name)),
     }));
     ({ renderLeadAutoReply } = require('../services/lead-auto-reply'));
   });
@@ -58,5 +58,13 @@ describe('renderLeadAutoReply keeps the lead text to one GSM-7 segment', () => {
     const body = await renderLeadAutoReply(name, 'c-1');
     expect(body.startsWith(opener)).toBe(true);
     expect(countSegments(body)).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
+  });
+
+  test('every render pins the base row, so the fallback cannot re-roll a variant', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    renderSmsTemplate.mockClear();
+    await renderLeadAutoReply('Bartholomew-Alexander', 'c-1');
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(2);
+    for (const call of renderSmsTemplate.mock.calls) expect(call[3]).toEqual({ noVariants: true });
   });
 });
