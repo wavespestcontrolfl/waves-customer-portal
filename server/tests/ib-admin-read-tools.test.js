@@ -1214,3 +1214,15 @@ describe('one label rule, one card-run rule, one URL verdict', () => {
     expect(scrub('wss://host.example.com/live/' + 'A1b2C3d4E5f6G7h8I9')).toBe('[private link removed]');
   });
 });
+
+// Pre-push audit: the expiry and security code riding a grouped card number go with it.
+describe('grouped card number with expiry and code', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  test('the code after the expiry is removed', () => {
+    const out = scrub(`Card number: ${['424', '242', '4242', '424242'].join(', ')}, 12/28, 123`);
+    expect(out).not.toMatch(/\b123\b/);
+    expect(out).not.toContain('12/28');
+    expect(out).toContain('[card ending 4242]');
+  });
+});

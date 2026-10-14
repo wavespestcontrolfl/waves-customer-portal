@@ -304,7 +304,10 @@ function scrubGroupedCard(text) {
       let end = 0;
       while (seen < length) { if (/\d/.test(run[end])) seen += 1; end += 1; }
       removed += 1;
-      return `${word}${between}[card ending ${digits.slice(length - 4, length)}]${run.slice(end)}`;
+      // Digits that ride the same run after the card number are its expiry and
+      // security code ("424, 242, 4242, 424242, 12/28, 123"): they go too.
+      const rest = run.slice(end);
+      return `${word}${between}[card ending ${digits.slice(length - 4, length)}]${/\d/.test(rest) ? ' [card details removed]' : rest}`;
     }
     return match;
   });
