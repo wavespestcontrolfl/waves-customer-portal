@@ -44,6 +44,52 @@ const visit = (over = {}) => ({
 const run = (calls, booked = [], triage = [], opts = {}) => computeHeldVisits(calls, booked, triage, { dateET: DAY, now: NOW, ...opts });
 
 describe('which calls are held', () => {
+  describe('a reschedule with no visit on file', () => {
+    const moved = (sched = {}) => extraction({
+      scheduling: {
+        status: 'reschedule_requested', confirmed_start_at: `${DAY}T12:00:00-04:00`,
+        agent_committed_booking: true, caller_accepted_slot: true, ...sched,
+      },
+    });
+    const movedCall = (over = {}, sched = {}) => call({ customer_id: 'cust-1', ai_extraction_enriched: moved(sched), ...over });
+
+    it('holds the agreed slot as a confirmed row when the customer has no visit', () => {
+      const [row] = run([movedCall()]);
+      expect(row).toMatchObject({ kind: 'confirmed', minutes: 720, time_label: '12:00 PM', customer_id: 'cust-1' });
+    });
+
+    it('does not hold it when the customer has a visit the call could be moving', () => {
+      expect(run([movedCall()], [visit({ sched_date: '2026-10-20' })])).toHaveLength(0);
+      expect(run([movedCall()], [visit({ sched_date: '2026-10-13', status: 'rescheduled' })])).toHaveLength(0);
+      expect(run([movedCall()], [visit({ sched_date: '2026-10-12', status: 'completed' })])).toHaveLength(0);
+    });
+
+    it('ignores a visit before the call day, a cancelled visit and another customer\'s visit', () => {
+      const rows = [
+        visit({ sched_date: '2026-10-09', status: 'completed' }),
+        visit({ sched_date: '2026-10-16', status: 'cancelled' }),
+        visit({ sched_date: '2026-10-16', customer_id: 'cust-2' }),
+      ];
+      expect(run([movedCall()], rows)).toHaveLength(1);
+    });
+
+    it('clears once the slot is booked', () => {
+      expect(run([movedCall()], [visit({ window_start: '12:00:00' })])).toHaveLength(0);
+      expect(run([movedCall()], [visit({ customer_id: 'cust-7', sched_date: '2026-10-15', internal_notes: 'Call ID: call-1.' })])).toHaveLength(0);
+    });
+
+    it('needs a linked customer, the staff commitment and the caller\'s acceptance', () => {
+      expect(run([movedCall({ customer_id: null })])).toHaveLength(0);
+      expect(run([movedCall({}, { agent_committed_booking: false })])).toHaveLength(0);
+      expect(run([movedCall({}, { agent_committed_booking: false, definite_commitment: true })])).toHaveLength(0);
+      expect(run([movedCall({}, { agent_committed_booking: null })])).toHaveLength(0);
+      // The firm-promise judgement stands in when the commitment flag is absent.
+      expect(run([movedCall({}, { agent_committed_booking: undefined, definite_commitment: true })])).toHaveLength(1);
+      expect(run([movedCall({}, { caller_accepted_slot: null })])).toHaveLength(0);
+      expect(run([movedCall({}, { confirmed_start_at: null })])).toHaveLength(0);
+    });
+  });
+
   it('holds a confirmed slot with no visit, with its time and display fields', () => {
     const [row] = run([call()]);
     expect(row).toMatchObject({

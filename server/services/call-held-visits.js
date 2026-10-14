@@ -19,6 +19,16 @@
  *               (the canonical callEndedWithNothingToDo rule).
  * One row per call; confirmed wins when a call qualifies as both.
  *
+ * A "reschedule" with no visit on file is a confirmed row too (call audit 2026-10-13). A
+ * caller who says "I booked yesterday and got no confirmation" is read as moving a visit
+ * (scheduling.status 'reschedule_requested'), and that status never books. When staff
+ * committed to the new slot (agent_committed_booking, or definite_commitment with no explicit
+ * "did not commit"), the caller accepted it, and the call's own customer has no other
+ * visit on file from the call day on (live, or parked at 'rescheduled' for a rebook), there
+ * is nothing to move: the agreed slot is a promised visit that is not on the calendar. A
+ * customer with any such visit stays with the reschedule card, and so does an unlinked call
+ * (nothing says whether a visit exists).
+ *
  * A held row clears when the office has acted:
  *   - a visit carries the call: source_call_log_id, or a call marker in its notes or internal
  *     notes ("Call ID: <call_log id>", which "Book it" prefills, or the pipeline's "Call SID:"),
@@ -59,6 +69,30 @@ const DAY_ONLY_STATUSES = new Set(['requested', 'offered', 'ambiguous']);
 const CLOSED_DISPOSITIONS = new Set(['spam_discarded', 'wrong_number_closed', 'vendor_logged']);
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DAYPARTS = new Set(['morning', 'afternoon', 'evening']);
+// A visit the reschedule could be moving: on the calendar or done, or parked for a rebook.
+const onFileForMove = (status) => isLive(status) || status === 'rescheduled';
+
+// The slot a 'reschedule_requested' call agreed, when staff committed to it and the caller
+// accepted it on a linked customer's call. Whether there is a visit to move is decided later,
+// against the customer's visits (movesAVisitOnFile).
+function agreedMoveSlot(call, extraction) {
+  const sched = extraction.scheduling || {};
+  if (!call.customer_id || sched.status !== 'reschedule_requested') return null;
+  // Staff's side of the agreement: the commitment flag, or the firm-promise judgement the
+  // extraction records beside the agreed slot. An explicit "staff did not commit" wins.
+  const staffCommitted = sched.agent_committed_booking !== false
+    && (sched.agent_committed_booking === true || sched.definite_commitment === true);
+  if (!staffCommitted || sched.caller_accepted_slot !== true) return null;
+  return extractConfirmedSlot({ ...extraction, scheduling: { ...sched, status: 'confirmed' } });
+}
+
+// Does the customer of a moved-slot candidate have a visit the call could be moving? Any visit
+// of theirs from the call day on that does not carry this call.
+function movesAVisitOnFile({ call }, bookedRows) {
+  const callDayET = etDateString(new Date(call.created_at));
+  return bookedRows.some((row) => row.customer_id === call.customer_id && onFileForMove(row.status)
+    && row.sched_date >= callDayET && !rowCarriesCall(row, call));
+}
 
 function parseExtraction(raw) {
   if (!raw) return null;
@@ -125,15 +159,17 @@ function heldCandidates(calls, dateET, now = new Date()) {
     const createdAt = readableCall(call, since);
     const extraction = createdAt && parseExtraction(call.ai_extraction_enriched);
     if (!extraction || !isRealConversation(call, extraction)) continue;
-    const slot = extractConfirmedSlot(extraction);
-    if (slot && slot.dateET === dateET) out.push({ call, extraction, kind: 'confirmed', minutes: slot.minutes, slot });
+    const moveSlot = agreedMoveSlot(call, extraction);
+    const slot = extractConfirmedSlot(extraction) || moveSlot;
+    if (slot && slot.dateET === dateET) out.push({ call, extraction, kind: 'confirmed', minutes: slot.minutes, slot, moved: !!moveSlot });
     else if (ISO_DATE.test(dateET) && isDayOnlyAsk(call, extraction, dateET, etDateString(createdAt))) out.push({ call, extraction, kind: 'day_only', minutes: null, slot: null });
   }
   return out;
 }
 
 // Has the office acted on this candidate? One booked row is enough (see the header for each rule).
-function clearedByBooking({ call, kind, slot }, bookedRows, { dateET, namesakes }) {
+function clearedByBooking({ call, kind, slot, moved }, bookedRows, { dateET, namesakes }) {
+  if (moved && movesAVisitOnFile({ call }, bookedRows)) return true;
   const sameName = namesakes.get(call.id);
   // The call's own customer has a live visit that day. A confirmed promise has a time, so the
   // visit must sit inside the watchdog's window tolerance (rowClearsSlot): a morning lawn visit
@@ -232,6 +268,9 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
     ...[...namesakes.values()].flatMap((ids) => [...ids]),
   ])];
   const callIds = candidates.map((c) => c.call.id);
+  const moved = candidates.filter((c) => c.moved);
+  const movedCustomerIds = [...new Set(moved.map((c) => c.call.customer_id))];
+  const movedSince = moved.map((c) => etDateString(new Date(c.call.created_at))).sort()[0];
   const sidPatterns = candidates.map((c) => c.call.twilio_call_sid).filter(Boolean).map((sid) => `%Call SID: ${sid}%`);
 
   // "Book it" writes "Call ID: <call_log id>" into the visit's internal notes; the pipeline
@@ -244,6 +283,12 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
       if (customerIds.length) {
         this.orWhere(function ownOrNamesakeOnDay() {
           this.whereIn('customer_id', customerIds).whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [dateET]);
+        });
+      }
+      // A moved slot is held only when its customer has no visit on file from the call day on.
+      if (movedCustomerIds.length) {
+        this.orWhere(function movedCustomerVisits() {
+          this.whereIn('customer_id', movedCustomerIds).whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') >= ?", [movedSince]);
         });
       }
     })
