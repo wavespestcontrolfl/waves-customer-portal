@@ -279,3 +279,11 @@ describe('a kept labelled value does not hide a later one', () => {
     expect(scrubSecretText('PIN is 4821 at the front gate').text).toBe('PIN is 4821 at the front gate');
   });
 });
+
+// Pre-push audit: a credential assignment in a long run-on line still loses its value.
+test('a long run-on dotenv line still loses its value', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const value = ['hun', 'ter', '2z'].join('');
+  const out = scrubSecretText(`DB_PASSWORD=${value} ${'ordinary words '.repeat(20)}`).text;
+  expect(out).not.toContain(value);
+});

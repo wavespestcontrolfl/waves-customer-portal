@@ -53,9 +53,10 @@ function hasCredentialPart(identifier) {
 }
 
 // The value after the separator: to the closing quote, else to whitespace.
-// An unquoted value runs to the end of its clause (sentence end, line end, comma or semicolon): a
+// An unquoted value runs to the end of its clause (sentence end, line end, comma or semicolon),
+// or 120 characters when the clause runs on longer: a
 // dotenv passphrase is several words ("DB_PASSWORD=correct horse battery staple").
-const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)([^\n"'`,;]{1,120}?)(?=[.!?]+(?:[ \t]|$)|[ \t]*(?:\r?\n|$)|[,;]))/y;
+const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\n"'`,;]{1,120}?(?=[.!?]+(?:[ \t]|$)|[ \t]*(?:\r?\n|$)|[,;]))|[^\n"'`,;]{120}))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
 const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)(${AFTER_SEPARATOR})`, 'g');
 
