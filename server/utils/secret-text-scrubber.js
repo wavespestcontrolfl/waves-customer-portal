@@ -120,6 +120,16 @@ const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]
 // "gate PIN: 1234", "lockbox pin 1234": a PIN or passcode that opens a gate,
 // door or lockbox is the same kept data as a gate code.
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
+// "PIN is 4821 at the front gate", "Use PIN: 4821 for the gate": the access
+// word may follow the label. A PIN or passcode whose own line names a gate,
+// door, lockbox, garage, keypad, entry, callbox, clubhouse, lobby, elevator or pool is a property
+// access code, which the owner reads through the bar like a gate code.
+const ACCESS_WORD_RE = /\b(?:gate|gates|door|doors|lockbox|lock\s?box|garage|keypad|entry|entrance|callbox|call\s?box|clubhouse|lobby|elevator|pool)\b/i;
+function accessCodeLine(text, offset) {
+  const start = text.lastIndexOf('\n', offset) + 1;
+  const nextBreak = text.indexOf('\n', offset);
+  return ACCESS_WORD_RE.test(text.slice(start, nextBreak === -1 ? text.length : nextBreak));
+}
 // After ":" / "=" these are not values; after "is" the value must also look
 // like a secret (a digit or a symbol, or be quoted).
 const NOT_A_VALUE = new Set(['none', 'n/a', 'na', 'unknown', 'required', 'needed', 'reset', 'changed', 'set', 'updated', 'sent',
@@ -145,7 +155,7 @@ function labelledReplacement(match, label, separator, quote, quoted, _empty, bar
   // An earlier pattern may already have removed the first word; a value that
   // is ONLY the removed marker is done, anything after it is still the value.
   if (!value || /^\[removed[^\]]*\]$/.test(value) || proseOnly(value)) return match;
-  if (/^pin|passcode/i.test(label) && KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length))) return match;
+  if (/^pin|passcode/i.test(label) && (KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length)) || accessCodeLine(text, offset))) return match;
   const viaIs = /\bis[ \t]*$/i.test(separator);
   // After " is " one short plain word ("pin is blue") reads as prose; anything
   // longer, several words, or a digit or symbol is taken as the value.

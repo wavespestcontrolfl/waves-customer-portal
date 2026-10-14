@@ -994,3 +994,28 @@ describe('session-style query keys carry a credential', () => {
     expect(redactString(link, newState())).toBe(link);
   });
 });
+
+// Codex r1 on the notes ruling: returned text never carries a card number, a
+// CVV or a Social Security number, and a property access PIN stays readable.
+describe('financial identifiers and access PINs in returned text', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  const pan = ['4242', '4242', '4242', '4242'].join(' ');
+  const ssn = ['123', '45', '6789'].join('-');
+  test('a card number, a CVV and an SSN are removed; the rest of the note stays', () => {
+    const out = scrub(`Paid by card ${pan}, CVV: 123. SSN ${ssn} on file. Call 941-555-0100 first.`);
+    expect(out).not.toContain(pan);
+    expect(out).not.toContain(ssn);
+    expect(out).not.toMatch(/CVV: 123/);
+    expect(out).toContain('Call 941-555-0100 first.');
+  });
+  test('a labelled SSN without dashes is removed', () => {
+    expect(scrub('social security number is 123 45 6789')).toBe('social security number is [SSN removed]');
+  });
+  test.each(['PIN is 4821 at the front gate', 'Use PIN: 4821 for the gate', 'gate PIN: 1234', 'Lockbox on the side door, passcode 7788'])('an access code stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+  test.each([['portal PIN is 4821', 'portal PIN is [removed]'], ['app passcode: 998877\nGate is open', 'app passcode: [removed]\nGate is open']])('a non-access PIN is still removed: %s', (text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+});

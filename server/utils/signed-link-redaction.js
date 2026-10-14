@@ -37,6 +37,7 @@
  */
 const { isCredentialField, isCredentialName } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
+const { scrubPansDetailed } = require('./pan-scrub');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -269,10 +270,25 @@ function newState() {
 }
 
 // Credentials pasted into free text (best effort; see secret-text-scrubber.js).
+// Card numbers and CVVs go through the shared card scrubber (Luhn-checked, so
+// phone numbers, invoice numbers and ids stay), and a Social Security number
+// in its dashed form or after its label is removed.
+const SSN_DASHED_RE = /\b\d{3}-\d{2}-\d{4}\b/g;
+const SSN_LABELLED_RE = /\b(ssn|social(?:\s+security)?(?:\s+(?:number|no\.?|#))?)\b([^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
+function scrubFinancialIdentifiers(text) {
+  const cards = scrubPansDetailed(text);
+  let removed = cards.count;
+  const clean = cards.text
+    .replace(SSN_DASHED_RE, () => { removed += 1; return '[SSN removed]'; })
+    .replace(SSN_LABELLED_RE, (_match, label, between) => { removed += 1; return `${label}${between}[SSN removed]`; });
+  return { text: clean, removed };
+}
+
 function scrubFreeText(text, state) {
-  const { text: clean, removed } = scrubSecretText(text);
-  state.fields += removed;
-  return clean;
+  const secrets = scrubSecretText(text);
+  const financial = scrubFinancialIdentifiers(secrets.text);
+  state.fields += secrets.removed + financial.removed;
+  return financial.text;
 }
 
 // A copy of `value` with credentials removed. `state` counts what was removed.
