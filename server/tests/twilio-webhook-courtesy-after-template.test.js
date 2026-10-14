@@ -183,19 +183,27 @@ describe('tapbacks on an automated visit text', () => {
     expect(REMINDER).toContain('Reply C to confirm');
     expect(await quiet(android('👍', 'Reply C to confirm'))).toBe(false);
     expect(await quiet(android('👍', 'Reply C to confirm or reschedule here'))).toBe(false);
-    expect(await quiet(`Reacted 👍 to "Reply C to confirm"`)).toBe(false);
+    expect(await quiet('Reacted 👍 to "Reply C to confirm"')).toBe(false);
   });
 
-  test('gate on: a carrier-truncated quote (a prefix of the text) stays quiet; a short one does not', async () => {
+  test('gate on: an earlier staff text that is itself a prefix of the newest reminder stays loud (codex #6331 r4)', async () => {
+    process.env[GATE] = 'true';
+    const staff = 'Reply C to confirm your Thursday visit between 8 and 10 AM';
+    mockState.last = { message_type: 'appointment_reminder', message_body: `${staff}, or reschedule: https://wav.es/ab12c` };
+    expect(staff.length).toBeGreaterThan(20);
+    expect(await quiet(android('👍', staff))).toBe(false);
+  });
+
+  test('gate on: only the whole text counts; a truncated quote rings, whitespace and case differences do not matter', async () => {
     process.env[GATE] = 'true';
     const body = 'Reply C to confirm your Thursday visit between 8 and 10 AM, or reschedule: https://wav.es/ab12c';
     mockState.last = { message_type: 'appointment_reminder', message_body: body };
     expect(isQuietSmsReaction(android('👍', body))).toBe(false); // asks for a reply, so the recognizer alone rings
     expect(await quiet(android('👍', body))).toBe(true);
-    expect(await quiet(android('👍', body.slice(0, 60)))).toBe(true);
-    expect(await quiet(android('👍', body.slice(0, 20)))).toBe(true);
-    expect(await quiet(android('👍', body.slice(0, 19)))).toBe(false);
-    expect(await quiet(android('👍', `${body}  extra`))).toBe(false); // longer than the text: not that text
+    expect(await quiet(android('👍', `  ${body.toUpperCase().replace(/ /g, '  ')} `))).toBe(true);
+    expect(await quiet(android('👍', body.slice(0, 60)))).toBe(false);
+    expect(await quiet(android('👍', body.slice(0, body.length - 1)))).toBe(false);
+    expect(await quiet(android('👍', `${body} extra`))).toBe(false);
   });
 
   test('gate on: ❓ / 👎 / disliked stay loud even after an automated text', async () => {
