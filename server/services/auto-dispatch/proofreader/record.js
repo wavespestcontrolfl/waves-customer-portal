@@ -279,8 +279,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
-  // Not a color ("MIDNIGHT BLUE"): r47.
-  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint)\\b)',
+  // Not a color or a plant or bird ("MIDNIGHT BLUE", "MORNING GLORY"): r47, r52.
+  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose)\\b)',
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
   // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
   // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
@@ -289,7 +289,7 @@ const TIME_WORDS_RE = new RegExp([
   // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
