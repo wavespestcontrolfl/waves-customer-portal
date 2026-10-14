@@ -350,6 +350,45 @@ describe('the customer record', () => {
     expect(conn.calls.some(([t, method, col, value]) => t === 'agent_messages' && method === 'where' && col === 'agent_sessions.customer_id' && value === 'c1')).toBe(true);
   });
 
+  describe('a time or a day in the same sentence as an access code', () => {
+    const { maskHidTime } = require('../services/auto-dispatch/proofreader/record')._internals;
+    const { redactAccessCodes } = require('../services/context-aggregator');
+    const hid = (text) => maskHidTime(text, redactAccessCodes(text));
+
+    test.each([
+      'Gate code 4821, not before 10am please',
+      'CODE 4821 FRIDAYS ONLY',
+      'Gate code 4821 and never before 9',
+      'Lockbox code 5521, 9:30 works',
+      'The access code 4821 works 7-7',
+    ])('the mask hides it: %s', (text) => {
+      expect(hid(text)).toBe(true);
+      expect(redactAccessCodes(text)).not.toContain('4821');
+    });
+
+    test.each([
+      'Side gate code 4821, latch sticks.',
+      'The gate code is 1234. Never on Fridays.',
+      'Please come Tuesday at 2pm',
+      'No codes here, any day is fine',
+      // The mask also takes the day numbers of a note's date stamps: not a time statement.
+      '[call Fri Aug 14] Gate code: 4821.',
+      '[2026-10-09 from messages] Gate code 4821 is unconfirmed',
+      'Community gate code 4821# given by the owner 10/1.',
+    ])('nothing about when is hidden: %s', (text) => {
+      expect(hid(text)).toBe(false);
+    });
+
+    test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {
+      const tables = { ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: 'Gate code 4821, not before 10am please' }] };
+      const record = await buildCustomerRecord(fakeConn(tables), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('4821');
+      expect(record.unread).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'time_masked' })]));
+      expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
+      expect(judge({ verdict: 'allow', entry_id: '', quote: '', reason: 'fine' }, record)).toMatchObject({ verdict: 'unknown', why: 'record_incomplete' });
+    });
+  });
+
   test('a source that cannot be read is listed as unread and the rest is still built', async () => {
     const record = await buildCustomerRecord(fakeConn(TABLES, { fail: ['sms_log', 'call_log'] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'text', reason: 'read_failed' }, { channel: 'call', reason: 'read_failed' }]));

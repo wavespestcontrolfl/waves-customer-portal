@@ -24,7 +24,9 @@
  * replay too. They come first and are marked undated.
  *
  * Access codes and card / SSN numbers never reach a provider
- * (redactAccessCodes).
+ * (redactAccessCodes). When that mask also hides a word that can say when
+ * (a time or a day in the same sentence as a code), the entry is listed in
+ * `unread` as `time_masked`: the verdict is then never "allow".
  */
 const logger = require('../../logger');
 // A database error's message can carry the query's bindings (a customer's
@@ -92,14 +94,46 @@ function partsOf(body) {
   return parts;
 }
 
+// Words that can say WHEN: a clock time, an hour after "before / after / by
+// / until / at / from", an hour range ("7-7"), a part of the day, a weekday.
+// The access-code mask works on a whole sentence that names a code, and it
+// masks every token with a digit in it and every word in capitals: in "gate
+// code 4821, not before 10am" the 10am goes too, in "CODE 4821 FRIDAYS ONLY"
+// the day, in "the code works 7-7" the hours. The model then cannot see a
+// time statement that is on file. The code never reaches a provider, so the
+// text is not unmasked; the record says it could not read that entry in full
+// (`time_masked`), and a verdict on it is never "allow".
+// A bare number is NOT counted: the mask also takes the day numbers of the
+// date stamps staff notes carry ("[call Fri Aug 14]", "2026-09-25"), and on
+// production notes that was six of seven flags (measured 2026-10-13). A
+// range inside a longer run of digits and dashes or slashes is a date.
+const TIME_WORDS_RE = new RegExp([
+  '\\b\\d{1,2}:\\d{2}(?:\\s?[ap]\\.?m\\.?)?(?![\\w:])',
+  '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
+  '\\b(?:before|after|by|until|till|at|from|around)\\s+\\d{1,2}(?![\\w:/-])',
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
+  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])',
+  '\\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?(?![\\w])',
+].join('|'), 'gi');
+const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
+
+// The mask removed at least one word that can say when.
+function maskHidTime(raw, masked) {
+  return raw !== masked && timeWords(masked) < timeWords(raw);
+}
+
 // The entries of one stored text: one, or its parts when it is long. `ms`
-// (sort key) and `split` are dropped before the record is returned.
+// (sort key), `split` and `maskedTime` are dropped before the record is
+// returned.
 function entry(channel, from, at, text) {
-  const body = redactAccessCodes(clean(text));
+  const raw = clean(text);
+  const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
+  const masked = maskHidTime(raw, body);
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
+    ...(masked && i === 0 ? { maskedTime: true } : {}),
   }));
 }
 
@@ -405,11 +439,18 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   }
   // Undated notes first, then oldest to newest.
   found.sort((a, b) => (a.ms ?? -1) - (b.ms ?? -1));
-  const entries = found.map(({ split: _split, ms: _ms, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
+  // An entry whose access-code mask also hid a word that can say when
+  // (maskHidTime): read, but not in full.
+  for (const row of found) {
+    if (row.maskedTime) unread.push({ channel: row.channel, ...(row.at ? { at: row.at } : {}), reason: 'time_masked' });
+  }
+  const entries = found.map(({ split: _split, ms: _ms, maskedTime: _masked, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
   const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
   return {
     entries, unread, split: found.filter((row) => row.split).length, chars, tooLong: chars > MAX_RECORD_CHARS, serviceTypes: args.serviceTypes || [],
   };
 }
 
-module.exports = { buildCustomerRecord, MAX_ENTRY_CHARS, MAX_RECORD_CHARS };
+module.exports = {
+  buildCustomerRecord, MAX_ENTRY_CHARS, MAX_RECORD_CHARS, _internals: { maskHidTime },
+};
