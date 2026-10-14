@@ -93,15 +93,21 @@ const isOlderMessage = (ms, sid, base) => {
 // standing row while it is unread, so a later text cannot drop the label the
 // owner sorts his callbacks by. A read or done row starts over. Read at
 // refresh time: with the gate off a standing row stops carrying the choice.
+// The choice has its own time (leadPreferenceAtMs; the time of the text that
+// carried it), compared apart from the row's displayed text: an ordinary
+// text that lands between a CALL and a later-processed, newer TEXT must not
+// pin the CALL. Explicit undefined clears a key the payload merge would keep.
 const threadRefresh = (MessageSid, receivedAtMs, leadPreference) => (existing, base) => {
   const count = Math.max(1, Math.floor(Number(base.textCount)) || 1);
-  const keepPreference = (pref) => (pref && isEnabled('leadCallTextPreference') ? { leadPreference: pref } : {});
-  if (base.twilioSid === MessageSid) return { payload: { textCount: count, ...keepPreference(base.leadPreference) } };
+  const baseAt = base.leadPreferenceAtMs ?? base.receivedAtMs;
+  const keep = (pref, atMs) => (pref && isEnabled('leadCallTextPreference')
+    ? { leadPreference: pref, leadPreferenceAtMs: atMs }
+    : { leadPreference: undefined, leadPreferenceAtMs: undefined });
+  if (base.twilioSid === MessageSid) return { payload: { textCount: count, ...keep(base.leadPreference, baseAt) } };
   if (existing.read_at || existing.done_at) return { payload: { textCount: 1 } };
-  // An OLDER text arriving late never overrides the newer text's choice.
-  const older = isOlderMessage(receivedAtMs, MessageSid, base);
-  const pref = older ? (base.leadPreference || leadPreference) : (leadPreference || base.leadPreference);
-  return { payload: { textCount: count + 1, ...keepPreference(pref) }, keepContent: older };
+  const incomingWins = leadPreference && !(base.leadPreference && baseAt > receivedAtMs);
+  const kept = incomingWins ? keep(leadPreference, receivedAtMs) : keep(base.leadPreference, baseAt);
+  return { payload: { textCount: count + 1, ...kept }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
 };
 
 // When the text reached us: the unified message row's own time, else now.

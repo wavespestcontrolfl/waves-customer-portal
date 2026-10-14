@@ -268,7 +268,7 @@ describe('known-sender thread bell', () => {
     const read = rowAt({ read_at: new Date() }, { leadPreference: 'call' });
     expect(await decide(read)).toEqual({ payload: { textCount: 1 } });
     const plain = rowAt();
-    expect((await decide(plain)).payload).not.toHaveProperty('leadPreference');
+    expect((await decide(plain)).payload.leadPreference).toBeUndefined();
   });
 
   test('gate off: a standing row stops carrying the choice (nothing copied forward)', async () => {
@@ -278,7 +278,23 @@ describe('known-sender thread bell', () => {
     // The row's own text being replayed drops it too.
     await ring('SM-2');
     const same = rowAt({}, { leadPreference: 'text', twilioSid: 'SM-2' });
-    expect((await lastCall()[2].refreshPayload(same, same.metadata.payload)).payload).not.toHaveProperty('leadPreference');
+    expect((await lastCall()[2].refreshPayload(same, same.metadata.payload)).payload.leadPreference).toBeUndefined();
+  });
+
+  test('CALL, then TEXT, then an ordinary text, processed CALL / ordinary / TEXT: the bell ends on TEXT', async () => {
+    // Row after the ordinary text (newer than the TEXT): shows the ordinary text, still carries CALL (own time T-2000).
+    const afterOrdinary = rowAt({}, { leadPreference: 'call', leadPreferenceAtMs: Date.now() - 2000, receivedAtMs: Date.now() + 1000, twilioSid: 'SM-3' });
+    await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-2', message: 'Text', leadPreference: 'text' });
+    const r = await lastCall()[2].refreshPayload(afterOrdinary, afterOrdinary.metadata.payload);
+    // The TEXT is older than the displayed ordinary text (content kept) but newer than the CALL (choice replaced).
+    expect(r).toMatchObject({ keepContent: true, payload: { leadPreference: 'text' } });
+  });
+
+  test('an incoming choice older than the one on the row loses even when the displayed text is older', async () => {
+    const row = rowAt({}, { leadPreference: 'text', leadPreferenceAtMs: Date.now() + 500, receivedAtMs: Date.now() + 500 });
+    await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-1', message: 'Call', leadPreference: 'call' });
+    const r = await lastCall()[2].refreshPayload(row, row.metadata.payload);
+    expect(r.payload.leadPreference).toBe('text');
   });
 
   test('a late, older CALL never overrides the newer TEXT choice on the row', async () => {
