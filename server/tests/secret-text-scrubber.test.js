@@ -293,3 +293,12 @@ test.each(['DB_PASSWORD=secret123', 'DB_PASSWORD=changed2026!', 'password: secre
   const { scrubSecretText } = require('../utils/secret-text-scrubber');
   expect(scrubSecretText(text).text).toMatch(/\[removed\]/);
 });
+
+// Pre-push audit: a later assignment or quoted value does not shield the first one.
+test('a value followed by another assignment is still removed', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const value = ['hun', 'ter', '2w'].join('');
+  const out = scrubSecretText(`DB_PASSWORD=${value} OTHER_VAR="value"`).text;
+  expect(out).not.toContain(value);
+  expect(out).toContain('OTHER_VAR="value"');
+});
