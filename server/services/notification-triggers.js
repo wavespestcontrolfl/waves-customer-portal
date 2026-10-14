@@ -369,7 +369,9 @@ const TRIGGER_REGISTRY = {
       // One bell row per conversation: a known sender's later texts rewrite the
       // row while it is still open, so a count leads the title ("3 texts from
       // Name") and the body is always the latest text.
-      title: `${Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
+      // A lead's bare CALL / TEXT reply (GATE_LEAD_CALL_TEXT_PREFERENCE) leads
+      // with the choice so the owner calls the CALL leads first.
+      title: `${p.leadPreference === 'call' ? 'Wants a call:' : p.leadPreference === 'text' ? 'Prefers text:' : Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
       // The whole text, for the bell's "Show full text": the 140-character
       // body above (also the push text) used to be all the bell ever kept.

@@ -242,6 +242,16 @@ describe('known-sender thread bell', () => {
     expect(payload).toMatchObject({ threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 1, receivedAtMs: expect.any(Number) });
   });
 
+  test('a lead preference rides in the bell payload only when given', async () => {
+    await ring();
+    expect(lastCall()[1]).not.toHaveProperty('leadPreference');
+    await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-9', message: 'Call', leadPreference: 'call' });
+    const [key, payload, options] = lastCall();
+    expect(key).toBe('sms_reply');
+    expect(payload).toMatchObject({ leadPreference: 'call', threadId: 'cust-1', twilioSid: 'SM-9' });
+    expect(options).toMatchObject({ dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
+  });
+
   // refreshPayload runs inside notifyAdmin's keyed lock on the row as it stands.
   const decide = async (row, sid = 'SM-3', at = 3000) => {
     await ring(sid);

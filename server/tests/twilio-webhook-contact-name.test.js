@@ -58,6 +58,8 @@ describe('a scope-vetoed intake reply still reaches normal inbound notification 
     expect(intakeOutcome({ handled: false })).toBe('continue');
     expect(intakeOutcome(null)).toBe('continue');
     expect(intakeOutcome(undefined)).toBe('continue');
+    // A bare CALL / TEXT reply is recorded but never consumed (GATE_LEAD_CALL_TEXT_PREFERENCE).
+    expect(intakeOutcome({ handled: false, callTextPreference: 'call' })).toBe('continue');
   });
 });
 

@@ -116,6 +116,21 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/communications');
   });
 
+  test('SMS reply trigger leads with a lead\'s CALL / TEXT choice and is unchanged without it', () => {
+    const base = { fromName: 'Dana Example', message: 'Call', threadId: 'customer-123', twilioSid: 'SM1' };
+    const call = TRIGGER_REGISTRY.sms_reply.build({ ...base, leadPreference: 'call', textCount: 1 });
+    const text = TRIGGER_REGISTRY.sms_reply.build({ ...base, leadPreference: 'text', textCount: 2 });
+    const plain = TRIGGER_REGISTRY.sms_reply.build({ ...base, textCount: 1 });
+    const plainMany = TRIGGER_REGISTRY.sms_reply.build({ ...base, textCount: 3 });
+    expect(call.title).toBe('Wants a call: Dana Example');
+    expect(text.title).toBe('Prefers text: Dana Example');
+    expect(plain.title).toBe('SMS from Dana Example');
+    expect(plainMany.title).toBe('3 texts from Dana Example');
+    // Body and link are identical with or without the preference.
+    expect(call.body).toBe(plain.body);
+    expect(call.link).toBe(plain.link);
+  });
+
   test('SMS reply trigger masks fallback phone and redacts sensitive message text', () => {
     const built = TRIGGER_REGISTRY.sms_reply.build({
       fromPhone: '+19415551234',
