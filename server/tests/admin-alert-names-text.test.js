@@ -309,6 +309,80 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   });
 });
 
+describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => {
+  // A scripted lookup: each first() on the notifications builder answers the next
+  // queued row, so the test picks what the newest and the open-row probes find.
+  const scriptedTrx = (customer, answers) => {
+    const queries = [];
+    const trx = (table) => {
+      if (table !== 'notifications') return { where: () => ({ first: async () => customer }) };
+      const builder = kx(table);
+      builder.then = (resolve, reject) => { sentUpdates.push(builder.toSQL().toNative()); return Promise.resolve(1).then(resolve, reject); };
+      builder.first = async () => { queries.push(builder.toSQL().toNative().sql); return answers.shift() || null; };
+      return builder;
+    };
+    trx.raw = (...args) => kx.raw(...args);
+    trx.queries = queries;
+    return trx;
+  };
+  const ringWith = (answers) => {
+    const trx = scriptedTrx({ first_name: 'Albert', last_name: 'Clark' }, answers);
+    const result = ringOverdueBell(trx, {
+      row: row(), message: { id: 'sms-1', customer_id: CUSTOMER_ID, created_at: sourceAt, message_body: 'Hi, can I get a free estimate?' },
+      verdict: { verdict: 'open' }, dedupeKey: 'sms-commitment:commit-1',
+    });
+    return result.then((r) => ({ r, trx }));
+  };
+  beforeEach(() => { process.env.GATE_ALERT_RING_ONCE = 'true'; });
+  afterEach(() => { delete process.env.GATE_ALERT_RING_ONCE; });
+
+  test('gate off: no lookup, the 24-hour rolling dedupe rings as before', async () => {
+    delete process.env.GATE_ALERT_RING_ONCE;
+    const { trx } = await ringWith([{ id: 'n-open', done_at: null }]);
+    expect(trx.queries).toHaveLength(0);
+    const opts = lastCall()[3];
+    expect(opts).toMatchObject({ dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true, bell: true });
+    expect(opts.ringOnRefresh).toBeUndefined();
+  });
+
+  test('gate on, standing row still open: no new row; the text is refreshed without a ring', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-open', deduped: true });
+    await ringWith([{ id: 'n-open', done_at: null }]);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const opts = lastCall()[3];
+    // No window, so a row older than a day is still the standing one; a refresh never rings.
+    expect(opts.dedupeWindowMs).toBeUndefined();
+    expect(opts.refreshOnDedupe).toBe(true);
+    expect(opts.ringOnRefresh()).toBe(false);
+    expect(opts.dedupeKey).toBe('sms-commitment:commit-1');
+    // Strays of the same key still close.
+    expect(sentUpdates).toHaveLength(1);
+    expect(sentUpdates[0].bindings).toContain('n-open');
+  });
+
+  test('gate on, no row yet: one new row and bell through the normal path', async () => {
+    const { trx } = await ringWith([]);
+    expect(trx.queries).toHaveLength(1);
+    const opts = lastCall()[3];
+    expect(opts).toMatchObject({ dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true, bell: true });
+    expect(opts.ringOnRefresh).toBeUndefined();
+  });
+
+  test('gate on, a person marked the row done and the promise is still overdue: rings once more', async () => {
+    const { trx } = await ringWith([{ id: 'n-done', done_at: new Date('2026-10-12T15:00:00Z') }, null]);
+    expect(trx.queries).toHaveLength(2);
+    expect(trx.queries[1]).toContain('"done_at" is null');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(lastCall()[3]).toMatchObject({ dedupeWindowMs: 24 * 3600 * 1000, bell: true });
+  });
+
+  test('gate on, newest row is done but an older row is still open: keep the open one, make nothing', async () => {
+    const { r } = await ringWith([{ id: 'n-done', done_at: new Date('2026-10-12T15:00:00Z') }, { id: 'n-old-open' }]);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ id: 'n-old-open', deduped: true });
+  });
+});
+
 describe('fitAction name shortening', () => {
   const { fitAction } = require('../services/admin-alert-names');
   const send = [(n) => `send ${n} the estimate`];

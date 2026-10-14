@@ -6703,3 +6703,13 @@ function fastCompleteWrapUpLive() {
 }
 // GATE_FAST_COMPLETE_WRAP_UP reader, on its own line so gate PRs never conflict.
 module.exports.fastCompleteWrapUpLive = fastCompleteWrapUpLive;
+
+// GATE_ALERT_RING_ONCE read at CALL time, strict `=== 'true'`, dark in every environment.
+// On, an overdue promise bell (SMS and email, ringOverdueBell) never makes a second row or
+// ring while its first row is still open, and the call booking-miss watchdog skips its
+// repeat rings. Off = today's behavior, byte for byte.
+function alertRingOnceLive() {
+  return process.env.GATE_ALERT_RING_ONCE === 'true';
+}
+// GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
+module.exports.alertRingOnceLive = alertRingOnceLive;
