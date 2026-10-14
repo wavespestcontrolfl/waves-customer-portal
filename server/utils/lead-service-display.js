@@ -144,9 +144,9 @@ function catalogNameIndex(names) {
   return new Map([...(names || [])].map(clean).filter(Boolean).map((name) => [name.toLowerCase(), name]));
 }
 
-function classify(part, catalogNames, keptLabels) {
+function classify(part, catalogNames) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
-  if (KEPT_LABELS.has(part.toLowerCase()) || keptLabels.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
+  if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: null };
   const catalogName = catalogMatch(part, catalogNames);
@@ -242,18 +242,16 @@ const PLACE = {
   },
 };
 
-// keptLabels: admin-configured names with no catalog row (the standalone
-// roach package), shown as written. keyedName: the current catalog name of
-// the lead's service_key, which survives a catalog rename.
-function leadServiceDisplay(serviceInterest, { catalogNames = null, keptLabels = [], keyedName = null } = {}) {
+// keyedName: the current catalog name of the lead's service_key. The key
+// names the FIRST service (an upsell appends after it), so a catalog rename
+// reaches that part and the rest is named part by part.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, keyedName = null } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
-  const kept = new Set([...keptLabels].map((label) => clean(label).toLowerCase()).filter(Boolean));
-  // A keyed lead's text is its catalog name at the time (or a kept label);
-  // a text that grew a second service is named part by part instead.
-  if (keyedName && !kept.has(text.toLowerCase()) && !/\s\+\s/.test(text)) return clean(keyedName);
 
-  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames, kept));
+  const pieces = splitParts(text, catalogNames);
+  if (keyedName) pieces[0] = clean(keyedName);
+  const parts = pieces.map((part) => classify(part, catalogNames));
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.
@@ -268,7 +266,18 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null, keptLabels =
     if (assessmentAt < 0) { assessmentAt = out.length; out.push(null); }
     if (short) shorts.push(short);
   };
-  for (const part of parts) PLACE[part.kind](part, plan, (label) => out.push(label), toAssessment);
+  const seenTopics = new Set();
+  for (const part of parts) {
+    const before = out.length;
+    const named = [];
+    PLACE[part.kind](part, plan, (label) => { named.push(label); out.push(label); }, toAssessment);
+    // A part about a different service never vanishes into an earlier name:
+    // "Quarterly Pest Control + Roach Package" keeps the roach work visible.
+    const keys = (part.topics || [part.topic]).filter(Boolean).map((topic) => topic.key);
+    const repeatsOnly = named.length && named.every((label) => out.indexOf(label) < before);
+    if (repeatsOnly && keys.length && !keys.some((key) => seenTopics.has(key))) out.push(part.text || part.name);
+    keys.forEach((key) => seenTopics.add(key));
+  }
   if (assessmentAt >= 0) out[assessmentAt] = assessmentLabel(shorts);
 
   return [...new Set(out.filter(Boolean))].join(' + ') || null;

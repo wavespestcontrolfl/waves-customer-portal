@@ -31,13 +31,9 @@ async function serviceDisplayCatalog() {
   if (!leadServiceDisplayLive()) return null;
   try {
     const services = await db('services').select('name', 'service_key');
-    // The quote wizard stores the admin-configured roach package names
-    // (pest_base.initial_roach.display), which are not catalog rows.
-    const roachDisplay = require('../services/pricing-engine').constants?.PEST?.pestInitialRoach?.display || {};
     return {
       catalogNames: catalogNameIndex(services.map((service) => service.name)),
       nameByKey: new Map(services.filter((service) => service.service_key).map((service) => [service.service_key, service.name])),
-      keptLabels: Object.values(roachDisplay).map((entry) => entry?.name).filter((name) => typeof name === 'string' && name.trim()),
     };
   } catch (err) {
     logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
@@ -45,10 +41,15 @@ async function serviceDisplayCatalog() {
   }
 }
 
+// The standalone cockroach package is keyed, but its lead text is the
+// admin-configured package name (public-quote keyedLeadLabel), not the
+// catalog name, and it is shown as written.
+const CONFIGURED_NAME_KEYS = new Set(['cockroach_control']);
+
 function serviceDisplayFor(catalog, serviceInterest, serviceKey) {
+  if (CONFIGURED_NAME_KEYS.has(serviceKey)) return String(serviceInterest || '').trim() || null;
   return leadServiceDisplay(serviceInterest, {
     catalogNames: catalog.catalogNames,
-    keptLabels: catalog.keptLabels,
     keyedName: serviceKey ? catalog.nameByKey.get(serviceKey) : null,
   });
 }
@@ -173,11 +174,12 @@ function applyLeadSearch(query, search, serviceTexts = []) {
       .orWhereILike('leads.email', pattern)
       .orWhereILike('leads.address', pattern)
       .orWhereILike('leads.service_interest', pattern);
-    for (const { text, key } of serviceTexts) {
-      this.orWhere(function () {
-        this.where('leads.service_interest', text);
-        if (key) this.where('leads.service_key', key); else this.whereNull('leads.service_key');
-      });
+    // One set-based clause with two array binds, whatever the match count.
+    if (serviceTexts.length) {
+      this.orWhereRaw(
+        "(leads.service_interest, COALESCE(leads.service_key, '')) IN (SELECT * FROM unnest(?::text[], ?::text[]))",
+        [serviceTexts.map((row) => row.text), serviceTexts.map((row) => row.key || '')],
+      );
     }
     if (digits && /^[+\d\s().-]+$/.test(term)) {
       this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);

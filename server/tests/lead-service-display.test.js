@@ -128,20 +128,15 @@ describe('leadServiceDisplay', () => {
     expect(name(text)).toBe(text);
   });
 
-  test('an admin-configured package name is shown as written', () => {
-    const opts = { catalogNames, keptLabels: ['Roach Package'] };
-    expect(leadServiceDisplay('Roach Package', opts)).toBe('Roach Package');
-    expect(leadServiceDisplay('Roach Package + Recurring Lawn Care', opts)).toBe('Roach Package + Monthly Lawn Care Service');
-    expect(leadServiceDisplay('Roach Package', { catalogNames })).toBe('Waves Assessment (Pest)');
+  test('a part about a different service never vanishes into an earlier name', () => {
+    expect(name('Quarterly Pest Control + Roach Package')).toBe('Quarterly Pest Control Service + Roach Package');
+    expect(name('Recurring Lawn Care + One-Time Lawn Treatment')).toBe('Monthly Lawn Care Service');
   });
 
-  test('a keyed lead shows its key\'s current catalog name after a rename', () => {
-    const opts = { catalogNames, keptLabels: ['Roach Package'], keyedName: 'Quarterly Pest Control Service' };
-    expect(leadServiceDisplay('General Pest Program', opts)).toBe('Quarterly Pest Control Service');
-    // the standalone roach package is keyed but reads its configured name
-    expect(leadServiceDisplay('Roach Package', opts)).toBe('Roach Package');
-    // a text that grew a second service is named part by part
-    expect(leadServiceDisplay('Recurring Pest Control + Recurring Lawn Care', opts))
+  test('a keyed lead names its first service from the key, after a rename and after an upsell', () => {
+    const keyed = { catalogNames, keyedName: 'Quarterly Pest Control Service' };
+    expect(leadServiceDisplay('General Pest Program', keyed)).toBe('Quarterly Pest Control Service');
+    expect(leadServiceDisplay('General Pest Program + Recurring Lawn Care', keyed))
       .toBe('Quarterly Pest Control Service + Monthly Lawn Care Service');
   });
 
