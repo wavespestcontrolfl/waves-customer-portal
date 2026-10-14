@@ -43,17 +43,10 @@ async function serviceDisplayCatalog() {
   }
 }
 
-// The standalone cockroach package is keyed, and its lead text starts with
-// the admin-configured package name (public-quote keyedLeadLabel), shown as
-// written even after the config is renamed.
-const CONFIGURED_NAME_KEYS = new Set(['cockroach_control']);
-
-function serviceDisplayFor(catalog, serviceInterest, serviceKey) {
-  return leadServiceDisplay(serviceInterest, {
-    catalogNames: catalog.catalogNames,
-    asWritten: catalog.asWritten,
-    firstAsWritten: CONFIGURED_NAME_KEYS.has(serviceKey),
-  });
+// The name comes from the stored text alone. service_key is not used: a
+// staff edit changes the text but keeps the key (public-quote dedupe reads it).
+function serviceDisplayFor(catalog, serviceInterest) {
+  return leadServiceDisplay(serviceInterest, { catalogNames: catalog.catalogNames, asWritten: catalog.asWritten });
 }
 
 async function withServiceDisplay(leads) {
@@ -61,16 +54,15 @@ async function withServiceDisplay(leads) {
   if (!catalog) return leads;
   return leads.map((lead) => ({
     ...lead,
-    service_display: serviceDisplayFor(catalog, lead.service_interest, lead.service_key),
+    service_display: serviceDisplayFor(catalog, lead.service_interest),
   }));
 }
 
 // Search matches what the screen shows: the stored service texts whose
-// display name contains the term, as (text, key) pairs for applyLeadSearch
-// to OR in: the same text can be shown under two names, keyed and unkeyed. The
-// (text, key) → name index is rebuilt at most every five minutes (the Leads
-// screen re-runs an active search every 10 s); every match is used, so no
-// lead is missing from a search by the name it is shown under.
+// display name contains the term, for applyLeadSearch to OR in. The
+// text → name index is rebuilt at most every five minutes (the Leads screen
+// re-runs an active search every 10 s); every match is used, so no lead is
+// missing from a search by the name it is shown under.
 const SHOWN_AS_TTL_MS = 5 * 60 * 1000;
 let shownAsIndex = { builtAt: 0, rows: [] };
 
@@ -80,17 +72,13 @@ async function serviceTextsShownAs(search) {
   if (!catalog) return [];
   if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS) {
     const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest')
-      .distinct('service_interest', 'service_key');
+      .distinct().pluck('service_interest');
     shownAsIndex = {
       builtAt: Date.now(),
-      rows: stored.map((row) => ({
-        text: row.service_interest,
-        key: row.service_key || null,
-        shown: (serviceDisplayFor(catalog, row.service_interest, row.service_key) || '').toLowerCase(),
-      })),
+      rows: stored.map((text) => ({ text, shown: (serviceDisplayFor(catalog, text) || '').toLowerCase() })),
     };
   }
-  return shownAsIndex.rows.filter((row) => row.shown.includes(term));
+  return shownAsIndex.rows.filter((row) => row.shown.includes(term)).map((row) => row.text);
 }
 
 // Format/length validation for manual lead creation. Permissive by design — it
@@ -176,13 +164,8 @@ function applyLeadSearch(query, search, serviceTexts = []) {
       .orWhereILike('leads.email', pattern)
       .orWhereILike('leads.address', pattern)
       .orWhereILike('leads.service_interest', pattern);
-    // One set-based clause with two array binds, whatever the match count.
-    if (serviceTexts.length) {
-      this.orWhereRaw(
-        "(leads.service_interest, COALESCE(leads.service_key, '')) IN (SELECT * FROM unnest(?::text[], ?::text[]))",
-        [serviceTexts.map((row) => row.text), serviceTexts.map((row) => row.key || '')],
-      );
-    }
+    // One clause with one array bind, whatever the match count.
+    if (serviceTexts.length) this.orWhereRaw('leads.service_interest = ANY(?::text[])', [serviceTexts]);
     if (digits && /^[+\d\s().-]+$/.test(term)) {
       this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
     }

@@ -271,15 +271,11 @@ function nameParts(text, catalogNames, kept) {
 
 // asWritten: admin-configured package names with no catalog row (the roach
 // package names the quote wizard stores), shown as written, plus sign
-// included, wherever they appear. firstAsWritten: the lead's key says its
-// first part is such a name even if the config was renamed since.
-function leadServiceDisplay(serviceInterest, { catalogNames = null, asWritten = [], firstAsWritten = false } = {}) {
+// included, wherever they appear.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, asWritten = [] } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
   const kept = new Set(asWritten.map(clean).filter(Boolean).map((label) => label.toLowerCase()));
-  if (firstAsWritten && !splitParts(text, null, kept).some((part) => kept.has(part.toLowerCase()))) {
-    kept.add(clean(text.split(/\s+\+\s+/)[0]).toLowerCase());
-  }
   return nameParts(text, catalogNames, kept);
 }
 
