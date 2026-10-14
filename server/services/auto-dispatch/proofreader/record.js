@@ -142,7 +142,7 @@ const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // r19, r28, r31.
 // Whole month names and their short forms only: "JANITOR" is not January (r33).
 const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const DATE_SHAPES = `(?:(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:the\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
+const DATE_SHAPES = `(?:\\d{1,2}-\\d{1,2}-(?:\\d{4}|\\d{2})(?![\\w/-])|(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:the\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
@@ -175,7 +175,7 @@ const TIME_WORDS_RE = new RegExp([
   // by its own pattern.
   `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${HOUR_ISH}|${SPELLED_HOUR}|${TIME_ANCHORS}))`,
   `\\b${HOUR_ISH}`,
-  `\\b${HHMM}(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
+  `\\b(?:${HHMM}|[1-9][0-5]\\d(?![\\w:/-]))(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
   // Minutes to / past an hour, spelled ("TEN TO TWO"): r23. Digits are read
   // by the range pattern.
   `\\b(?:five|ten|fifteen|twenty(?:[\\s-]{1,3}five)?)(?=\\s{1,5}(?:to|past|after|til|till)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
@@ -208,7 +208,7 @@ const TIME_WORDS_RE = new RegExp([
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
-  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|warning|lead[\\s-]{0,3}time|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)(?:.?s)?(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|warning|lead[\\s-]{0,3}time|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
   `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
