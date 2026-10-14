@@ -268,6 +268,13 @@ describe('known-sender thread bell', () => {
     expect((await decide(plain)).payload).not.toHaveProperty('leadPreference');
   });
 
+  test('a late, older CALL never overrides the newer TEXT choice on the row', async () => {
+    const newerText = rowAt({}, { leadPreference: 'text', receivedAtMs: 9e15 });
+    await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-OLD', message: 'Call', leadPreference: 'call' });
+    const r = await lastCall()[2].refreshPayload(newerText, newerText.metadata.payload);
+    expect(r).toMatchObject({ keepContent: true, payload: { leadPreference: 'text' } });
+  });
+
   test('a newer text on a still-open row counts one more and takes over the row', async () => {
     expect(await decide(rowAt())).toEqual({ payload: { textCount: 3 }, keepContent: false });
   });

@@ -96,7 +96,10 @@ const threadRefresh = (MessageSid, receivedAtMs, leadPreference = null) => (exis
   const keepPreference = (pref) => (pref ? { leadPreference: pref } : {});
   if (base.twilioSid === MessageSid) return { payload: { textCount: count, ...keepPreference(base.leadPreference) } };
   if (existing.read_at || existing.done_at) return { payload: { textCount: 1 } };
-  return { payload: { textCount: count + 1, ...keepPreference(leadPreference || base.leadPreference) }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
+  // An OLDER text arriving late never overrides the newer text's choice.
+  const older = isOlderMessage(receivedAtMs, MessageSid, base);
+  const pref = older ? (base.leadPreference || leadPreference) : (leadPreference || base.leadPreference);
+  return { payload: { textCount: count + 1, ...keepPreference(pref) }, keepContent: older };
 };
 
 // When the text reached us: the unified message row's own time, else now.
