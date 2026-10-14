@@ -366,6 +366,8 @@ describe('the customer record', () => {
       'Gate code 4821, come at 2 o\'clock',
       'Gate code 4821, 3 or later is best',
       'Gate code 4821, any time past 3',
+      // A day-word credential AND a real statement: the statement still counts.
+      'Gate code Friday, never before 10am',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
       expect(redactAccessCodes(text)).not.toContain('4821');
@@ -380,6 +382,10 @@ describe('the customer record', () => {
       '[call Fri Aug 14] Gate code: 4821.',
       '[2026-10-09 from messages] Gate code 4821 is unconfirmed',
       'Community gate code 4821# given by the owner 10/1.',
+      // The credential itself is a day or a time word: not a statement about when.
+      'Gate code Friday',
+      'Gate password is noon',
+      'The garage code: sunday',
     ])('nothing about when is hidden: %s', (text) => {
       expect(hid(text)).toBe(false);
     });

@@ -120,9 +120,16 @@ const TIME_WORDS_RE = new RegExp([
 ].join('|'), 'gi');
 const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
 
+// The value that directly follows a code noun is the credential itself, not
+// a statement about when: "gate code Friday", "password is noon". It is left
+// out of the count on the raw side, so a code that happens to be a day or a
+// time word does not make the record incomplete (Codex #6328 r2).
+const CREDENTIAL_VALUE_RE = /\b(code|password|passcode|passphrase|pin|combo|combination)\b(\s*(?:is|=|:|-)?\s*)["'\u201c\u2018]?[A-Za-z0-9#*]+["'\u201d\u2019]?/gi;
+const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2');
+
 // The mask removed at least one word that can say when.
 function maskHidTime(raw, masked) {
-  return raw !== masked && timeWords(masked) < timeWords(raw);
+  return raw !== masked && timeWords(masked) < timeWords(withoutCredentialValues(raw));
 }
 
 // The entries of one stored text: one, or its parts when it is long. `ms`
