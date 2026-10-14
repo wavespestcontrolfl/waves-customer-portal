@@ -1322,6 +1322,11 @@ const gates = {
   // customer rows share attaches to one account. Read at call time by
   // server/routes/twilio-webhook.js findSingleCustomerByPhone() — this entry is for logGateStatus only.
   smsSharedPhoneLink: gateEnvValue('GATE_SMS_SHARED_PHONE_LINK'),
+  // Courtesy reply to an automated visit text (owner 2026-10-14): a bare "Ok" / "Thanks" / 👍
+  // after Waves' own confirmation, reminder, en-route, arrival or completion text is marked
+  // read with no bell. Read at call time by server/routes/twilio-webhook.js
+  // smsCourtesyAfterTemplateLive() — this entry is for logGateStatus only.
+  smsCourtesyAfterTemplate: process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   // SMS offer ledger (SMS booking completion, slice 1 of
   // sms-booking-complete-scope 2026-10-02): after the provider accepts a reply
   // that quoted appointment times, record in sms_offers which slots the SENT
@@ -6409,6 +6414,14 @@ function portalChatEmailChangeLive() {
   return process.env.GATE_PORTAL_CHAT_EMAIL_CHANGE === 'true';
 }
 
+// GATE_SMS_COURTESY_AFTER_TEMPLATE read at CALL time — strict `=== 'true'`.
+// The one reader for the inbound-SMS courtesy rule after an automated visit
+// text (server/routes/twilio-webhook.js lastOutboundAskedQuestion). Off = a
+// reply after such a text counts as answering it, as before.
+function smsCourtesyAfterTemplateLive() {
+  return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.pestRidesLawnAtAcceptLive = pestRidesLawnAtAcceptLive;
@@ -6703,3 +6716,5 @@ function fastCompleteWrapUpLive() {
 }
 // GATE_FAST_COMPLETE_WRAP_UP reader, on its own line so gate PRs never conflict.
 module.exports.fastCompleteWrapUpLive = fastCompleteWrapUpLive;
+// GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
+module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;

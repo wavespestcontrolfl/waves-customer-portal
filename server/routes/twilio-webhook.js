@@ -2295,6 +2295,16 @@ async function ringSmsReplyBell(args) {
   return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
 }
 
+// sms_log.message_type of the automated visit notices the system sends on its
+// own (appointment-reminders.js, twilio.js, reschedule-sms.js; names from
+// mapPurposeToMessageType and the reminder kind maps).
+const AUTOMATED_VISIT_TEXT_TYPES = new Set([
+  'confirmation', 'appointment_confirmation',
+  'appointment_reminder', 'appointment_reminder_72h', 'appointment_reminder_24h',
+  'reminder_72h', 'reminder_24h',
+  'tech_en_route', 'tech_arrived', 'service_complete',
+]);
+
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {
   try {
     // Scoped to the Waves number the customer replied on: a question asked
@@ -2305,8 +2315,15 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
       .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .orderBy('created_at', 'desc')
-      .first('message_body');
+      .first('message_body', 'message_type');
     if (!last) return true;
+    // GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14): an automated visit
+    // text asks nothing a person is waiting to hear back on, even when its
+    // template carries a "reply"/"confirm" line, so "Ok" after it is a closer.
+    // Only the explicit allowlist counts; a person's text ('manual', AI-approved
+    // drafts) and every unlisted type keep the question check below.
+    if (require('../config/feature-gates').smsCourtesyAfterTemplateLive()
+      && AUTOMATED_VISIT_TEXT_TYPES.has(String(last.message_type || '').toLowerCase())) return false;
     // A question mark OR an explicit reply directive ("Reply YES to confirm",
     // "let us know", "text back") — templates ask without "?" (hook P1).
     return outboundAsksForReply(last.message_body);
@@ -2327,6 +2344,7 @@ router._internals = {
   hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
+  lastOutboundAskedQuestion,
 };
 
 module.exports = router;

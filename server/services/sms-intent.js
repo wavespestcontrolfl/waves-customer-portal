@@ -64,6 +64,16 @@ const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|hear
 const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator}|[0-9#*]\\ufe0f?\\u20e3|[\\u{E0020}-\\u{E007F}])+';
 const EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+${EMOJI_SEQ_RE}\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+// Google Messages (Android) renders an emoji tapback on our text as
+// `<emoji> to “<our text>”` with NO "Reacted" word, the emoji wrapped in
+// zero-width spaces (U+200B) and spaces inside the curly quotes. Missed until
+// 2026-10-14: the body read as a normal text and rang "2 texts from …" for a
+// 👍 on a visit notice. Zero-width characters are allowed around the emoji
+// here, in the pattern, rather than stripped from the body: the quote-boundary
+// rule above stays untouched. The emoji capture excludes the padding, so the
+// affirmative check below sees the bare emoji.
+const ZERO_WIDTH_PAD = '[\\s\\u200b\\u200c\\u200d\\ufeff]';
+const ANDROID_EMOJI_SMS_REACTION_RE = new RegExp(`^${ZERO_WIDTH_PAD}*(${EMOJI_SEQ_RE})${ZERO_WIDTH_PAD}*to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 
 // Pure conversation-closers: the whole message is courtesy — "Thanks!",
 // "Ok great", "Sounds good, see you then", "👍". Deliberately narrow: a bare
@@ -106,7 +116,7 @@ function isAffirmativeSmsReaction(body) {
   const text = String(body || '').trim();
   if (!text) return false;
   if (AFFIRMATIVE_SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text)) return true;
-  const m = ACK_EMOJI_SMS_REACTION_RE.exec(text);
+  const m = ACK_EMOJI_SMS_REACTION_RE.exec(text) || ANDROID_EMOJI_SMS_REACTION_RE.exec(text);
   if (!m) return false;
   return m[1].replace(ACK_EMOJI_RE, '').replace(/[\ufe0f\u200d]/gu, '').length === 0;
 }
@@ -200,7 +210,8 @@ function isSmsReaction(body) {
   if (!body || typeof body !== 'string') return false;
   const text = body.trim();
   return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text)
-    || EMOJI_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text);
+    || EMOJI_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text)
+    || ANDROID_EMOJI_SMS_REACTION_RE.test(text);
 }
 
 // Reschedule/away intent — a strict SUBSET of scheduling intent. Scheduling
