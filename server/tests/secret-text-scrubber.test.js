@@ -287,3 +287,9 @@ test('a long run-on dotenv line still loses its value', () => {
   const out = scrubSecretText(`DB_PASSWORD=${value} ${'ordinary words '.repeat(20)}`).text;
   expect(out).not.toContain(value);
 });
+
+// Pre-push audit: a value with a digit or symbol is never a status word.
+test.each(['DB_PASSWORD=secret123', 'DB_PASSWORD=changed2026!', 'password: secret1'])('a digit-bearing value is removed: %s', (text) => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  expect(scrubSecretText(text).text).toMatch(/\[removed\]/);
+});

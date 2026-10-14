@@ -175,7 +175,12 @@ const NOT_A_VALUE = new Set(['none', 'n/a', 'na', 'unknown', 'required', 'needed
 // set"). A few status words can also open a passphrase ("correct horse battery
 // staple"): for those every word of the clause must be a status word.
 const AMBIGUOUS_FIRST = new Set(['correct', 'valid', 'private', 'secure', 'secret', 'same', 'old', 'new', 'current', 'default', 'shared', 'a', 'an', 'the']);
-const statusWord = word => NOT_A_VALUE.has(word.replace(/[^a-z/]/g, ''));
+// A status word is letters only ("n/a" too); a word with a digit or symbol is
+// a value ("secret123", "changed2026!"), never prose.
+const statusWord = (word) => {
+  const bare = word.toLowerCase().replace(/[.,!?:;]+$/, '');
+  return /^[a-z/]+$/.test(bare) && NOT_A_VALUE.has(bare);
+};
 function proseOnly(clause) {
   const words = clause.toLowerCase().split(/\s+/).filter(Boolean);
   if (!statusWord(words[0])) return false;
