@@ -2318,13 +2318,14 @@ const AUTOMATED_VISIT_TEXT_TYPES = new Set([
 // customer replied on: a question asked from a different line is a different
 // thread — hook P1). Throws on a failed read; callers fail closed.
 async function lastOutboundOnThread(toPhone, ourNumber) {
-  return db('sms_log')
+  const last = await db('sms_log')
     .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
     .whereIn('status', ['queued', 'sent', 'delivered']) // a failed/blocked send never reached them (hook P1)
     .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
     .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
     .orderBy('created_at', 'desc')
     .first('message_body', 'message_type');
+  return last;
 }
 
 // GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14): an automated visit text
@@ -2357,9 +2358,9 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
 // only when the tapback quotes that last text. ❓/👎
 // and every other reaction keep their loud path. Fails closed (loud).
 async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
-  if (!require('../config/feature-gates').smsCourtesyAfterTemplateLive()) return false;
-  if (!isAffirmativeSmsReaction(body)) return false;
   try {
+    if (!require('../config/feature-gates').smsCourtesyAfterTemplateLive()) return false;
+    if (!isAffirmativeSmsReaction(body)) return false;
     const last = await lastOutboundOnThread(toPhone, ourNumber);
     if (!isAutomatedVisitText(last)) return false;
     // The tapback must quote THAT text: a thumbs-up on a staff question sent
