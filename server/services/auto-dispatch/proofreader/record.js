@@ -231,8 +231,9 @@ const TIME_WORDS_RE = new RegExp([
   // "late in the day"): r49.
   '\\b(?:early|earlier|late|later)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
   '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
-  // A week of the month ("FIRST WEEK OF THE MONTH ONLY"): r49.
-  '\\b(?:first|second|third|fourth|last|\\d(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
+  // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
+  // "SECOND TUESDAY OF THE MONTH"): r49, r50.
+  '\\b(?:first|second|third|fourth|last|\\d(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
   // "AS EARLY AS 9", "as late as 5": r35.
   `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
