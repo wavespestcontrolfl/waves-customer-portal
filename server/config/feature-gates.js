@@ -15,6 +15,7 @@
  *   GATE_IB_BILLING_MODE_EDIT=true (the Intelligence Bar's update_customer may change one customer's billing type (billing_mode) and per-application fee on its own confirm card, owner ruling D5 2026-10-06; the same billing-type rules as the customer page (services/billing-mode-rules.js), annual prepay and clearing the type refused, never owner-direct, no customer message; read at call time via ibBillingModeEditLive(), strict === 'true', dark by default; off = both fields are refused exactly as before)
  *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
  *   GATE_IB_REPRICE_VISITS=true (the Intelligence Bar's reprice_future_visits write tool, owner ruling 2026-10-07: one confirm card changes the per-visit price of one customer's future visits for one service, listing each visit's old -> new price; each visit is saved through the Schedule screen's own visit edit (updateVisitDetails over PUT /admin/schedule/:id/update-details), so the re-price block, validation and CAS are the screen's. Never a completed, in-progress, invoiced, prepaid, annual-prepay-covered or otherwise money-committed visit; a monthly-membership customer is refused (their price is the monthly rate). No customer message is sent. Read at call time via ibRepriceVisitsLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
+ *   GATE_IB_GENERAL_READ=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_reads and read_admin_data read tools, owner ruling 2026-10-12: on the owner login only, the bar may read what an admin screen reads. read_admin_data calls one reviewed admin GET endpoint from the generated catalog (server/services/intelligence-bar/admin-read-catalog.json) on this server as the logged-in owner and returns the JSON, capped. No write, no outside call, no file or stream. Read at call time via ibGeneralReadLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
@@ -26,6 +27,7 @@
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
+ *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_ONE_TEXT_PER_CUSTOMER_DAY=true (owner 2026-10-12: one appointment reminder, one on-the-way text and one arrived text per customer, service address and day, no matter how many services or visits that day has; the rule never reads visit_id, service_visits or visit_effects; read at call time via oneTextPerCustomerDayLive(), dark by default; off = every reminder and tracker text is byte-identical to before)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
@@ -3581,6 +3583,18 @@ const gates = {
   // switch: unset.
   autoDispatchRoadCheck: gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK'),
 
+  // Auto-dispatch move proofreader (owner 2026-10-09 "proofreader yes";
+  // 2026-10-12 "go with the better agent, and for moves it is unsure of
+  // moving forward create admin notifications"). On, the 04:10 run in apply
+  // mode asks one model (ROUTES.autoDispatchProofreader) about each move
+  // right before it is written: the model reads the customer record and
+  // answers allow / hold / unknown. Only an allow moves the visit, on the
+  // slot the model read. An unknown raises one admin notice for the visit.
+  // It can only stop a move and it sends the customer nothing. OFF in every
+  // environment; auto-dispatch/config.js reads it through gateEnvValue() at
+  // call time (config.proofreaderEnabled). Kill switch: unset.
+  autoDispatchProofreader: gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -4885,6 +4899,29 @@ function ibRepriceVisitsLive() {
   return process.env.GATE_IB_REPRICE_VISITS === 'true';
 }
 
+// GATE_IB_GENERAL_READ read at CALL time — strict `=== 'true'`, dark, and it
+// needs GATE_IB_PLATFORM. The Intelligence Bar's find_admin_reads /
+// read_admin_data tools (services/intelligence-bar/admin-read-tools.js):
+// offered and executable only while on, and only on the owner login. Only the
+// platform path has the owner-only access model (fullAccess), so with
+// GATE_IB_PLATFORM off nothing offers the tools and a forced call is refused:
+// this reader is false then, everywhere. Kill: unset either variable.
+function ibGeneralReadLive() {
+  return process.env.GATE_IB_GENERAL_READ === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
+// GATE_IB_TOOL_SEARCH read at CALL time — strict `=== 'true'`, dark. A
+// full-access Intelligence Bar login on an ordinary admin page gets its page's
+// tools up front plus every other allowed tool deferred behind the Anthropic
+// API's tool search (action-registry.js initialTools, scope.toolSearch). Off =
+// the page list plus discover_capabilities for everyone. Has effect only on a
+// model that accepts tool search (models.anthropicSupportsToolSearch) and does
+// not think by default (models.anthropicThinksByDefault); any other model
+// keeps the ordinary list. Kill: unset.
+function ibToolSearchLive() {
+  return process.env.GATE_IB_TOOL_SEARCH === 'true';
+}
+
 // GATE_IB_BILLING_MODE_EDIT read at CALL time — strict `=== 'true'`, dark.
 // The Intelligence Bar's update_customer billing type + per-application fee
 // edit (services/intelligence-bar/billing-mode-change.js). Kill: unset.
@@ -4905,6 +4942,12 @@ function ibTierUpgradeEmailLive() {
 // Strict `=== 'true'`, dark in every environment.
 function ibStaffAutopayOffLive() {
   return process.env.GATE_IB_STAFF_AUTOPAY_OFF === 'true';
+}
+
+// Intelligence Bar accept_estimate (services/intelligence-bar/estimate-accept-tools.js),
+// read at CALL time. Strict `=== 'true'`, dark in every environment.
+function ibAcceptEstimateLive() {
+  return process.env.GATE_IB_ACCEPT_ESTIMATE === 'true';
 }
 
 // GATE_DUPLICATES_SAME_ADDRESS read at REQUEST time — strict `=== 'true'`, dark.
@@ -6500,6 +6543,8 @@ module.exports.neighborhoodTechActionsLive = neighborhoodTechActionsLive;
 module.exports.contactReportTextLive = contactReportTextLive;
 // GATE_IB_STAFF_AUTOPAY_OFF reader, on its own line.
 module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
+// GATE_IB_ACCEPT_ESTIMATE reader, on its own line.
+module.exports.ibAcceptEstimateLive = ibAcceptEstimateLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
@@ -6594,6 +6639,10 @@ module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
 module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;
 // GATE_IB_REPRICE_VISITS reader, on its own line so gate PRs never conflict.
 module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
+// GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
+module.exports.ibGeneralReadLive = ibGeneralReadLive;
+// GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
+module.exports.ibToolSearchLive = ibToolSearchLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.

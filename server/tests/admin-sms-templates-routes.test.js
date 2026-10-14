@@ -208,6 +208,30 @@ describe('admin SMS template routes', () => {
     });
   });
 
+  test('rejects an autopay_setup_link body that drops {secure_link} — the link IS the text', async () => {
+    const updateQuery = chain();
+    setDbQueues({
+      sms_templates: [
+        chain({ first: { id: 'sms-9', template_key: 'autopay_setup_link', category: 'billing', variables: JSON.stringify(['first_name', 'secure_link']) } }),
+        updateQuery,
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/sms-9`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: 'Hi {first_name}, set up Auto Pay with your saved card.' }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.missing_placeholders).toEqual(['secure_link']);
+      expect(body.error).toMatch(/must keep \{secure_link\}/);
+      expect(updateQuery.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('rejects a hardcoded WaveGuard brand in autopay_pre_charge — {autopay_label} is per-customer (2026-07-30)', async () => {
     const updateQuery = chain();
     setDbQueues({

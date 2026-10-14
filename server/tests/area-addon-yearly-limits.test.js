@@ -839,14 +839,16 @@ describe('where the recheck runs (source order)', () => {
     expect(insert).toBeGreaterThan(again);
     const won = read('services/estimate-manual-acceptance.js');
     expect(won).toContain('estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer');
-    // comms lock, then the estimate row FOR UPDATE, then the recheck on the locked row (Codex round 14): never the first read
-    const commsAt = won.indexOf('await lockCustomerComms(trx, estimate.customer_id);');
-    const rowLockAt = won.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimateId }).forUpdate().first();");
-    const recheckAt = won.indexOf('await assertAddOnsAcceptable(trx, estimate, {');
+    // comms lock, then the estimate row FOR UPDATE, then the recheck on the locked row (Codex round 14): never the first read.
+    // The steps are named functions now; the order is the order they are called in the win transaction.
+    const commsAt = won.indexOf('await lockCustomerComms(trx, current.customer_id);');
+    const rowLockAt = won.indexOf("const freshLinkRow = await trx('estimates').where({ id: ctx.estimateId }).forUpdate().first();");
+    const recheckAt = won.indexOf('await assertAddOnsAcceptable(trx, locked, {');
     expect(commsAt).toBeGreaterThan(0);
     expect(rowLockAt).toBeGreaterThan(commsAt);
     expect(recheckAt).toBeGreaterThan(rowLockAt);
-    expect(won.indexOf('if (freshLinkRow) estimate = { ...estimate, ...freshLinkRow };')).toBeLessThan(recheckAt);
+    expect(won.indexOf('const locked = freshLinkRow ? { ...estimate, ...freshLinkRow } : estimate;')).toBeLessThan(recheckAt);
+    expect(won.indexOf('await lockCommsOwner(trx,')).toBeLessThan(won.indexOf('await revalidateLockedRow(trx,'));
   });
 
   test('the quote steps attach the history; the engine file never queries', () => {
@@ -915,7 +917,8 @@ describe('the booking fence: every reader of a customer\'s add-on history holds 
     // Mark Won: the estimate's own customer is locked at the top; a customer the check finds is fenced
     const markWon = read('services/estimate-manual-acceptance.js');
     expect(markWon).toContain('fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),');
-    expect(markWon.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(markWon.indexOf('await assertAddOnsAcceptable(trx, estimate, {'));
+    expect(markWon.indexOf('await lockCustomerComms(trx, current.customer_id);')).toBeLessThan(markWon.indexOf('await assertAddOnsAcceptable(trx, locked, {'));
+    expect(markWon.indexOf('await lockCommsOwner(trx,')).toBeLessThan(markWon.indexOf('await revalidateLockedRow(trx,'));
     // Staff booking: the limits are read AFTER lockCustomerComms(trx, customerId) of the booking's customer
     const schedule = read('routes/admin-schedule.js');
     const lockAt = schedule.indexOf('await lockCustomerComms(trx, customerId);', schedule.indexOf('Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the'));

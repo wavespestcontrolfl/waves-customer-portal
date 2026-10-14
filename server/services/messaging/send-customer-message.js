@@ -654,6 +654,13 @@ async function sendCustomerMessageCore(input) {
     || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
       && input.entryPoint === 'estimate_service_details_send'
       && input.metadata?.original_message_type === 'estimate_service_details')
+    // The Auto Pay setup link (autopay-setup-link.js) when its caller pins the recipient it
+    // showed on a confirm card: a bearer link to the customer's payment page, so the
+    // customer-comms + phone locks and the customer row are held through the provider
+    // request while the number is re-read (the pin is only given by the bar's card).
+    || (input.audience === 'customer' && input.purpose === 'card_request'
+      && input.entryPoint === 'autopay_setup_link_send'
+      && input.metadata?.original_message_type === 'autopay_setup_link')
     // The annual rate review letter's text pointer (rate-review-comms.js): its
     // notice token is a bearer link that belongs to ONE customer, so the
     // customer-comms + phone locks are held through the provider request and
@@ -1795,6 +1802,12 @@ module.exports = {
   // must route through this instead of reading `blocked`/`deliveryOutcome`
   // itself, so a future outcome shape only needs updating here.
   classifyDeliveryCertainty,
+  // The send's own hold predicates and the callback-number hold's blocked
+  // outcome, for a read-only preflight that must refuse what this send would
+  // (autopay-setup-link.js autopayDeliveryPreflight). Never a second copy.
+  billingHoldBlock,
+  callbackNumberHoldBlocksSend,
+  CALLBACK_NUMBER_HOLD_BLOCK,
   // Exposed for tests
   _internals: {
     validateContract,

@@ -542,6 +542,7 @@ describe('write calls', () => {
     expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { phone: 'x' } } }], ownerDirect)).toBe(false);
     expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { email: 'x' } } }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard(owner, [{ tool: 'add_customer_property', input: { label: 'rental' } }], ownerDirect)).toBe(true);
+    expect(matrix.expectedCard(owner, [{ tool: 'add_customer_property', input: { address_line1: '100 Example Way' } }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard(owner, [{ tool: 'reschedule_appointment', input: {}, preview: { pinned_appointment: { id: 'a' } } }, { tool: 'send_sms', input: {} }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard(owner, [{ tool: 'reschedule_appointment', input: {}, preview: { pinned_appointment: { id: 'a', visit_id: 'v' } } }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard({ actor: 'owner', mode: 'owner_direct_off' }, [{ tool: 'adjust_stock', input: {} }], ownerDirect)).toBe(true);

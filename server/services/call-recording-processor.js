@@ -31,8 +31,8 @@ const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
-const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
-const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
+const { resolveLocation } = require('../config/locations');
+const { isInDesotoExclusion, isDesotoLocality, isDesotoZip, isServedSouthHillsboroughTown } = require('./service-area');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1933,8 +1933,7 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   }
   // A served south-Hillsborough town named by city OR by a served ZIP (AV
   // can return a ZIP with no locality), as the inspection route checks it.
-  const servedHillsboroughTown = [...cities, ...zips.map((z) => lower(zipToCity(z)))]
-    .some((c) => c && SOUTH_HILLSBOROUGH_CITIES.includes(c));
+  const servedHillsboroughTown = isServedSouthHillsboroughTown({ cities, zips });
   if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
     if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
     return { reason: 'address_validation_out_of_service_area', county: av.county || null };
@@ -4323,10 +4322,30 @@ const shutdownStampSql = (conn) => conn.raw(
 // valid extraction that is not spam and whose disposition is the callback task.
 // Only while V2 is the primary extractor: in shadow mode (V2 on, routing off)
 // its verdict is recorded for evaluation and rings nothing.
-function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled() } = {}) {
+// Call audit 2026-10-13: an urgent "please call me back immediately" voicemail
+// rang nothing because the model filed it voicemail_processed. The disposition
+// is the model's choice between two labels for the same message, so the second
+// basis is the verdict that a person left a message at all (call_nature
+// voicemail_message, not spam). No wording test: reading "call me back" out of
+// the transcript needed a refusal rule, a Spanish list, a speaker filter and a
+// tense rule, and each one opened another (Codex r1, r2). Thirty days of
+// production voicemails: the verdict alone rings for the same 3 unknown-caller
+// messages the wording rule did. Dead air and noise carry other call_nature
+// values and still ring nothing; the plan still requires spoken content.
+// Not spam is read from the schema's required boolean; the spam_kind label is
+// optional and, when present, must agree (a wrong number is not a message for
+// us). A voicemail that asks not to be contacted rings nothing on this basis:
+// both shapes of the flag, the V2 consent object and the legacy flat field.
+function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled(), extracted = {} } = {}) {
   if (!v2Primary) return false;
   const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
-  return v2?.recommended_disposition === 'callback_task_created' && v2?.spam_verdict?.spam_kind === 'not_spam';
+  const verdict = v2?.spam_verdict;
+  const notSpam = verdict?.spam_kind
+    ? verdict.spam_kind === 'not_spam' && verdict.is_spam_content !== true
+    : verdict?.is_spam_content === false;
+  if (!notSpam) return false;
+  if (v2.consent?.do_not_contact_request === true || extracted?.do_not_contact_request === true) return false;
+  return v2.recommended_disposition === 'callback_task_created' || v2.call_nature === 'voicemail_message';
 }
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
@@ -4355,7 +4374,8 @@ function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, 
   // Owner 2026-10-12 (call audit): an UNKNOWN caller who asks for a callback
   // rings too. Four such voicemails in 14 days ended with no bell, no card and
   // no lead. The basis is the V2 verdict (callbackAsked: not spam + a callback
-  // disposition), so a solicitor or robocall voicemail still stays bell-free.
+  // disposition or a left message), so a solicitor or robocall voicemail still
+  // stays bell-free.
   const workable = hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true });
   const spokenContent = String(transcript || '').replace(/\[(?:VOICEMAIL|NO SPEECH)\]/gi, '').trim();
   if (!workable && !((knownCustomer || callbackAsked) && spokenContent)) return null;
@@ -12311,7 +12331,7 @@ const CallRecordingProcessor = {
             outbound: isOutboundCall(call),
             knownCustomer: Boolean(vmAlertCustomer?.id),
             transcript: transcription,
-            callbackAsked: voicemailCallbackAsked(v2Result),
+            callbackAsked: voicemailCallbackAsked(v2Result, { extracted }),
           });
           if (alertPlan) {
             // One alert per call even across reprocessing (retranscription

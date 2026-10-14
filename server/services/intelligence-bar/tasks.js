@@ -95,6 +95,11 @@ function continuationError(task, receipts, { selectedTarget } = {}) {
       || (task.state === 'awaiting_approval' && !receipts.length)) {
     return { error: 'This task has no interrupted step to continue.', code: 'not_resumable' };
   }
+  // A history with tool-search blocks AND thinking blocks cannot be rewritten for
+  // a resume (a model change between the request and the resume): refuse it.
+  if (require('./tool-search').hasSearchAndThinking(task.checkpoint)) {
+    return { error: 'This saved request cannot be continued after a model change. Start the request again.', code: 'not_resumable' };
+  }
   if (task.state === 'running' && new Date(task.lease_expires_at).getTime() >= Date.now()) {
     return { error: 'This task is already running', code: 'already_running' };
   }
@@ -193,4 +198,4 @@ async function purgeExpiredTasks() {
     .where('lease_expires_at', '<=', db.fn.now()).del();
 }
 
-module.exports = { REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };
+module.exports = { continuationError, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };

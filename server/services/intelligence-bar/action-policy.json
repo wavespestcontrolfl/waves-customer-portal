@@ -119,6 +119,14 @@
     "approval": null,
     "scope": "none"
   },
+  "check_address": {
+    "module": "address-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "check_customer_status": {
     "module": "tech-tools.js",
     "domain": "tech",
@@ -463,6 +471,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "send_autopay_setup_link": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "remove_customer_property": {
     "module": "property-tools.js",
     "domain": "customers",
@@ -491,6 +507,14 @@
     "module": "billing-write-tools.js",
     "domain": "customers",
     "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "accept_estimate": {
+    "module": "estimate-accept-tools.js",
+    "domain": "estimate",
+    "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
@@ -1982,5 +2006,21 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "find_admin_reads": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "read_admin_data": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
   }
 }

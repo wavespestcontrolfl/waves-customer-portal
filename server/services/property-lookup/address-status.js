@@ -141,4 +141,4 @@ async function askProvider(address, key, opts, now) {
   return value;
 }
 
-module.exports = { STATES, resolveAddressStatus, addressStatusFromValidation, _private: { memo, inFlight, memoKey, DEFAULT_TIMEOUT_MS } };
+module.exports = { STATES, resolveAddressStatus, addressStatusFromValidation, isCountyGap, _private: { memo, inFlight, memoKey, DEFAULT_TIMEOUT_MS } };
