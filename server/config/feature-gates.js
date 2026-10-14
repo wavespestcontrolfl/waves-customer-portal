@@ -1733,6 +1733,13 @@ const gates = {
   // gate is on, verdicts are only logged (shadow) and never block a caller.
   marchexAutoBlock: process.env.GATE_MARCHEX_AUTO_BLOCK === 'true',
 
+  // Lead Alert Call — the business-hours phone call to Adam's cell when a
+  // website quote form lands (announce, or Press-1 bridge under
+  // leadAutoBridge). Owner 2026-10-14: off for now. Off unless exactly
+  // 'true'; off, the lead is handled like an after-hours lead (new_lead
+  // bell, legacy SMS only as delivery fallback).
+  leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
@@ -6718,3 +6725,13 @@ function fastCompleteWrapUpLive() {
 module.exports.fastCompleteWrapUpLive = fastCompleteWrapUpLive;
 // GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
 module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
+
+// GATE_ALERT_RING_ONCE read at CALL time, strict `=== 'true'`, dark in every environment.
+// On, an overdue promise bell (SMS and email, ringOverdueBell) never makes a second row or
+// ring while its first row is still open, and the call booking-miss watchdog skips its
+// repeat rings. Off = today's behavior, byte for byte.
+function alertRingOnceLive() {
+  return process.env.GATE_ALERT_RING_ONCE === 'true';
+}
+// GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
+module.exports.alertRingOnceLive = alertRingOnceLive;

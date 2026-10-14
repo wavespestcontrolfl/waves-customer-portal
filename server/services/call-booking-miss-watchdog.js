@@ -502,6 +502,8 @@ async function runInner({ now = new Date() } = {}) {
     // Already rung once. Re-ring while the slot is under a day away, the
     // office has not closed the call's cards, and the last bell is older
     // than the repeat interval.
+    // GATE_ALERT_RING_ONCE (owner 2026-10-14): the first ring stands alone.
+    if (require('../config/feature-gates').alertRingOnceLive?.()) continue;
     if (!repeatCandidates.includes(m) || closedCalls.has(m.call.id)) continue;
     const last = lastRung.get(m.call.id);
     if (last && now.getTime() - last.getTime() < REPEAT_INTERVAL_MINUTES * 60 * 1000) continue;
