@@ -156,7 +156,8 @@ const TIME_ANCHORS = `(?:${NAMED_TIMES}|noon|midnight|mornings?|afternoons?|even
 const TIME_WORDS_RE = new RegExp([
   // The hour alone is the match, the AM / PM a look-ahead: the mask can take
   // the hour and leave "A.M.", which counts by its own pattern (r21).
-  '\\b\\d{1,2}:\\d{2}(?=\\s?[ap]\\.?m\\.?(?![\\w])|(?![\\w:]))',
+  // Not a mix ratio ("mix ratio 1:10"): r27.
+  '(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})\\b\\d{1,2}:\\d{2}(?=\\s?[ap]\\.?m\\.?(?![\\w])|(?![\\w:]))',
   '\\b\\d{1,2}(?=\\s?[ap]\\.?m\\.?(?![\\w]))',
   // The lead word alone is the match, the anchor a look-ahead: in "BEFORE
   // lunch" the mask takes BEFORE and leaves lunch, and a match that took
@@ -220,6 +221,9 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:nights?|overnight)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service)\\b|[,;!)]|\\.(?:\\s|$)|$))',
   // "FIRST APPOINTMENT ONLY", "last stop": r25.
   '\\b(?:first|last)(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
+  // A bare hour before a word that makes it a time ("9 works for us", "TEN
+  // ONLY"): r27.
+  `(?<![\\d:/.-])\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
