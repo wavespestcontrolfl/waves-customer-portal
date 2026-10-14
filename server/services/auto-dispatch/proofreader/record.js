@@ -128,6 +128,10 @@ const AFTER_HOUR_OK = 'am|pm|a\\.m|p\\.m|o\\W?clock|or|and|to|until|till|only|pl
 const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
 // A quantity in a duration, in digits or words ("TWO DAYS NOTICE", "a week
 // ahead", "every couple of weeks"): r15.
+// A 24-hour clock time in four digits ("before 1400 hours"): only after an
+// hour word or before "hours / hrs", never alone (a four-digit number alone
+// is most often a code or a house number): r16.
+const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
@@ -145,7 +149,8 @@ const TIME_WORDS_RE = new RegExp([
   // lunch" the mask takes BEFORE and leaves lunch, and a match that took
   // both would count one on each side (r12). The anchor's own word counts
   // by its own pattern.
-  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${SPELLED_HOUR}|(?:${NAMED_TIMES})\\b))`,
+  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${SPELLED_HOUR}|(?:${NAMED_TIMES})\\b))`,
+  `\\b${HHMM}(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
   // Quarter or half to / past an hour ("QUARTER TO TEN"): r15.
   `\\b(?:quarter|half)(?=\\s{1,5}(?:to|past|after|til|till|before)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
   '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
