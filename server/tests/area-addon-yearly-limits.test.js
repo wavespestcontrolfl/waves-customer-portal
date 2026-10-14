@@ -740,14 +740,6 @@ describe('a backdated booking is judged against its own window', () => {
 });
 
 describe('the day of the visit is judged on every path (Codex round 9)', () => {
-  // These calls name no day, so the service judges "today" from the clock. Pin the clock to
-  // TODAY (noon ET) so the 360-day-old application stays inside the 12 months on any run date.
-  // Only Date is faked; timers stay real so the fake database's promises settle.
-  beforeEach(() => {
-    jest.useFakeTimers({ now: new Date(`${TODAY}T16:00:00.000Z`), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'] });
-  });
-  afterEach(() => { jest.useRealTimers(); });
-
   const lastYear = world({ property_application_history: [ledger('p-top', 360)] });
   const fireAnt = { id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY, estimate_data: storedWith(['fire_ant_yard']) };
 
