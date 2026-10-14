@@ -142,7 +142,8 @@ const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
 const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
 // "TWO AND A HALF HOURS": r22.
-const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
+// Spelled tens too ("THIRTY MINUTES NOTICE"): r30.
+const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
 // A word after the number must be one that goes with a time ("before 9
@@ -221,8 +222,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|first\\s{1,3}thing|mid-?day)(?![\\w])',
   // Night only as a limit ("NIGHT ONLY"); "NIGHT LIGHT" is a thing (r25).
   '\\b(?:nights?|overnight)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service)\\b|[,;!)]|\\.(?:\\s|$)|$))',
-  // "FIRST APPOINTMENT ONLY", "last stop": r25.
-  '\\b(?:first|last)(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
+  // "FIRST APPOINTMENT ONLY", "last stop", "1st appointment": r25, r30.
+  '\\b(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
   `(?<![\\d:/.-])\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,

@@ -447,6 +447,8 @@ describe('the customer record', () => {
       'Gate code 4821 VALID THROUGH OCTOBER',
       'Gate code 4821, 2:30ish only',
       'Gate code 4821, 10/31 works',
+      'Gate code 4821, THIRTY MINUTES NOTICE',
+      'Gate code 4821, 1st appointment only',
       'Gate code 4821, PM ONLY',
       'Gate code 4821, BUSINESS HOURS ONLY',
       'CODE 4821 OFFICE HOURS',
