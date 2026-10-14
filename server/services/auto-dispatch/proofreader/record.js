@@ -135,8 +135,9 @@ const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // The shapes of a calendar date: ISO, slash, month name (with an optional
 // ordinal), an ordinal day alone (with an optional "the"), or a month alone
 // ("VALID THROUGH OCTOBER"; not before a day or a mask, which the
-// month-and-day shape reads): r7 to r19, r28.
-const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))';
+// month-and-day shape reads), or day first ("EXPIRES 20 OCTOBER"): r7 to
+// r19, r28, r31.
+const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))';
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
@@ -198,7 +199,7 @@ const TIME_WORDS_RE = new RegExp([
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
   `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
-  `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
+  `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
