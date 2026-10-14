@@ -15,6 +15,7 @@ const {
   isSmsReaction,
   isQuietSmsReaction,
   isAffirmativeSmsReaction,
+  reactionQuotedTarget,
   isCourtesyOnly,
   hasRescheduleOrAwayIntent,
   outboundAsksForReply,
@@ -2352,13 +2353,21 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
 
 // Gate on: an affirmative tapback (Liked/Loved/👍-type emoji, the same ACK
 // list as isQuietSmsReaction) on a thread whose last Waves text was automated
-// is quiet even though that template quoted a "reply"/"confirm" line. ❓/👎
+// is quiet even though that template quoted a "reply"/"confirm" line, but
+// only when the tapback quotes that last text. ❓/👎
 // and every other reaction keep their loud path. Fails closed (loud).
 async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
   if (!require('../config/feature-gates').smsCourtesyAfterTemplateLive()) return false;
   if (!isAffirmativeSmsReaction(body)) return false;
   try {
-    return isAutomatedVisitText(await lastOutboundOnThread(toPhone, ourNumber));
+    const last = await lastOutboundOnThread(toPhone, ourNumber);
+    if (!isAutomatedVisitText(last)) return false;
+    // The tapback must quote THAT text: a thumbs-up on a staff question sent
+    // earlier must not go quiet because a reminder went out after it. A quote
+    // that does not start like the last text stays loud (as before the gate).
+    const collapse = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const quoted = collapse(reactionQuotedTarget(body));
+    return quoted.length >= 10 && collapse(last.message_body).includes(quoted.slice(0, 60));
   } catch (e) {
     logger.warn(`[twilio-webhook] reaction thread lookup failed: ${e.message}; leaving the reaction loud`);
     return false;

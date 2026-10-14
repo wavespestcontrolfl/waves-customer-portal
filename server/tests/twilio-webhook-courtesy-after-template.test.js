@@ -165,8 +165,16 @@ describe('tapbacks on an automated visit text', () => {
     process.env[GATE] = 'true';
     mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };
     expect(await quiet(android('👍', CONFIRMATION))).toBe(true);
+    mockState.last = { message_type: 'appointment_reminder', message_body: REMINDER };
     expect(await quiet(`Liked \u201c${REMINDER}\u201d`)).toBe(true);
     expect(await quiet(`Reacted ❤️ to "${REMINDER}"`)).toBe(true);
+  });
+
+  test('gate on: a tapback on an EARLIER staff question stays loud when a reminder went out after it', async () => {
+    process.env[GATE] = 'true';
+    mockState.last = { message_type: 'appointment_reminder', message_body: REMINDER };
+    expect(await quiet(android('👍', PERSON_ASK))).toBe(false);
+    expect(await quiet(android('👍', 'Can you do Thursday morning instead? Reply with a time.'))).toBe(false);
   });
 
   test('gate on: ❓ / 👎 / disliked stay loud even after an automated text', async () => {

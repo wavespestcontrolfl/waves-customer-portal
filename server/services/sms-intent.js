@@ -137,10 +137,16 @@ function outboundAsksForReply(body) {
   return ASKS_RE.test(withoutComplianceFooter);
 }
 
-function reactionTargetAsksQuestion(body) {
+// The text a tapback quotes ("an image" and other unquoted targets: null).
+function reactionQuotedTarget(body) {
   const m = /[\u201c"]([\s\S]+)[\u201d"]\s*$/.exec(String(body || '').trim());
-  if (!m) return false;
-  return outboundAsksForReply(m[1]);
+  return m ? m[1] : null;
+}
+
+function reactionTargetAsksQuestion(body) {
+  const target = reactionQuotedTarget(body);
+  if (target === null) return false;
+  return outboundAsksForReply(target);
 }
 
 /**
@@ -385,6 +391,7 @@ module.exports = {
   isQuietSmsReaction,
   isAffirmativeSmsReaction,
   reactionTargetAsksQuestion,
+  reactionQuotedTarget,
   outboundAsksForReply,
   isCourtesyOnly,
   hasRescheduleOrAwayIntent,
