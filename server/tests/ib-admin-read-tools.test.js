@@ -1440,3 +1440,20 @@ test('an escaped quote does not end a quoted credential value', () => {
   const out = redactSecrets(`{"password":"abc\\"${tail}"}`, { links: 0, privateLinks: 0, fields: 0 });
   expect(out).not.toContain(tail);
 });
+
+// Codex r13: a far card word in the same clause, and a value right after a status verb.
+describe('far card word and connectorless status verbs', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  test('a card number far after its card word is removed', () => {
+    const out = scrub(`Card number given by customer over the phone is ${['424', '242', '4242', '424242'].join(' ')}`);
+    expect(out).toContain('[card ending 4242]');
+  });
+  const v = ['hun', 'ter', '2u'].join('');
+  test.each([`Password: reset ${v}`, `Password: changed ${v}`, `Password: updated ${v}`])('removed: %s', (text) => {
+    expect(scrub(text)).not.toContain(v);
+  });
+  test.each(['Password: required before login', 'Password: changed yesterday', 'Password: reset', 'The pin is required before booking'])('stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+});

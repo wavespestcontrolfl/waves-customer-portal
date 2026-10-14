@@ -227,6 +227,11 @@ const statusWord = (word) => {
   const bare = word.toLowerCase().replace(/[.,!?:;]+$/, '');
   return /^[a-z/]+$/.test(bare) && NOT_A_VALUE.has(bare);
 };
+// Verbs that can take the new value directly ("reset hunter2").
+const CHANGE_VERBS = new Set(['reset', 'changed', 'updated', 'set', 'rotated', 'changing']);
+const PROSE_FOLLOWERS = new Set(['to', 'as', 'into', 'before', 'after', 'for', 'on', 'at', 'by', 'until', 'when', 'if', 'in',
+  'with', 'from', 'during', 'and', 'or', 'but', 'yesterday', 'today', 'recently', 'again', 'last', 'this', 'next', 'please',
+  'per', 'via', 'so', 'because', 'since', 'already', 'still', 'too', 'also', 'here', 'there', 'now', 'soon', 'yet']);
 function proseOnly(clause) {
   const words = clause.toLowerCase().split(/\s+/).filter(Boolean);
   if (!statusWord(words[0])) return false;
@@ -234,6 +239,11 @@ function proseOnly(clause) {
   // / "into" is the new value unless it is itself a status word.
   const connector = words.findIndex((word) => ['to', 'as', 'into'].includes(word));
   if (connector >= 0 && words[connector + 1] && !statusWord(words[connector + 1])) return false;
+  // "reset hunter2", "changed hunter2": the word right after the status word
+  // is the value unless it is a status word, a connector or a plain
+  // preposition / time word ("required before booking", "changed yesterday").
+  const next = words[1] && words[1].replace(/[.,!?:;]+$/, '');
+  if (CHANGE_VERBS.has(words[0].replace(/[.,!?:;]+$/, '')) && next && !statusWord(next) && !PROSE_FOLLOWERS.has(next)) return false;
   return AMBIGUOUS_FIRST.has(words[0].replace(/[^a-z/]/g, '')) ? words.every(statusWord) : true;
 }
 

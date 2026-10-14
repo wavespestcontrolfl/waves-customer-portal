@@ -290,7 +290,10 @@ const CARD_WORD = '(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|cc|credit|debit|pan|
 // Digit groups on a card line are separated by a space, tab, comma, dash, dot or slash (up to 3 characters),
 // or one line break: "424 242 4242 424242", "424, 242, 4242, 424242", "4242\n4242\n4242\n4242".
 const GROUP_GAP = '[ \\t,.\\/-]{0,3}(?:\\r?\\n[ \\t]*)?';
-const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b(${labelGap(24)})(\\d(?:${GROUP_GAP}\\d)*)(?!\\d)`, 'gi');
+// The card word may sit anywhere earlier in the clause (up to 120 characters,
+// no digit or sentence end between): "Card number given by customer over the
+// phone is 424 242 ...".
+const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b(${labelGap(120)})(\\d(?:${GROUP_GAP}\\d)*)(?!\\d)`, 'gi');
 // Every card length from 13 to 19 digits, the common 16 and 15 first (an 8-digit-IIN card may be 17 or 18 long).
 const PAN_LENGTHS = [16, 15, 19, 18, 17, 14, 13];
 function scrubGroupedCard(text) {
