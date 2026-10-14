@@ -113,7 +113,9 @@ function partsOf(body) {
 const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|than|past';
 // Words that tie a date to the visit or the access; never taken for the
 // credential either ("access code expires 10/20": r8).
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|on|valid|good';
+// Not "good": "good 10/10 service" is a rating; "good until" is read by
+// "until" (r11).
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|on|valid';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -146,7 +148,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,3}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])',
   '\\b(?:expires?|expiring|changes?|changing|resets?|every)\\s{1,5}(?:in\\s{1,5})?\\d{1,3}\\s{0,3}(?:days?|weeks?|months?)(?![\\w])',
   // AM or PM on its own ("PM ONLY"): r8.
-  '\\b(?:am|pm|a\\.m\\.|p\\.m\\.)(?![\\w])',
+  // Not the verb in "I AM" (r11).
+  '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:pm|a\\.m\\.|p\\.m\\.)(?![\\w])',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   '\\b(?:today|tonight|tomorrow|yesterday|weekly|biweekly|daily|holidays?)(?![\\w])',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
@@ -170,12 +173,14 @@ function timeWords(text) {
 // a statement about when: "gate code Friday", "password is noon". It is left
 // out of the count on the raw side, so a code that happens to be a day or a
 // time word does not make the record incomplete (Codex #6328 r2).
+// A value followed by "only" is a restriction, not the credential ("gate
+// code WEEKDAYS ONLY": r11).
 // A word that introduces an hour is never taken for the credential: in "no
 // gate code after 9" the "after 9" is the statement (r4). Only the ONE token
 // after the noun is taken: a passphrase of several words that are day or time
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
-const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}["'\\u201d\\u2019]?`, 'gi');
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])["'\\u201d\\u2019]?(?!\\s{1,5}only\\b)`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
 // code" (r3, r7).
