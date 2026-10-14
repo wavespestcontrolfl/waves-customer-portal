@@ -157,6 +157,9 @@ const TIME_WORDS_RE = new RegExp([
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
   // note's own stamp and does not count.
+  // A day of the month after a word that limits the visit to it ("ONLY ON
+  // THE 20TH", "except the 5th"): r17. "on the 20th" alone is history.
+  '\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))',
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])))`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
@@ -178,7 +181,9 @@ const TIME_WORDS_RE = new RegExp([
   '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
   '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?![\\w])(?!\\s{1,5}(?:for|to|about|re|regarding|if|with|first|has|have|will|said|says|or|and)\\b)',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
-  '\\b(?:today|tonight|tomorrow|yesterday|weekly|biweekly|daily|holidays?)(?![\\w])',
+  // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
+  // (r17); "every week" is read below.
+  '\\b(?:today|tonight|tomorrow|yesterday|holidays?)(?![\\w])',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',

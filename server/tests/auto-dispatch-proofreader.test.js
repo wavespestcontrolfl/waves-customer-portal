@@ -407,6 +407,7 @@ describe('the customer record', () => {
       'Gate code 4821 expires in TWO DAYS',
       'Gate code 4821, do not arrive before 1400 hours',
       'CODE 4821, 0800 HRS ONLY',
+      'GATE CODE 4821, ONLY ON THE 20TH',
       'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
@@ -441,6 +442,7 @@ describe('the customer record', () => {
       'Gate code 4821, about THREE acres',
       'Gate code 4821, got it from ONE of the owners',
       'Gate code 4821, house 1400 on the left',
+      'GATE CODE 4821, DOG GETS DAILY MEDICATION',
       'Friday is the front door access code',
       'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
