@@ -121,12 +121,20 @@ const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|vali
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
 const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+// The words that may follow an hour in a time ("before 9 please", "after
+// NINE at night"); any other word makes it a count ("about THREE acres",
+// "ONE of the owners"): r5, r7, r15.
+const AFTER_HOUR_OK = 'am|pm|a\\.m|p\\.m|o\\W?clock|or|and|to|until|till|only|please|on|at|in|sharp|latest|earliest|ish|then|so|is|works?|thirty|fifteen|forty|twenty';
+const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
+// A quantity in a duration, in digits or words ("TWO DAYS NOTICE", "a week
+// ahead", "every couple of weeks"): r15.
+const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
 // A word after the number must be one that goes with a time ("before 9
 // please", "after 9 at night"); any other word makes it a count ("about 5
 // dogs", "50 lbs"): r5, r7.
-const HOUR = '(?:[01]?\\d|2[0-3])(?![\\w:/%-])(?!\\s{1,5}(?!(?:am|pm|a\\.m|p\\.m|o\\W?clock|or|and|to|until|till|only|please|on|at|in|sharp|latest|earliest|ish|then|so|is|works?)\\b)[A-Za-z])';
+const HOUR = `(?:[01]?\\d|2[0-3])(?![\\w:/%-])(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
 // Times a person names instead of an hour ("AFTER LUNCH ONLY", "before
 // sunset", "after work"): r5.
 const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk|daylight|dark|work|school';
@@ -137,7 +145,9 @@ const TIME_WORDS_RE = new RegExp([
   // lunch" the mask takes BEFORE and leaves lunch, and a match that took
   // both would count one on each side (r12). The anchor's own word counts
   // by its own pattern.
-  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|(?:${SPELLED_HOURS}|${NAMED_TIMES})\\b))`,
+  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${SPELLED_HOUR}|(?:${NAMED_TIMES})\\b))`,
+  // Quarter or half to / past an hour ("QUARTER TO TEN"): r15.
+  `\\b(?:quarter|half)(?=\\s{1,5}(?:to|past|after|til|till|before)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
   '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
@@ -155,8 +165,8 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,5}(?:fifteen|thirty|forty[\\s-]?five|forty|twenty|o\\W?clock)(?![\\w]))`,
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
-  '\\b\\d{1,3}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])',
-  '\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?\\d{1,3}\\s{0,3}(?:days?|weeks?|months?)(?![\\w]))',
+  `\\b${QTY}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}\\s{0,3}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
@@ -192,7 +202,7 @@ function timeWords(text) {
 // after the noun is taken: a passphrase of several words that are day or time
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
-const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])["'\\u201d\\u2019]?(?!\\s{1,5}only\\b)`, 'gi');
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])["'\\u201d\\u2019]?(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b)`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
 // code" (r3, r7). Only "is" and "=", as the mask itself reads: "Friday WAS

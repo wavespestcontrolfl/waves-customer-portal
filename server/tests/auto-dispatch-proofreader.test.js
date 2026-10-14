@@ -398,6 +398,13 @@ describe('the customer record', () => {
       'Gate code 4821, NINE in the morning',
       'Gate code 4821 expires on 10/20',
       'Friday was the gate code, MONDAYS ONLY',
+      'Gate code 4821, QUARTER TO TEN ONLY',
+      'Gate code WEEKDAYS, ONLY',
+      'Gate code WEEKDAYS (ONLY)',
+      'Gate code 4821, need TWO DAYS NOTICE',
+      'Gate code 4821, ONE WEEK NOTICE',
+      'Gate code 4821 changes every TWO WEEKS',
+      'Gate code 4821 expires in TWO DAYS',
       'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
@@ -429,6 +436,8 @@ describe('the customer record', () => {
       'Gate code 4821, good 10/10 service',
       'Gate code 4821, contact PM for access',
       'Gate code 4821, spoke with owner on 10/10',
+      'Gate code 4821, about THREE acres',
+      'Gate code 4821, got it from ONE of the owners',
       'Friday is the front door access code',
       'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
