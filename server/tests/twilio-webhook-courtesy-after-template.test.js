@@ -177,6 +177,27 @@ describe('tapbacks on an automated visit text', () => {
     expect(await quiet(android('👍', 'Can you do Thursday morning instead? Reply with a time.'))).toBe(false);
   });
 
+  test('gate on: a staff clause that also sits mid-text in the newest reminder stays loud (codex #6331 r3)', async () => {
+    process.env[GATE] = 'true';
+    mockState.last = { message_type: 'appointment_reminder', message_body: REMINDER }; // contains "Reply C to confirm"
+    expect(REMINDER).toContain('Reply C to confirm');
+    expect(await quiet(android('👍', 'Reply C to confirm'))).toBe(false);
+    expect(await quiet(android('👍', 'Reply C to confirm or reschedule here'))).toBe(false);
+    expect(await quiet(`Reacted 👍 to "Reply C to confirm"`)).toBe(false);
+  });
+
+  test('gate on: a carrier-truncated quote (a prefix of the text) stays quiet; a short one does not', async () => {
+    process.env[GATE] = 'true';
+    const body = 'Reply C to confirm your Thursday visit between 8 and 10 AM, or reschedule: https://wav.es/ab12c';
+    mockState.last = { message_type: 'appointment_reminder', message_body: body };
+    expect(isQuietSmsReaction(android('👍', body))).toBe(false); // asks for a reply, so the recognizer alone rings
+    expect(await quiet(android('👍', body))).toBe(true);
+    expect(await quiet(android('👍', body.slice(0, 60)))).toBe(true);
+    expect(await quiet(android('👍', body.slice(0, 20)))).toBe(true);
+    expect(await quiet(android('👍', body.slice(0, 19)))).toBe(false);
+    expect(await quiet(android('👍', `${body}  extra`))).toBe(false); // longer than the text: not that text
+  });
+
   test('gate on: ❓ / 👎 / disliked stay loud even after an automated text', async () => {
     process.env[GATE] = 'true';
     mockState.last = { message_type: 'confirmation', message_body: CONFIRMATION };

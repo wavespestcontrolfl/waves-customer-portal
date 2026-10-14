@@ -2364,11 +2364,13 @@ async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
     const last = await lastOutboundOnThread(toPhone, ourNumber);
     if (!isAutomatedVisitText(last)) return false;
     // The tapback must quote THAT text: a thumbs-up on a staff question sent
-    // earlier must not go quiet because a reminder went out after it. A quote
-    // that does not start like the last text stays loud (as before the gate).
+    // earlier must not go quiet because a reminder went out after it. The quote
+    // must be the start of the last text (a carrier that truncates the quote
+    // leaves a prefix); a clause found mid-text, or a quote under 20 characters,
+    // stays loud (as before the gate).
     const collapse = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
     const quoted = collapse(reactionQuotedTarget(body));
-    return quoted.length >= 10 && collapse(last.message_body).includes(quoted.slice(0, 60));
+    return quoted.length >= 20 && collapse(last.message_body).startsWith(quoted);
   } catch (e) {
     logger.warn(`[twilio-webhook] reaction thread lookup failed: ${e.message}; leaving the reaction loud`);
     return false;
