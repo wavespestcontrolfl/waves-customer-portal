@@ -135,6 +135,10 @@ const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // The shapes of a calendar date: ISO, slash, month name (with an optional
 // ordinal), or an ordinal day alone (with an optional "the"): r7 to r19.
 const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))';
+// An hour with "ish" ("around 10ish", "10-ish"): r21.
+const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
+// A word between the quantity and the unit ("2 business days"): r21.
+const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
 const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|few|couple(?:\\s{1,5}of)?)`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
@@ -145,14 +149,20 @@ const HOUR = `(?:[01]?\\d|2[0-3])(?![\\w:/%-])(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})
 // Times a person names instead of an hour ("AFTER LUNCH ONLY", "before
 // sunset", "after work"): r5.
 const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk|daylight|dark|work|school';
+// The words a lead word may point at that count by their own pattern too
+// ("BEFORE noon", "after DARK", "by Friday"): r12, r21.
+const TIME_ANCHORS = `(?:${NAMED_TIMES}|noon|midnight|mornings?|afternoons?|evenings?|night|weekdays?|weekends?|(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?)\\b`;
 const TIME_WORDS_RE = new RegExp([
-  '\\b\\d{1,2}:\\d{2}(?:\\s?[ap]\\.?m\\.?)?(?![\\w:])',
-  '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
+  // The hour alone is the match, the AM / PM a look-ahead: the mask can take
+  // the hour and leave "A.M.", which counts by its own pattern (r21).
+  '\\b\\d{1,2}:\\d{2}(?=\\s?[ap]\\.?m\\.?(?![\\w])|(?![\\w:]))',
+  '\\b\\d{1,2}(?=\\s?[ap]\\.?m\\.?(?![\\w]))',
   // The lead word alone is the match, the anchor a look-ahead: in "BEFORE
   // lunch" the mask takes BEFORE and leaves lunch, and a match that took
   // both would count one on each side (r12). The anchor's own word counts
   // by its own pattern.
-  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${SPELLED_HOUR}|(?:${NAMED_TIMES})\\b))`,
+  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${HOUR_ISH}|${SPELLED_HOUR}|${TIME_ANCHORS}))`,
+  `\\b${HOUR_ISH}`,
   `\\b${HHMM}(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
   // Quarter or half to / past an hour ("QUARTER TO TEN"): r15.
   `\\b(?:quarter|half)(?=\\s{1,5}(?:to|past|after|til|till|before)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
@@ -179,8 +189,8 @@ const TIME_WORDS_RE = new RegExp([
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
-  `\\b${QTY}[\\s-]{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
-  `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}[\\s-]{0,3}(?:days?|weeks?|months?)(?![\\w]))`,
+  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
