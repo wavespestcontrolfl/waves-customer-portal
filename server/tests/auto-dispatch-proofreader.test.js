@@ -542,6 +542,12 @@ describe('the customer record', () => {
       expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
     });
 
+    test('a code split across lines is still masked in the text the model reads', async () => {
+      const note = 'Front door: 4821 is the\ngate code';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('4821');
+    });
+
     test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {
       const tables = { ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: 'Gate code 4821, not before 10am please' }] };
       const record = await buildCustomerRecord(fakeConn(tables), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });

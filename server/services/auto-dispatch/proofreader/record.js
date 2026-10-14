@@ -386,26 +386,32 @@ function maskBesideTimeWord(masked) {
 const { AsyncLocalStorage } = require('async_hooks');
 const scanBudget = new AsyncLocalStorage();
 
-// The scan reads the text with its line breaks (a break ends a clause for
-// the neighbor rule: "ask MANAGER\nFriday works", r34); the model gets the
-// one-line form.
-const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\s]*/g, '\n').trim();
+// The mask runs on the text with its line breaks, and the scan reads that
+// same masked text (a break ends a clause for the neighbor rule: "ask
+// MANAGER\nFriday works", r34). The model gets those masked words on one
+// line (with the one-line mask on top), and the scan judges each step, so it
+// always judges what the model reads (pre-push r34).
+const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n\s*/g, '\n').trim();
 
-function hiddenTimeIn(text, raw, body) {
-  if (raw === body) return false;
+function hiddenTimeIn(raw, masked) {
+  if (raw === masked) return false;
   const budget = scanBudget.getStore();
   if (budget && raw.length > budget.left) return true;
   if (budget) budget.left -= raw.length;
-  const lines = keepLines(text);
-  return lines === raw ? maskHidTime(raw, body) : maskHidTime(lines, redactAccessCodes(lines));
+  return maskHidTime(raw, masked);
 }
 
 function entry(channel, from, at, text) {
-  const raw = clean(text);
-  const body = redactAccessCodes(raw);
+  const raw = keepLines(text);
+  const masked = redactAccessCodes(raw);
+  // The one-line mask runs again on the result: a code split across lines
+  // ("is the\ngate code") is masked in the one-line form too, as before.
+  // The scan checks both steps.
+  const once = clean(masked);
+  const body = redactAccessCodes(once);
   if (!body) return [];
   const parts = partsOf(body);
-  const hidden = hiddenTimeIn(text, raw, body);
+  const hidden = hiddenTimeIn(raw, masked) || (once !== body && hiddenTimeIn(once, body));
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
     ...(hidden && i === 0 ? { maskedTime: true } : {}),
