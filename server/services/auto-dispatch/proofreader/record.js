@@ -123,6 +123,9 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
   `\\b(?:${HOUR_LEADS})\\s+(?:${HOUR}|(?:${SPELLED_HOURS}|${NAMED_TIMES})\\b)`,
   '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
+  // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
+  '\\b(?:today|tonight|tomorrow|yesterday|weekly|biweekly|daily|holidays?)(?![\\w])',
+  '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
@@ -149,7 +152,11 @@ const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pi
 const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|was|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:[A-Za-z]{1,30}\s{1,5})?(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
 const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
 
-// The mask removed at least one word that can say when.
+// The mask removed at least one word that can say when. The list is the
+// common ways to say when, not every way: a rule that counted every word
+// the mask removes flagged 37 of 244 production records (technicians'
+// product names in capitals), against 4 with this list (measured
+// 2026-10-13); a statement the list misses is the known limit.
 function maskHidTime(raw, masked) {
   return raw !== masked && timeWords(masked) < timeWords(withoutCredentialValues(raw));
 }

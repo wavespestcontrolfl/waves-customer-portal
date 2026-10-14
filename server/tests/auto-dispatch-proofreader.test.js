@@ -376,6 +376,9 @@ describe('the customer record', () => {
       'Gate password Friday morning',
       'Gate code 4821, AFTER LUNCH ONLY',
       'CODE 4821 BEFORE SUNSET',
+      'Gate code 4821, TOMORROW ONLY',
+      'CODE 4821 NOT ON HOLIDAYS',
+      'CODE 4821 NEXT WEEK',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
       expect(redactAccessCodes(text)).not.toContain('4821');
