@@ -393,6 +393,7 @@ describe('the customer record', () => {
       'Gate code 4821 changes every 30 days',
       'Gate code WEEKDAYS ONLY',
       'GATE CODE 4821, AM ONLY',
+      'Gate code 4821, BEFORE lunch only',
       'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
@@ -422,6 +423,8 @@ describe('the customer record', () => {
       'Gate code 4821, the fence is 6 feet tall',
       'GATE CODE 4821 I AM THE OWNER',
       'Gate code 4821, good 10/10 service',
+      'Gate code 4821, contact PM for access',
+      'Gate code 4821, spoke with owner on 10/10',
       'Friday is the front door access code',
       'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
@@ -447,15 +450,12 @@ describe('the customer record', () => {
       expect(maskHidTime(longCode, redactAccessCodes(longCode))).toBe(true);
     });
 
-    test('the scan runs after the record knows its size, inside one budget', async () => {
-      // Too long: no model is asked, and nothing is scanned.
-      const big = `Gate code 4821. ${'word '.repeat(70000)}`;
-      const tooLong = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: big }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-      expect(tooLong.tooLong).toBe(true);
-      expect(tooLong.unread.some((u) => u.reason === 'time_masked')).toBe(false);
-      // No scan texts reach the returned record.
-      const fine = await buildCustomerRecord(fakeConn(TABLES), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-      expect(fine.entries.every((row) => Object.getOwnPropertySymbols(row).length === 0)).toBe(true);
+    test('one record shares one scan budget: a text past what is left is not scanned and counts as not fully read', async () => {
+      const long = `Gate code 4821. ${'word '.repeat(70000)}`; // 350 KB raw, past the whole budget
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: long }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+      // The flag never reaches the returned entries.
+      expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
     });
 
     test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {

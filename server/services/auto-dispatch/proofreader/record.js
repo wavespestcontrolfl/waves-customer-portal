@@ -115,7 +115,8 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // credential either ("access code expires 10/20": r8).
 // Not "good": "good 10/10 service" is a rating; "good until" is read by
 // "until" (r11).
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|on|valid';
+// Not "on": "spoke with the owner on 10/10" is history (r12).
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -132,12 +133,16 @@ const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|
 const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}:\\d{2}(?:\\s?[ap]\\.?m\\.?)?(?![\\w:])',
   '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
-  `\\b(?:${HOUR_LEADS})\\s+(?:${HOUR}|(?:${SPELLED_HOURS}|${NAMED_TIMES})\\b)`,
+  // The lead word alone is the match, the anchor a look-ahead: in "BEFORE
+  // lunch" the mask takes BEFORE and leaves lunch, and a match that took
+  // both would count one on each side (r12). The anchor's own word counts
+  // by its own pattern.
+  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|(?:${SPELLED_HOURS}|${NAMED_TIMES})\\b))`,
   '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
   // note's own stamp and does not count.
-  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})\\s{1,5}(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))`,
+  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])))`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
   // "8 onwards"): r9.
   // A look-ahead: the phrase is not consumed, so its own time word still
@@ -146,10 +151,12 @@ const TIME_WORDS_RE = new RegExp([
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   '\\b\\d{1,3}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])',
-  '\\b(?:expires?|expiring|changes?|changing|resets?|every)\\s{1,5}(?:in\\s{1,5})?\\d{1,3}\\s{0,3}(?:days?|weeks?|months?)(?![\\w])',
+  '\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?\\d{1,3}\\s{0,3}(?:days?|weeks?|months?)(?![\\w]))',
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
-  '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:pm|a\\.m\\.|p\\.m\\.)(?![\\w])',
+  // Not the property manager: "contact the PM", "PM for access" (r12).
+  '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
+  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?![\\w])(?!\\s{1,5}(?:for|to|about|re|regarding|if|with|first|has|have|will|said|says|or|and)\\b)',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   '\\b(?:today|tonight|tomorrow|yesterday|weekly|biweekly|daily|holidays?)(?![\\w])',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
@@ -206,25 +213,24 @@ function maskHidTime(raw, masked) {
 }
 
 // The entries of one stored text: one, or its parts when it is long. `ms`
-// (sort key), `split` and the scan texts are dropped before the record is
+// (sort key), `split` and `maskedTime` are dropped before the record is
 // returned.
-const SCAN = Symbol('proofreaderMaskScan');
+//
+// The hidden-time scan runs here, as each text is read, and keeps a yes / no
+// only: no raw text is held until the record is built (Codex #6328 security
+// r12: 300 replies of 800 KB raised the process's memory by 230 MB). One
+// record shares one budget of MAX_RECORD_CHARS raw characters (its own
+// AsyncLocalStorage store, so records built at once do not share it); a text
+// past what is left is counted as not fully read without a scan (r8, r10).
+const { AsyncLocalStorage } = require('async_hooks');
+const scanBudget = new AsyncLocalStorage();
 
-// The hidden-time scan, after the record's size is known (Codex #6328
-// security r8, r10): a record past the limit asks no model and is not
-// scanned; otherwise the raw texts are scanned within one budget of
-// MAX_RECORD_CHARS, and an entry past what is left of it is counted as not
-// fully read without a scan.
-function scanHiddenTimes(found, unread, tooLong) {
-  if (tooLong) return;
-  let budget = MAX_RECORD_CHARS;
-  for (const row of found) {
-    const scan = row[SCAN];
-    if (!scan) continue;
-    const hidden = scan.raw.length > budget ? true : maskHidTime(scan.raw, scan.body);
-    budget = Math.max(0, budget - scan.raw.length);
-    if (hidden) unread.push({ channel: row.channel, ...(row.at ? { at: row.at } : {}), reason: 'time_masked' });
-  }
+function hiddenTimeIn(raw, body) {
+  if (raw === body) return false;
+  const budget = scanBudget.getStore();
+  if (budget && raw.length > budget.left) return true;
+  if (budget) budget.left -= raw.length;
+  return maskHidTime(raw, body);
 }
 
 function entry(channel, from, at, text) {
@@ -232,12 +238,10 @@ function entry(channel, from, at, text) {
   const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
+  const hidden = hiddenTimeIn(raw, body);
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
-    // The text before and after the mask, for the hidden-time scan the record
-    // runs once it knows its own size (scanHiddenTimes). Only when the mask
-    // changed something; never in the returned record.
-    ...(i === 0 && raw !== body ? { [SCAN]: { raw, body } } : {}),
+    ...(hidden && i === 0 ? { maskedTime: true } : {}),
   }));
 }
 
@@ -533,9 +537,10 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const args = {
     customerId, serviceId, asOf, customer, customerEmail: customer && customer.email,
   };
+  const budget = { left: MAX_RECORD_CHARS };
   for (const [channel, read] of SOURCES) {
     try {
-      found.push(...(await read(conn, args, unread)).flat(2));
+      found.push(...(await scanBudget.run(budget, () => read(conn, args, unread))).flat(2));
     } catch (err) {
       unread.push({ channel, reason: 'read_failed' });
       logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${safeError(err)}`);
@@ -543,12 +548,14 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   }
   // Undated notes first, then oldest to newest.
   found.sort((a, b) => (a.ms ?? -1) - (b.ms ?? -1));
-  const entries = found.map(({ split: _split, ms: _ms, [SCAN]: _scan, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
-  const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
-  const tooLong = chars > MAX_RECORD_CHARS;
   // An entry whose access-code mask also hid a word that can say when
   // (maskHidTime): read, but not in full.
-  scanHiddenTimes(found, unread, tooLong);
+  for (const row of found) {
+    if (row.maskedTime) unread.push({ channel: row.channel, ...(row.at ? { at: row.at } : {}), reason: 'time_masked' });
+  }
+  const entries = found.map(({ split: _split, ms: _ms, maskedTime: _masked, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
+  const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
+  const tooLong = chars > MAX_RECORD_CHARS;
   return {
     entries, unread, split: found.filter((row) => row.split).length, chars, tooLong, serviceTypes: args.serviceTypes || [],
   };
