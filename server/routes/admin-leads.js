@@ -47,13 +47,25 @@ async function withServiceDisplay(leads) {
 }
 
 // Search matches what the screen shows: the stored service texts whose
-// display name contains the term, for applyLeadSearch to OR in.
+// display name contains the term, for applyLeadSearch to OR in. The
+// text → name index is rebuilt at most every five minutes (the Leads screen
+// re-runs an active search every 10 s) and one search adds at most 100 texts.
+const SHOWN_AS_TTL_MS = 5 * 60 * 1000;
+const SHOWN_AS_MAX_TEXTS = 100;
+let shownAsIndex = { builtAt: 0, rows: [] };
+
 async function serviceTextsShownAs(search) {
   const term = String(search).trim().replace(/\s+/g, ' ').toLowerCase();
   const catalogNames = term ? await serviceDisplayCatalog() : null;
   if (!catalogNames) return [];
-  const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest').distinct().pluck('service_interest');
-  return stored.filter((text) => (leadServiceDisplay(text, { catalogNames }) || '').toLowerCase().includes(term));
+  if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS) {
+    const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest').distinct().pluck('service_interest');
+    shownAsIndex = {
+      builtAt: Date.now(),
+      rows: stored.map((text) => [text, (leadServiceDisplay(text, { catalogNames }) || '').toLowerCase()]),
+    };
+  }
+  return shownAsIndex.rows.filter(([, shown]) => shown.includes(term)).slice(0, SHOWN_AS_MAX_TEXTS).map(([text]) => text);
 }
 
 // Format/length validation for manual lead creation. Permissive by design — it

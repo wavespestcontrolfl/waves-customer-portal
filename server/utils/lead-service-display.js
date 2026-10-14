@@ -61,7 +61,14 @@ const NOT_CATALOG = new Set([
 const ONE_TIME_LABELS = {
   'lawn pest control': 'Lawn Pest Knockdown Service',
   'rodent sanitation': 'Rodent Sanitation Service',
+  // lead-webhook serviceLabelFor vocabulary
+  dethatching: 'Lawn Dethatching Service',
+  'top dressing': 'Lawn Top Dressing Service',
 };
+
+// The quote wizard's label for its recurring tree and shrub program carries
+// no cadence word.
+const RECURRING_LABELS = new Set(['tree & shrub care']);
 
 // Intake labels with no catalog row of their own; shown as written. The
 // quote wizard's German cockroach add-on is one treatment inside a recurring
@@ -92,7 +99,7 @@ const RODENT_NAMED_RE = /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i;
 // prose ("Quarterly pest control for ants, roaches and spiders"). Reading
 // services and cadences out of a sentence guesses, so prose is shown as
 // written; only labels are renamed.
-const PROSE_RE = /[,;(]|\b(?:and|or|for|with|including)\b/i;
+const PROSE_RE = /[,;(]|\b(?:and|or|for|with|including|in|on|at|around|near|the|my|our)\b/i;
 function isProse(text) {
   return PROSE_RE.test(text) || (text.match(/[A-Za-z0-9]+/g) || []).length > 6;
 }
@@ -147,7 +154,7 @@ function classify(part, catalogNames) {
   // The catalog's own name states the cadence even when the stored text
   // (an old catalog name) does not.
   const said = catalogName ? `${part} ${catalogName}` : part;
-  const frequency = statesRecurring(said) ? 'recurring' : ONE_TIME_RE.test(said) ? 'one_time' : null;
+  const frequency = statesRecurring(said) || RECURRING_LABELS.has(part.toLowerCase()) ? 'recurring' : ONE_TIME_RE.test(said) ? 'one_time' : null;
   if (!catalogName && isProse(part)) return { kind: 'other', name: part, frequency: null };
   const topics = topicsFor(part);
   if (catalogName) return { kind: 'catalog', name: catalogName, frequency, topic: topics[0] || null };

@@ -37,6 +37,7 @@ describe('leadServiceDisplay', () => {
     ['Recurring Lawn Care + One-Time Lawn Treatment', 'Monthly Lawn Care Service'],
     ['Recurring Cockroach Control', 'Quarterly Pest Control Service'],
     ['Rodent Bait Stations', 'Quarterly Rodent Bait Station Service'],
+    ['Tree & Shrub Care', 'Bi-Monthly Tree & Shrub Care Service'], // quote wizard's recurring program
     ['Recurring Termite Bait Stations', 'Termite Bait Station Service'],
     ['Recurring Lawn Care + One-Time Lawn Care Service', 'Monthly Lawn Care Service'],
     ['Quarterly Pest Control Service + One-Time Lawn Care Service', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
@@ -64,6 +65,8 @@ describe('leadServiceDisplay', () => {
     ['One-Time Termite Inspection', 'Termite Inspection Service'],
     ['Lawn Pest Control', 'Lawn Pest Knockdown Service'], // quote wizard
     ['Rodent Sanitation', 'Rodent Sanitation Service'], // quote wizard
+    ['Dethatching', 'Lawn Dethatching Service'],
+    ['Top Dressing', 'Lawn Top Dressing Service'],
     ['One-Time Wasp & Hornet Control', 'Bee / Wasp Nest Removal Service'],
     ['One-Time Pest Control + Termite Inspection', 'One-Time Pest Control Service + Termite Inspection Service'],
     ['Waves Assessment + One-Time Pest Control', 'One-Time Pest Control Service'],
@@ -115,6 +118,8 @@ describe('leadServiceDisplay', () => {
     ['Termite bait stations and rodent bait stations'],
     ['One-Time WDO inspection and termite treatment'],
     ['Termite inspection for a closing'],
+    ['Ants in the lawn'],
+    ['Roaches around palm trees'],
     ['Quarterly pest control and monthly lawn care'],
     ['Monthly lawn care and quarterly pest control'],
     ['Pest control and lawn care, monthly or quarterly'],
