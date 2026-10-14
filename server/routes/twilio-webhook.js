@@ -216,6 +216,17 @@ function intakeOutcome(intakeResult) {
   return intakeResult.terminal ? 'continue_without_quote' : 'consumed';
 }
 
+
+// GATE_ONE_TEXT_PER_CUSTOMER_DAY: no-op with the gate off; never throws into the webhook (the record itself never
+// rejects, and loading the module is guarded here).
+function recordTrackBounceSafely(sid) {
+  try {
+    void require('../services/one-text-per-day').recordBouncedTrackText({ sid });
+  } catch (e) {
+    logger.error(`[twilio-status] tracker bounce record dispatch failed: ${e.message}`);
+  }
+}
+
 router.post('/sms', async (req, res) => {
   // Whether THIS delivery actually took the dedupe ledger row. Only an owner
   // may release the claim on error (a fail-open delivery must not delete a
@@ -1996,6 +2007,9 @@ router.post('/status', async (req, res) => {
         } catch (e) {
           logger.error(`[twilio-status] appointment email fallback dispatch failed: ${e.message}`);
         }
+
+        // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a tracker text the provider reports undelivered is recorded by id and stops covering other visits.
+        recordTrackBounceSafely(MessageSid);
 
         // Recipient double opt-in: a failed/undelivered confirmation ask
         // flips its pending row to ask_failed so the next consented save
