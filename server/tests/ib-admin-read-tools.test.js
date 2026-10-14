@@ -1432,3 +1432,11 @@ describe('account PIN names and spaced JSON keys', () => {
     expect(scrub('{"service type":"quarterly pest"}')).toBe('{"service type":"quarterly pest"}');
   });
 });
+
+// Codex r12: an escaped quote inside a quoted credential value.
+test('an escaped quote does not end a quoted credential value', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const tail = ['def', 'SECRET', '9'].join('');
+  const out = redactSecrets(`{"password":"abc\\"${tail}"}`, { links: 0, privateLinks: 0, fields: 0 });
+  expect(out).not.toContain(tail);
+});

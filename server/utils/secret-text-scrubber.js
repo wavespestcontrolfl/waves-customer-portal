@@ -68,7 +68,8 @@ const accessPinName = (identifier, text, offset, valueEnd) => !ACCOUNT_WORD_RE.t
 // passphrase goes whole ("DB_PASSWORD=correct horse battery staple") while a
 // following assignment or quoted value is still examined on its own
 // ("DB_PASSWORD=hunter2 OTHER_VAR=\"value\"").
-const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:}\]](?:[ \t]+[A-Za-z0-9][A-Za-z0-9'!@#$%^&*+-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:}\]]*(?=[\s"'`,;]|$)))/y;
+// A quoted value honors backslash escapes: {"password":"abc\\"def"} is one value.
+const VALUE_RE = /(?:(["'`])((?:\\.|(?!\1)[^\\\n])*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:}\]](?:[ \t]+[A-Za-z0-9][A-Za-z0-9'!@#$%^&*+-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:}\]]*(?=[\s"'`,;]|$)))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
 // An optional quote on each side of the identifier covers a JSON or JS key ("password": "x", 'api_key': 'x').
 // A bare or quoted identifier; a QUOTED key may also hold spaces, as JSON
