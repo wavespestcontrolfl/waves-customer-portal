@@ -135,12 +135,16 @@ const TIME_WORDS_RE = new RegExp([
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
   // note's own stamp and does not count.
-  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})\\s{1,5}(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))`,
+  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})\\s{1,5}(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
   // "8 onwards"): r9.
   // A look-ahead: the phrase is not consumed, so its own time word still
   // counts on both sides and the hour alone tells the loss.
   '\\b(?:[01]?\\d|2[0-3])(?=\\s{1,5}(?:in\\s{1,5}the\\s{1,5}(?:morning|afternoon|evening)|at\\s{1,5}night|sharp|onwards?|or\\s{1,5}so)(?![\\w]))',
+  // A notice period or a change interval ("need 7 days notice", "expires
+  // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
+  '\\b\\d{1,3}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])',
+  '\\b(?:expires?|expiring|changes?|changing|resets?|every)\\s{1,5}(?:in\\s{1,5})?\\d{1,3}\\s{0,3}(?:days?|weeks?|months?)(?![\\w])',
   // AM or PM on its own ("PM ONLY"): r8.
   '\\b(?:am|pm|a\\.m\\.|p\\.m\\.)(?![\\w])',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
@@ -197,17 +201,38 @@ function maskHidTime(raw, masked) {
 }
 
 // The entries of one stored text: one, or its parts when it is long. `ms`
-// (sort key), `split` and `maskedTime` are dropped before the record is
+// (sort key), `split` and the scan texts are dropped before the record is
 // returned.
+const SCAN = Symbol('proofreaderMaskScan');
+
+// The hidden-time scan, after the record's size is known (Codex #6328
+// security r8, r10): a record past the limit asks no model and is not
+// scanned; otherwise the raw texts are scanned within one budget of
+// MAX_RECORD_CHARS, and an entry past what is left of it is counted as not
+// fully read without a scan.
+function scanHiddenTimes(found, unread, tooLong) {
+  if (tooLong) return;
+  let budget = MAX_RECORD_CHARS;
+  for (const row of found) {
+    const scan = row[SCAN];
+    if (!scan) continue;
+    const hidden = scan.raw.length > budget ? true : maskHidTime(scan.raw, scan.body);
+    budget = Math.max(0, budget - scan.raw.length);
+    if (hidden) unread.push({ channel: row.channel, ...(row.at ? { at: row.at } : {}), reason: 'time_masked' });
+  }
+}
+
 function entry(channel, from, at, text) {
   const raw = clean(text);
   const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
-  const masked = maskHidTime(raw, body);
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
-    ...(masked && i === 0 ? { maskedTime: true } : {}),
+    // The text before and after the mask, for the hidden-time scan the record
+    // runs once it knows its own size (scanHiddenTimes). Only when the mask
+    // changed something; never in the returned record.
+    ...(i === 0 && raw !== body ? { [SCAN]: { raw, body } } : {}),
   }));
 }
 
@@ -513,15 +538,14 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   }
   // Undated notes first, then oldest to newest.
   found.sort((a, b) => (a.ms ?? -1) - (b.ms ?? -1));
+  const entries = found.map(({ split: _split, ms: _ms, [SCAN]: _scan, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
+  const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
+  const tooLong = chars > MAX_RECORD_CHARS;
   // An entry whose access-code mask also hid a word that can say when
   // (maskHidTime): read, but not in full.
-  for (const row of found) {
-    if (row.maskedTime) unread.push({ channel: row.channel, ...(row.at ? { at: row.at } : {}), reason: 'time_masked' });
-  }
-  const entries = found.map(({ split: _split, ms: _ms, maskedTime: _masked, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
-  const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
+  scanHiddenTimes(found, unread, tooLong);
   return {
-    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong: chars > MAX_RECORD_CHARS, serviceTypes: args.serviceTypes || [],
+    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong, serviceTypes: args.serviceTypes || [],
   };
 }
 

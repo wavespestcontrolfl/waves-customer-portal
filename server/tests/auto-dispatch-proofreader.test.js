@@ -388,6 +388,9 @@ describe('the customer record', () => {
       'Gate code 4821 expires 2026-10-20',
       'Gate code 4821, 10 in the morning only',
       'CODE 4821, 9 SHARP',
+      'Gate code 4821 expires the 20th',
+      'Gate code 4821, need 7 days notice',
+      'Gate code 4821 changes every 30 days',
       'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
@@ -414,6 +417,7 @@ describe('the customer record', () => {
       'Gate code 4821, dog weighs about 50 lbs',
       'Gate code 4821, about 5 dogs roam the yard',
       'Gate code 4821, lot is about 5/8 acre',
+      'Gate code 4821, the fence is 6 feet tall',
       'Friday is the front door access code',
       'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
@@ -437,6 +441,17 @@ describe('the customer record', () => {
       // ...unless the mask made it short: a long credential run hides a statement, unscanned.
       const longCode = `Gate code ${'A'.repeat(300000)}1 TOMORROW ONLY`;
       expect(maskHidTime(longCode, redactAccessCodes(longCode))).toBe(true);
+    });
+
+    test('the scan runs after the record knows its size, inside one budget', async () => {
+      // Too long: no model is asked, and nothing is scanned.
+      const big = `Gate code 4821. ${'word '.repeat(70000)}`;
+      const tooLong = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: big }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(tooLong.tooLong).toBe(true);
+      expect(tooLong.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+      // No scan texts reach the returned record.
+      const fine = await buildCustomerRecord(fakeConn(TABLES), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(fine.entries.every((row) => Object.getOwnPropertySymbols(row).length === 0)).toBe(true);
     });
 
     test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {
