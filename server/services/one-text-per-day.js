@@ -36,8 +36,13 @@
  *  - A text the provider reports undelivered is recorded by id (a `bounced` audit row written from the
  *    status callback, whether or not the proof exists yet); a proof any of whose ids has a bounced row
  *    no longer covers other visits (reconciled at read time). Nothing is re-sent retroactively.
- *  - The ONE arrived text names every service it covers (sender plus same-customer, property, day
- *    and technician visits with no text of their own), using the existing per-visit label builder.
+ *  - NAMED = COVERED. The delivered proof records the ids of the visits the text named
+ *    (`named_service_ids`), and only a visit on that list is covered. The arrived text names the sender
+ *    plus the other live same-customer, property, day and technician visits with no text of their own
+ *    (one merged label, existing per-visit label builder). The on-the-way text names no service, so it
+ *    stands for the same set as of its delivery. A visit added later, a visit assigned to a different
+ *    technician, or a failed label lookup is not named, so it sends its own. A proof without the list
+ *    covers nothing.
  *  - "Could not read" is never "already told": every read or write error fails OPEN toward the
  *    customer being informed (the text goes out as with the gate off).
  */
@@ -113,6 +118,9 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
     .whereRaw("al.metadata->>'customer_id' = ?", [String(ref.customer_id)])
     .whereRaw("al.metadata->>'property_id' = ?", [String(ref.property_id)])
     .whereNot('sib.id', ref.id)
+    // THE rule: named = covered. Only a visit whose id the delivered text named is covered by it. A proof
+    // written without the list covers nothing.
+    .whereRaw("al.metadata->'named_service_ids' @> ?::jsonb", [JSON.stringify([String(ref.id)])])
     // A visit that did not happen (cancelled, skipped, no-show, awaiting re-placement) told the customer
     // nothing about THIS service: the canonical non-performed list. A completed visit still covers.
     .where(function liveOrLegacyNullStatus() {
@@ -130,7 +138,7 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
   return rows.find((r) => sameTextDay(ref, r) && String(r.delivered_technician_id || '') === String(technicianId || '')) || null;
 }
 
-async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false, providerIds = [] } = {}) {
+async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false, providerIds = [], namedIds = [] } = {}) {
   await auditLog.recordAuditEvent({
     critical,
     actor_type: 'system',
@@ -141,17 +149,18 @@ async function recordTrackOutcome(ref, kind, covering, technicianId, { critical 
       kind, customer_id: ref.customer_id, property_id: ref.property_id, day: ref.day,
       technician_id: technicianId || null,
       ...(providerIds.length ? { provider_message_ids: providerIds } : {}),
+      ...(namedIds.length ? { named_service_ids: namedIds } : {}),
       ...(covering ? { covered_by_scheduled_service_id: covering.id } : {}),
     },
   });
 }
 
 // The delivered proof: a critical write, retried once. Never throws: the text is already out.
-async function recordDeliveryProof(ref, kind, technicianId, providerIds) {
+async function recordDeliveryProof(ref, kind, technicianId, { providerIds, namedIds }) {
   let last = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true, providerIds });
+      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true, providerIds, namedIds });
       return true;
     } catch (err) {
       last = err;
@@ -207,9 +216,9 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
     logger.error(`[one-text-per-day] ${kind} once-per-day check failed for ${svc.id} (sent as usual): ${err.message}`);
     ref = null;
   }
-  const label = ref ? await coveredServiceLabel(ref, kind, named) : null;
-  const result = await (label ? sendFn({ serviceLabel: label }) : sendFn());
-  if (ref && result && result.success === true) await proveIfCurrent(svc, fence, ref, kind, named, result);
+  const scope = ref ? await namedScope(ref, kind, named) : null;
+  const result = await (scope && scope.label ? sendFn({ serviceLabel: scope.label }) : sendFn());
+  if (ref && result && result.success === true) await proveIfCurrent(svc, fence, ref, kind, named, result, scope.ids);
   return result;
 }
 
@@ -223,14 +232,14 @@ function acceptedProviderIds(result) {
 // The proof is written only if the visit STILL matches the attempt's complete fence after the provider
 // call: a visit force-rescheduled or re-armed meanwhile sent a text about an abandoned snapshot, which
 // must not stand down another visit (the text went out and records no proof: the fail-open direction).
-async function proveIfCurrent(svc, fence, ref, kind, named, result) {
+async function proveIfCurrent(svc, fence, ref, kind, named, result, namedIds) {
   let current = null;
   try {
     current = await loadRef(db, svc, fence);
   } catch (err) {
     logger.error(`[one-text-per-day] ${kind} post-send fence read failed for ${svc.id} (no proof recorded): ${err.message}`);
   }
-  if (current) await recordDeliveryProof(ref, kind, named, acceptedProviderIds(result));
+  if (current) await recordDeliveryProof(ref, kind, named, { providerIds: acceptedProviderIds(result), namedIds });
 }
 
 // Join distinct service labels list-style ("A, B & C"), the shape the reminder labels use.
@@ -244,43 +253,57 @@ function joinLabels(labels) {
   return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
 }
 
-// The services ONE arrived text covers: the sender plus every live visit of the same customer, recorded
+// The visits ONE text stands for besides the sender: every live visit of the same customer, recorded
 // property, ET day and technician that has no text of its own (delivered or covered) for this kind and
-// day. Labelled with the existing per-visit label builder (parent + add-ons), so the single text names
-// each of them. Null (the sender's own label, as today) for the on-the-way text, which names no
-// service, for a lone visit, and on any lookup failure.
-async function coveredServiceLabel(ref, kind, technicianId) {
-  if (kind !== 'arrived') return null;
+// day, as of now. A visit added later is not among them.
+function otherVisitsOfTheText(ref, kind, technicianId) {
+  return db('scheduled_services as sib')
+    .where({ 'sib.customer_id': ref.customer_id, 'sib.property_id': ref.property_id })
+    .whereRaw("to_char(sib.scheduled_date, 'YYYY-MM-DD') = ?", [ref.day])
+    .whereNot('sib.id', ref.id)
+    .where(function sameTechnician() {
+      if (technicianId) this.where('sib.technician_id', technicianId);
+      else this.whereNull('sib.technician_id');
+    })
+    .where(function liveOrLegacyNullStatus() {
+      this.whereNull('sib.status').orWhereIn('sib.status', LIVE_LABEL_STATUSES);
+    })
+    .whereNotExists(function alreadyTold() {
+      this.select(1).from('audit_log as al')
+        .whereRaw('al.resource_id = sib.id')
+        .whereIn('al.action', [DELIVERED_ACTION, `track.one_text_per_day.${kind}`])
+        .whereRaw("al.metadata->>'kind' = ?", [kind])
+        .whereRaw("al.metadata->>'day' = ?", [ref.day]);
+    })
+    .orderBy('sib.window_start', 'asc')
+    .orderBy('sib.id', 'asc')
+    .select('sib.id', 'sib.service_type');
+}
+
+/**
+ * What this text names, and so what it will cover ("named = covered"): { ids, label }.
+ *  - arrived: the sender plus those other visits, all in one merged label (existing per-visit label
+ *    builder); the label is passed to the sender. If the label cannot be built, the text names only the
+ *    sender's own service and covers only the sender.
+ *  - on the way: it names no service, so it stands for every live visit of that customer, property, ET
+ *    day and technician at the moment it is delivered (no label). A visit added afterwards is not covered.
+ * Any lookup failure: the sender alone (the text goes out as it would without the rule).
+ */
+async function namedScope(ref, kind, technicianId) {
+  const alone = { ids: [String(ref.id)], label: null };
   try {
-    const others = await db('scheduled_services as sib')
-      .where({ 'sib.customer_id': ref.customer_id, 'sib.property_id': ref.property_id })
-      .whereRaw("to_char(sib.scheduled_date, 'YYYY-MM-DD') = ?", [ref.day])
-      .whereNot('sib.id', ref.id)
-      .where(function sameTechnician() {
-        if (technicianId) this.where('sib.technician_id', technicianId);
-        else this.whereNull('sib.technician_id');
-      })
-      .where(function liveOrLegacyNullStatus() {
-        this.whereNull('sib.status').orWhereIn('sib.status', LIVE_LABEL_STATUSES);
-      })
-      .whereNotExists(function alreadyTold() {
-        this.select(1).from('audit_log as al')
-          .whereRaw('al.resource_id = sib.id')
-          .whereIn('al.action', [DELIVERED_ACTION, `track.one_text_per_day.${kind}`])
-          .whereRaw("al.metadata->>'kind' = ?", [kind])
-          .whereRaw("al.metadata->>'day' = ?", [ref.day]);
-      })
-      .orderBy('sib.window_start', 'asc')
-      .orderBy('sib.id', 'asc')
-      .select('sib.id', 'sib.service_type');
-    if (!others.length) return null;
+    const others = await otherVisitsOfTheText(ref, kind, technicianId);
+    if (!others.length) return alone;
+    const ids = [String(ref.id), ...others.map((v) => String(v.id))];
+    if (kind !== 'arrived') return { ids, label: null };
     const { buildServiceLabel } = require('./appointment-reminders');
     const labels = [];
     for (const v of [ref, ...others]) labels.push(await buildServiceLabel(v.id, v.service_type));
-    return joinLabels(labels);
+    const label = joinLabels(labels);
+    return label ? { ids, label } : alone;
   } catch (err) {
-    logger.warn(`[one-text-per-day] covered-service label lookup failed for ${ref.id} (own label used): ${err.message}`);
-    return null;
+    logger.warn(`[one-text-per-day] named-visits lookup failed for ${ref.id} (covers only itself): ${err.message}`);
+    return alone;
   }
 }
 

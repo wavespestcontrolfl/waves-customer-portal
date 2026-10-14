@@ -427,7 +427,7 @@ postgres('one text per customer, address and day', () => {
       expect((await deliveredRow(f.rows[1].id, 'arrived')).metadata.technician_id).toBe(technicians[1]);
     });
 
-    test('the same person arrives for both visits although the second is assigned to someone else: one arrived text', async () => {
+    test('the same person arrives for both visits although the second is assigned to someone else: the first text did not name it, so the second arrival SENDS', async () => {
       gateOn();
       const f = await fixture({ date: etDateString(), specs: [
         { start: '09:00', end: '10:00', name: 'Quarterly Pest Control', tech: 0 },
@@ -437,8 +437,9 @@ postgres('one text per customer, address and day', () => {
       await enRoute(f.rows[1].id);
       await arriveBy(f.rows[0].id, 0);
       await arriveBy(f.rows[1].id, 0);
-      expect(texted(TwilioService.sendTechArrived)).toBe(1);
-      expect(await auditFor(f.rows[1].id, 'track.one_text_per_day.arrived')).toHaveLength(1);
+      expect(texted(TwilioService.sendTechArrived)).toBe(2);
+      expect(TwilioService.sendTechArrived.mock.calls[0][2].serviceLabel).toBeUndefined(); // the first text named only its own service
+      expect(await auditFor(f.rows[1].id, 'track.one_text_per_day.arrived')).toHaveLength(0);
     });
 
     test('the first visit is reassigned after its text was delivered: the comparison uses the recorded technician', async () => {
@@ -689,6 +690,54 @@ postgres('one text per customer, address and day', () => {
         }
         expect(texted(TwilioService.sendTechArrived)).toBe(1);
         expect(arrivedOptions().serviceLabel).toBeUndefined();
+        // the text named only the sender's own service, so the second visit is NOT covered and sends its own
+        await onSite(f.rows[1].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(2);
+      });
+
+      const addVisit = async (f, { start, end, name }) => {
+        const [row] = await mockPg('scheduled_services').insert({
+          customer_id: f.customerId, property_id: f.rows[0].property_id, technician_id: technicians[0], service_type: name,
+          scheduled_date: f.date, window_start: start, window_end: end, status: 'confirmed', estimated_duration_minutes: 60,
+          track_state: 'scheduled', track_view_token: randomUUID(),
+        }).returning('*');
+        created.rows.push(row.id);
+        return row;
+      };
+
+      test('a visit added after the first arrival text was delivered sends its own; the one it named stays covered', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        await onSite(f.rows[0].id); // names visits 1 and 2
+        const added = await addVisit(f, { start: '11:00', end: '12:00', name: 'Mosquito Control' });
+        await enRoute(added.id);
+        await onSite(added.id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(2); // the added visit sent its own
+        await onSite(f.rows[1].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(2); // the named one is still covered
+        expect((await proofsFor(f.rows[0].id))[0].metadata.named_service_ids.sort()).toEqual([f.rows[0].id, f.rows[1].id].sort());
+      });
+
+      test('on the way: a visit added after the delivered text sends its own; the live visit it stood for is covered', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id); // stands for visits 1 and 2 (it names no service)
+        const added = await addVisit(f, { start: '11:00', end: '12:00', name: 'Mosquito Control' });
+        await enRoute(added.id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
+
+      test('a proof written without the named list covers nothing', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await mockPg.raw("UPDATE audit_log SET metadata = metadata - 'named_service_ids' WHERE resource_id = ? AND action = 'track.one_text_per_day.delivered'", [f.rows[0].id]);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
       });
 
       const sidOf = (n) => `SM${String(n).padStart(32, 'a')}`;
