@@ -7,6 +7,7 @@ const {
   callMakesNoServiceAsk,
   callEndedWithNothingToDo,
   noActionCallCards,
+  vendorCallCards,
   spelledEmailSettled,
 } = require('../services/call-triage-flags');
 
@@ -253,5 +254,55 @@ describe('spelledEmailSettled', () => {
     expect(spelledEmailSettled(null, 'a@example.com')).toBe(false);
     expect(spelledEmailSettled(one('a@example.com'), '')).toBe(false);
     expect(spelledEmailSettled(one('not-an-email'), 'not-an-email')).toBe(false);
+  });
+});
+
+// 2026-10-13 call audit: a property manager asked for insurance paperwork and
+// the call filed two address cards and an authorization card, all blocking.
+describe('vendorCallCards: a vendor or partner call that asks for no visit', () => {
+  const vendor = (over = {}) => ({
+    call_nature: 'vendor_or_partner',
+    recommended_disposition: 'vendor_logged',
+    meta: { is_voicemail: false },
+    scheduling: { status: 'none' },
+    service_request: { service_intent: 'follow_up_existing_service', quote_requested: false, quote_promised: false },
+    property: { service_address: { street_line_1: '12 Test Lane', city: 'Sampleton' } },
+    ...over,
+  });
+  const primary = { v2Primary: true };
+
+  test('files no address card and no authorization card, stated street or not', () => {
+    const expected = ['address_unverifiable', 'address_unverified', 'caller_not_authorized', 'low_confidence_address', 'missing_service_address'];
+    expect(vendorCallCards(vendor(), primary).sort()).toEqual(expected);
+    expect(vendorCallCards(vendor({ property: {} }), primary).sort()).toEqual(expected);
+  });
+
+  test('every card stays when V2 is not the primary extractor', () => {
+    expect(vendorCallCards(vendor(), { v2Primary: false })).toEqual([]);
+    expect(vendorCallCards(vendor())).toEqual([]);
+  });
+
+  test('every card stays on any other kind of call', () => {
+    const kept = [
+      vendor({ call_nature: 'new_lead' }),
+      vendor({ call_nature: 'existing_customer_service' }),
+      vendor({ recommended_disposition: 'callback_task_created' }),
+      vendor({ meta: { is_voicemail: true } }),
+      null,
+    ];
+    for (const e of kept) expect(vendorCallCards(e, primary)).toEqual([]);
+  });
+
+  test('every card stays when the call asked for a time or a quote', () => {
+    const kept = [
+      vendor({ scheduling: { status: 'requested' } }),
+      vendor({ scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-14T10:00:00-04:00' } }),
+      vendor({ scheduling: { status: 'none', agent_committed_booking: true } }),
+      vendor({ scheduling: { status: 'none', caller_accepted_slot: true } }),
+      vendor({ scheduling: { status: 'none', requested_date_range_start: '2026-10-14' } }),
+      vendor({ service_request: { quote_requested: true } }),
+      vendor({ service_request: { quote_promised: true } }),
+    ];
+    for (const e of kept) expect(vendorCallCards(e, primary)).toEqual([]);
   });
 });

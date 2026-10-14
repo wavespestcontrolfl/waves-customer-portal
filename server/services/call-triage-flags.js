@@ -999,6 +999,42 @@ function noActionCallCards(extraction, { canonicalStreet } = {}) {
   return statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
 }
 
+// 6. A vendor or partner call that asks for no visit and no quote (2026-10-13
+//    call audit: a property manager asked for the insurance certificate and
+//    the license, and the call filed three blocking cards: two on the address
+//    of the property they manage and one on their authority to book). The
+//    extraction's own verdict is call_nature vendor_or_partner with the
+//    vendor_logged disposition; the call asked for no time and no quote, and
+//    left no scheduling thread open. Such a call writes nothing the cards
+//    protect: with V2 primary a vendor_or_partner call creates no customer
+//    and no lead, and its contact detail is never copied onto a customer it
+//    is linked to (the processor's V2_NON_CUSTOMER_CALL_NATURES and
+//    thirdPartyCallNatureFromV2). So the stated street does not keep the
+//    address cards here, unlike rules 3 and 5. What the office promised (the
+//    paperwork) is tracked by call_commitments. With V2 not primary the
+//    legacy path can still create a record, and every card stays. Advisory
+//    cards are untouched; the routing verdict and the flags are untouched.
+const VENDOR_CALL_MOOT_CARDS = ['caller_not_authorized', ...NO_ACTION_ADDRESS_CARDS];
+
+function vendorCallAsksNoVisit(extraction) {
+  if (!extraction || extraction.call_nature !== 'vendor_or_partner') return false;
+  if (extraction.recommended_disposition !== 'vendor_logged') return false;
+  if (extraction.meta?.is_voicemail === true) return false;
+  const scheduling = extraction.scheduling || {};
+  if (String(scheduling.status || 'none') !== 'none') return false;
+  const openThread = scheduling.confirmed_start_at
+    || scheduling.agent_committed_booking === true
+    || scheduling.caller_accepted_slot === true
+    || scheduling.requested_date_range_start;
+  if (openThread) return false;
+  const sr = extraction.service_request || {};
+  return sr.quote_requested !== true && sr.quote_promised !== true;
+}
+
+function vendorCallCards(extraction, { v2Primary = false } = {}) {
+  return v2Primary && vendorCallAsksNoVisit(extraction) ? [...VENDOR_CALL_MOOT_CARDS] : [];
+}
+
 function hasCanonicalWriteBlock(flags) {
   return (flags || []).some((f) => CANONICAL_WRITE_BLOCKING_FLAGS.has(f));
 }
@@ -3482,6 +3518,7 @@ module.exports = {
   dropUnneededCallCards,
   callEndedWithNothingToDo,
   noActionCallCards,
+  vendorCallCards,
   CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
