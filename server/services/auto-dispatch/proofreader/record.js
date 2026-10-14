@@ -136,12 +136,12 @@ const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\
 const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // The shapes of a calendar date: ISO, slash, month name (with an optional
 // ordinal), an ordinal day alone (with an optional "the"), or a month alone
-// ("VALID THROUGH OCTOBER"; not before a day or a mask, which the
+// ("VALID THROUGH OCTOBER"; "TILL END OF OCTOBER": r36; not before a day or a mask, which the
 // month-and-day shape reads), or day first ("EXPIRES 20 OCTOBER"): r7 to
 // r19, r28, r31.
 // Whole month names and their short forms only: "JANITOR" is not January (r33).
 const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const DATE_SHAPES = `(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
+const DATE_SHAPES = `(?:(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:the\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
@@ -400,12 +400,16 @@ const scanBudget = new AsyncLocalStorage();
 // always judges what the model reads (pre-push r34).
 const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n\s*/g, '\n').trim();
 
-function hiddenTimeIn(raw, masked) {
-  if (raw === masked) return false;
+// One entry is charged once against the record's budget, for all its
+// steps (r36): each step scans a text of about the same length.
+function hiddenTimeIn(steps) {
+  const changed = steps.filter(([raw, masked]) => raw !== masked);
+  if (!changed.length) return false;
+  const length = changed[0][0].length;
   const budget = scanBudget.getStore();
-  if (budget && raw.length > budget.left) return true;
-  if (budget) budget.left -= raw.length;
-  return maskHidTime(raw, masked);
+  if (budget && length > budget.left) return true;
+  if (budget) budget.left -= length;
+  return changed.some(([raw, masked]) => maskHidTime(raw, masked));
 }
 
 function entry(channel, from, at, text) {
@@ -418,7 +422,7 @@ function entry(channel, from, at, text) {
   const body = redactAccessCodes(once);
   if (!body) return [];
   const parts = partsOf(body);
-  const hidden = hiddenTimeIn(raw, masked) || (once !== body && hiddenTimeIn(once, body));
+  const hidden = hiddenTimeIn([[raw, masked], [once, body]]);
   return parts.map((part, i) => ({
     channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
     ...(hidden && i === 0 ? { maskedTime: true } : {}),

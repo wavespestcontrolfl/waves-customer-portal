@@ -460,6 +460,7 @@ describe('the customer record', () => {
       'Gate code 4821, scheduled for 9',
       'Gate code 4821, AS EARLY AS 9',
       'Gate code 4821, AN HOUR AND A HALF NOTICE',
+      'GATE CODE 4821, VALID TILL END OF OCTOBER',
       'Gate code 4821, ON MONDAY',
       'Gate code 4821, MONDAY WORKS',
       'CODE 4821 MON-FRI ONLY',
@@ -553,6 +554,14 @@ describe('the customer record', () => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
       expect(JSON.stringify(record.entries)).not.toContain('FRIDAY');
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
+    test('an entry both mask steps change is charged once against the scan budget', async () => {
+      // The first step masks 4821; only the one-line step masks 5555 (split across lines).
+      const note = `Gate code 4821\n${'word '.repeat(32000)}\n5555 is the\ngate code`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.tooLong).toBe(false);
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
     });
 
     test('a code split across lines is still masked in the text the model reads', async () => {
