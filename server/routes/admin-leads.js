@@ -63,7 +63,8 @@ async function withServiceDisplay(leads) {
 }
 
 // Search matches what the screen shows: the stored service texts whose
-// display name contains the term, for applyLeadSearch to OR in. The
+// display name contains the term, as (text, key) pairs for applyLeadSearch
+// to OR in: the same text can be shown under two names, keyed and unkeyed. The
 // (text, key) → name index is rebuilt at most every five minutes (the Leads
 // screen re-runs an active search every 10 s); every match is used, so no
 // lead is missing from a search by the name it is shown under.
@@ -79,10 +80,14 @@ async function serviceTextsShownAs(search) {
       .distinct('service_interest', 'service_key');
     shownAsIndex = {
       builtAt: Date.now(),
-      rows: stored.map((row) => [row.service_interest, (serviceDisplayFor(catalog, row.service_interest, row.service_key) || '').toLowerCase()]),
+      rows: stored.map((row) => ({
+        text: row.service_interest,
+        key: row.service_key || null,
+        shown: (serviceDisplayFor(catalog, row.service_interest, row.service_key) || '').toLowerCase(),
+      })),
     };
   }
-  return [...new Set(shownAsIndex.rows.filter(([, shown]) => shown.includes(term)).map(([text]) => text))];
+  return shownAsIndex.rows.filter((row) => row.shown.includes(term));
 }
 
 // Format/length validation for manual lead creation. Permissive by design — it
@@ -168,7 +173,12 @@ function applyLeadSearch(query, search, serviceTexts = []) {
       .orWhereILike('leads.email', pattern)
       .orWhereILike('leads.address', pattern)
       .orWhereILike('leads.service_interest', pattern);
-    if (serviceTexts.length) this.orWhereIn('leads.service_interest', serviceTexts);
+    for (const { text, key } of serviceTexts) {
+      this.orWhere(function () {
+        this.where('leads.service_interest', text);
+        if (key) this.where('leads.service_key', key); else this.whereNull('leads.service_key');
+      });
+    }
     if (digits && /^[+\d\s().-]+$/.test(term)) {
       this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
     }
