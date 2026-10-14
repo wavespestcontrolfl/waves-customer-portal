@@ -1376,3 +1376,15 @@ describe('classes: unicode separators, card lengths, JSON keys, cookies, authori
     });
   });
 });
+
+// Pre-push audit: physical-access passcodes survive the assignment pass too.
+describe('access passcodes in the assignment pass', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  test.each(['Lockbox passcode: 7788', 'Passcode: 7788 for the side door'])('stays: %s', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+  test('an app passcode is still removed', () => {
+    expect(scrub('App passcode: 998877')).toBe('App passcode: [removed]');
+  });
+});

@@ -25,7 +25,9 @@ const CREDENTIAL_WORDS = new Set([
 // ("Prior authorization: required", "Signature: on file", "gate PIN: 1234" which is kept data). The
 // free-text passes (secret-text-scrubber.js) use the SAME list minus these: authorization has its own
 // header rule, a PIN has its own gate-code rule, and a hash, salt or signature in prose is not a secret.
-const FREE_TEXT_EXEMPT_WORDS = new Set(['pin', 'authorization', 'hash', 'salt', 'sig', 'signature', 'signatures']);
+// pin and passcode go to the labelled pass in free text, which keeps a property
+// access code ("Lockbox passcode: 7788") and removes every other one.
+const FREE_TEXT_EXEMPT_WORDS = new Set(['pin', 'passcode', 'authorization', 'hash', 'salt', 'sig', 'signature', 'signatures']);
 // Two-word credentials: api key, access key, private key, magic link, reset link, invite code ...
 const CREDENTIAL_PAIRS = [
   ['api', 'key'], ['access', 'key'], ['private', 'key'], ['secret', 'key'], ['signing', 'key'], ['encryption', 'key'], ['cert', 'key'],
