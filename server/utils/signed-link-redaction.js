@@ -36,13 +36,12 @@
  * select or build such values out of the catalog.
  */
 const { isCredentialField, isCredentialName } = require('./credential-fields');
-const { scrubSecretText, clauseAt, ACCESS_WORD_RE } = require('./secret-text-scrubber');
+const { scrubSecretText, clauseAt, ACCESS_WORD_RE, labelGap } = require('./secret-text-scrubber');
 const { scrubPansDetailed, luhnValid } = require('./pan-scrub');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
 const REDACTED_FIELD = '[removed]';
-const REDACTED_CREDENTIALS = '[credentials removed]';
 
 // Query keys that mark a credential in a LINK. The general rule is the shared
 // credential-name test (credential-fields.js: token, secret, password, session,
@@ -61,7 +60,8 @@ const SIGNED_KEYS = new Set([
   'key', 'auth', 'sid', 'ticket', 'pwd', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'bearer',
 ]);
 const STORAGE_HOST_RE = /(^|\.)(amazonaws\.com|r2\.cloudflarestorage\.com|r2\.dev|storage\.googleapis\.com|storage\.cloud\.google\.com|blob\.core\.windows\.net|digitaloceanspaces\.com|backblazeb2\.com|wasabisys\.com)$/i;
-const URL_IN_TEXT_RE = /https?:\/\/[^\s"'<>\\]+/gi;
+// A hierarchical URL of ANY scheme (https, wss, ftp, postgres, a custom app scheme): all are judged the same way.
+const URL_IN_TEXT_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>\\]+/gi;
 // A first path segment that marks an ordinary public content page.
 const PUBLIC_CONTENT_SEGMENTS = new Set(['blog', 'services', 'service', 'service-area', 'service-areas', 'areas', 'locations', 'about', 'contact', 'faq', 'resources']);
 // OWN-DOMAIN RULE. The business's own hosts: the literal domain (and every
@@ -232,20 +232,7 @@ function absoluteLinkVerdict(href) {
   return isOwnPrivateLink(url) || isPrivateLink(href) ? REDACTED_PRIVATE_LINK : null;
 }
 
-// "postgres://admin:pw@host/db", "ftp://user:pw@host", "mysql://:pw@host": a scheme other than http(s)
-// with a password in its userinfo. The scheme and host stay; the userinfo goes. (An http(s) link with
-// userinfo is judged as a whole by absoluteLinkVerdict.)
-const USERINFO_URL_RE = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^\s/@?#"'<>\\:]*):([^\s/@?#"'<>\\]*)@/g;
-function scrubUserinfo(text, state) {
-  return text.replace(USERINFO_URL_RE, (match, scheme) => {
-    if (/^https?:\/\/$/i.test(scheme)) return match;
-    state.fields += 1;
-    return `${scheme}${REDACTED_CREDENTIALS}@`;
-  });
-}
-
-function redactString(rawText, state) {
-  const text = scrubUserinfo(rawText, state);
+function redactString(text, state) {
   const count = (verdict) => { if (verdict === REDACTED_LINK) state.links += 1; else state.privateLinks += 1; return verdict; };
   const absolute = text.replace(URL_IN_TEXT_RE, (match) => {
     const { link, tail } = splitTail(match);
@@ -296,11 +283,14 @@ function newState() {
 const SSN_DASHED_RE = /(?<![\d-])\d{3}([- ])\d{2}\1\d{4}(?![\d-])/g;
 // Only "SSN" or the whole phrase "Social Security" is a label ("Social media ID" is not).
 // "SSN", "Social Security", "Social Security Number", "Social Security No.", "SSN #": the label may be
-// followed by "number"/"no", ordinary punctuation (". : #") and spaces, or by up to 20 other characters
-// that hold no digit, period or line break ("SSN on file is ").
-const SSN_LABELLED_RE = /\b(ssn|social\s+security)\b((?:\s+(?:number|num|no)\b)?[\s.:#]{0,8}|[^.\n\d]{0,20})(\d[\d -]{7,11}\d)\b/gi;
+// followed by "number"/"no", ordinary punctuation (". : #") and spaces, then at most one line break, or by up
+// to 20 other characters that hold no digit, period or line break ("SSN on file is "): the shared label gap.
+const SSN_LABELLED_RE = new RegExp(`\\b(ssn|social\\s+security)\\b((?:[ \\t]+(?:number|num|no)\\b)?[ \\t.:#]{0,8}(?:[ \\t]*\\r?\\n[ \\t]*)?|${labelGap(20)})(\\d[\\d -]{7,11}\\d)\\b`, 'gi');
 const CARD_WORD = '(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|cc|credit|debit|pan|visa|master\\s?card|amex|american\\s+express|discover)';
-const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b([^\\d\\n.;!?]{0,24})(\\d(?:[ -]?\\d)*)(?!\\d)`, 'gi');
+// Digit groups on a card line are separated by a space, tab, comma, dash, dot or slash (up to 3 characters),
+// or one line break: "424 242 4242 424242", "424, 242, 4242, 424242", "4242\n4242\n4242\n4242".
+const GROUP_GAP = '[ \\t,.\\/-]{0,3}(?:\\r?\\n[ \\t]*)?';
+const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b(${labelGap(24)})(\\d(?:${GROUP_GAP}\\d)*)(?!\\d)`, 'gi');
 const PAN_LENGTHS = [16, 15, 19, 14, 13];
 function scrubGroupedCard(text) {
   let removed = 0;
@@ -321,7 +311,7 @@ function scrubGroupedCard(text) {
   return { text: clean, removed };
 }
 // The code must sit in the label's own clause: "Security code missing. ID 123" keeps 123.
-const CVV_RE = /\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\b([^\d.;!?\n]{0,15}?)(\d{3,4})(?!\d)/gi;
+const CVV_RE = new RegExp(`\\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\\b(${labelGap(15)})(\\d{3,4})(?!\\d)`, 'gi');
 const CARD_CONTEXT_RE = /\b(?:card|credit|debit|visa|mastercard|master card|amex|discover|paid|payment)\b/i;
 function scrubCvv(text) {
   let removed = 0;

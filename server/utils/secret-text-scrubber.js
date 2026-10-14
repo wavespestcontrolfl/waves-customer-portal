@@ -18,6 +18,15 @@
  */
 const REMOVED = '[removed]';
 
+// ONE notion of "the value after a label", shared by every labelled pass (the labelled secrets and
+// identifier assignments below, and the card code, SSN and card number passes in signed-link-redaction.js).
+//  - AFTER_SEPARATOR: an explicit ":" or "=" with spaces or tabs around it, and then at most ONE line
+//    break (with spaces or tabs around that), so "Password:\nhunter2" has its value on the next line.
+//  - labelGap(n): the loose gap for a label with no separator ("CVV 123", "Card number 4242...", "Amex CID:\n1234"):
+//    up to n characters that hold no digit and end no sentence, and at most one line break.
+const AFTER_SEPARATOR = '[ \\t]*[:=][ \\t]*(?:\\r?\\n[ \\t]*)?';
+const labelGap = (max) => `[^\\d.;!?\\n]{0,${max}}?(?:[ \\t]*\\r?\\n[ \\t]*)?`;
+
 // ENVIRONMENT-STYLE ASSIGNMENTS. An identifier of letters, digits and "_" "."
 // "-" (AWS_SECRET_ACCESS_KEY, DB_PASSWORD, db.password, api-key) that has a
 // credential word as one of its separated parts, then "=" or ":", then a
@@ -46,7 +55,7 @@ function hasCredentialPart(identifier) {
 // The value after the separator: to the closing quote, else to whitespace.
 const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)([^\s"'`,;]+))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
-const IDENT_SEP_RE = /(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)([ \t]*[:=][ \t]*(?:\r?\n[ \t]*)?)/g;
+const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)(${AFTER_SEPARATOR})`, 'g');
 
 // Returns { text, removed }. A non-credential identifier ("Pasted:") does not
 // swallow what follows it, so the next identifier is still examined.
@@ -121,7 +130,7 @@ const LABEL_WORDS = '(?:password|passcode|passphrase|passwd|pwd|pin|secret|token
 // ("Password:\nhunter2"); after " is " it may not.
 // A line that runs on for more than 120 characters with no sentence end still
 // loses the value: the first 120 characters after the label are removed.
-const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*(?:\\r?\\n[ \\t]*)?|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()((?:[^\\n]{1,120}?(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))|[^\\n]{120}))`, 'gi');
+const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b(${AFTER_SEPARATOR}|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()((?:[^\\n]{1,120}?(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))|[^\\n]{120}))`, 'gi');
 // "gate PIN: 1234", "lockbox pin 1234": a PIN or passcode that opens a gate,
 // door or lockbox is the same kept data as a gate code.
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
@@ -205,4 +214,4 @@ function scrubSecretText(input) {
   return { text, removed };
 }
 
-module.exports = { SECRET_PATTERNS, REMOVED, scrubSecretText, clauseAt, ACCESS_WORD_RE };
+module.exports = { SECRET_PATTERNS, REMOVED, scrubSecretText, clauseAt, ACCESS_WORD_RE, AFTER_SEPARATOR, labelGap };

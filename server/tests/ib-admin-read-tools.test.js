@@ -1072,16 +1072,16 @@ describe('card codes, grouped card numbers, multi-line labels, URL credentials a
     expect(scrub(text)).toBe(text);
   });
 
+  // Round 7 folded the non-HTTP userinfo pass into the one URL verdict: a link with a password in it is replaced whole,
+  // whatever its scheme (the full table is in "one URL verdict for every scheme" below).
   test.each([
-    ['postgres://admin:' + secret + '@db.example.com/prod', 'postgres://[credentials removed]@db.example.com/prod'],
-    ['mysql://root:s3' + 'cret@host/app', 'mysql://[credentials removed]@host/app'],
-    ['ftp://user:pass' + 'word@example.com/file', 'ftp://[credentials removed]@example.com/file'],
-    ['redis://:pw0' + 'rd@cache:6379', 'redis://[credentials removed]@cache:6379'],
-    ['amqp+ssl://svc:' + secret + '@mq.example.com:5671/vhost and then text', 'amqp+ssl://[credentials removed]@mq.example.com:5671/vhost and then text'],
-  ])('a non-HTTP URL loses its userinfo, keeping the scheme and host: %s', (text, expected) => {
+    ['postgres://admin:' + secret + '@db.example.com/prod', '[signed link removed]'],
+    ['redis://:pw0' + 'rd@cache:6379', '[signed link removed]'],
+    ['amqp+ssl://svc:' + secret + '@mq.example.com:5671/vhost and then text', '[signed link removed] and then text'],
+  ])('a non-HTTP URL with a password in its userinfo is removed whole: %s', (text, expected) => {
     expect(scrub(text)).toBe(expected);
   });
-  test.each(['See http://example.com/page for the schedule', 'ssh://git@example.com/repo.git', 'Call tel://9415550100'])('a link with no password in it stays: %s', (text) => {
+  test.each(['See http://example.com/page for the schedule', 'Call tel://9415550100'])('a link with no password in it stays: %s', (text) => {
     expect(scrub(text)).toBe(text);
   });
   test('an http link with userinfo is still removed as a whole', () => {
@@ -1131,5 +1131,86 @@ describe('next-line environment credentials and CID codes', () => {
   });
   test('a non-credential label keeps the next line', () => {
     expect(scrub('Notes:\nCall before arriving')).toBe('Notes:\nCall before arriving');
+  });
+});
+
+// Codex round 7 on #6324: close the classes, not the examples.
+//  1. every labelled pass takes its value from the same line or, after at most ONE line break, the next;
+//  2. a card word takes a digit run whose groups are split by space, tab, comma, dash, dot, slash or one line break;
+//  3. every hierarchical URL, whatever its scheme, gets the same credential verdict as https.
+describe('one label rule, one card-run rule, one URL verdict', () => {
+  const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, newState());
+  const secret = 'hunter' + '2';
+  const pan = ['4242', '4242', '4242', '4242'];
+  const maskedCard = '[card ending 4242]';
+
+  // (a) same line, (b) next line, for each labelled pass. The value is built by concatenation.
+  describe.each([
+    ['labelled secret', 'Password', secret, '[removed]'],
+    ['labelled secret (token=)', 'token', 'abc' + 'DEF123456', '[removed]'],
+    ['api key', 'API key', 'abc' + 'DEF123456', '[removed]'],
+    ['identifier assignment', 'DB_PASSWORD', secret, '[removed]'],
+    ['card code', 'Amex CID', '1234', '[code removed]'],
+    ['cvv', 'CVV', '123', '[code removed]', true],
+    ['security code beside a card word', 'Paid by card, security code', '987', '[code removed]', true],
+    ['ssn', 'SSN', '123456789', '[SSN removed]'],
+    ['social security number', 'Social Security Number', '123-45-6789', '[SSN removed]', true],
+  ])('%s', (_name, label, value, mask, shapeAloneIsCaught) => {
+    const sep = ':';
+    test('the value on the same line', () => {
+      expect(scrub(`${label}${sep} ${value}`)).toBe(`${label}${sep} ${mask}`);
+    });
+    test('the value on the next line (spaces and tabs around the break allowed)', () => {
+      expect(scrub(`${label}${sep}\n${value}`)).toBe(`${label}${sep}\n${mask}`);
+      expect(scrub(`${label}${sep} \t\n  ${value}`)).toBe(`${label}${sep} \t\n  ${mask}`);
+    });
+    // (the shared card scrub and the dashed-SSN pattern catch their own shapes after a blank line, so those rows skip this)
+    test('a second line break is not crossed', () => {
+      if (shapeAloneIsCaught) return;
+      expect(scrub(`${label}${sep}\n\n${value}`)).toBe(`${label}${sep}\n\n${value}`);
+    });
+  });
+
+  // (c) card numbers with every separator between the groups, same line and next line
+  describe.each([
+    ['spaces', ' '], ['commas', ', '], ['dashes', '-'], ['dots', '.'], ['slashes', '/'], ['tabs', '\t'], ['a line break', '\n'],
+  ])('card number groups split by %s', (_name, glue) => {
+    const run = pan.join(glue);
+    test.each(['Card number: ', 'Card number:\n', 'CC ', 'Visa: ', 'Credit card number is\n'])('after the label %j', (label) => {
+      expect(scrub(`${label}${run}`)).toBe(`${label}${maskedCard}`);
+    });
+  });
+  test('a phone-like 3-3-4-6 split is taken after a card word, with commas and a line break', () => {
+    expect(scrub('Card number:\n424 242 4242 424242')).toBe(`Card number:\n${maskedCard}`);
+    expect(scrub('Card number: 424, 242, 4242, 424242')).toBe(`Card number: ${maskedCard}`);
+    expect(scrub('Card number: 424-242-4242-424242, exp 12/28')).toBe(`Card number: ${maskedCard}, exp 12/28`);
+  });
+  test.each([
+    'Call 941 555 0100 after 3 pm', 'Card on file, call 424 242 4242', 'Phone 424 242 4242 424243', 'Card number: 1234 5678 9012 3456',
+    'Card number:\n\n424 242 4242 424242', 'Gate code: 7777', 'Order number 123456789 shipped', 'Customer CID:\n1234', 'cid: 1234',
+  ])('near-miss stays: %j', (text) => {
+    expect(scrub(text)).toBe(text);
+  });
+
+  // URLs: scheme × (userinfo, credential query key, plain link). Secrets are built by concatenation.
+  const raw = 'THE-RAW-' + 'SECRET9';
+  describe.each(['http', 'https', 'wss', 'ws', 'ftp', 'postgres', 'mysql', 'redis', 'amqps', 'custom', 'my-app+v2'])('%s://', (scheme) => {
+    test('userinfo with a password is removed', () => {
+      expect(scrub(`${scheme}://admin:${secret}@host.example.com/path`)).toBe('[signed link removed]');
+      expect(scrub(`${scheme}://:${secret}@host.example.com/path`)).toBe('[signed link removed]');
+    });
+    test.each(['key', 'session', 'token', 'sig', 'auth_token', 'password'])('the credential query key %s is removed', (key) => {
+      expect(scrub(`${scheme}://host.example.com/ws?${key}=${raw}`)).toBe('[signed link removed]');
+      expect(scrub(`see ${scheme}://host.example.com/ws?a=1&${key}=${raw}.`)).toBe('see [signed link removed].');
+    });
+    test('a plain link with no secret stays', () => {
+      for (const text of [`${scheme}://host.example.com/path`, `${scheme}://host.example.com/ws?room=lobby&page=2`, `Connect to ${scheme}://host.example.com:8080/app.`]) {
+        expect(scrub(text)).toBe(text);
+      }
+    });
+  });
+  test('a link with a random token in its path is private whatever its scheme', () => {
+    expect(scrub('wss://host.example.com/live/' + 'A1b2C3d4E5f6G7h8I9')).toBe('[private link removed]');
   });
 });
