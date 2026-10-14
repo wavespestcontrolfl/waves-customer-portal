@@ -244,6 +244,21 @@ const PLACE = {
   },
 };
 
+const partTopic = (part) => part.topic || part.topics?.[0] || null;
+
+// The key's name replaces the first part, which keeps its stated frequency,
+// except when the lead's frequency changes that part (a one-time first part
+// beside recurring work is named as recurring) or the stored text names
+// another service than the key (staff edited the lead's service).
+function applyFirstName(parts, firstName, recurring, catalogNames) {
+  const first = parts[0];
+  if (first.kind === 'assessment' || (recurring && first.frequency === 'one_time')) return;
+  const keyedTopic = partTopic(classify(firstName, catalogNames));
+  const storedTopic = partTopic(first);
+  if (keyedTopic && storedTopic && keyedTopic.key !== storedTopic.key) return;
+  parts[0] = { kind: 'other', name: firstName, frequency: first.frequency, topic: storedTopic };
+}
+
 // firstName: how the FIRST part is shown, set from the lead's service_key
 // (an upsell appends after it): the key's current catalog name, or the
 // stored text for a configured package name. The part keeps the frequency
@@ -259,12 +274,7 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null, firstName = 
   // A one-time request is never an assessment.
   const assessmentBooked = !oneTime && parts.some((part) => part.kind === 'assessment');
   const plan = { recurring, oneTime, assessmentBooked, assess: assessmentBooked || (!recurring && !oneTime), catalogNames };
-  // The key's name stands unless the lead's frequency changes that part:
-  // a one-time first part beside recurring work is named as recurring.
-  if (firstName && parts[0].kind !== 'assessment' && !(recurring && parts[0].frequency === 'one_time')) {
-    const first = parts[0];
-    parts[0] = { kind: 'other', name: clean(firstName), frequency: first.frequency, topic: first.topic || first.topics?.[0] || null };
-  }
+  if (firstName) applyFirstName(parts, clean(firstName), recurring, catalogNames);
 
   const out = [];
   const shorts = [];

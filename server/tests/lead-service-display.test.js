@@ -144,6 +144,9 @@ describe('leadServiceDisplay', () => {
     // recurring wins: a keyed one-time first part beside recurring work
     expect(leadServiceDisplay('One-Time Pest Control Service + Tree & Shrub Care', { catalogNames, firstName: 'One-Time Pest Control Service' }))
       .toBe('Quarterly Pest Control Service + Bi-Monthly Tree & Shrub Care Service');
+    // staff edited a keyed pest lead to another service: the text wins
+    expect(leadServiceDisplay('WDO Inspection Service', { catalogNames, firstName: 'Quarterly Pest Control Service' }))
+      .toBe(leadServiceDisplay('WDO Inspection Service', { catalogNames }));
     // a configured package name stays as written; an upsell after it is named
     expect(leadServiceDisplay('Roach Package + Lawn Care', { catalogNames, firstName: 'Roach Package' }))
       .toBe('Roach Package + Waves Assessment (Lawn)');
