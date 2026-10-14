@@ -575,11 +575,13 @@ const NotificationService = {
     // inside the SAME transaction as the insert (the caller's own `trx`
     // when given, else one this call opens) so the lookup a gate performs
     // and the row it gates can never observe each other's in-between state.
+    // dedupeOpenOnly (optional, with dedupeKey): the dedupe probe skips rows with
+    // done_at set, so a closed row never hides a new ring (see the probe below).
     // bumpOnRefresh (optional, with refreshOnDedupe): a refresh that rings also
     // moves the row's created_at to now, so a standing row that keeps getting
     // newer news (one row per customer thread: "3 texts") rises to the top of
     // the newest-first bell instead of staying where its first text put it.
-    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -593,6 +595,11 @@ const NotificationService = {
         if (Number.isFinite(windowMs) && windowMs > 0) {
           existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
         }
+        // dedupeOpenOnly (optional, with dedupeKey; GATE_ALERT_RING_ONCE): only a
+        // row nobody has closed (done_at IS NULL) is the standing one. A row a
+        // person marked done is ignored, so the same key can ring again as a
+        // fresh row; an open row is found at any age when no window is given.
+        if (dedupeOpenOnly) existingQuery = existingQuery.whereNull('done_at');
         // Newest row first: a key with a rolling window (or a duplicate left by
         // an old race) can hold several rows, and the LATEST is the standing
         // one — never an arbitrary older row.
