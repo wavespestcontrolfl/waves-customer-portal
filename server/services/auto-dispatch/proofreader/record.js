@@ -125,7 +125,10 @@ const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
 // out of the count on the raw side, so a code that happens to be a day or a
 // time word does not make the record incomplete (Codex #6328 r2).
 const CREDENTIAL_VALUE_RE = /\b(code|password|passcode|passphrase|pin|combo|combination)\b(\s*(?:is|=|:|-)?\s*)["'\u201c\u2018]?[A-Za-z0-9#*]+["'\u201d\u2019]?/gi;
-const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2');
+// The same in the reverse order the mask also reads: "Friday is the gate
+// code", "Noon is the gate password" (r3).
+const CREDENTIAL_VALUE_REVERSE_RE = /["'\u201c\u2018]?[A-Za-z0-9#*]+["'\u201d\u2019]?(\s+(?:is|was|=)\s+(?:(?:the|my|our|your)\s+)?(?:[A-Za-z]+\s+)?(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
+const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
 
 // The mask removed at least one word that can say when.
 function maskHidTime(raw, masked) {
