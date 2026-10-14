@@ -374,6 +374,8 @@ describe('the customer record', () => {
       'CODE 4821, AT NINE O\'CLOCK ONLY',
       // A passphrase of day or time words cannot be told from a time statement: the safe side is a person.
       'Gate password Friday morning',
+      'Gate code 4821, AFTER LUNCH ONLY',
+      'CODE 4821 BEFORE SUNSET',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
       expect(redactAccessCodes(text)).not.toContain('4821');
@@ -395,9 +397,19 @@ describe('the customer record', () => {
       'Gate password is noon',
       'The garage code: sunday',
       'Friday is the gate code',
+      // A quantity is not a time.
+      'Gate code 4821, dog weighs about 50 lbs',
+      'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
     ])('nothing about when is hidden: %s', (text) => {
       expect(hid(text)).toBe(false);
+    });
+
+    test('a long stored text is scanned in bounded time (no retry at every byte)', () => {
+      const text = `Gate code 1234. ${'A'.repeat(64 * 1024)}`;
+      const started = Date.now();
+      hid(text);
+      expect(Date.now() - started).toBeLessThan(500);
     });
 
     test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {

@@ -112,10 +112,17 @@ function partsOf(body) {
 // all-caps note "DO NOT COME BEFORE NINE" loses both to the mask: r4).
 const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|than|past';
 const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+// An hour is 0-23, and a number followed by a unit is a quantity ("about 50
+// lbs", "after 5 minutes"), not a time (r5).
+const HOUR = '(?:[01]?\\d|2[0-3])(?![\\w:/-])(?!\\s*(?:lbs?|pounds?|ft|feet|inch(?:es)?|seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|yrs?|dollars?|gallons?|acres?|%))';
+// Times a person names instead of an hour ("AFTER LUNCH ONLY", "before
+// sunset", "after work"): r5.
+const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk|daylight|dark|work|school';
 const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}:\\d{2}(?:\\s?[ap]\\.?m\\.?)?(?![\\w:])',
   '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
-  `\\b(?:${HOUR_LEADS})\\s+(?:\\d{1,2}(?![\\w:/-])|(?:${SPELLED_HOURS})\\b)`,
+  `\\b(?:${HOUR_LEADS})\\s+(?:${HOUR}|(?:${SPELLED_HOURS}|${NAMED_TIMES})\\b)`,
+  '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
@@ -134,10 +141,12 @@ const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
 // after the noun is taken: a passphrase of several words that are day or time
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
-const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s*(?:is|=|:|-)?\\s*)(?!(?:${HOUR_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]+["'\\u201d\\u2019]?`, 'gi');
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s*(?:is|=|:|-)?\\s*)(?!(?:${HOUR_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}["'\\u201d\\u2019]?`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password" (r3).
-const CREDENTIAL_VALUE_REVERSE_RE = /["'\u201c\u2018]?[A-Za-z0-9#*]+["'\u201d\u2019]?(\s+(?:is|was|=)\s+(?:(?:the|my|our|your)\s+)?(?:[A-Za-z]+\s+)?(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
+// Bounded tokens: an unbounded run here was retried at every byte of a long
+// stored text (a 64 KB entry took 5.9 s on the event loop: Codex security r5).
+const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|was|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:[A-Za-z]{1,30}\s{1,5})?(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
 const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
 
 // The mask removed at least one word that can say when.
