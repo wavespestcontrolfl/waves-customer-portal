@@ -139,14 +139,16 @@ const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // ("VALID THROUGH OCTOBER"; not before a day or a mask, which the
 // month-and-day shape reads), or day first ("EXPIRES 20 OCTOBER"): r7 to
 // r19, r28, r31.
-const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))';
+// Whole month names and their short forms only: "JANITOR" is not January (r33).
+const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const DATE_SHAPES = `(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
 const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
 // "TWO AND A HALF HOURS": r22.
 // Spelled tens too ("THIRTY MINUTES NOTICE"): r30.
-const QTY = `(?:\\d{1,3}|a|an|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
+const QTY = `(?:\\d{1,3}|a|an|half|an?\\s{1,3}half|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
 // A word after the number must be one that goes with a time ("before 9
@@ -242,7 +244,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
   '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])',
-  '\\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?(?![\\w])',
+  // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?(?![\\w])',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
 // (Codex security r8).
@@ -353,7 +356,13 @@ function maskBesideTimeWord(masked) {
       // "May" is also a verb: a month only when nothing, or a joining word,
       // follows it ("expires [redacted] May", "... May only"): r24, r25.
       if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) return true;
-      if (PREV_LIMITS.has(prev) && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
+      // At most two hidden words after the limit ("NEVER [redacted]"): a
+      // longer hidden run ("ONLY [redacted] [redacted] [redacted]") is a
+      // sentence, not a time (r33).
+      const run = (masked.slice(at).match(/^(?:\[redacted\]\s{0,3}){1,3}/) || [''])[0].split(MARK).length - 1;
+      // The limit must stand right before this mask, not before an earlier one.
+      const afterMask = /\[redacted\][\s,]*$/.test(before);
+      if (PREV_LIMITS.has(prev) && !afterMask && run <= 2 && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
     }
     at = masked.indexOf(MARK, at + MARK.length);
   }
