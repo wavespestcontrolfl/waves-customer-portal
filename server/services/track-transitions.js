@@ -965,6 +965,15 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
   if (!isEnabled('techArrivedSms')) return 'gate_off';
 
+  // The COMPLETE attempt fence: everything the claim above matched, plus this invocation's own claim
+  // stamp. A re-armed visit that arrived again (a new arrival time, a new claim) no longer matches.
+  const arrivalAttemptFence = function arrivalAttempt() {
+    this.where({ id: serviceId, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null, arrival_sms_sent_at: claimStamp });
+    if (expectTechnicianId) this.where('technician_id', expectTechnicianId);
+    if (claimArrivedAt == null) this.whereNull('arrived_at');
+    else this.whereRaw(`date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(claimArrivedAt)]);
+  };
+
   let outcome = 'retry';
   try {
     const techId = actingTechId || svc.technician_id;
@@ -974,7 +983,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
     const techName = tech?.name || 'Your Waves technician';
     // GATE_ONE_TEXT_PER_CUSTOMER_DAY: once per customer, address, technician and day, from a recorded
     // delivery, not from the claim above (which is stamped before any send). Gate off: just the send.
-    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }), { fence: { id: serviceId, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null }, technicianId: techId });
+    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }), { fence: arrivalAttemptFence, technicianId: techId });
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);

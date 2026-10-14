@@ -18,15 +18,21 @@
  *    no-show, rescheduled). The sibling's CURRENT address, date, assignment or track state is
  *    never read; the per-row guard columns (`track_sms_sent_at`, `arrival_sms_sent_at`) are
  *    stamped before a send, even when the text is disabled, and prove nothing.
- *  - Proof of delivery is durable and written WITH the send. `sendTrackTextOnce` holds an
- *    advisory lock on customer + address + day + kind from the check until the proof is
- *    committed, writes the proof row (a critical write) only after the sender returned
- *    success, and if that write fails writes it again while still holding the lock. If the
- *    proof still cannot be written, this visit never sends twice and the next same-day visit
- *    sends (a possible duplicate, never silence).
- *  - The proof describes the attempt that sent. The caller's schedule fence is re-checked under
- *    the lock before the send; an attempt whose visit was moved or changed meanwhile sends as it
- *    would without the rule and records no proof, so a stale send cannot cover another visit.
+ *  - NO lock and NO connection held across the provider call. Standing down needs a delivered
+ *    row, and only a completed send writes one, so two taps can never both stand down. Two taps at
+ *    the same instant can both find no row and both send: a duplicate, the fail-open direction,
+ *    and exactly what happens with the gate off. A technician taps visit 1, later visit 2, on one
+ *    phone, so a truly simultaneous pair is rare; holding a database connection (and a lock) across
+ *    a network call to prevent it is the worse trade (it can exhaust the pool, since the real
+ *    senders take more connections themselves).
+ *  - Proof of delivery is durable and written after the send: the proof row (a critical write) is
+ *    written only once the sender returned success, retried once if the write fails, and logged
+ *    loudly if it still fails. Then this visit never sends twice and the next same-day visit sends
+ *    (a possible duplicate, never silence).
+ *  - The proof describes the attempt that sent. The caller's COMPLETE attempt fence (the tuple its
+ *    own claim used) is checked right before the send; an attempt whose visit was moved, re-armed
+ *    or changed meanwhile sends as it would without the rule and records no proof, so a stale
+ *    send cannot cover another visit.
  *  - "Could not read" is never "already told": every read or write error fails OPEN toward the
  *    customer being informed (the text goes out as with the gate off).
  */
@@ -89,8 +95,8 @@ async function stampTrackGuard(kind, fence) {
 // it is read from the recorded delivery (the person is the one the text named, which for an
 // arrival can be the one who actually arrived, not the scheduled one). The sibling is consulted
 // only to see that it still exists and is not in a retained-history status.
-async function deliveredSibling(trx, ref, kind, technicianId) {
-  const rows = await trx('audit_log as al')
+async function deliveredSibling(conn, ref, kind, technicianId) {
+  const rows = await conn('audit_log as al')
     .join('scheduled_services as sib', 'sib.id', 'al.resource_id')
     .where('al.action', DELIVERED_ACTION)
     .whereRaw("al.metadata->>'kind' = ?", [kind])
@@ -102,14 +108,14 @@ async function deliveredSibling(trx, ref, kind, technicianId) {
     // nothing about THIS service: the canonical non-performed list. A completed visit still covers.
     .whereNotIn('sib.status', RETAINED_HISTORY_STATUSES)
     .select('sib.id',
-      trx.raw("al.metadata->>'customer_id' as customer_id"),
-      trx.raw("al.metadata->>'property_id' as property_id"),
-      trx.raw("al.metadata->>'day' as day"),
-      trx.raw("al.metadata->>'technician_id' as delivered_technician_id"));
+      conn.raw("al.metadata->>'customer_id' as customer_id"),
+      conn.raw("al.metadata->>'property_id' as property_id"),
+      conn.raw("al.metadata->>'day' as day"),
+      conn.raw("al.metadata->>'technician_id' as delivered_technician_id"));
   return rows.find((r) => sameTextDay(ref, r) && String(r.delivered_technician_id || '') === String(technicianId || '')) || null;
 }
 
-async function recordTrackOutcome(trx, ref, kind, covering, technicianId, { critical = false } = {}) {
+async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false } = {}) {
   await auditLog.recordAuditEvent({
     critical,
     actor_type: 'system',
@@ -121,27 +127,47 @@ async function recordTrackOutcome(trx, ref, kind, covering, technicianId, { crit
       technician_id: technicianId || null,
       ...(covering ? { covered_by_scheduled_service_id: covering.id } : {}),
     },
-    trx,
   });
 }
 
-async function lockTrackDay(trx, ref, kind) {
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-    [`one-text-day:${kind}:${ref.customer_id}:${ref.property_id}:${ref.day}`]);
+// The delivered proof: a critical write, retried once. Never throws: the text is already out.
+async function recordDeliveryProof(ref, kind, technicianId) {
+  let last = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true });
+      return true;
+    } catch (err) {
+      last = err;
+    }
+  }
+  logger.error(`[one-text-per-day] DELIVERY PROOF NOT RECORDED for ${kind} text of ${ref.id} (${last.code || last.name || 'error'}): the next same-day sibling will send`);
+  return false;
+}
+
+// Covered by another visit's delivered text: stamp the guard and leave an audit trace. A failure of
+// either only logs; the covering proof is what made the decision.
+async function standDown(ref, covering, kind, named, fence) {
+  try {
+    await stampTrackGuard(kind, fence);
+    await recordTrackOutcome(ref, kind, covering, named);
+  } catch (err) {
+    logger.error(`[one-text-per-day] ${kind} covered stamp failed for ${ref.id}: ${err.message}`);
+  }
+  logger.info(`[one-text-per-day] ${kind} text for ${ref.id} covered by ${covering.id} (delivered text, same customer, address, technician, day)`);
+  return COVERED_BY_DAY;
 }
 
 /**
- * Run a tracker text's sender `sendFn` (returns the sender's result) once per
- * customer, address, technician and day (`technicianId`: the person the text names; the
- * scheduled technician when not given). With the gate on and a saved address,
- * the check and the send happen under one advisory lock, so a second tap waits
- * for the first send to finish and then sees its "delivered" row. A sender that
- * did not return success leaves no row, so the next tap sends. `fence` is the caller's
- * schedule tuple for this attempt: if the visit no longer matches it (moved, re-armed) the
- * send goes out as it would without the rule and records no proof. Returns the sender's
- * result, or COVERED_BY_DAY (a suppressed, handled result) after stamping the guard and
- * writing an audit row. Gate off, no saved address, or a failure before the send: the sender
- * runs as without the rule.
+ * Run a tracker text's sender `sendFn` (returns the sender's result) once per customer, address,
+ * technician and day (`technicianId`: the person the text names; the scheduled technician when not
+ * given). Flow, with no transaction and no lock around the send:
+ *  1. Gate off, no saved address, or a read error: the sender runs as without the rule.
+ *  2. Read the visit through the caller's attempt `fence`; gone or changed: send, record no proof.
+ *  3. Look for another visit's delivered row (same customer, address, ET day, kind, technician).
+ *  4. Found: stamp the guard, write the covered audit row, return COVERED_BY_DAY.
+ *  5. Else run the sender ONCE (a throw propagates; it is never run twice).
+ *  6. Only on success, write the delivered proof (critical, retried once).
  */
 async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId = null } = {}) {
   let applies = false;
@@ -151,71 +177,20 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
     applies = false;
   }
   if (!applies) return sendFn();
-  const state = { sending: false, done: false, result: null, proof: null };
+  let ref = null;
+  let named = null;
   try {
-    // The OUTER transaction owns the advisory lock until it ends; the check, the send and the
-    // proof run in a savepoint inside it, so a failed proof write rolls back only that part
-    // and the lock is still held while the proof is written again (rescueDeliveryProof).
-    return await db.transaction((outer) => lockedTrackText({ outer, svc, kind, sendFn, fence, technicianId, state }));
+    ref = await loadRef(db, svc, fence);
+    named = ref ? (technicianId || ref.technician_id) : null;
+    const covering = ref ? await deliveredSibling(db, ref, kind, named) : null;
+    if (covering) return await standDown(ref, covering, kind, named, fence);
   } catch (err) {
-    // The sender itself threw: its caller handles that, as without the rule.
-    if (state.sending && !state.done) throw err;
-    logger.error(`[one-text-per-day] ${kind} once-per-day bookkeeping failed for ${svc.id}: ${err.message}`);
-    // Bookkeeping failed AFTER a real send: never send a second one for this visit, and keep the proof.
-    if (state.sending) return rescueDeliveryProof(db, state, kind);
-    return sendFn();
+    logger.error(`[one-text-per-day] ${kind} once-per-day check failed for ${svc.id} (sent as usual): ${err.message}`);
+    ref = null;
   }
-}
-
-async function lockedTrackText({ outer, svc, kind, sendFn, fence, technicianId, state }) {
-  const send = async () => {
-    state.sending = true;
-    state.result = await sendFn();
-    state.done = true;
-    return state.result;
-  };
-  const first = await loadRef(outer, svc, fence);
-  if (!first) return send();
-  await lockTrackDay(outer, first, kind);
-  // Re-checked under the lock, immediately before the send: still the attempt that was claimed.
-  const ref = await loadRef(outer, svc, fence);
-  if (!ref) return send();
-  const named = technicianId || ref.technician_id;
-  try {
-    return await outer.transaction(async (inner) => {
-      const covering = await deliveredSibling(inner, ref, kind, named);
-      if (covering) {
-        await stampTrackGuard(kind, fence);
-        await recordTrackOutcome(inner, ref, kind, covering, named);
-        logger.info(`[one-text-per-day] ${kind} text for ${ref.id} covered by ${covering.id} (delivered text, same customer, address, technician, day)`);
-        return COVERED_BY_DAY;
-      }
-      const result = await send();
-      state.proof = result && result.success === true ? { ref, named } : null;
-      // CRITICAL write: a database error must surface here, not be swallowed (the row is the only proof).
-      if (state.proof) await recordTrackOutcome(inner, ref, kind, null, named, { critical: true });
-      return result;
-    });
-  } catch (err) {
-    if (state.sending && !state.done) throw err;
-    logger.error(`[one-text-per-day] ${kind} once-per-day check or proof failed for ${svc.id}: ${err.message}`);
-    // The savepoint rolled back; the lock is still held here.
-    return state.sending ? rescueDeliveryProof(outer, state, kind) : send();
-  }
-}
-
-// The text is already out but its proof row did not commit: write it again on `conn` (the outer
-// transaction, still holding the day lock, so a waiting sibling sees the row when the lock
-// releases). If that also fails, say so loudly: this visit's text stands as delivered, and the
-// NEXT same-day sibling will send (a possible duplicate, never a silence).
-async function rescueDeliveryProof(conn, state, kind) {
-  if (!state.proof) return state.result;
-  try {
-    await recordTrackOutcome(conn === db ? null : conn, state.proof.ref, kind, null, state.proof.named, { critical: true });
-  } catch (err) {
-    logger.error(`[one-text-per-day] DELIVERY PROOF NOT RECORDED for ${kind} text of ${state.proof.ref.id} (${err.code || err.name || 'error'}): the next same-day sibling will send`);
-  }
-  return state.result;
+  const result = await sendFn();
+  if (ref && result && result.success === true) await recordDeliveryProof(ref, kind, named);
+  return result;
 }
 
 module.exports = {

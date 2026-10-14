@@ -10,8 +10,23 @@
  *
  * Real path: TrackTransitions.markEnRoute / markOnProperty over real scheduled_services rows.
  */
-jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
-  get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
+// mockDb.override: a different knex instance the code under test uses instead (the one-connection pool test).
+// mockDb.onTechnicians: runs once, awaited, just before the technician lookup that sits between the arrival claim
+// and the send (to change the visit while an attempt is in flight).
+const mockDb = { override: null, onTechnicians: null };
+jest.mock('../models/db', () => new Proxy((...args) => {
+  const target = mockDb.override || mockPg;
+  if (args[0] === 'technicians' && mockDb.onTechnicians) {
+    const hook = mockDb.onTechnicians;
+    mockDb.onTechnicians = null;
+    return { where: (...w) => ({ first: async (...c) => { await hook(); return target('technicians').where(...w).first(...c); } }) };
+  }
+  return target(...args);
+}, {
+  get: (_, key) => {
+    const target = mockDb.override || mockPg;
+    return typeof target[key] === 'function' ? target[key].bind(target) : target[key];
+  },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({
@@ -80,6 +95,8 @@ postgres('one text per customer, address and day', () => {
   });
 
   afterEach(() => {
+    mockDb.override = null;
+    mockDb.onTechnicians = null;
     delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
     gates.visitGroups = false;
   });
@@ -265,28 +282,86 @@ postgres('one text per customer, address and day', () => {
       { start: '10:00', end: '11:00', name: 'Lawn Care' },
     ] });
 
-    test('gate on, two on-the-way taps in flight together: exactly one text, never zero', async () => {
+    // No lock is held across the send: two taps at the same instant may both send (a duplicate, which is what the gate
+    // off does), but never zero, and whichever sent has a proof row. Standing down needs a delivered row only a
+    // completed send writes.
+    const deliveredKinds = async (f, kind) => mockPg('audit_log').whereIn('resource_id', f.rows.map((r) => r.id))
+      .where({ action: 'track.one_text_per_day.delivered' }).whereRaw("metadata->>'kind' = ?", [kind]);
+
+    test('gate on, two on-the-way taps in flight together: at least one and at most two texts, never zero, each with a proof', async () => {
       gateOn();
       const f = await twoVisits();
       TwilioService.sendTechEnRoute.mockImplementationOnce(slow({ success: true }));
       await Promise.all([enRoute(f.rows[0].id), enRoute(f.rows[1].id)]);
-      expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
-      expect(await mockPg('audit_log').whereIn('resource_id', f.rows.map((r) => r.id)).where({ action: 'track.one_text_per_day.delivered' })).toHaveLength(1);
+      const sent = texted(TwilioService.sendTechEnRoute);
+      expect(sent).toBeGreaterThanOrEqual(1);
+      expect(sent).toBeLessThanOrEqual(2);
+      expect(await deliveredKinds(f, 'en_route')).toHaveLength(sent);
     });
 
-    test('gate on, two arrivals in flight together: exactly one arrived text, never zero', async () => {
+    test('gate on, two arrivals in flight together: at least one and at most two texts, never zero, each with a proof', async () => {
       gateOn();
       const f = await twoVisits();
       await enRoute(f.rows[0].id);
       await enRoute(f.rows[1].id);
       TwilioService.sendTechArrived.mockImplementationOnce(slow({ success: true }));
       await Promise.all([onSite(f.rows[0].id), onSite(f.rows[1].id)]);
-      expect(texted(TwilioService.sendTechArrived)).toBe(1);
+      const sent = texted(TwilioService.sendTechArrived);
+      expect(sent).toBeGreaterThanOrEqual(1);
+      expect(sent).toBeLessThanOrEqual(2);
+      expect(await deliveredKinds(f, 'arrived')).toHaveLength(sent);
       const guards = await mockPg('scheduled_services').whereIn('id', f.rows.map((r) => r.id)).select('arrival_sms_sent_at');
       expect(guards.every((g) => g.arrival_sms_sent_at !== null)).toBe(true);
     });
 
-    test('gate on, the first arrival send fails while the second waits: the second still sends (never zero)', async () => {
+    test('sequential taps: exactly one text, the second visit is covered by the recorded delivery', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+    });
+
+    test('the rule holds NO database connection during the send: it completes on a one-connection pool whose sender queries the database', async () => {
+      gateOn();
+      const f = await twoVisits();
+      const tiny = knex({ client: 'pg', connection, pool: { min: 0, max: 1 }, acquireConnectionTimeout: 4000 });
+      mockDb.override = tiny;
+      const { sendTrackTextOnce } = require('../services/one-text-per-day');
+      const sender = jest.fn(async () => {
+        // the real senders query the same pool (customer, template, link lookups)
+        await tiny('scheduled_services').where({ id: f.rows[0].id }).first('id');
+        return { success: true };
+      });
+      const started = Date.now();
+      try {
+        const out = await sendTrackTextOnce(f.rows[0], 'en_route', sender, { technicianId: technicians[0] });
+        expect(out).toEqual({ success: true });
+      } finally {
+        mockDb.override = null;
+        await tiny.destroy();
+      }
+      expect(Date.now() - started).toBeLessThan(3500); // under the old lock-and-transaction design this waits out the acquire timeout
+      expect(sender).toHaveBeenCalledTimes(1);
+      expect(await deliveredKinds(f, 'en_route')).toHaveLength(1);
+    });
+
+    test('an arrival attempt whose visit was re-armed and arrived again while it was in flight records no proof, and a later visit still texts', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      // between the arrival claim and the send, the first visit is re-armed and arrives again (a new arrival, a new claim)
+      mockDb.onTechnicians = () => mockPg('scheduled_services').where({ id: f.rows[0].id })
+        .update({ arrived_at: new Date(Date.now() + 5000), arrival_sms_sent_at: new Date(Date.now() + 5000) });
+      await onSite(f.rows[0].id);
+      expect(texted(TwilioService.sendTechArrived)).toBe(1); // the stale attempt still goes out, as without the rule
+      expect(await deliveredKinds(f, 'arrived')).toHaveLength(0); // ... and is recorded as proof for nothing
+      await onSite(f.rows[1].id);
+      expect(texted(TwilioService.sendTechArrived)).toBe(2); // the later visit is not suppressed by the stale attempt
+    });
+
+    test('gate on, the first arrival send fails while the second is in flight: the second still sends (never zero)', async () => {
       gateOn();
       const f = await twoVisits();
       await enRoute(f.rows[0].id);
@@ -442,7 +517,7 @@ postgres('one text per customer, address and day', () => {
     //      possible duplicate, never silence).
     describe('delivery proof write failures', () => {
       const auditLog = require('../services/audit-log');
-      const failProof = (times, { delayMs = 0 } = {}) => {
+      const failProof = (times) => {
         const real = auditLog.recordAuditEvent;
         let left = times;
         const spy = jest.spyOn(auditLog, 'recordAuditEvent').mockImplementation(async (input) => {
@@ -450,7 +525,6 @@ postgres('one text per customer, address and day', () => {
           // a non-critical write swallows its own error: model that exactly (a lost row, no throw)
           if (left > 0) {
             left -= 1;
-            if (delayMs) await new Promise((resolve) => { setTimeout(resolve, delayMs); }); // a sibling is waiting on the lock meanwhile
             if (input.critical !== true) return undefined;
             throw new Error('synthetic audit insert failure');
           }
@@ -464,7 +538,7 @@ postgres('one text per customer, address and day', () => {
       ] });
       const proofRows = (id) => auditFor(id, 'track.one_text_per_day.delivered');
 
-      test('the proof insert fails once: the text went out once, the proof is written again, the next sibling is covered', async () => {
+      test('the proof insert fails once: the text went out once, the write is retried, the next sibling is covered', async () => {
         gateOn();
         const spy = failProof(1);
         const f = await pair();
@@ -474,17 +548,6 @@ postgres('one text per customer, address and day', () => {
         expect(await proofRows(f.rows[0].id)).toHaveLength(1);
         await enRoute(f.rows[1].id);
         expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
-      });
-
-      test('a sibling waiting on the day lock while the first proof insert fails: exactly one text (the proof is rescued under the lock)', async () => {
-        gateOn();
-        const spy = failProof(1, { delayMs: 500 });
-        const f = await pair();
-        await Promise.all([enRoute(f.rows[0].id), enRoute(f.rows[1].id)]);
-        spy.mockRestore();
-        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
-        const proofs = (await proofRows(f.rows[0].id)).length + (await proofRows(f.rows[1].id)).length;
-        expect(proofs).toBe(1);
       });
 
       test('the proof cannot be written at all: this visit never sends twice, and the next sibling sends (never silence)', async () => {
