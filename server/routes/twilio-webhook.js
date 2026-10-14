@@ -217,13 +217,13 @@ function intakeOutcome(intakeResult) {
 }
 
 
-// GATE_ONE_TEXT_PER_CUSTOMER_DAY: no-op with the gate off; never throws into the webhook (the revoke itself never
+// GATE_ONE_TEXT_PER_CUSTOMER_DAY: no-op with the gate off; never throws into the webhook (the record itself never
 // rejects, and loading the module is guarded here).
-function revokeTrackProofSafely(sid) {
+function recordTrackBounceSafely(sid) {
   try {
-    void require('../services/one-text-per-day').revokeBouncedTrackProof({ sid });
+    void require('../services/one-text-per-day').recordBouncedTrackText({ sid });
   } catch (e) {
-    logger.error(`[twilio-status] tracker proof revoke dispatch failed: ${e.message}`);
+    logger.error(`[twilio-status] tracker bounce record dispatch failed: ${e.message}`);
   }
 }
 
@@ -2008,8 +2008,8 @@ router.post('/status', async (req, res) => {
           logger.error(`[twilio-status] appointment email fallback dispatch failed: ${e.message}`);
         }
 
-        // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a tracker text the provider now reports undelivered stops covering other visits.
-        revokeTrackProofSafely(MessageSid);
+        // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a tracker text the provider reports undelivered is recorded by id and stops covering other visits.
+        recordTrackBounceSafely(MessageSid);
 
         // Recipient double opt-in: a failed/undelivered confirmation ask
         // flips its pending row to ask_failed so the next consented save

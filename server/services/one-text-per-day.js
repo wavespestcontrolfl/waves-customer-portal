@@ -33,8 +33,9 @@
  *    own claim used) is checked right before the send; an attempt whose visit was moved, re-armed
  *    or changed meanwhile sends as it would without the rule and records no proof, so a stale
  *    send cannot cover another visit.
- *  - A text the provider later reports undelivered is revoked (a `revoked` audit row written from
- *    the status callback): it no longer covers other visits. Nothing is re-sent retroactively.
+ *  - A text the provider reports undelivered is recorded by id (a `bounced` audit row written from the
+ *    status callback, whether or not the proof exists yet); a proof any of whose ids has a bounced row
+ *    no longer covers other visits (reconciled at read time). Nothing is re-sent retroactively.
  *  - The ONE arrived text names every service it covers (sender plus same-customer, property, day
  *    and technician visits with no text of their own), using the existing per-visit label builder.
  *  - "Could not read" is never "already told": every read or write error fails OPEN toward the
@@ -52,7 +53,8 @@ const TRACK_TEXTS = {
   arrived: { stamp: 'arrival_sms_sent_at' },
 };
 const DELIVERED_ACTION = 'track.one_text_per_day.delivered';
-const REVOKED_ACTION = 'track.one_text_per_day.revoked';
+const BOUNCED_ACTION = 'track.one_text_per_day.bounced';
+const TRACK_PURPOSES = ['tech_en_route', 'tech_arrived'];
 // A visit that can still be worked: its status, with a legacy NULL counted as live (as the scheduling paths do).
 const LIVE_LABEL_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 const COVERED_BY_DAY = Object.freeze({ success: false, suppressed: true, reason: 'covered_by_day' });
@@ -116,12 +118,10 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
     .where(function liveOrLegacyNullStatus() {
       this.whereNull('sib.status').orWhereNotIn('sib.status', RETAINED_HISTORY_STATUSES);
     })
-    // A delivered text whose provider later reported it undelivered (revoked) told nobody.
-    .whereNotExists(function bounced() {
-      this.select(1).from('audit_log as rv')
-        .where('rv.action', REVOKED_ACTION)
-        .whereRaw("rv.metadata->>'delivered_audit_id' = al.id::text");
-    })
+    // A delivered text any of whose provider ids was reported undelivered told nobody. Decided at READ time
+    // from the recorded bounce, so it does not matter whether the bounce or the proof was written first.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) AS p(sid)
+      JOIN audit_log b ON b.action = ? AND b.metadata->>'sid' = p.sid)`, [BOUNCED_ACTION])
     .select('sib.id',
       conn.raw("al.metadata->>'customer_id' as customer_id"),
       conn.raw("al.metadata->>'property_id' as property_id"),
@@ -186,7 +186,7 @@ async function standDown(ref, covering, kind, named, fence) {
  *     for several visits gets their merged label (`sendFn({ serviceLabel })`; gate off: no argument).
  *  6. Only on success, and only if the visit still matches the fence after the provider call, write the
  *     delivered proof (critical, retried once) with the provider message ids, so an "undelivered"
- *     status callback can revoke it (`revokeBouncedTrackProof`).
+ *     status callback can void it (`recordBouncedTrackText`).
  */
 async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId = null } = {}) {
   let applies = false;
@@ -214,7 +214,7 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
 }
 
 // The provider ids (Twilio SIDs) of the texts a sender result accepted, kept on the proof so a later
-// "undelivered" status callback can revoke it.
+// "undelivered" status callback can void it.
 function acceptedProviderIds(result) {
   const sent = Array.isArray(result && result.results) ? result.results.filter((r) => r && r.sent && r.providerMessageId) : [];
   return sent.map((r) => String(r.providerMessageId));
@@ -284,36 +284,37 @@ async function coveredServiceLabel(ref, kind, technicianId) {
   }
 }
 
+// Is the message with this provider id a tracker text? Read from the log rows the send wrote (the audit
+// row's purpose, else the sms_log message type). Not logged yet (the callback raced the log insert): yes,
+// because a bounced row only ever matters to a proof that lists this id.
+async function isTrackerText(sid) {
+  const audit = await db('messaging_audit_log').where({ provider_message_id: sid }).first('purpose');
+  if (audit) return TRACK_PURPOSES.includes(audit.purpose);
+  const log = await db('sms_log').where({ twilio_sid: sid }).first('message_type');
+  return log ? TRACK_PURPOSES.includes(log.message_type) : true;
+}
+
 /**
- * A provider "failed / undelivered" status callback for `sid`: if that message was recorded as a
- * delivered tracker text, write a revoked row so it no longer covers other visits (a visit tapped
- * AFTER the bounce sends its own text; nothing is re-sent retroactively). A no-op with the gate off;
- * never throws (it is called from the webhook).
+ * A provider "failed / undelivered" status callback for `sid`: if it is an on-the-way or arrived text,
+ * record the bounce by id (one `bounced` row per id; a repeated callback writes nothing more). Coverage
+ * is reconciled at read time (deliveredSibling), whether the proof exists yet or not. A no-op with the
+ * gate off; never throws (it is called from the webhook).
  */
-async function revokeBouncedTrackProof({ sid } = {}) {
+async function recordBouncedTrackText({ sid } = {}) {
   try {
-    if (!sid || !oneTextPerCustomerDayLive()) return 0;
-    const proofs = await db('audit_log as al')
-      .where('al.action', DELIVERED_ACTION)
-      .whereRaw("al.metadata->'provider_message_ids' @> ?::jsonb", [JSON.stringify([String(sid)])])
-      .whereNotExists(function alreadyRevoked() {
-        this.select(1).from('audit_log as rv').where('rv.action', REVOKED_ACTION).whereRaw("rv.metadata->>'delivered_audit_id' = al.id::text");
-      })
-      .select('al.id', 'al.resource_id', 'al.metadata');
-    for (const p of proofs) {
-      await auditLog.recordAuditEvent({
-        critical: true,
-        actor_type: 'system',
-        action: REVOKED_ACTION,
-        resource_type: 'scheduled_service',
-        resource_id: p.resource_id,
-        metadata: { delivered_audit_id: String(p.id), kind: p.metadata && p.metadata.kind, sid: String(sid) },
-      });
-    }
-    if (proofs.length) logger.info(`[one-text-per-day] ${proofs.length} delivered tracker text(s) revoked: provider reported ${String(sid).slice(0, 6)}… undelivered`);
-    return proofs.length;
+    if (!sid || !oneTextPerCustomerDayLive() || !(await isTrackerText(sid))) return 0;
+    const seen = await db('audit_log').where({ action: BOUNCED_ACTION }).whereRaw("metadata->>'sid' = ?", [String(sid)]).first('id');
+    if (seen) return 0;
+    await auditLog.recordAuditEvent({
+      critical: true,
+      actor_type: 'system',
+      action: BOUNCED_ACTION,
+      resource_type: 'sms',
+      metadata: { sid: String(sid) },
+    });
+    return 1;
   } catch (err) {
-    logger.error(`[one-text-per-day] tracker proof revoke failed: ${err.message}`);
+    logger.error(`[one-text-per-day] tracker bounce record failed: ${err.message}`);
     return 0;
   }
 }
@@ -322,5 +323,5 @@ module.exports = {
   sameTextDay,
   dayOf,
   sendTrackTextOnce,
-  revokeBouncedTrackProof,
+  recordBouncedTrackText,
 };

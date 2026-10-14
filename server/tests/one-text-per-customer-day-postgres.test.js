@@ -106,6 +106,8 @@ postgres('one text per customer, address and day', () => {
     const ids = created.rows;
     if (ids.length) {
       await mockPg('audit_log').whereIn('resource_id', ids).del();
+      // bounce rows carry no resource id; the synthetic SIDs are SM + 31 'a' + one digit
+      await mockPg('audit_log').where({ action: 'track.one_text_per_day.bounced' }).whereRaw("metadata->>'sid' ~ '^SMa{31}[0-9]$'").del();
       await mockPg('sms_log').whereIn('customer_id', created.customers).del().catch(() => {});
       await mockPg('scheduled_services').whereIn('id', ids).update({ visit_id: null });
       await mockPg('service_visits').whereIn('customer_id', created.customers).del();
@@ -609,7 +611,7 @@ postgres('one text per customer, address and day', () => {
     });
 
     describe('legacy NULL status, post-send fence, merged arrival label, bounced proofs', () => {
-      const { sendTrackTextOnce, revokeBouncedTrackProof } = require('../services/one-text-per-day');
+      const { sendTrackTextOnce, recordBouncedTrackText } = require('../services/one-text-per-day');
       const proofsFor = (id) => auditFor(id, 'track.one_text_per_day.delivered');
 
       test('a first visit with a legacy NULL status still covers a later visit', async () => {
@@ -692,17 +694,34 @@ postgres('one text per customer, address and day', () => {
       const sidOf = (n) => `SM${String(n).padStart(32, 'a')}`;
       const sendWithSid = (sid) => TwilioService.sendTechEnRoute.mockImplementationOnce(async () => ({ success: true, results: [{ sent: true, providerMessageId: sid }] }));
 
-      test('delivered, then an undelivered callback: a sibling tapped afterwards sends its own text', async () => {
+      const bouncedRows = (sid) => mockPg('audit_log').where({ action: 'track.one_text_per_day.bounced' }).whereRaw("metadata->>'sid' = ?", [sid]);
+
+      test('delivered, then an undelivered callback: a sibling tapped afterwards sends its own text (one bounced row, repeats write nothing)', async () => {
         gateOn();
         const f = await twoVisits();
         const sid = sidOf(1);
         sendWithSid(sid);
         await enRoute(f.rows[0].id);
         expect((await proofsFor(f.rows[0].id))[0].metadata.provider_message_ids).toEqual([sid]);
-        expect(await revokeBouncedTrackProof({ sid })).toBe(1);
-        expect(await revokeBouncedTrackProof({ sid })).toBe(0); // idempotent
+        expect(await recordBouncedTrackText({ sid })).toBe(1);
+        expect(await recordBouncedTrackText({ sid })).toBe(0); // idempotent
+        expect(await bouncedRows(sid)).toHaveLength(1);
         await enRoute(f.rows[1].id);
         expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
+
+      test('the callback arrives BEFORE the proof is written (the sender is still finishing): a later sibling still sends', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = sidOf(6);
+        TwilioService.sendTechEnRoute.mockImplementationOnce(async () => {
+          expect(await recordBouncedTrackText({ sid })).toBe(1); // the bounce lands while the send is still in flight
+          return { success: true, results: [{ sent: true, providerMessageId: sid }] };
+        });
+        await enRoute(f.rows[0].id);
+        expect(await proofsFor(f.rows[0].id)).toHaveLength(1); // the proof is written afterwards ...
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2); // ... and does not suppress the next visit
       });
 
       test('a callback for an unrelated SID changes nothing', async () => {
@@ -710,25 +729,36 @@ postgres('one text per customer, address and day', () => {
         const f = await twoVisits();
         sendWithSid(sidOf(2));
         await enRoute(f.rows[0].id);
-        expect(await revokeBouncedTrackProof({ sid: sidOf(3) })).toBe(0);
+        await recordBouncedTrackText({ sid: sidOf(3) });
         await enRoute(f.rows[1].id);
         expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
       });
 
-      test('a callback arriving after the sibling was already covered re-sends nothing retroactively', async () => {
+      test('a failed SMS that is not a tracker text writes no bounced row', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = sidOf(7);
+        await mockPg('sms_log').insert({ direction: 'outbound', from_phone: '+15550000001', to_phone: f.phone, twilio_sid: sid, message_type: 'appointment_reminder', customer_id: f.customerId });
+        expect(await recordBouncedTrackText({ sid })).toBe(0);
+        expect(await bouncedRows(sid)).toHaveLength(0);
+      });
+
+      test('a callback after the sibling was already covered re-sends nothing retroactively', async () => {
         gateOn();
         const f = await twoVisits();
         const sid = sidOf(4);
         sendWithSid(sid);
         await enRoute(f.rows[0].id);
         await enRoute(f.rows[1].id);
-        await revokeBouncedTrackProof({ sid });
+        await recordBouncedTrackText({ sid });
         expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
       });
 
-      test('gate off: the revoke hook does nothing and never throws', async () => {
-        expect(await revokeBouncedTrackProof({ sid: sidOf(5) })).toBe(0);
-        expect(await revokeBouncedTrackProof()).toBe(0);
+      test('gate off: the bounce hook writes nothing and never throws', async () => {
+        const sid = sidOf(5);
+        expect(await recordBouncedTrackText({ sid })).toBe(0);
+        expect(await recordBouncedTrackText()).toBe(0);
+        expect(await bouncedRows(sid)).toHaveLength(0);
       });
     });
   });
