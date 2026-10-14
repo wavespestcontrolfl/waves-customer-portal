@@ -452,6 +452,8 @@ describe('the customer record', () => {
       'GATE CODE 4821 EXPIRES 20 OCTOBER',
       'Gate code 4821 is valid for 30 days',
       'Gate code 4821 expires after 30 days',
+      'GATE CODE 4821 ACCESS ENDS OCTOBER 20',
+      'Gate code 4821 changes on 11/1',
       'Gate code 4821, PM ONLY',
       'Gate code 4821, BUSINESS HOURS ONLY',
       'CODE 4821 OFFICE HOURS',

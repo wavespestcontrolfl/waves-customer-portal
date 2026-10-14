@@ -116,7 +116,9 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // Not "good": "good 10/10 service" is a rating; "good until" is read by
 // "until" (r11).
 // Not "on": "spoke with the owner on 10/10" is history (r12).
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid';
+// ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
+// 20"): r32.
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
