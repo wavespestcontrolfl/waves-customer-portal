@@ -202,7 +202,7 @@ const TIME_WORDS_RE = new RegExp([
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
-  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
   `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
@@ -221,8 +221,10 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:only|not|never|except|after|before|until|by|from|on|no)(?=\\s{1,5}(?:today|tonight|tomorrow|holidays?)(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
+  // "AS EARLY AS 9", "as late as 5": r35.
+  `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
-  `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
+  `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at|for)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|first\\s{1,3}thing|mid-?day)(?![\\w])',
   // Night only as a limit ("NIGHT ONLY"); "NIGHT LIGHT" is a thing (r25).
@@ -247,7 +249,12 @@ const TIME_WORDS_RE = new RegExp([
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
   // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
   // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?(?![\\w])',
+  // A plural weekday is a habit ("MONDAYS ONLY"); one weekday counts only
+  // with a word that ties it to the visit ("on Monday", "Monday works",
+  // "Friday is when"): "OWNER CALLED MONDAY" is history (r35).
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches

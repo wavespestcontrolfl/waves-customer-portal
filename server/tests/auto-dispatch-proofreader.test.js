@@ -457,6 +457,11 @@ describe('the customer record', () => {
       'Gate code 4821, HALF HOUR NOTICE',
       'Gate code 4821 VALID THROUGH OCTOBER 2026',
       'Gate code 4821, GIVE US 30 MINUTES HEADS UP',
+      'Gate code 4821, scheduled for 9',
+      'Gate code 4821, AS EARLY AS 9',
+      'Gate code 4821, AN HOUR AND A HALF NOTICE',
+      'Gate code 4821, ON MONDAY',
+      'Gate code 4821, MONDAY WORKS',
       'CODE 4821 MON-FRI ONLY',
       'CODE 4821 SAT ONLY',
       'Gate code 4821, PM ONLY',
@@ -505,6 +510,7 @@ describe('the customer record', () => {
       '[CALL FRI AUG 14] Gate code: 4821.',
       'Gate code 4821, ONLY JANITOR HAS KEY',
       'Gate code 4821, FULL SUN IN BACK YARD',
+      'Gate code 4821, OWNER CALLED MONDAY',
       'Gate code 4821, ask MANAGER\nFriday works.',
       'Gate code 4821, ask MANAGER. Friday works.',
       'Gate code 4821, owner called YESTERDAY',
@@ -540,6 +546,13 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
       // The flag never reaches the returned entries.
       expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
+    });
+
+    test('a day the one-line mask hides on a second line is listed as not fully read', async () => {
+      const note = 'Gate code 4821, ask MANAGER\nFRIDAY WORKS.';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('FRIDAY');
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
     test('a code split across lines is still masked in the text the model reads', async () => {
