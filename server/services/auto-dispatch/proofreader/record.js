@@ -167,7 +167,7 @@ const TIME_WORDS_RE = new RegExp([
   `\\b${HHMM}(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
   // Minutes to / past an hour, spelled ("TEN TO TWO"): r23. Digits are read
   // by the range pattern.
-  `\\b(?:five|ten|twenty(?:[\\s-]{1,3}five)?)(?=\\s{1,5}(?:to|past|after|til|till)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
+  `\\b(?:five|ten|fifteen|twenty(?:[\\s-]{1,3}five)?)(?=\\s{1,5}(?:to|past|after|til|till)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
   // Quarter or half to / past an hour ("QUARTER TO TEN"): r15.
   `\\b(?:quarter|half)(?=\\s{1,5}(?:to|past|after|til|till|before)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
   '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
@@ -193,13 +193,16 @@ const TIME_WORDS_RE = new RegExp([
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
   // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
-  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
   `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
   '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
-  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?![\\w])(?!\\s{1,5}(?:for|to|about|re|regarding|if|with|first|has|have|will|said|says|or|and)\\b)',
+  // PM alone only before a word that makes it a time ("PM ONLY", "PM is
+  // best") or at the end of a sentence; any other word is the property
+  // manager ("PM approved access": r24).
+  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b|[.,;!)]|$))',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
   // (r17); "every week" is read below.
@@ -207,6 +210,12 @@ const TIME_WORDS_RE = new RegExp([
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
   '\\b(?:today|tonight|tomorrow|holidays?)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
   '\\b(?:only|not|never|except|after|before|until|by|from|on|no)(?=\\s{1,5}(?:today|tonight|tomorrow|holidays?)(?![\\w]))',
+  // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
+  `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
+  // An hour after a word that names the visit's time ("appointment time 9"): r24.
+  `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
+  // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
+  '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|nights?|overnight|first\\s{1,3}thing)(?![\\w])',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -305,7 +314,11 @@ function maskBesideTimeWord(masked) {
     if (!own) {
       const prev = wordsOf(before).pop();
       const next = wordsOf(after)[0];
+      const following = wordsOf(after);
       if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) return true;
+      // "May" is also a verb: a month only when nothing follows it ("expires
+      // [redacted] May"): r24.
+      if (next === 'may' && following.length === 1) return true;
       if (PREV_LIMITS.has(prev) && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
     }
     at = masked.indexOf(MARK, at + MARK.length);
