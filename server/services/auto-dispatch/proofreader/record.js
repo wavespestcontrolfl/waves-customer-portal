@@ -114,6 +114,9 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // Words that tie a date to the visit or the access; never taken for the
 // credential either ("access code expires 10/20": r8).
 const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|on|valid|good';
+// The hour words that also tie a DATE: not "about / around / than / past /
+// at", which come before quantities ("about 5/8 acre": r9).
+const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
 const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
@@ -132,7 +135,12 @@ const TIME_WORDS_RE = new RegExp([
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
   // note's own stamp and does not count.
-  `\\b(?:${HOUR_LEADS}|${DATE_LEADS})\\s{1,5}(?:\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))`,
+  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})\\s{1,5}(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))`,
+  // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
+  // "8 onwards"): r9.
+  // A look-ahead: the phrase is not consumed, so its own time word still
+  // counts on both sides and the hour alone tells the loss.
+  '\\b(?:[01]?\\d|2[0-3])(?=\\s{1,5}(?:in\\s{1,5}the\\s{1,5}(?:morning|afternoon|evening)|at\\s{1,5}night|sharp|onwards?|or\\s{1,5}so)(?![\\w]))',
   // AM or PM on its own ("PM ONLY"): r8.
   '\\b(?:am|pm|a\\.m\\.|p\\.m\\.)(?![\\w])',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
@@ -179,9 +187,12 @@ const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_
 // product names in capitals), against 4 with this list (measured
 // 2026-10-13); a statement the list misses is the known limit.
 function maskHidTime(raw, masked) {
-  // A text past the whole record's limit makes the record too long (no model
-  // is asked, the verdict is unknown): it is not scanned (security r8).
-  if (raw === masked || raw.length > MAX_RECORD_CHARS) return false;
+  if (raw === masked) return false;
+  // A text past the whole record's limit is not scanned (security r8). Its
+  // masked form decides: still past the limit, the record is too long and no
+  // model is asked; shorter (the mask took a long credential run), it is
+  // counted as not fully read, unscanned (r9).
+  if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
   return timeWords(masked) < timeWords(withoutCredentialValues(raw));
 }
 

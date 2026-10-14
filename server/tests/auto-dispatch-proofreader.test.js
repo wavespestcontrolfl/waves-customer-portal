@@ -385,6 +385,9 @@ describe('the customer record', () => {
       'Access code expires 10/20',
       'Gate code 4821, PM ONLY',
       'Friday is when the gate code works',
+      'Gate code 4821 expires 2026-10-20',
+      'Gate code 4821, 10 in the morning only',
+      'CODE 4821, 9 SHARP',
       'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
@@ -410,6 +413,7 @@ describe('the customer record', () => {
       // A quantity is not a time.
       'Gate code 4821, dog weighs about 50 lbs',
       'Gate code 4821, about 5 dogs roam the yard',
+      'Gate code 4821, lot is about 5/8 acre',
       'Friday is the front door access code',
       'Gate code 4821, the latch opens after 5 seconds of pressing',
       'Noon is the gate password',
@@ -430,6 +434,9 @@ describe('the customer record', () => {
       // A text past the record's limit is not scanned: the record is too long anyway.
       const huge = `Gate code 1234. today ${'x '.repeat(200000)}`;
       expect(maskHidTime(huge, huge.replace('1234', '[redacted]'))).toBe(false);
+      // ...unless the mask made it short: a long credential run hides a statement, unscanned.
+      const longCode = `Gate code ${'A'.repeat(300000)}1 TOMORROW ONLY`;
+      expect(maskHidTime(longCode, redactAccessCodes(longCode))).toBe(true);
     });
 
     test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {
