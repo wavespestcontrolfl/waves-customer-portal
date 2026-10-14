@@ -205,12 +205,21 @@ function scrubSecretText(input) {
       text = text.replace(re, (...args) => { removed += 1; return `${keep ? args[keep] : ''}${REMOVED}`; });
     }
   }
-  text = text.replace(LABELLED_RE, (...args) => {
+  const scrubLabelled = (source) => source.replace(LABELLED_RE, (...args) => {
     const replaced = labelledReplacement(...args);
     // A clause whose first word an earlier pattern already removed was counted there.
     if (replaced !== args[0] && !args[0].includes(REMOVED)) removed += 1;
-    return replaced;
+    if (replaced !== args[0]) return replaced;
+    // A kept value (an access PIN, prose, a short word) keeps only its first
+    // word: the rest of the clause is scanned again, so "PIN is 4821 for the
+    // gate, password is hunter2" still loses the password.
+    const [match, label, separator, quote, quoted] = args;
+    if (quote) return `${label}${separator}${quote}${quoted}${quote}${scrubLabelled(match.slice(label.length + separator.length + quoted.length + 2))}`;
+    const value = match.slice(label.length + separator.length);
+    const firstWord = value.match(/^\s*\S+/)?.[0] || value;
+    return `${label}${separator}${firstWord}${scrubLabelled(value.slice(firstWord.length))}`;
   });
+  text = scrubLabelled(text);
   return { text, removed };
 }
 

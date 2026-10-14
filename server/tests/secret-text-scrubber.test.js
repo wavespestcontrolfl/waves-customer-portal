@@ -262,3 +262,18 @@ describe('labelled secret in a long line', () => {
     expect(out).toContain('plan around it');
   });
 });
+
+// Pre-push audit: a kept value (access PIN, prose) must not shield a later label in the same clause.
+describe('a kept labelled value does not hide a later one', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const pw = ['hun', 'ter', '2q'].join('');
+  test.each([
+    [`PIN is 4821 for the gate, password is ${pw}`, 'PIN is 4821 for the gate, password is [removed]'],
+    [`password is required, token: ${pw}`, 'password is required, token: [removed]'],
+  ])('%s', (text, expected) => {
+    expect(scrubSecretText(text).text).toBe(expected);
+  });
+  test('the access PIN alone still stays', () => {
+    expect(scrubSecretText('PIN is 4821 at the front gate').text).toBe('PIN is 4821 at the front gate');
+  });
+});
