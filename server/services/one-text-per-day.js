@@ -218,8 +218,18 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
   }
   const scope = ref ? await namedScope(ref, kind, named) : null;
   const result = await (scope && scope.label ? sendFn({ serviceLabel: scope.label }) : sendFn());
-  if (ref && result && result.success === true) await proveIfCurrent(svc, fence, ref, kind, named, result, scope.ids);
+  if (ref && result && result.success === true) await proveIfCurrent(svc, fence, ref, kind, named, result, idsDelivered(kind, result, scope.ids, ref));
   return result;
+}
+
+// The visits the DELIVERED message named. An arrived text's merged label reaches only the text (SMS or
+// app push) template; the arrived EMAIL never carries it and names the sender's own visit. So when the
+// sender succeeded without any accepted text leg (the email leg alone, `results` empty or all unsent),
+// only the sender is covered and the other visits send their own. The on-the-way text and email name no
+// service (tech, ETA, track link), so either channel stands for the whole scope.
+function idsDelivered(kind, result, scopeIds, ref) {
+  const textAccepted = Array.isArray(result && result.results) && result.results.some((r) => r && r.sent);
+  return kind === 'arrived' && !textAccepted ? [String(ref.id)] : scopeIds;
 }
 
 // The provider ids (Twilio SIDs) of the texts a sender result accepted, kept on the proof so a later

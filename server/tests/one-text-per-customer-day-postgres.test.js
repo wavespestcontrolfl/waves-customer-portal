@@ -32,7 +32,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/twilio', () => ({
   sendSMS: jest.fn(),
   sendTechEnRoute: jest.fn(async () => ({ success: true })),
-  sendTechArrived: jest.fn(async () => ({ success: true })),
+  // the shape a text leg accepted by the provider returns (the email-only shapes are stubbed per test)
+  sendTechArrived: jest.fn(async () => ({ success: true, results: [{ sent: true }] })),
 }));
 jest.mock('../services/tech-status', () => ({
   setTechJobStatus: jest.fn(async () => {}),
@@ -729,6 +730,44 @@ postgres('one text per customer, address and day', () => {
         expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
         await enRoute(f.rows[1].id);
         expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
+
+      // Result shapes read from twilio.js: an email-only success is { success: true, results: [], emailSent: true }
+      // (channel email), or results holding only unsent entries (channel both with the text leg failed).
+      test.each([
+        ['email channel', { success: true, results: [], emailSent: true }],
+        ['both channel, text leg not accepted', { success: true, results: [{ sent: false, blocked: true }], emailSent: true }],
+      ])('arrived, email-only success (%s): the proof lists only the sender and the second visit sends its own', async (_label, shape) => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        TwilioService.sendTechArrived.mockImplementationOnce(async () => shape);
+        await onSite(f.rows[0].id);
+        expect((await proofsFor(f.rows[0].id)).find((p) => p.metadata.kind === 'arrived').metadata.named_service_ids).toEqual([f.rows[0].id]);
+        await onSite(f.rows[1].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(2);
+      });
+
+      test('arrived, text accepted: the proof lists both visits and the second is covered (as before)', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        await onSite(f.rows[0].id);
+        expect((await proofsFor(f.rows[0].id)).find((p) => p.metadata.kind === 'arrived').metadata.named_service_ids.sort()).toEqual([f.rows[0].id, f.rows[1].id].sort());
+        await onSite(f.rows[1].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(1);
+      });
+
+      test('on the way, email-only success: it names no service, so it still stands for every live visit of the day', async () => {
+        gateOn();
+        const f = await twoVisits();
+        TwilioService.sendTechEnRoute.mockImplementationOnce(async () => ({ success: true, results: [], emailSent: true }));
+        await enRoute(f.rows[0].id);
+        expect((await proofsFor(f.rows[0].id))[0].metadata.named_service_ids.sort()).toEqual([f.rows[0].id, f.rows[1].id].sort());
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
       });
 
       test('a proof written without the named list covers nothing', async () => {
