@@ -189,13 +189,15 @@ function statesRecurring(text) {
 // topic's default cadence when none, or more than one, is stated or no such
 // row exists.
 // With the live catalog, a name it does not have (a renamed or retired
-// program) is not shown: the part is shown as written instead.
-function recurringName(topic, text, catalogNames) {
+// program) is not shown: the part is shown as written instead, unless its
+// text is one-time wording on a recurring lead (recurring wins), which
+// keeps the default name.
+function recurringName(topic, text, catalogNames, statedOneTime = false) {
   if (!catalogNames) return topic.recurring;
   const inText = CADENCES.filter(([, re]) => re.test(text));
   const stated = inText.length === 1 && CADENCE_PREFIX_RE.test(topic.recurring) ? inText[0] : null;
   const wanted = stated ? catalogNames.get(topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `).toLowerCase()) : null;
-  return wanted || catalogNames.get(topic.recurring.toLowerCase()) || text;
+  return wanted || catalogNames.get(topic.recurring.toLowerCase()) || (statedOneTime ? topic.recurring : text);
 }
 
 // Parts are joined by " + ", but a few catalog names contain one
@@ -243,7 +245,7 @@ const PLACE = {
       // is never an assessment.
       else if (plan.oneTime) name(topic.oneTime || part.text);
       else if (plan.assess || !topic.recurring) toAssessment(topic.short);
-      else name(recurringName(topic, part.text, plan.catalogNames));
+      else name(recurringName(topic, part.text, plan.catalogNames, part.frequency === 'one_time'));
     }
   },
 };

@@ -145,6 +145,10 @@ describe('leadServiceDisplay', () => {
   test('a default name the live catalog does not have is not shown', () => {
     const renamed = catalogNameIndex(['Monthly Lawn Care Service']);
     expect(leadServiceDisplay('Palm Injections', { catalogNames: renamed })).toBe('Palm Injections');
+    // recurring wins even when the default name is missing
+    const noLawn = catalogNameIndex(['Quarterly Pest Control Service']);
+    expect(leadServiceDisplay('Recurring Pest Control + One-Time Lawn Treatment', { catalogNames: noLawn }))
+      .toBe('Quarterly Pest Control Service + Monthly Lawn Care Service');
   });
 
   test('empty text has no name, and a missing catalog still passes a "… Service" pick through', () => {

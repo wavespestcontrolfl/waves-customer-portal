@@ -34,7 +34,8 @@ async function serviceDisplayCatalog() {
     // (pest_base.initial_roach.display), which are not catalog rows.
     const roachDisplay = require('../services/pricing-engine').constants?.PEST?.pestInitialRoach?.display || {};
     return {
-      catalogNames: catalogNameIndex(await db('services').pluck('name')),
+      // Live rows only: a retired row keeps its name but is not a service.
+      catalogNames: catalogNameIndex(await db('services').where({ is_active: true, is_archived: false }).pluck('name')),
       asWritten: Object.values(roachDisplay).map((entry) => entry?.name).filter((name) => typeof name === 'string' && name.trim()),
     };
   } catch (err) {
@@ -64,17 +65,21 @@ async function withServiceDisplay(leads) {
 // re-runs an active search every 10 s); every match is used, so no lead is
 // missing from a search by the name it is shown under.
 const SHOWN_AS_TTL_MS = 5 * 60 * 1000;
-let shownAsIndex = { builtAt: 0, rows: [] };
+let shownAsIndex = { builtAt: 0, names: '', rows: [] };
 
 async function serviceTextsShownAs(search) {
   const term = String(search).trim().replace(/\s+/g, ' ').toLowerCase();
   const catalog = term ? await serviceDisplayCatalog() : null;
   if (!catalog) return [];
-  if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS) {
+  // Rebuilt at once when the catalog or the configured names change, so
+  // search and the screen use the same names.
+  const names = [...catalog.catalogNames.keys(), '|', ...catalog.asWritten].join('\n');
+  if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS || shownAsIndex.names !== names) {
     const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest')
       .distinct().pluck('service_interest');
     shownAsIndex = {
       builtAt: Date.now(),
+      names,
       rows: stored.map((text) => ({ text, shown: (serviceDisplayFor(catalog, text) || '').toLowerCase() })),
     };
   }
