@@ -137,6 +137,14 @@ describe('leadServiceDisplay', () => {
       .toBe('Quarterly Pest Control Service + Roach Package + Lawn Care');
   });
 
+  test('a configured name counts only when it is about roaches, and keeps its cadence', () => {
+    expect(leadServiceDisplay('Lawn Care', { catalogNames, asWritten: ['Lawn Care'] })).toBe('Waves Assessment (Lawn)');
+    expect(leadServiceDisplay('One-Time Roach Package + Lawn Care', { catalogNames, asWritten: ['One-Time Roach Package'] }))
+      .toBe('One-Time Roach Package + One-Time Lawn Care Service');
+    expect(leadServiceDisplay('Monthly Roach Program + Lawn Care', { catalogNames, asWritten: ['Monthly Roach Program'] }))
+      .toBe('Monthly Roach Program + Monthly Lawn Care Service');
+  });
+
   test('aliases of one service stay one name', () => {
     expect(name('Recurring Cockroach Control + Pest Control')).toBe('Quarterly Pest Control Service');
     expect(name('Recurring Lawn Care + One-Time Lawn Treatment')).toBe('Monthly Lawn Care Service');

@@ -146,7 +146,11 @@ function catalogNameIndex(names) {
 
 function classify(part, catalogNames, kept = new Set()) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
-  if (KEPT_LABELS.has(part.toLowerCase()) || kept.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
+  if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
+  // A configured package name is shown as written but keeps the cadence it states.
+  if (kept.has(part.toLowerCase())) {
+    return { kind: 'other', name: part, frequency: statesRecurring(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null };
+  }
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: null };
   const catalogName = catalogMatch(part, catalogNames);
@@ -277,7 +281,10 @@ function nameParts(text, catalogNames, kept) {
 function leadServiceDisplay(serviceInterest, { catalogNames = null, asWritten = [] } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
-  const kept = new Set(asWritten.map(clean).filter(Boolean).map((label) => label.toLowerCase()));
+  // Only a name about roaches counts: a configured name like "Lawn Care"
+  // must not stop ordinary lawn leads from being named.
+  const kept = new Set(asWritten.map(clean).filter((label) => topicsFor(label).some((topic) => topic.key === 'cockroach'))
+    .map((label) => label.toLowerCase()));
   return nameParts(text, catalogNames, kept);
 }
 
