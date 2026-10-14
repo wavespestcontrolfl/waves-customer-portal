@@ -30,21 +30,28 @@ const { leadServiceDisplayLive } = require('../config/feature-gates');
 async function serviceDisplayCatalog() {
   if (!leadServiceDisplayLive()) return null;
   try {
-    return { catalogNames: catalogNameIndex(await db('services').pluck('name')) };
+    // The quote wizard stores the admin-configured roach package names
+    // (pest_base.initial_roach.display), which are not catalog rows.
+    const roachDisplay = require('../services/pricing-engine').constants?.PEST?.pestInitialRoach?.display || {};
+    return {
+      catalogNames: catalogNameIndex(await db('services').pluck('name')),
+      asWritten: Object.values(roachDisplay).map((entry) => entry?.name).filter((name) => typeof name === 'string' && name.trim()),
+    };
   } catch (err) {
     logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
     return null;
   }
 }
 
-// The standalone cockroach package is keyed, but its lead text is the
-// admin-configured package name (public-quote keyedLeadLabel), not the
-// catalog name, and it is shown as written.
+// The standalone cockroach package is keyed, and its lead text starts with
+// the admin-configured package name (public-quote keyedLeadLabel), shown as
+// written even after the config is renamed.
 const CONFIGURED_NAME_KEYS = new Set(['cockroach_control']);
 
 function serviceDisplayFor(catalog, serviceInterest, serviceKey) {
   return leadServiceDisplay(serviceInterest, {
     catalogNames: catalog.catalogNames,
+    asWritten: catalog.asWritten,
     firstAsWritten: CONFIGURED_NAME_KEYS.has(serviceKey),
   });
 }

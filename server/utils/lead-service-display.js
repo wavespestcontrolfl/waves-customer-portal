@@ -144,9 +144,9 @@ function catalogNameIndex(names) {
   return new Map([...(names || [])].map(clean).filter(Boolean).map((name) => [name.toLowerCase(), name]));
 }
 
-function classify(part, catalogNames) {
+function classify(part, catalogNames, kept = new Set()) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
-  if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
+  if (KEPT_LABELS.has(part.toLowerCase()) || kept.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: null };
   const catalogName = catalogMatch(part, catalogNames);
@@ -244,26 +244,14 @@ const PLACE = {
   },
 };
 
-// firstAsWritten: the lead's key says its first part is an admin-configured
-// package name with no catalog row (the standalone roach package), shown as
-// written; an upsell after it is named part by part. The part keeps its
-// stated frequency, and a one-time first part beside recurring work is
-// still named as recurring.
-function leadServiceDisplay(serviceInterest, { catalogNames = null, firstAsWritten = false } = {}) {
-  const text = clean(serviceInterest);
-  if (!text) return null;
-
-  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames));
+function nameParts(text, catalogNames, kept) {
+  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames, kept));
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.
   // A one-time request is never an assessment.
   const assessmentBooked = !oneTime && parts.some((part) => part.kind === 'assessment');
   const plan = { recurring, oneTime, assessmentBooked, assess: assessmentBooked || (!recurring && !oneTime), catalogNames };
-  const first = parts[0];
-  if (firstAsWritten && first.kind !== 'assessment' && !(recurring && first.frequency === 'one_time')) {
-    parts[0] = { kind: 'other', name: first.text || first.name, frequency: first.frequency, topic: first.topic || first.topics?.[0] || null };
-  }
 
   const out = [];
   const shorts = [];
@@ -272,21 +260,32 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null, firstAsWritt
     if (assessmentAt < 0) { assessmentAt = out.length; out.push(null); }
     if (short) shorts.push(short);
   };
-  const seenTopics = new Set();
-  for (const part of parts) {
-    const before = out.length;
-    const named = [];
-    PLACE[part.kind](part, plan, (label) => { named.push(label); out.push(label); }, toAssessment);
-    // A part about a different service never vanishes into an earlier name:
-    // "Quarterly Pest Control + Roach Package" keeps the roach work visible.
-    const keys = (part.topics || [part.topic]).filter(Boolean).map((topic) => topic.key);
-    const repeatsOnly = named.length && named.every((label) => out.indexOf(label) < before);
-    if (repeatsOnly && keys.length && !keys.some((key) => seenTopics.has(key))) out.push(part.text || part.name);
-    keys.forEach((key) => seenTopics.add(key));
-  }
+  for (const part of parts) PLACE[part.kind](part, plan, (label) => out.push(label), toAssessment);
   if (assessmentAt >= 0) out[assessmentAt] = assessmentLabel(shorts);
-
   return [...new Set(out.filter(Boolean))].join(' + ') || null;
+}
+
+// The configured name the text starts with (longest first), or null.
+function leadingLabel(text, labels) {
+  const lower = text.toLowerCase();
+  return [...labels].sort((a, b) => b.length - a.length)
+    .find((label) => lower === label.toLowerCase() || lower.startsWith(`${label.toLowerCase()} + `)) || null;
+}
+
+// asWritten: admin-configured package names with no catalog row (the roach
+// package names the quote wizard stores), shown as written, plus sign
+// included, wherever they appear. firstAsWritten: the lead's key says its
+// first part is such a name even if the config was renamed since. Text
+// after a configured name (an upsell) is named on its own.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, asWritten = [], firstAsWritten = false } = {}) {
+  const text = clean(serviceInterest);
+  if (!text) return null;
+  const labels = asWritten.map(clean).filter(Boolean);
+  const kept = new Set(labels.map((label) => label.toLowerCase()));
+  const lead = leadingLabel(text, labels) || (firstAsWritten ? text.split(/\s+\+\s+/)[0] : null);
+  if (!lead) return nameParts(text, catalogNames, kept);
+  const rest = clean(text.slice(lead.length).replace(/^\s*\+\s*/, ''));
+  return [lead, rest ? nameParts(rest, catalogNames, kept) : null].filter(Boolean).join(' + ');
 }
 
 module.exports = { leadServiceDisplay, catalogNameIndex };

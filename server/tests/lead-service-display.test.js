@@ -128,8 +128,15 @@ describe('leadServiceDisplay', () => {
     expect(name(text)).toBe(text);
   });
 
-  test('a part about a different service never vanishes into an earlier name', () => {
-    expect(name('Quarterly Pest Control + Roach Package')).toBe('Quarterly Pest Control Service + Roach Package');
+  test('a configured package name is shown as written, whole or as one part', () => {
+    const opts = { catalogNames, asWritten: ['Roach Package', 'Roach Package + Lawn Care'] };
+    expect(leadServiceDisplay('Quarterly Pest Control + Roach Package', opts)).toBe('Quarterly Pest Control Service + Roach Package');
+    expect(leadServiceDisplay('Roach Package + Lawn Care', opts)).toBe('Roach Package + Lawn Care');
+    expect(leadServiceDisplay('Roach Package + Recurring Lawn Care', opts)).toBe('Roach Package + Monthly Lawn Care Service');
+  });
+
+  test('aliases of one service stay one name', () => {
+    expect(name('Recurring Cockroach Control + Pest Control')).toBe('Quarterly Pest Control Service');
     expect(name('Recurring Lawn Care + One-Time Lawn Treatment')).toBe('Monthly Lawn Care Service');
   });
 
