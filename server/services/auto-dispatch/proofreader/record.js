@@ -387,13 +387,13 @@ function maskBesideTimeWord(masked, lineMasked = null) {
       // "May" is also a verb: a month only when nothing, or a joining word,
       // follows it ("expires [redacted] May", "... May only"): r24, r25.
       if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) return true;
-      // At most two hidden words after the limit ("NEVER [redacted]"): a
-      // longer hidden run ("ONLY [redacted] [redacted] [redacted]") is a
-      // sentence, not a time (r33).
+      // One hidden word after the limit ("NEVER [redacted]"): a longer
+      // hidden run ("ONLY [redacted] [redacted]", "ONLY TWO DOGS") is a
+      // phrase, not a time (r33, r43); a time in it is read by the count.
       const run = (masked.slice(at).match(/^(?:\[redacted\]\s{0,3}){1,3}/) || [''])[0].split(MARK).length - 1;
       // The limit must stand right before this mask, not before an earlier one.
       const afterMask = /\[redacted\][\s,]*$/.test(before);
-      if (PREV_LIMITS.has(prev) && !afterMask && run <= 2 && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
+      if (PREV_LIMITS.has(prev) && !afterMask && run <= 1 && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
     }
     at = masked.indexOf(MARK, at + MARK.length);
   }

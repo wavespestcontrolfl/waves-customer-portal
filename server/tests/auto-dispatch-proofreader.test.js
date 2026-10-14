@@ -538,6 +538,7 @@ describe('the customer record', () => {
       'Gate code 4821, KEY IS AT SCHOOL',
       'Gate code 4821, SPOKE TO PM',
       'GATE CODE 4821, FIRST APPOINTMENT COMPLETED',
+      'GATE CODE 4821, ONLY TWO DOGS',
       'Gate code 4821, ask MANAGER\nFriday works.',
       'Gate code 4821, ask MANAGER. Friday works.',
       'Gate code 4821, owner called YESTERDAY',
