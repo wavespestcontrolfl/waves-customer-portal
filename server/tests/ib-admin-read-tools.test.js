@@ -1114,3 +1114,22 @@ describe('SSN and CVV labels do not over-remove', () => {
     expect(scrub('Paid by card, security code 123.')).not.toMatch(/123/);
   });
 });
+
+// Codex r6: environment-style credentials with the value on the next line, and Amex CID codes.
+describe('next-line environment credentials and CID codes', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  const value = ['hun', 'ter', '2x7'].join('');
+  test.each(['DB_PASSWORD', 'API_TOKEN', 'AWS_SECRET_ACCESS_KEY'])('%s on the next line is removed', (name) => {
+    expect(scrub(`${name}:\n${value}`)).not.toContain(value);
+  });
+  test.each(['Amex CID: 1234', 'Card CID: 1234'])('a card CID is removed: %s', (text) => {
+    expect(scrub(text)).not.toContain('1234');
+  });
+  test('a customer CID with no card word stays', () => {
+    expect(scrub('Customer CID: 1234')).toBe('Customer CID: 1234');
+  });
+  test('a non-credential label keeps the next line', () => {
+    expect(scrub('Notes:\nCall before arriving')).toBe('Notes:\nCall before arriving');
+  });
+});

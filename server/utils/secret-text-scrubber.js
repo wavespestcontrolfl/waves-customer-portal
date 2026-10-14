@@ -45,7 +45,8 @@ function hasCredentialPart(identifier) {
 
 // The value after the separator: to the closing quote, else to whitespace.
 const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)([^\s"'`,;]+))/y;
-const IDENT_SEP_RE = /(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)([ \t]*[:=][ \t]*)/g;
+// The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
+const IDENT_SEP_RE = /(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)([ \t]*[:=][ \t]*(?:\r?\n[ \t]*)?)/g;
 
 // Returns { text, removed }. A non-credential identifier ("Pasted:") does not
 // swallow what follows it, so the next identifier is still examined.

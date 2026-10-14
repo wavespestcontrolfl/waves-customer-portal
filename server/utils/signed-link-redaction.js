@@ -321,12 +321,14 @@ function scrubGroupedCard(text) {
   return { text: clean, removed };
 }
 // The code must sit in the label's own clause: "Security code missing. ID 123" keeps 123.
-const CVV_RE = /\b(cvv2?|cvc2?|csc|security code|card code|card verification(?: (?:value|code))?)\b([^\d.;!?\n]{0,15}?)(\d{3,4})(?!\d)/gi;
+const CVV_RE = /\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\b([^\d.;!?\n]{0,15}?)(\d{3,4})(?!\d)/gi;
 const CARD_CONTEXT_RE = /\b(?:card|credit|debit|visa|mastercard|master card|amex|discover|paid|payment)\b/i;
 function scrubCvv(text) {
   let removed = 0;
   const clean = text.replace(CVV_RE, (match, label, between, _digits, offset) => {
     const clause = clauseAt(text, offset);
+    // "CID" is also a customer id: it is a card code only beside a card word ("Amex CID: 1234").
+    if (/^cid$/i.test(label) && !CARD_CONTEXT_RE.test(clause)) return match;
     if (ACCESS_WORD_RE.test(clause) && !CARD_CONTEXT_RE.test(clause)) return match;
     removed += 1;
     return `${label}${between}[code removed]`;
