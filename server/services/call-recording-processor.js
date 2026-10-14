@@ -3819,6 +3819,29 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   return out;
 }
 
+// The staff member who answered an inbound call is never one of the caller's
+// people. Call audit 2026-10-13: at the end of a call the caller asked "what was
+// your first name?", the speaker labels swapped, and the answer was saved on the
+// new customer as her husband's name, beside the husband's real email. When a
+// contact's first name is the answering staff member's (the forward-acceptance
+// record, written by the phone system, not by a model), the NAME is dropped and
+// the phone, email and role stay; a contact that was only that name is dropped.
+// The secondary_contact_captured card still files from the extraction, so the
+// office confirms the name. Inbound only: an outbound call has no acceptance
+// record. Known limit: a real contact who shares the first name of the person
+// who answered loses the name on the slot until the office adds it.
+function withoutAnsweringStaffName(contacts = [], call = {}) {
+  if (isOutboundCall(call)) return contacts;
+  let meta = call.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  const first = (v) => String(v || '').trim().toLowerCase().split(/\s+/)[0];
+  const staff = meta?.forward_acceptance?.accepted === true ? first(meta.forward_acceptance.csr_name) : '';
+  if (!staff) return contacts;
+  return contacts
+    .map((c) => (first(c.first_name) === staff ? { ...c, first_name: null, last_name: null } : c))
+    .filter((c) => c.first_name || c.last_name || c.phone || c.email);
+}
+
 // Third-party payer (Bill-To) linkage from a call (GATE_CALL_PAYER_LINKING):
 // when the caller named a DISTINCT paying party (is_billing_party) with a usable
 // AP email, find-or-create a `payers` Bill-To and return its id so it can be
@@ -13961,7 +13984,7 @@ const CallRecordingProcessor = {
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
-    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    const callSecondaryContacts = withoutAnsweringStaffName(resolveCallSecondaryContacts(extracted, v2CanonicalExtraction), call);
     // The caller asked not to be contacted: no on-site opt-in ask for any
     // contact on this call (the slot may still be written).
     // Either extractor hearing a do-not-contact request blocks the on-site
@@ -25291,6 +25314,7 @@ CallRecordingProcessor._test = {
   rerunAssessmentPreDraftAfterQuarantineClear,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
+  withoutAnsweringStaffName,
   isFreshInboundCall,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
