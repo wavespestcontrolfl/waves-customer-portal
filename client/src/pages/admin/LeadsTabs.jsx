@@ -94,6 +94,12 @@ function ContactEvidenceExplanation({ activity }) {
 // already carry them, so "…, Palmetto, FL 34221, Palmetto" can never render.
 // Containment is segment-wise, not substring: a city sharing the street name
 // ("123 Palmetto Rd" + city Palmetto) must still get its city appended.
+// The catalog-style service name when the server sends one
+// (GATE_LEAD_SERVICE_DISPLAY), else the text the lead was saved with.
+function leadServiceName(lead) {
+  return lead.service_display || lead.service_interest || "";
+}
+
 function formatLeadAddress(lead) {
   const address = String(lead?.address || "").trim();
   const city = String(lead?.city || "").trim();
@@ -1801,8 +1807,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
                             {compactQueue && lead.service_interest && (
-                              <div className="text-zinc-900 text-ui-body">
-                                {lead.service_interest}
+                              <div className="text-zinc-900 text-ui-body" title={lead.service_interest}>
+                                {leadServiceName(lead)}
                               </div>
                             )}{" "}
                             {lead.estimate_id && (
@@ -1830,8 +1836,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   </span>
                                 )}
                               </TD>
-                              <TD className="text-zinc-900">
-                                {lead.service_interest || "--"}
+                              <TD className="text-zinc-900" title={lead.service_interest || undefined}>
+                                {leadServiceName(lead) || "--"}
                                 {lead.builder_warranty_expires_on && (
                                   <LeadBadge
                                     label={`warranty exp ${String(lead.builder_warranty_expires_on).slice(0, 10)}`}
@@ -2037,8 +2043,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       <div>
                                         Service:{" "}
                                         <span className="text-zinc-900 font-medium">
-                                          {lead.service_interest || "--"}
+                                          {leadServiceName(lead) || "--"}
                                         </span>
+                                        {lead.service_display && lead.service_display !== lead.service_interest && (
+                                          <div className="text-ink-secondary">
+                                            From the lead: {lead.service_interest}
+                                          </div>
+                                        )}
                                       </div>{" "}
                                       <div>
                                         Email:{" "}
@@ -3201,8 +3212,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                         <div className="text-ink-secondary text-ui-body mb-[5px] overflow-hidden whitespace-nowrap text-ellipsis">
                           {lead.phone || lead.email || "--"}
                         </div>{" "}
-                        <div className="text-zinc-900 text-ui-body mb-[8px] overflow-hidden whitespace-nowrap text-ellipsis">
-                          {lead.service_interest || "--"}
+                        <div className="text-zinc-900 text-ui-body mb-[8px] overflow-hidden whitespace-nowrap text-ellipsis" title={lead.service_interest || undefined}>
+                          {leadServiceName(lead) || "--"}
                         </div>{" "}
                         <div className="flex items-center gap-[6px] flex-wrap">
                           {lead.source_name && (
