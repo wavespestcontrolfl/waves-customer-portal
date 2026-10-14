@@ -314,7 +314,7 @@ function scrubGroupedCard(text) {
   return { text: clean, removed };
 }
 // The code must sit in the label's own clause: "Security code missing. ID 123" keeps 123.
-const CVV_RE = new RegExp(`\\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\\b(${labelGap(15)})(\\d{3,4})(?!\\d)`, 'gi');
+const CVV_RE = new RegExp(`\\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\\b((?:\\s+(?:no\\.?|num\\.?|number|#))?${labelGap(15)})(\\d{3,4})(?!\\d)`, 'gi');
 const CARD_CONTEXT_RE = /\b(?:card|credit|debit|visa|mastercard|master card|amex|discover|paid|payment)\b/i;
 function scrubCvv(text) {
   let removed = 0;

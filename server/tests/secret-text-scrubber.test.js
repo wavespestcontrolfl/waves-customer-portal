@@ -150,7 +150,9 @@ describe('credential-named identifiers (environment-style assignments)', () => {
     ['SIGNING_' + 'KEY: ' + V + '.', 'SIGNING_' + 'KEY: [removed].'],
     ['encryption_' + 'key=' + V, 'encryption_' + 'key=[removed]'],
     ['CERT_' + 'KEY=' + V, 'CERT_' + 'KEY=[removed]'],
-    ['client_' + 'secret=' + V + ' next', 'client_' + 'secret=[removed] next'],
+    // An unquoted value runs to the end of its clause (a dotenv passphrase has spaces).
+    ['client_' + 'secret=' + V + ' next', 'client_' + 'secret=[removed]'],
+    ['client_' + 'secret=' + V + '. Next', 'client_' + 'secret=[removed]. Next'],
     ['SMTP_PWD:' + V, 'SMTP_PWD:[removed]'],
     ['GIT_' + 'PASSPHRASE = "' + V + '"', 'GIT_' + 'PASSPHRASE = "[removed]"'],
     ['AUTH_' + 'HEADER=' + V, 'AUTH_' + 'HEADER=[removed]'],

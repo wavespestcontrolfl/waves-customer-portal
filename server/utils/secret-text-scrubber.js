@@ -53,7 +53,9 @@ function hasCredentialPart(identifier) {
 }
 
 // The value after the separator: to the closing quote, else to whitespace.
-const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)([^\s"'`,;]+))/y;
+// An unquoted value runs to the end of its clause (sentence end, line end, comma or semicolon): a
+// dotenv passphrase is several words ("DB_PASSWORD=correct horse battery staple").
+const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)([^\n"'`,;]{1,120}?)(?=[.!?]+(?:[ \t]|$)|[ \t]*(?:\r?\n|$)|[,;]))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
 const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)(${AFTER_SEPARATOR})`, 'g');
 
@@ -75,10 +77,11 @@ function scrubIdentifierAssignments(input) {
     const quote = found[1] || '';
     const open = found[3] || '';
     const rawBare = found[4] || '';
-    const tail = quote ? '' : (rawBare.match(/[.!?:]+$/) || [''])[0];
-    const value = quote ? found[2] : (tail ? rawBare.slice(0, -tail.length) : rawBare);
+    const tail = quote ? '' : (rawBare.replace(/\s+$/, '').match(/[.!?:]+$/) || [''])[0];
+    const trimmed = rawBare.replace(/\s+$/, '');
+    const value = quote ? found[2] : (tail ? trimmed.slice(0, -tail.length) : trimmed);
     const last = identifier.toLowerCase().split(/[_.-]/).pop();
-    const keep = !value || value.startsWith('[removed') || NOT_A_VALUE.has(value.toLowerCase())
+    const keep = !value || value.startsWith('[removed') || proseOnly(value)
       || (COUNTER_PARTS.has(last) && /^\d{1,6}$/.test(value));
     if (keep) continue;
     out += input.slice(cursor, valueStart) + (quote ? `${quote}${REMOVED}${quote}` : `${open}${REMOVED}${tail}`);

@@ -1226,3 +1226,19 @@ describe('grouped card number with expiry and code', () => {
     expect(out).toContain('[card ending 4242]');
   });
 });
+
+// Codex security r8: whole dotenv values and "CVV No." labels.
+describe('dotenv passphrases and CVV No. labels', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  test('a multi-word dotenv value is removed whole', () => {
+    const out = scrub('DB_PASSWORD=correct horse battery staple');
+    expect(out).not.toMatch(/horse|battery|staple/);
+  });
+  test('a status word after a credential name stays', () => {
+    expect(scrub('API_TOKEN: required')).toBe('API_TOKEN: required');
+  });
+  test.each(['CVV No. 123', 'CVC No 123', 'CID # 1234 on the Amex card'])('removed: %s', (text) => {
+    expect(scrub(text)).not.toMatch(/\b12(3|34)\b/);
+  });
+});
