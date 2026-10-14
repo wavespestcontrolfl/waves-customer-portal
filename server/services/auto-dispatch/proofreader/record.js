@@ -133,8 +133,10 @@ const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\
 // is most often a code or a house number): r16.
 const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // The shapes of a calendar date: ISO, slash, month name (with an optional
-// ordinal), or an ordinal day alone (with an optional "the"): r7 to r19.
-const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/]))';
+// ordinal), an ordinal day alone (with an optional "the"), or a month alone
+// ("VALID THROUGH OCTOBER"; not before a day or a mask, which the
+// month-and-day shape reads): r7 to r19, r28.
+const DATE_SHAPES = '(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))';
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
@@ -216,14 +218,14 @@ const TIME_WORDS_RE = new RegExp([
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
   `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
-  '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|first\\s{1,3}thing)(?![\\w])',
+  '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|first\\s{1,3}thing|mid-?day)(?![\\w])',
   // Night only as a limit ("NIGHT ONLY"); "NIGHT LIGHT" is a thing (r25).
   '\\b(?:nights?|overnight)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service)\\b|[,;!)]|\\.(?:\\s|$)|$))',
   // "FIRST APPOINTMENT ONLY", "last stop": r25.
   '\\b(?:first|last)(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
-  `(?<![\\d:/.-])\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\d:/.-])\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
