@@ -1242,3 +1242,137 @@ describe('dotenv passphrases and CVV No. labels', () => {
     expect(scrub(text)).not.toMatch(/\b12(3|34)\b/);
   });
 });
+
+// Codex security r9: Unicode spaces and dashes, every card length, quoted JSON keys, cookie headers,
+// authorization notes, and a PIN beside an unrelated account word.
+describe('classes: unicode separators, card lengths, JSON keys, cookies, authorization, PIN phrase', () => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  const luhn = (d) => { let s = 0; let dbl = false; for (let i = d.length - 1; i >= 0; i -= 1) { let n = Number(d[i]); if (dbl) { n *= 2; if (n > 9) n -= 9; } s += n; dbl = !dbl; } return s % 10 === 0; };
+  // A card number of `len` digits whose shorter prefixes are not valid card numbers, built from a counter.
+  const makePan = (len) => {
+    for (let n = 0; ; n += 1) {
+      const body = `4${String(n * 7919 + 1234567).padStart(len - 2, '0').slice(0, len - 2)}`;
+      for (let c = 0; c < 10; c += 1) {
+        const d = `${body}${c}`;
+        if (d.length === len && luhn(d) && [13, 14, 15, 16, 17, 18, 19].filter(l => l < len).every(l => !luhn(d.slice(0, l)))) return d;
+      }
+    }
+  };
+  const SEPARATORS = { space: ' ', nbsp: ' ', narrow: ' ', thin: ' ', figure: ' ', 'en dash': '–', 'minus': '−', 'hyphen': '‐', 'zero width': '​' };
+  describe.each([13, 14, 15, 16, 17, 18, 19])('%i-digit card', (len) => {
+    const pan = makePan(len);
+    test.each(Object.entries(SEPARATORS))('grouped with %s', (_name, sep) => {
+      const grouped = (pan.match(/.{1,4}/g) || []).join(sep);
+      const out = scrub(`Card number: ${grouped}`);
+      expect(out).toContain(`[card ending ${pan.slice(-4)}]`);
+      expect(out.replace(/ending \d{4}/, '')).not.toMatch(/\d{4}/);
+    });
+  });
+  test('Unicode spaces open labelled values too', () => {
+    expect(scrub('SSN 123-45-6789')).toContain('[SSN removed]');
+    expect(scrub('Password: hunter2x')).not.toContain('hunter2x');
+  });
+  test('a string with nothing to remove comes back as written', () => {
+    const note = 'Ring twice and wait – dog inside';
+    expect(scrub(note)).toBe(note);
+  });
+  test('a short digit run with Unicode spaces is not a card', () => {
+    expect(scrub('Order 1234 5678 9012')).toBe('Order 1234 5678 9012');
+  });
+
+  describe('credential keys in serialized JSON', () => {
+    test.each([
+      ['{"password":"' + 'hunter' + '2"}', 'hunter2'],
+      ['{"access_token":"abc123456789' + 'SECRET"}', 'abc123456789'],
+      ["{'api_key':'abc123456789" + "SECRET'}", 'abc123456789'],
+      ['{"auth": {"client_secret": "abc123456789' + 'SECRET"}}', 'abc123456789'],
+      ['[{"user":"x","passwd":"hunter' + '2"},{"user":"y","pwd":"other' + 'pw1"}]', 'hunter2'],
+      ['{"headers":{"cookie":"sid=abc123456789' + 'SECRET"}}', 'abc123456789'],
+      ['{"session":"abc123456789' + 'SECRET"}', 'abc123456789'],
+    ])('removed: %s', (text, leaked) => {
+      const out = scrub(text);
+      expect(out).not.toContain(leaked);
+      expect(out).toContain('[removed]');
+    });
+    test('other keys, and the rest of the object, stay', () => {
+      const out = scrub('{"name":"Kim","gate_code":"4821","note":"dog inside","password":"hunter' + '2","city":"Bradenton"}');
+      expect(out).toContain('"name":"Kim"');
+      expect(out).toContain('"gate_code":"4821"');
+      expect(out).toContain('"city":"Bradenton"');
+      expect(out).not.toContain('hunter2');
+    });
+    test('a credential word in a value is not a key', () => {
+      expect(scrub('{"note":"password reset requested","tokens_used":12}')).toBe('{"note":"password reset requested","tokens_used":12}');
+    });
+  });
+
+  describe('Cookie and Set-Cookie headers', () => {
+    test.each([
+      'Cookie: session=abc123456789' + 'SECRETvalue; theme=dark',
+      'Cookie: connect.sid=s%3Aabc123456789.sign' + 'atureXYZ',
+      'Set-Cookie: sid=abc123456789' + 'SECRET; Path=/; HttpOnly',
+      'set-cookie: _app_session=abc123456789' + 'SECRET',
+      'Request headers: Cookie: theme=dark; sid=abc123456789' + 'SECRET',
+    ])('the whole value goes: %s', (text) => {
+      const out = scrub(text);
+      expect(out).not.toMatch(/abc123456789|theme=dark|Path=|HttpOnly/);
+      expect(out).toMatch(/ookie: \[removed\]$/i);
+    });
+    test('the next line stays', () => {
+      expect(scrub('Cookie: session=abc123456789' + 'SECRET\nGate is open')).toBe('Cookie: [removed]\nGate is open');
+    });
+    test('a cookie in ordinary prose stays', () => {
+      expect(scrub('Customer left a cookie: chocolate chip')).toBe('Customer left a cookie: chocolate chip');
+    });
+    test('session names count in assignments', () => {
+      expect(scrub('session_token=abc123456789' + 'SECRET')).not.toContain('abc123456789');
+      expect(scrub('SESSION_SECRET=abc123456789' + 'SECRET')).not.toContain('abc123456789');
+    });
+  });
+
+  describe('Authorization is removed from headers, not from notes', () => {
+    test.each([
+      'Authorization: Bearer abc123456789' + 'SECRETVALUE',
+      'Authorization: Basic dXNlcjpw' + 'YXNzd29yZA==',
+      'Proxy-Authorization: NTLM TlRMTVNTUAABAAAA' + 'B4IIAAAAAAAA',
+      'Authorization: Digest username="u", realm="r", nonce="n' + 'once123", response="abc"',
+      'Authorization: AWS4-HMAC-SHA256 Credential=AKIA' + 'EXAMPLE/20261001/us-east-1/s3',
+      'Authorization: abcdefghij' + 'klmnopqrstuvwxyz',
+      '{"authorization":"Bearer abc123456789' + 'SECRETVALUE"}',
+      'Sent with  authorization: Bearer abc123456789' + 'SECRETVALUE',
+      'curl -H "Authorization: token ghx12345' + '6789"',
+    ])('removed: %s', (text) => {
+      const out = scrub(text);
+      expect(out).not.toMatch(/abc123456789|dXNlcjpw|TlRMTVNT|nonce123|EXAMPLE|klmnop|ghx123/);
+    });
+    test.each([
+      'Customer authorization: verbal consent received',
+      'Prior authorization: required before treatment',
+      'Authorization to treat: signed on the porch',
+      'Insurance authorization: pending',
+    ])('kept: %s', (text) => {
+      expect(scrub(text)).toBe(text);
+    });
+  });
+
+  describe('a PIN beside an unrelated account word', () => {
+    test.each([
+      'PIN: 4821 for the gate, call customer phone before arrival',
+      'Gate PIN is 4821; phone customer on arrival',
+      'Use PIN 4821 at the gate. Email the invoice after.',
+      'PIN: 4821 at the garage keypad, then text the account owner',
+    ])('kept: %s', (text) => {
+      expect(scrub(text)).toBe(text);
+    });
+    test.each([
+      ['Portal PIN is 4821. Gate is open.', 'Portal PIN is [removed]. Gate is open.'],
+      ['Zoom PIN is 4821 for the meeting lobby', 'Zoom PIN is [removed] for the meeting lobby'],
+      ['Wifi PIN: 4821 at the gate', 'Wifi PIN: [removed] at the gate'],
+      ['PIN: 4821 for the bank login at the gate', 'PIN: [removed] for the bank login at the gate'],
+    ])('removed: %s', (text) => {
+      expect(scrub(text)).toMatch(/\[removed\]/);
+      expect(scrub(text)).not.toContain('4821');
+    });
+  });
+});

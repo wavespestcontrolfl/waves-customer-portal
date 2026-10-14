@@ -291,7 +291,8 @@ const CARD_WORD = '(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|cc|credit|debit|pan|
 // or one line break: "424 242 4242 424242", "424, 242, 4242, 424242", "4242\n4242\n4242\n4242".
 const GROUP_GAP = '[ \\t,.\\/-]{0,3}(?:\\r?\\n[ \\t]*)?';
 const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b(${labelGap(24)})(\\d(?:${GROUP_GAP}\\d)*)(?!\\d)`, 'gi');
-const PAN_LENGTHS = [16, 15, 19, 14, 13];
+// Every card length from 13 to 19 digits, the common 16 and 15 first (an 8-digit-IIN card may be 17 or 18 long).
+const PAN_LENGTHS = [16, 15, 19, 18, 17, 14, 13];
 function scrubGroupedCard(text) {
   let removed = 0;
   const clean = text.replace(CARD_RUN_RE, (match, word, between, run) => {
@@ -347,9 +348,27 @@ function scrubFreeText(text, state) {
   return financial.text;
 }
 
+// Detection reads ASCII: every Unicode space (NBSP, narrow NBSP, thin, figure and the rest of \p{Zs}, the
+// line and paragraph separators), every Unicode dash (\p{Pd}, the minus sign) becomes its ASCII form, and
+// zero-width characters are dropped, once, before any pass runs. A string with nothing removed comes back
+// as the original; a string with a removal comes back normalised (spaces and dashes in ASCII).
+const UNICODE_SPACE_RE = /[\p{Zs}\u0085]/gu;
+const UNICODE_BREAK_RE = /[\u2028\u2029]/g;
+const UNICODE_DASH_RE = /[\p{Pd}\u2212]/gu;
+const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF]/g;
+function foldUnicode(text) {
+  return text.replace(ZERO_WIDTH_RE, '').replace(UNICODE_SPACE_RE, ' ').replace(UNICODE_BREAK_RE, '\n').replace(UNICODE_DASH_RE, '-');
+}
+function redactText(value, state) {
+  const folded = foldUnicode(value);
+  const before = state.fields;
+  const out = scrubFreeText(redactString(folded, state), state);
+  return state.fields === before && out === folded ? value : out;
+}
+
 // A copy of `value` with credentials removed. `state` counts what was removed.
 function redactSecrets(value, state, depth = 0) {
-  if (typeof value === 'string') return scrubFreeText(redactString(value, state), state);
+  if (typeof value === 'string') return redactText(value, state);
   if (!value || typeof value !== 'object') return value;
   if (depth > MAX_DEPTH) { state.fields += 1; return '[too deeply nested]'; }
   if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1));

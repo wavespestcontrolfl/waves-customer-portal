@@ -16,6 +16,8 @@
  * one ("PIN the note", "token of appreciation", "password reset requested")
  * is left alone.
  */
+const { isCredentialName, FREE_TEXT_EXEMPT_WORDS } = require('./credential-fields');
+
 const REMOVED = '[removed]';
 
 // ONE notion of "the value after a label", shared by every labelled pass (the labelled secrets and
@@ -27,39 +29,40 @@ const REMOVED = '[removed]';
 const AFTER_SEPARATOR = '[ \\t]*[:=][ \\t]*(?:\\r?\\n[ \\t]*)?';
 const labelGap = (max) => `[^\\d.;!?\\n]{0,${max}}?(?:[ \\t]*\\r?\\n[ \\t]*)?`;
 
-// ENVIRONMENT-STYLE ASSIGNMENTS. An identifier of letters, digits and "_" "."
-// "-" (AWS_SECRET_ACCESS_KEY, DB_PASSWORD, db.password, api-key) that has a
-// credential word as one of its separated parts, then "=" or ":", then a
-// value. "\b" cannot find "secret" inside AWS_SECRET_ACCESS_KEY because "_" is
-// a word character, and such a value has no distinctive prefix.
-//   Credential parts: password, passwd, pwd, passphrase, secret(s), token,
-//   apikey, auth, credential(s); and "key" right after api, access, secret,
-//   private, signing, encryption or cert. NOT included: pin, code (a gate,
-//   access, door or lockbox code is kept data), "keypad", "monkey" (a part
-//   must be the whole word), "tokens" (plural: a counter), "author".
-//   Counter rule: an identifier whose LAST part is a counter word (count, used,
-//   total, limit, max, min, size, length, num, number, ttl, seconds, ms, days,
-//   remaining, ...) with a plain number of up to 6 digits is a quantity, not a
-//   secret ("tokens_used=12", "page_token_count: 3"). A non-numeric value
-//   under such a name is still removed.
-const CREDENTIAL_PARTS = new Set(['password', 'passwd', 'pwd', 'passphrase', 'secret', 'secrets', 'token', 'apikey', 'auth', 'credential', 'credentials']);
-const KEY_PREFIXES = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'cert']);
+// ASSIGNMENTS: "DB_PASSWORD=hunter2", "api-key: abc", {"password":"hunter2"}, {'access_token':'abc'}. An
+// identifier, optionally in quotes (a JSON or JS key), then "=" or ":", then a value. The identifier is a
+// credential name by the SAME classifier the structured-field redactor uses (credential-fields.js
+// isCredentialName: password, secret, token, session, cookie, pwd, passphrase, "api key" ...), minus the
+// words that also name ordinary things in a sentence (FREE_TEXT_EXEMPT_WORDS: pin, authorization, hash,
+// signature ...). "\b" cannot find "secret" inside AWS_SECRET_ACCESS_KEY because "_" is a word
+// character, and such a value has no distinctive prefix.
+//   NOT included: code (a gate, access, door or lockbox code is kept data), "keypad", "monkey" (a part
+//   must be the whole word), "author".
+//   Counter rule: an identifier whose LAST part is a counter word (count, used, total, limit, max, min,
+//   size, length, num, number, ttl, seconds, ms, days, remaining, tokens ...) with a plain number of up to
+//   6 digits is a quantity, not a secret ("tokens_used=12", "max_tokens: 4096", "page_token_count: 3"). A
+//   non-numeric value under such a name is still removed.
 const COUNTER_PARTS = new Set(['count', 'counts', 'used', 'total', 'limit', 'max', 'min', 'size', 'length', 'len', 'num', 'number', 'ttl',
-  'seconds', 'secs', 'ms', 'days', 'hours', 'remaining', 'left', 'age', 'index']);
+  'seconds', 'secs', 'ms', 'days', 'hours', 'remaining', 'left', 'age', 'index', 'tokens']);
 
-function hasCredentialPart(identifier) {
-  const parts = identifier.toLowerCase().split(/[_.-]/).filter(Boolean);
-  return parts.some((part, index) => CREDENTIAL_PARTS.has(part) || (part === 'key' && index > 0 && KEY_PREFIXES.has(parts[index - 1])));
-}
+// Plain English words that are also credential names ("Session: weekly service", "a cookie: chocolate chip"):
+// as a bare word (no "_", "." or "-") the name counts only when its value is secret-shaped, one token with a
+// digit or symbol, or 16+ characters.
+const PROSE_NAMES = new Set(['session', 'sessions', 'cookie', 'cookies', 'credential', 'credentials', 'secret', 'secrets', 'token', 'tokens', 'auth']);
+const proseName = (identifier, value) => PROSE_NAMES.has(identifier.toLowerCase())
+  && !(!/\s/.test(value) && (/[\d%=+/\\_-]/.test(value) || value.length >= 16));
+
+const hasCredentialPart = (identifier) => isCredentialName(identifier, FREE_TEXT_EXEMPT_WORDS);
 
 // The value after the separator: to the closing quote, else its first token
 // plus up to 20 plain words that follow it in the same clause, so a dotenv
 // passphrase goes whole ("DB_PASSWORD=correct horse battery staple") while a
 // following assignment or quoted value is still examined on its own
 // ("DB_PASSWORD=hunter2 OTHER_VAR=\"value\"").
-const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:](?:[ \t]+[A-Za-z][A-Za-z'-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:]*(?=[\s"'`,;]|$)))/y;
+const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)((?:[^\s"'`,;]*[^\s"'`,;.!?:}\]](?:[ \t]+[A-Za-z][A-Za-z'-]*(?=[ \t]|[.,;!?:]|$)){0,20}|[^\s"'`,;]+?)[.!?:}\]]*(?=[\s"'`,;]|$)))/y;
 // The value may sit on the next line ("DB_PASSWORD:\nhunter2"): one line break is allowed after the separator.
-const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)(${AFTER_SEPARATOR})`, 'g');
+// An optional quote on each side of the identifier covers a JSON or JS key ("password": "x", 'api_key': 'x').
+const IDENT_SEP_RE = new RegExp(`(?<![A-Za-z0-9_.-])["'\`]?([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)["'\`]?(${AFTER_SEPARATOR})`, 'g');
 
 // Returns { text, removed }. A non-credential identifier ("Pasted:") does not
 // swallow what follows it, so the next identifier is still examined.
@@ -79,10 +82,10 @@ function scrubIdentifierAssignments(input) {
     const quote = found[1] || '';
     const open = found[3] || '';
     const rawBare = found[4] || '';
-    const tail = quote ? '' : (rawBare.match(/[.!?:]+$/) || [''])[0];
+    const tail = quote ? '' : (rawBare.match(/[.!?:}\]]+$/) || [''])[0];
     const value = quote ? found[2] : (tail ? rawBare.slice(0, -tail.length) : rawBare);
     const last = identifier.toLowerCase().split(/[_.-]/).pop();
-    const keep = !value || value.startsWith('[removed') || proseOnly(value)
+    const keep = !value || value.startsWith('[removed') || proseOnly(value) || proseName(identifier, value)
       || (COUNTER_PARTS.has(last) && /^\d{1,6}$/.test(value));
     if (keep) continue;
     out += input.slice(cursor, valueStart) + (quote ? `${quote}${REMOVED}${quote}` : `${open}${REMOVED}${tail}`);
@@ -97,6 +100,7 @@ function scrubIdentifierAssignments(input) {
 // keep. Publishable keys (pk_live_, pk_test_) are public and are not listed.
 // A Twilio account id (AC + 32 hex) is an identifier, not a secret, and is
 // not listed either.
+const AUTH_SCHEMES = 'basic|bearer|digest|negotiate|ntlm|aws4-hmac-sha256|token|hoba|mutual';
 const SECRET_PATTERNS = Object.freeze([
   { name: 'stripe_secret_key', re: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/g },
   { name: 'stripe_webhook_secret', re: /\bwhsec_[A-Za-z0-9]{16,}/g },
@@ -111,9 +115,17 @@ const SECRET_PATTERNS = Object.freeze([
   { name: 'google_api_key', re: /\bAIza[0-9A-Za-z_-]{35}/g },
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { name: 'pem_private_key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
-  // An Authorization header (any scheme: Basic, Bearer, Digest, Negotiate, a
-  // vendor scheme) is removed to the end of its line: scheme and payload together.
-  { name: 'authorization_header', re: /\b((?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?)[^\r\n]{1,400}/gi, keep: 1 },
+  // An Authorization header (any scheme: Basic, Bearer, Digest, Negotiate, a vendor scheme) is removed to
+  // the end of its line, scheme and payload together. It must be header-shaped: the word starts a line or
+  // follows a quote or brace ("Authorization: ...", {"authorization": "..."}); or the value starts with a
+  // recognised scheme, a JWT or a 20+ character token. "Customer authorization: verbal consent received"
+  // and "Prior authorization: required before treatment" are notes and stay.
+  { name: 'authorization_header', re: /((?:^|(?<=["'{]))[ \t]*(?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?)[^\r\n]{1,400}/gim, keep: 1 },
+  { name: 'authorization_scheme', re: new RegExp(`(\\b(?:proxy-)?authorization["']?[ \\t]*[:=][ \\t]*["']?)(?=(?:${AUTH_SCHEMES})[ \\t]+\\S|eyJ|[^\\s"']{20})[^\\r\\n]{1,400}`, 'gi'), keep: 1 },
+  // A Cookie or Set-Cookie header loses its whole value, to the end of the line: header-shaped, or the value
+  // starts with a name=value pair.
+  { name: 'cookie_header', re: /((?:^|(?<=["'{]))[ \t]*(?:set-)?cookie["']?[ \t]*[:=][ \t]*["']?)[^\r\n]{1,1000}/gim, keep: 1 },
+  { name: 'cookie_pair', re: /(\b(?:set-)?cookie["']?[ \t]*[:=][ \t]*["']?)(?=[A-Za-z0-9_.%-]+=)[^\r\n]{1,1000}/gi, keep: 1 },
   // A scheme with its payload outside a header ("Basic dXNlcjpwYXNz"). Basic
   // payloads are short, so the payload needs only 8 base64 characters.
   { name: 'basic_credentials', re: /\b(Basic[ \t]+)[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/])/g, keep: 1 },
@@ -152,15 +164,24 @@ const ACCOUNT_WORD_RE = /\b(?:portal|bank|banking|app|account|login|log-in|onlin
 // The clause around `offset`: from the nearest "\n", ". ", ";", "! " or "? " before it to the
 // nearest "\n", ";" or sentence end after it.
 function clauseAt(text, offset) {
-  const before = text.slice(0, offset);
-  const start = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
+  const start = clauseStart(text, offset);
   const rest = text.slice(offset);
   const end = rest.search(/\n|;|[.!?](?:\s|$)/);
   return text.slice(start, end === -1 ? text.length : offset + end);
 }
-function accessCodeLine(text, offset) {
-  const clause = clauseAt(text, offset);
-  return ACCESS_WORD_RE.test(clause) && !ACCOUNT_WORD_RE.test(clause);
+// The credential phrase around a PIN: from the clause start to the end of the PIN's value, plus up to 4 more
+// plain words (no comma, no sentence end). "PIN: 4821 for the gate, call customer phone before arrival" has the
+// phrase "PIN: 4821 for the gate"; "phone" is another instruction in the clause.
+function clauseStart(text, offset) {
+  const before = text.slice(0, offset);
+  return Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
+}
+function credentialPhrase(text, offset, valueEnd) {
+  const tail = text.slice(valueEnd).match(/^(?:[ \t]+[^\s,;.!?]+){0,4}/)[0];
+  return text.slice(clauseStart(text, offset), valueEnd) + tail;
+}
+function accessCodeLine(text, offset, valueEnd) {
+  return ACCESS_WORD_RE.test(clauseAt(text, offset)) && !ACCOUNT_WORD_RE.test(credentialPhrase(text, offset, valueEnd));
 }
 // After ":" / "=" these are not values; after "is" the value must also look
 // like a secret (a digit or a symbol, or be quoted).
@@ -192,7 +213,7 @@ function labelledReplacement(match, label, separator, quote, quoted, _empty, bar
   // An earlier pattern may already have removed the first word; a value that
   // is ONLY the removed marker is done, anything after it is still the value.
   if (!value || /^\[removed[^\]]*\]$/.test(value) || proseOnly(value)) return match;
-  if (/^pin|passcode/i.test(label) && (KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length)) || accessCodeLine(text, offset))) return match;
+  if (/^pin|passcode/i.test(label) && (KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length)) || accessCodeLine(text, offset, offset + label.length + separator.length + (value.match(/^\S+/) || [''])[0].length))) return match;
   const viaIs = /\bis[ \t]*$/i.test(separator);
   // After " is " one short plain word ("pin is blue") reads as prose; anything
   // longer, several words, or a digit or symbol is taken as the value.

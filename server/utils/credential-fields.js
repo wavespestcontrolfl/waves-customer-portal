@@ -18,10 +18,17 @@ const CREDENTIAL_WORDS = new Set([
   'token', 'tokens', 'secret', 'secrets', 'password', 'passwords', 'passwd', 'passcode', 'pin', 'credential', 'credentials',
   'signature', 'signatures', 'sig', 'hash', 'salt', 'apikey', 'jwt', 'otp', 'nonce', 'authorization', 'bearer', 'cookie', 'cookies',
   'session', 'sessions',
+  // spellings the free-text scrubber also treats as credential names
+  'pwd', 'passphrase', 'auth',
 ]);
+// Words that name a credential in a structured field but also name ordinary things in a sentence
+// ("Prior authorization: required", "Signature: on file", "gate PIN: 1234" which is kept data). The
+// free-text passes (secret-text-scrubber.js) use the SAME list minus these: authorization has its own
+// header rule, a PIN has its own gate-code rule, and a hash, salt or signature in prose is not a secret.
+const FREE_TEXT_EXEMPT_WORDS = new Set(['pin', 'authorization', 'hash', 'salt', 'sig', 'signature', 'signatures']);
 // Two-word credentials: api key, access key, private key, magic link, reset link, invite code ...
 const CREDENTIAL_PAIRS = [
-  ['api', 'key'], ['access', 'key'], ['private', 'key'], ['secret', 'key'], ['signing', 'key'], ['encryption', 'key'],
+  ['api', 'key'], ['access', 'key'], ['private', 'key'], ['secret', 'key'], ['signing', 'key'], ['encryption', 'key'], ['cert', 'key'],
   ['magic', 'link'], ['reset', 'link'], ['login', 'link'], ['invite', 'code'], ['invite', 'link'], ['verification', 'code'],
   ['confirmation', 'code'], ['auth', 'code'],
 ];
@@ -44,9 +51,9 @@ function isStrongCredentialName(name) {
 }
 
 // True when the NAME marks a credential, whatever the value is.
-function isCredentialName(name) {
+function isCredentialName(name, exempt = null) {
   const words = nameWords(name);
-  if (words.some(word => CREDENTIAL_WORDS.has(word))) return true;
+  if (words.some(word => CREDENTIAL_WORDS.has(word) && !(exempt && exempt.has(word)))) return true;
   return CREDENTIAL_PAIRS.some(([a, b]) => words.some((word, i) => word === a && words[i + 1] === b));
 }
 
@@ -64,4 +71,4 @@ function isCredentialField(key, value) {
   return words[words.length - 1] === 'key' && looksOpaque(value);
 }
 
-module.exports = { isStrongCredentialName, isCredentialName, isCredentialField, nameWords, looksOpaque, CREDENTIAL_WORDS, LONG_OPAQUE_MIN };
+module.exports = { isStrongCredentialName, isCredentialName, isCredentialField, nameWords, looksOpaque, CREDENTIAL_WORDS, FREE_TEXT_EXEMPT_WORDS, LONG_OPAQUE_MIN };
