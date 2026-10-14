@@ -163,6 +163,8 @@ const TIME_WORDS_RE = new RegExp([
   // A day of the month after a word that limits the visit to it ("ONLY ON
   // THE 20TH", "except the 5th"): r17. "on the 20th" alone is history.
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
+  // ...and the date first ("on 10/20 only"): r20.
+  `(?<![\\w/-])${DATE_SHAPES}(?=[\\s,]{1,5}only\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
@@ -176,8 +178,9 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,5}(?:fifteen|thirty|forty[\\s-]?five|forty|twenty|o\\W?clock)(?![\\w]))`,
   // A notice period or a change interval ("need 7 days notice", "expires
   // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
-  `\\b${QTY}\\s{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
-  `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}\\s{0,3}(?:days?|weeks?|months?)(?![\\w]))`,
+  // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
+  `\\b${QTY}[\\s-]{0,3}(?:days?|weeks?|hours?|hrs?|months?)\\W{0,2}\\s{0,3}(?:notice|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b(?:expires?|expiring|changes?|changing|resets?|every)(?=\\s{1,5}(?:in\\s{1,5})?${QTY}[\\s-]{0,3}(?:days?|weeks?|months?)(?![\\w]))`,
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
@@ -193,6 +196,8 @@ const TIME_WORDS_RE = new RegExp([
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
   '\\b(?:business|office|working|opening|open|normal|regular|school)(?=\\s{1,5}hours\\b)',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
+  // "EVERY OTHER WEEK", "every second month": r20.
+  '\\b(?:every|each)(?=\\s{1,5}(?:other|second|2nd|third|3rd|fourth|4th)\\s{1,5}(?:week|month|day|visit)s?(?![\\w]))',
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
