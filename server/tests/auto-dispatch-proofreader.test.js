@@ -369,6 +369,11 @@ describe('the customer record', () => {
       // A day-word credential AND a real statement: the statement still counts.
       'Gate code Friday, never before 10am',
       'Friday is the gate code, never before 10am',
+      'CODE 4821 DO NOT COME BEFORE NINE',
+      'No gate code after 9',
+      'CODE 4821, AT NINE O\'CLOCK ONLY',
+      // A passphrase of day or time words cannot be told from a time statement: the safe side is a person.
+      'Gate password Friday morning',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
       expect(redactAccessCodes(text)).not.toContain('4821');
@@ -378,6 +383,8 @@ describe('the customer record', () => {
       'Side gate code 4821, latch sticks.',
       'The gate code is 1234. Never on Fridays.',
       'Please come Tuesday at 2pm',
+      // Lowercase words outside the code slot are not masked: the model reads them.
+      'Gate code 4821, come at nine o\'clock',
       'No codes here, any day is fine',
       // The mask also takes the day numbers of a note's date stamps: not a time statement.
       '[call Fri Aug 14] Gate code: 4821.',

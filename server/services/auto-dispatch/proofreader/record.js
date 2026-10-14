@@ -108,10 +108,15 @@ function partsOf(body) {
 // date stamps staff notes carry ("[call Fri Aug 14]", "2026-09-25"), and on
 // production notes that was six of seven flags (measured 2026-10-13). A
 // range inside a longer run of digits and dashes or slashes is a date.
+// Words that introduce an hour, and the hours a person spells out (an
+// all-caps note "DO NOT COME BEFORE NINE" loses both to the mask: r4).
+const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|than|past';
+const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}:\\d{2}(?:\\s?[ap]\\.?m\\.?)?(?![\\w:])',
   '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
-  '\\b(?:before|after|by|until|till|til|at|from|around|about|between|than|past)\\s+\\d{1,2}(?![\\w:/-])',
+  `\\b(?:${HOUR_LEADS})\\s+(?:\\d{1,2}(?![\\w:/-])|(?:${SPELLED_HOURS})\\b)`,
+  `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
@@ -124,7 +129,12 @@ const timeWords = (text) => (String(text).match(TIME_WORDS_RE) || []).length;
 // a statement about when: "gate code Friday", "password is noon". It is left
 // out of the count on the raw side, so a code that happens to be a day or a
 // time word does not make the record incomplete (Codex #6328 r2).
-const CREDENTIAL_VALUE_RE = /\b(code|password|passcode|passphrase|pin|combo|combination)\b(\s*(?:is|=|:|-)?\s*)["'\u201c\u2018]?[A-Za-z0-9#*]+["'\u201d\u2019]?/gi;
+// A word that introduces an hour is never taken for the credential: in "no
+// gate code after 9" the "after 9" is the statement (r4). Only the ONE token
+// after the noun is taken: a passphrase of several words that are day or time
+// words ("Friday morning") still counts, on purpose. Which it is cannot be
+// told from the text, and the safe side is a person reading it.
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s*(?:is|=|:|-)?\\s*)(?!(?:${HOUR_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]+["'\\u201d\\u2019]?`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password" (r3).
 const CREDENTIAL_VALUE_REVERSE_RE = /["'\u201c\u2018]?[A-Za-z0-9#*]+["'\u201d\u2019]?(\s+(?:is|was|=)\s+(?:(?:the|my|our|your)\s+)?(?:[A-Za-z]+\s+)?(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
