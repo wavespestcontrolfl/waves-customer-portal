@@ -66,9 +66,8 @@ const ONE_TIME_LABELS = {
   'top dressing': 'Lawn Top Dressing Service',
 };
 
-// The quote wizard's label for its recurring tree and shrub program carries
-// no cadence word.
-const RECURRING_LABELS = new Set(['tree & shrub care']);
+// Quote-wizard labels for a recurring program that carry no cadence word.
+const RECURRING_LABELS = new Set(['tree & shrub care', 'palm injections']);
 
 // Intake labels with no catalog row of their own; shown as written. The
 // quote wizard's German cockroach add-on is one treatment inside a recurring
@@ -145,9 +144,13 @@ function catalogNameIndex(names) {
   return new Map([...(names || [])].map(clean).filter(Boolean).map((name) => [name.toLowerCase(), name]));
 }
 
-function classify(part, catalogNames) {
+function classify(part, catalogNames, kept = new Set()) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
   if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
+  // A configured package name is shown as written but keeps the cadence it states.
+  if (kept.has(part.toLowerCase())) {
+    return { kind: 'other', name: part, frequency: statesRecurring(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null };
+  }
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: null };
   const catalogName = catalogMatch(part, catalogNames);
@@ -189,23 +192,31 @@ function statesRecurring(text) {
 // that row ("Monthly pest control" → Monthly Pest Control Service); the
 // topic's default cadence when none, or more than one, is stated or no such
 // row exists.
-function recurringName(topic, text, catalogNames) {
+// With the live catalog, a name it does not have (a renamed or retired
+// program) is not shown: the part is shown as written instead, unless its
+// text is one-time wording on a recurring lead (recurring wins), which
+// keeps the default name.
+function recurringName(topic, text, catalogNames, statedOneTime = false) {
+  if (!catalogNames) return topic.recurring;
   const inText = CADENCES.filter(([, re]) => re.test(text));
-  const stated = inText.length === 1 ? inText[0] : null;
-  if (!stated || !catalogNames || !CADENCE_PREFIX_RE.test(topic.recurring)) return topic.recurring;
-  const wanted = topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `);
-  return catalogNames.get(wanted.toLowerCase()) || topic.recurring;
+  const stated = inText.length === 1 && CADENCE_PREFIX_RE.test(topic.recurring) ? inText[0] : null;
+  const wanted = stated ? catalogNames.get(topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `).toLowerCase()) : null;
+  return wanted || catalogNames.get(topic.recurring.toLowerCase()) || (statedOneTime ? topic.recurring : text);
 }
 
 // Parts are joined by " + ", but a few catalog names contain one
 // ("Lawn + Tree & Shrub Service"); those stay whole.
-function splitParts(text, catalogNames) {
+// Splits on " + ", but keeps whole any catalog or configured name that has
+// " + " in it (longest match first, at every position).
+function splitParts(text, catalogNames, kept = new Set()) {
   const pieces = text.split(/\s+\+\s+/).map(clean).filter(Boolean);
-  if (!catalogNames) return pieces;
+  const known = (name) => kept.has(name.toLowerCase()) || Boolean(catalogNames?.has(name.toLowerCase()));
   const parts = [];
-  for (let i = 0; i < pieces.length; i += 1) {
-    const joined = i + 1 < pieces.length ? `${pieces[i]} + ${pieces[i + 1]}` : null;
-    if (joined && catalogNames.has(joined.toLowerCase())) { parts.push(joined); i += 1; } else parts.push(pieces[i]);
+  for (let i = 0; i < pieces.length;) {
+    let end = pieces.length;
+    while (end > i + 1 && !known(pieces.slice(i, end).join(' + '))) end -= 1;
+    parts.push(pieces.slice(i, end).join(' + '));
+    i = end;
   }
   return parts;
 }
@@ -238,16 +249,13 @@ const PLACE = {
       // is never an assessment.
       else if (plan.oneTime) name(topic.oneTime || part.text);
       else if (plan.assess || !topic.recurring) toAssessment(topic.short);
-      else name(recurringName(topic, part.text, plan.catalogNames));
+      else name(recurringName(topic, part.text, plan.catalogNames, part.frequency === 'one_time'));
     }
   },
 };
 
-function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
-  const text = clean(serviceInterest);
-  if (!text) return null;
-
-  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames));
+function nameParts(text, catalogNames, kept) {
+  const parts = splitParts(text, catalogNames, kept).map((part) => classify(part, catalogNames, kept));
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.
@@ -264,8 +272,20 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
   };
   for (const part of parts) PLACE[part.kind](part, plan, (label) => out.push(label), toAssessment);
   if (assessmentAt >= 0) out[assessmentAt] = assessmentLabel(shorts);
-
   return [...new Set(out.filter(Boolean))].join(' + ') || null;
+}
+
+// asWritten: admin-configured package names with no catalog row (the roach
+// package names the quote wizard stores), shown as written, plus sign
+// included, wherever they appear.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, asWritten = [] } = {}) {
+  const text = clean(serviceInterest);
+  if (!text) return null;
+  // Only a name about roaches counts: a configured name like "Lawn Care"
+  // must not stop ordinary lawn leads from being named.
+  const kept = new Set(asWritten.map(clean).filter((label) => topicsFor(label).some((topic) => topic.key === 'cockroach'))
+    .map((label) => label.toLowerCase()));
+  return nameParts(text, catalogNames, kept);
 }
 
 module.exports = { leadServiceDisplay, catalogNameIndex };

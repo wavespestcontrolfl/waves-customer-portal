@@ -24,48 +24,66 @@ const { leadServiceDisplayLive } = require('../config/feature-gates');
 // GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
 // way the booking catalog names it. Read-only: service_interest is untouched,
 // and with the gate off the field is absent so the screen shows the stored text.
-// The live catalog names, or null when the gate is off or the catalog cannot
-// be read. Without the catalog a name would be a guess, so callers then show
-// the stored text.
+// What naming needs from the live catalog, or null when the gate is off or
+// the catalog cannot be read. Without the catalog a name would be a guess,
+// so callers then show the stored text.
 async function serviceDisplayCatalog() {
   if (!leadServiceDisplayLive()) return null;
   try {
-    return catalogNameIndex(await db('services').pluck('name'));
+    // The quote wizard stores the admin-configured roach package names
+    // (pest_base.initial_roach.display), which are not catalog rows.
+    const roachDisplay = require('../services/pricing-engine').constants?.PEST?.pestInitialRoach?.display || {};
+    return {
+      // Live rows only: a retired row keeps its name but is not a service.
+      catalogNames: catalogNameIndex(await db('services').where({ is_active: true, is_archived: false }).pluck('name')),
+      asWritten: Object.values(roachDisplay).map((entry) => entry?.name).filter((name) => typeof name === 'string' && name.trim()),
+    };
   } catch (err) {
     logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
     return null;
   }
 }
 
+// The name comes from the stored text alone. service_key is not used: a
+// staff edit changes the text but keeps the key (public-quote dedupe reads it).
+function serviceDisplayFor(catalog, serviceInterest) {
+  return leadServiceDisplay(serviceInterest, { catalogNames: catalog.catalogNames, asWritten: catalog.asWritten });
+}
+
 async function withServiceDisplay(leads) {
-  const catalogNames = leads.length ? await serviceDisplayCatalog() : null;
-  if (!catalogNames) return leads;
+  const catalog = leads.length ? await serviceDisplayCatalog() : null;
+  if (!catalog) return leads;
   return leads.map((lead) => ({
     ...lead,
-    service_display: leadServiceDisplay(lead.service_interest, { catalogNames }),
+    service_display: serviceDisplayFor(catalog, lead.service_interest),
   }));
 }
 
 // Search matches what the screen shows: the stored service texts whose
 // display name contains the term, for applyLeadSearch to OR in. The
 // text → name index is rebuilt at most every five minutes (the Leads screen
-// re-runs an active search every 10 s) and one search adds at most 100 texts.
+// re-runs an active search every 10 s); every match is used, so no lead is
+// missing from a search by the name it is shown under.
 const SHOWN_AS_TTL_MS = 5 * 60 * 1000;
-const SHOWN_AS_MAX_TEXTS = 100;
-let shownAsIndex = { builtAt: 0, rows: [] };
+let shownAsIndex = { builtAt: 0, names: '', rows: [] };
 
 async function serviceTextsShownAs(search) {
   const term = String(search).trim().replace(/\s+/g, ' ').toLowerCase();
-  const catalogNames = term ? await serviceDisplayCatalog() : null;
-  if (!catalogNames) return [];
-  if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS) {
-    const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest').distinct().pluck('service_interest');
+  const catalog = term ? await serviceDisplayCatalog() : null;
+  if (!catalog) return [];
+  // Rebuilt at once when the catalog or the configured names change, so
+  // search and the screen use the same names.
+  const names = [...catalog.catalogNames.keys(), '|', ...catalog.asWritten].join('\n');
+  if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS || shownAsIndex.names !== names) {
+    const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest')
+      .distinct().pluck('service_interest');
     shownAsIndex = {
       builtAt: Date.now(),
-      rows: stored.map((text) => [text, (leadServiceDisplay(text, { catalogNames }) || '').toLowerCase()]),
+      names,
+      rows: stored.map((text) => ({ text, shown: (serviceDisplayFor(catalog, text) || '').toLowerCase() })),
     };
   }
-  return shownAsIndex.rows.filter(([, shown]) => shown.includes(term)).slice(0, SHOWN_AS_MAX_TEXTS).map(([text]) => text);
+  return shownAsIndex.rows.filter((row) => row.shown.includes(term)).map((row) => row.text);
 }
 
 // Format/length validation for manual lead creation. Permissive by design — it
@@ -151,7 +169,8 @@ function applyLeadSearch(query, search, serviceTexts = []) {
       .orWhereILike('leads.email', pattern)
       .orWhereILike('leads.address', pattern)
       .orWhereILike('leads.service_interest', pattern);
-    if (serviceTexts.length) this.orWhereIn('leads.service_interest', serviceTexts);
+    // One clause with one array bind, whatever the match count.
+    if (serviceTexts.length) this.orWhereRaw('leads.service_interest = ANY(?::text[])', [serviceTexts]);
     if (digits && /^[+\d\s().-]+$/.test(term)) {
       this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
     }
