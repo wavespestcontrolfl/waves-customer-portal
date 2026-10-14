@@ -192,8 +192,12 @@ function clauseStart(text, offset) {
   return Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
 }
 function credentialPhrase(text, offset, valueEnd) {
+  const head = text.slice(clauseStart(text, offset), valueEnd);
+  // A value that ends its sentence ("Door passcode: 7788.") takes no words
+  // from the next sentence.
+  if (/[.!?;][ \t]*$/.test(head) || /^[.!?;]/.test(text.slice(valueEnd))) return head;
   const tail = text.slice(valueEnd).match(/^(?:[ \t]+[^\s,;.!?]+){0,4}/)[0];
-  return text.slice(clauseStart(text, offset), valueEnd) + tail;
+  return head + tail;
 }
 function accessCodeLine(text, offset, valueEnd) {
   return ACCESS_WORD_RE.test(clauseAt(text, offset)) && !ACCOUNT_WORD_RE.test(credentialPhrase(text, offset, valueEnd));

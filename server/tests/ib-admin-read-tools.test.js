@@ -1407,3 +1407,9 @@ describe('identifier PINs and status verbs', () => {
     expect(scrub(text)).toBe(text);
   });
 });
+
+// Pre-push audit: an account word in the next sentence does not defeat an access passcode.
+test.each(['Door passcode: 7788. Phone customer on arrival.', 'Gate PIN: 4821. Email the customer after.'])('access code stays: %s', (text) => {
+  const { redactSecrets } = require('../utils/signed-link-redaction');
+  expect(redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 })).toBe(text);
+});
