@@ -361,6 +361,11 @@ describe('the customer record', () => {
       'Gate code 4821 and never before 9',
       'Lockbox code 5521, 9:30 works',
       'The access code 4821 works 7-7',
+      'Gate code 4821, only between 9 and 11',
+      'Gate code 4821, no earlier than 9',
+      'Gate code 4821, come at 2 o\'clock',
+      'Gate code 4821, 3 or later is best',
+      'Gate code 4821, any time past 3',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
       expect(redactAccessCodes(text)).not.toContain('4821');

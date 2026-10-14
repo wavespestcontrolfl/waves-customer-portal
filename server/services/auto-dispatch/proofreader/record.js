@@ -94,8 +94,9 @@ function partsOf(body) {
   return parts;
 }
 
-// Words that can say WHEN: a clock time, an hour after "before / after / by
-// / until / at / from", an hour range ("7-7"), a part of the day, a weekday.
+// Words that can say WHEN: a clock time, an hour after a time word ("before
+// 9", "between 9 and 11", "no earlier than 9", "past 3"), "9 o'clock", "9
+// or later", an hour range ("7-7"), a part of the day, a weekday.
 // The access-code mask works on a whole sentence that names a code, and it
 // masks every token with a digit in it and every word in capitals: in "gate
 // code 4821, not before 10am" the 10am goes too, in "CODE 4821 FRIDAYS ONLY"
@@ -110,7 +111,9 @@ function partsOf(body) {
 const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}:\\d{2}(?:\\s?[ap]\\.?m\\.?)?(?![\\w:])',
   '\\b\\d{1,2}\\s?[ap]\\.?m\\.?(?![\\w])',
-  '\\b(?:before|after|by|until|till|at|from|around)\\s+\\d{1,2}(?![\\w:/-])',
+  '\\b(?:before|after|by|until|till|til|at|from|around|about|between|than|past)\\s+\\d{1,2}(?![\\w:/-])',
+  '\\b\\d{1,2}\\s?o\\W?clock\\b',
+  '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
   '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])',
   '\\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?(?![\\w])',
