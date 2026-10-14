@@ -251,7 +251,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?|ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|hoy|aviso)(?![\\w\u00c0-\u024f])',
   // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
   // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
-  `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
+  `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -263,7 +263,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
-  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])',
+  // Not a color ("MIDNIGHT BLUE"): r47.
+  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint)\\b)',
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
   // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
   // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
@@ -423,13 +424,21 @@ const scanBudget = new AsyncLocalStorage();
 const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n\s*/g, '\n').trim();
 
 // One entry is charged once against the record's budget (r36).
+// A "[redacted]" already in the stored text is not this mask's work: for
+// the scan it is renamed first, so only the mask's own markers are judged
+// ("Prior caller [redacted] Monday": r47). The model reads the text as is.
+const PRIOR_MARK_RE = /\[redacted\]/gi;
+
 function hiddenTimeIn(text, raw, masked) {
   if (raw === masked) return false;
   const budget = scanBudget.getStore();
   if (budget && raw.length > budget.left) return true;
   if (budget) budget.left -= raw.length;
-  const lines = keepLines(text);
-  return maskHidTime(raw, masked, lines.includes('\n') ? redactAccessCodes(lines) : null);
+  const prior = raw.includes(MARK);
+  const scanRaw = prior ? raw.replace(PRIOR_MARK_RE, '[prior]') : raw;
+  const scanMasked = prior ? redactAccessCodes(scanRaw) : masked;
+  const lines = prior ? keepLines(text).replace(PRIOR_MARK_RE, '[prior]') : keepLines(text);
+  return maskHidTime(scanRaw, scanMasked, lines.includes('\n') ? redactAccessCodes(lines) : null);
 }
 
 function entry(channel, from, at, text) {

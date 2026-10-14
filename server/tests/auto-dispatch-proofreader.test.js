@@ -488,6 +488,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, COME BACK IN TWO WEEKS',
       'GATE CODE 4821, COME BACK IN 30 MINUTES',
       'GATE CODE 4821, WAIT 10 MINS',
+      'GATE CODE 4821, OUT OF TOWN FOR TWO WEEKS',
       'Gate code 4821, ON MONDAY',
       'Gate code 4821, MONDAY WORKS',
       'CODE 4821 MON-FRI ONLY',
@@ -545,6 +546,7 @@ describe('the customer record', () => {
       'Gate code 4821, SPOKE TO PM',
       'GATE CODE 4821, FIRST APPOINTMENT COMPLETED',
       'GATE CODE 4821, ONLY TWO DOGS',
+      'GATE CODE 4821, THE GATE IS MIDNIGHT BLUE',
       'Gate code 4821, ask MANAGER\nFriday works.',
       'Gate code 4821, ask MANAGER. Friday works.',
       'Gate code 4821, owner called YESTERDAY',
@@ -604,6 +606,12 @@ describe('the customer record', () => {
       const entry = record.entries.find((row) => row.text.includes('password'));
       expect(entry.text).toBe(redactAccessCodes(plain));
       expect(entry.text).not.toContain('blue house');
+    });
+
+    test('a [redacted] already in the stored text is not taken for the mask', async () => {
+      const note = 'Gate code 4821. Prior caller [redacted] Monday appointment.';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
     });
 
     test('a code split across lines is still masked in the text the model reads', async () => {
