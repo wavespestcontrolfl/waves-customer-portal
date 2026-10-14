@@ -71,4 +71,9 @@ function isCredentialField(key, value) {
   return words[words.length - 1] === 'key' && looksOpaque(value);
 }
 
-module.exports = { isStrongCredentialName, isCredentialName, isCredentialField, nameWords, looksOpaque, CREDENTIAL_WORDS, FREE_TEXT_EXEMPT_WORDS, LONG_OPAQUE_MIN };
+// True when the two words together form a listed credential pair ("private key", "secret key").
+function isCredentialPair(first, second) {
+  return CREDENTIAL_PAIRS.some(([a, b]) => a === String(first).toLowerCase() && b === String(second).toLowerCase());
+}
+
+module.exports = { isCredentialPair, isStrongCredentialName, isCredentialName, isCredentialField, nameWords, looksOpaque, CREDENTIAL_WORDS, FREE_TEXT_EXEMPT_WORDS, LONG_OPAQUE_MIN };

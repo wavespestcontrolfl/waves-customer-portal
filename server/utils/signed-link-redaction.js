@@ -185,6 +185,10 @@ const PROTOCOL_RELATIVE_RE = /(?<![\w:/.@-])\/\/(?=[A-Za-z0-9])[^\s"'<>\\]+/g;
 // follow a word character, "/", ":" or "." (so "10/12/2026", "and/or" and the
 // inside of an absolute URL are not starts).
 const RELATIVE_LINK_RE = /(?<![\w/:.@-])\/[A-Za-z0-9._~%@+=-]*(?:\/[A-Za-z0-9._~%@+=-]*)*(?:[?#][^\s"'<>\\]*)?/g;
+// A path with no leading slash and a query: "reset?ticket=...", "login/reset?ticket=...", "ws?sid=...". A
+// path word (or words joined by "/") directly followed by "?" and a key=value pair. It starts at a word
+// boundary that is not inside a longer path, host or address.
+const PATH_QUERY_RE = /(?<![\w/.:@%~+=-])[A-Za-z0-9._~%-]+(?:\/[A-Za-z0-9._~%@+=-]+)*\?[A-Za-z0-9_.[\]%-]+=[^\s"'<>\\]*/g;
 // A bare query string that carries a credential: "?token=...", "?sig=...&x=1".
 const BARE_QUERY_RE = /(?<![\w/])\?[A-Za-z0-9_.[\]-]+=[^\s"'<>\\]*/g;
 
@@ -260,7 +264,14 @@ function redactString(text, state) {
     const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
     return verdict ? count(verdict) + tail : match;
   });
-  return relative.replace(BARE_QUERY_RE, (match) => {
+  // The same credential-query verdict as an absolute link; a plain query ("faq?page=2") stays.
+  const pathQuery = relative.replace(PATH_QUERY_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    let url;
+    try { url = new URL(link, 'https://relative.invalid'); } catch { return match; }
+    return carriesCredential(url.search) ? count(REDACTED_LINK) + tail : match;
+  });
+  return pathQuery.replace(BARE_QUERY_RE, (match) => {
     const { link, tail } = splitTail(match);
     return carriesCredential(link.slice(1)) && /=[^&]/.test(link) ? count(REDACTED_LINK) + tail : match;
   });
@@ -286,7 +297,10 @@ const SSN_DASHED_RE = /(?<![\d-])\d{3}([- ])\d{2}\1\d{4}(?![\d-])/g;
 // followed by "number"/"no", ordinary punctuation (". : #") and spaces, then at most one line break, or by up
 // to 20 other characters that hold no digit, period or line break ("SSN on file is "): the shared label gap.
 const SSN_LABELLED_RE = new RegExp(`\\b(ssn|social\\s+security)\\b((?:[ \\t]+(?:number|num|no)\\b)?[ \\t.:#]{0,8}(?:[ \\t]*\\r?\\n[ \\t]*)?|${labelGap(20)})(\\d[\\d -]{7,11}\\d)\\b`, 'gi');
-const CARD_WORD = '(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|cc|credit|debit|pan|visa|master\\s?card|amex|american\\s+express|discover)';
+// ONE list of words that put a clause in card territory: the card-run pass (a card word leads a digit run) and
+// the security-code pass (a code beside a card word is a card code) both read it.
+const CARD_TERMS = 'card|cc|credit|debit|pan|visa|master\\s?card|amex|american\\s+express|discover|diners(?:\\s+club)?|jcb|union\\s?pay';
+const CARD_WORD = `(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|${CARD_TERMS.replace(/^card\|/, '')})`;
 // Digit groups on a card line are separated by a space, tab, comma, dash, dot or slash (up to 3 characters),
 // or one line break: "424 242 4242 424242", "424, 242, 4242, 424242", "4242\n4242\n4242\n4242".
 const GROUP_GAP = '[ \\t,.\\/-]{0,3}(?:\\r?\\n[ \\t]*)?';
@@ -319,7 +333,7 @@ function scrubGroupedCard(text) {
 }
 // The code must sit in the label's own clause: "Security code missing. ID 123" keeps 123.
 const CVV_RE = new RegExp(`\\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\\b((?:\\s+(?:no\\.?|num\\.?|number|#))?${labelGap(15)})(\\d{3,4})(?!\\d)`, 'gi');
-const CARD_CONTEXT_RE = /\b(?:card|credit|debit|visa|mastercard|master card|amex|discover|paid|payment)\b/i;
+const CARD_CONTEXT_RE = new RegExp(`\\b(?:${CARD_TERMS}|paid|payment)\\b`, 'i');
 function scrubCvv(text) {
   let removed = 0;
   const clean = text.replace(CVV_RE, (match, label, between, _digits, offset) => {
@@ -362,10 +376,17 @@ const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF]/g;
 function foldUnicode(text) {
   return text.replace(ZERO_WIDTH_RE, '').replace(UNICODE_SPACE_RE, ' ').replace(UNICODE_BREAK_RE, '\n').replace(UNICODE_DASH_RE, '-');
 }
+// A string longer than this is cut before any pass runs (a note is short; a 190,000-character one is a paste
+// or a runaway log). The cut is counted as a removal and the text ends with TEXT_CUT_MARKER; the answer's own
+// size limit is applied later.
+const MAX_TEXT_CHARS = 20000;
+const TEXT_CUT_MARKER = '[text cut at 20,000 characters]';
 function redactText(value, state) {
-  const folded = foldUnicode(value);
+  const cut = value.length > MAX_TEXT_CHARS;
+  const folded = foldUnicode(cut ? value.slice(0, MAX_TEXT_CHARS) : value);
   const before = state.fields;
   const out = scrubFreeText(redactString(folded, state), state);
+  if (cut) { state.fields += 1; return `${out} ${TEXT_CUT_MARKER}`; }
   return state.fields === before && out === folded ? value : out;
 }
 
@@ -386,5 +407,5 @@ function redactSecrets(value, state, depth = 0) {
 }
 
 module.exports = {
-  REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
+  REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, MAX_TEXT_CHARS, TEXT_CUT_MARKER, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
 };

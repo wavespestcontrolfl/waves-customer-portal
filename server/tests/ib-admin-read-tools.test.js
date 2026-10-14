@@ -1457,3 +1457,127 @@ describe('far card word and connectorless status verbs', () => {
     expect(scrub(text)).toBe(text);
   });
 });
+
+// Codex security r14: one label vocabulary, path-relative links, credential numbers, YAML blocks, card brands, length.
+describe('classes: label vocabulary, path links, counters, block scalars, card brands, long text', () => {
+  const { redactSecrets, MAX_TEXT_CHARS, TEXT_CUT_MARKER } = require('../utils/signed-link-redaction');
+  const scrub = text => redactSecrets(text, { links: 0, privateLinks: 0, fields: 0 });
+  const SECRET = 'abc123' + 'SECRET';
+
+  describe('credential labels come from the shared classifier', () => {
+    test.each([
+      'Private key', 'Secret key', 'Encryption key', 'Signing key', 'Master password', 'Wifi password', 'Client secret',
+      'Session token', 'Cert key', 'API key', 'Access key', 'Verification code', 'Login code', 'OTP', 'Api key',
+    ])('removed: %s', (label) => {
+      for (const separator of [': ', ' = ', ':']) {
+        const out = scrub(`${label}${separator}${SECRET}`);
+        expect(out).not.toContain(SECRET);
+        expect(out).toContain('[removed]');
+      }
+    });
+    test.each([
+      'Private key pairs: two kept', 'Password hint: first pet', 'Key box: on the left', 'Secret garden: closed on Mondays',
+      'Session: weekly service', 'Customer left a cookie: chocolate chip', 'Signature: on file', 'Prior authorization: required',
+    ])('kept: %s', (text) => {
+      expect(scrub(text)).toBe(text);
+    });
+    test('a non-credential label does not swallow a later credential', () => {
+      const out = scrub(`Pasted: foo bar. Private key: ${SECRET}`);
+      expect(out).toBe('Pasted: foo bar. Private key: [removed]');
+    });
+    test('labelled gate PIN stays, account PIN goes', () => {
+      expect(scrub('Gate PIN: 4821 at the side gate')).toBe('Gate PIN: 4821 at the side gate');
+      expect(scrub('Wifi PIN: 4821')).toBe('Wifi PIN: [removed]');
+    });
+  });
+
+  describe('path-relative links with a credential query', () => {
+    test.each([
+      ['reset?ticket=', 'reset'], ['callback?key=', 'callback'], ['ws?sid=', 'ws'], ['login/reset?ticket=', 'login/reset'],
+      ['a/b/c?access_token=', 'a/b/c'], ['verify?token=', 'verify'], ['x?sig=', 'x'],
+    ])('removed: %s', (prefix) => {
+      const out = scrub(`Open ${prefix}${SECRET}&x=1 now`);
+      expect(out).not.toContain(SECRET);
+      expect(out).toBe('Open [signed link removed] now');
+    });
+    test.each([
+      'faq?page=2', 'is this ok?yes=1', 'what? ok=1', 'See https://example.test/blog/post?page=2', 'rooms/12?view=map', 'a@b.test?subject=hi',
+    ])('kept: %s', (text) => {
+      expect(scrub(text)).toBe(text);
+    });
+  });
+
+  describe('credential numbers are not counters', () => {
+    test.each(['PORTAL_PIN_NUMBER=4821', 'PASSWORD_NUMBER=123456', 'OTP_NUMBER=123456', 'API_KEY_NUM=1234', 'CARD_PIN_NUMBER=4821', 'TOKEN_INDEX=123456'])('removed: %s', (text) => {
+      expect(scrub(text)).toMatch(/\[removed\]/);
+    });
+    test.each(['password_attempts: 3', 'tokens_used=12', 'max_tokens: 4096', 'page_token_count: 3', 'pin_length=4', 'session_ttl=3600', 'invoice_number=4821', 'page_number: 7'])('kept: %s', (text) => {
+      expect(scrub(text)).toBe(text);
+    });
+    test('a non-numeric value under a counter name is still removed', () => {
+      expect(scrub('password_attempts: ' + SECRET)).toBe('password_attempts: [removed]');
+    });
+  });
+
+  describe('YAML block scalars', () => {
+    test.each(['|', '|-', '|+', '>', '>-', '>+', '|2', '| # note'])('indicator %s removes the block', (indicator) => {
+      const out = scrub(`DB_PASSWORD: ${indicator}\n  ${SECRET}\n  second line\nNEXT: fine`);
+      expect(out).toBe('DB_PASSWORD: [removed]\nNEXT: fine');
+    });
+    test('a nested key uses its own indent and the next sibling stays', () => {
+      const out = scrub(`config:\n  api_key: |-\n    ${SECRET}\n\n    more\n  other: ok\ntop: ok`);
+      expect(out).toBe('config:\n  api_key: [removed]\n  other: ok\ntop: ok');
+    });
+    test('blank lines after the block stay', () => {
+      expect(scrub(`secret_key: >\n  ${SECRET}\n\nafter`)).toBe('secret_key: [removed]\n\nafter');
+    });
+    test('a block under a non-credential key stays', () => {
+      const text = 'notes: |\n  visit tomorrow\n  gate open';
+      expect(scrub(text)).toBe(text);
+    });
+    test('an indicator with no block lines changes nothing but the value rule', () => {
+      expect(scrub('DB_PASSWORD: |\nNEXT: fine')).toContain('NEXT: fine');
+    });
+  });
+
+  describe('card brands: one list', () => {
+    test.each(['American Express', 'Amex', 'Diners Club', 'Diners', 'JCB', 'UnionPay', 'Union Pay', 'Master Card', 'MasterCard', 'Visa', 'Discover', 'Debit', 'Credit'])('%s CID/CVV', (brand) => {
+      expect(scrub(`${brand} CID: 1234`)).toBe(`${brand} CID: [code removed]`);
+      expect(scrub(`${brand} CVV: 123`)).toBe(`${brand} CVV: [code removed]`);
+    });
+    test('a card brand leads a grouped number', () => {
+      expect(scrub('Diners Club 3056 930902 5904')).not.toMatch(/\b5904\b.*\b3056\b|3056 930902/);
+    });
+    test('a customer id CID stays', () => {
+      expect(scrub('Customer ID CID: 1234')).toBe('Customer ID CID: 1234');
+    });
+  });
+
+  describe('long text', () => {
+    test('192,000 characters of one sentence scrub in under 2 seconds', () => {
+      const text = 'PIN: 4821 for the gate. '.repeat(8000);
+      const started = Date.now();
+      const out = scrub(text);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(out.length).toBeLessThan(MAX_TEXT_CHARS + 100);
+    });
+    test('longer than 20,000 characters is cut with a marker, and what is kept is still scrubbed', () => {
+      const state = { links: 0, privateLinks: 0, fields: 0 };
+      const out = redactSecrets(`password: ${'hunter2x'}. ${'x'.repeat(30000)}`, state);
+      expect(out.endsWith(TEXT_CUT_MARKER)).toBe(true);
+      expect(out).toContain('password: [removed]');
+      expect(state.fields).toBeGreaterThanOrEqual(2);
+      expect(TEXT_CUT_MARKER).toBe('[text cut at 20,000 characters]');
+    });
+    test('exactly 20,000 characters is not cut', () => {
+      expect(scrub('x'.repeat(MAX_TEXT_CHARS))).toBe('x'.repeat(MAX_TEXT_CHARS));
+    });
+    test('clause lookups read a window, not the whole text', () => {
+      const { clauseAt } = require('../utils/secret-text-scrubber');
+      const text = 'a'.repeat(100000) + ' PIN: 4821 for the gate' + 'b'.repeat(100000);
+      const clause = clauseAt(text, 100010);
+      expect(clause.length).toBeLessThan(700);
+      expect(clause).toContain('PIN: 4821');
+    });
+  });
+});

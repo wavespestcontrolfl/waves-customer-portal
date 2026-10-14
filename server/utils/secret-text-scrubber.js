@@ -16,7 +16,7 @@
  * one ("PIN the note", "token of appreciation", "password reset requested")
  * is left alone.
  */
-const { isCredentialName, FREE_TEXT_EXEMPT_WORDS } = require('./credential-fields');
+const { isCredentialName, isCredentialPair, nameWords, FREE_TEXT_EXEMPT_WORDS } = require('./credential-fields');
 
 const REMOVED = '[removed]';
 
@@ -38,12 +38,25 @@ const labelGap = (max) => `[^\\d.;!?\\n]{0,${max}}?(?:[ \\t]*\\r?\\n[ \\t]*)?`;
 // character, and such a value has no distinctive prefix.
 //   NOT included: code (a gate, access, door or lockbox code is kept data), "keypad", "monkey" (a part
 //   must be the whole word), "author".
-//   Counter rule: an identifier whose LAST part is a counter word (count, used, total, limit, max, min,
-//   size, length, num, number, ttl, seconds, ms, days, remaining, tokens ...) with a plain number of up to
-//   6 digits is a quantity, not a secret ("tokens_used=12", "max_tokens: 4096", "page_token_count: 3"). A
-//   non-numeric value under such a name is still removed.
-const COUNTER_PARTS = new Set(['count', 'counts', 'used', 'total', 'limit', 'max', 'min', 'size', 'length', 'len', 'num', 'number', 'ttl',
-  'seconds', 'secs', 'ms', 'days', 'hours', 'remaining', 'left', 'age', 'index', 'tokens']);
+//   Counter rule: an identifier whose LAST part is a counter word with a plain number of up to 6 digits
+//   is a quantity, not a secret ("tokens_used=12", "max_tokens: 4096", "page_token_count: 3",
+//   "password_attempts: 3"). A non-numeric value under such a name is still removed. A NAME counter word
+//   (number, num, index) may also label the credential itself ("PASSWORD_NUMBER=123456", "OTP_NUMBER=123456",
+//   "PORTAL_PIN_NUMBER=4821"), so it is a counter only when the name parts BEFORE it hold no credential word.
+const QUANTITY_PARTS = new Set(['count', 'counts', 'used', 'total', 'limit', 'max', 'min', 'size', 'length', 'len', 'ttl',
+  'seconds', 'secs', 'ms', 'days', 'hours', 'remaining', 'left', 'age', 'tokens', 'attempts', 'tries', 'failures']);
+const NAME_COUNTER_PARTS = new Set(['number', 'num', 'index']);
+// Credential words beyond the shared classifier that make a "number" a credential number.
+const NUMBER_CREDENTIAL_WORDS = new Set(['pin', 'passcode', 'otp', 'code', 'token', 'key', 'secret', 'cvv', 'cvc', 'csc', 'cid', 'ssn',
+  'card', 'pan', 'password', 'passwd', 'pwd', 'passphrase', 'account', 'routing', 'auth', 'login']);
+function isCounterName(identifier) {
+  const parts = nameWords(identifier);
+  const last = parts[parts.length - 1];
+  if (QUANTITY_PARTS.has(last)) return true;
+  if (!NAME_COUNTER_PARTS.has(last)) return false;
+  const before = parts.slice(0, -1);
+  return !before.some((word) => NUMBER_CREDENTIAL_WORDS.has(word)) && !isCredentialName(before.join(' '));
+}
 
 // Plain English words that are also credential names ("Session: weekly service", "a cookie: chocolate chip"):
 // as a bare word (no "_", "." or "-") the name counts only when its value is secret-shaped, one token with a
@@ -85,8 +98,32 @@ function keepAssignment({ identifier, value, pinName, input, offset, valueEnd })
   if (!value || value.startsWith('[removed') || proseOnly(value)) return true;
   if (pinName && accessPinName(identifier, input, offset, valueEnd)) return true;
   if (proseName(identifier, value)) return true;
-  const last = identifier.toLowerCase().split(/[_.-]/).pop();
-  return COUNTER_PARTS.has(last) && /^\d{1,6}$/.test(value);
+  return isCounterName(identifier) && /^\d{1,6}$/.test(value);
+}
+
+// A YAML block scalar ("DB_PASSWORD: |", "api_key: |-", ">", ">-", "|+", with an optional indent digit and
+// comment): the value is the following lines that are blank or indented deeper than the key.
+const BLOCK_INDICATOR_RE = /[|>][+-]?\d?[+-]?[ \t]*(?:#[^\n]*)?(?:\r?\n|$)/y;
+const LINE_RE = /[^\n]*(?:\n|$)/y;
+// The end offset of the block that starts at `from` (just after the indicator line), or -1 when it holds no text.
+function blockEnd(input, keyIndent, from) {
+  let cursor = from;
+  let end = -1;
+  while (cursor < input.length) {
+    LINE_RE.lastIndex = cursor;
+    const line = LINE_RE.exec(input)[0];
+    const content = line.replace(/\r?\n$/, '');
+    if (content.trim()) {
+      if (content.match(/^[ \t]*/)[0].length <= keyIndent) break;
+      end = cursor + content.length;
+    }
+    cursor += line.length;
+  }
+  return end;
+}
+function lineIndent(input, offset) {
+  const lineStart = input.lastIndexOf('\n', offset - 1) + 1;
+  return input.slice(lineStart).match(/^[ \t]*/)[0].length;
 }
 
 function scrubIdentifierAssignments(input) {
@@ -100,6 +137,17 @@ function scrubIdentifierAssignments(input) {
     const valueStart = match.index + match[0].length;
     const pinName = isPinName(identifier);
     if (!pinName && !hasCredentialPart(identifier)) continue;
+    BLOCK_INDICATOR_RE.lastIndex = valueStart;
+    const indicator = BLOCK_INDICATOR_RE.exec(input);
+    if (indicator) {
+      const end = blockEnd(input, lineIndent(input, match.index), valueStart + indicator[0].length);
+      if (end < 0) continue;
+      out += `${input.slice(cursor, valueStart)}${REMOVED}`;
+      cursor = end;
+      removed += 1;
+      IDENT_SEP_RE.lastIndex = cursor;
+      continue;
+    }
     VALUE_RE.lastIndex = valueStart;
     const found = VALUE_RE.exec(input);
     if (!found) continue;
@@ -155,19 +203,39 @@ const SECRET_PATTERNS = Object.freeze([
   { name: 'credential_identifier_assignment', scrub: scrubIdentifierAssignments },
 ]);
 
-// Words that name a credential. "access key" is a credential; "access code" is
-// a gate/door code and is not in this list.
-const LABEL_WORDS = '(?:password|passcode|passphrase|passwd|pwd|pin|secret|token|api[ _-]?key|access[ _-]?key|login[ _-]?code|verification[ _-]?code|otp)';
-// label, separator (":" / "=" / " is "), then the WHOLE value clause: to the
-// closing quote when quoted, otherwise to the end of the sentence or line (a
-// passphrase is several words: "token: alpha beta gamma"), at most 120
-// characters. A "." inside a value ("abc.def") does not end it; a "." followed
-// by a space or the end does.
+// LABELS in prose ("Wifi password: x", "Private key: x", "PIN is 4821"). ONE vocabulary: a label of 1 to 3
+// words is a credential label when the shared classifier (credential-fields.js isCredentialName, minus the
+// ordinary-prose words) calls it a credential name: password, passcode, secret, token, otp, "api key",
+// "private key", "secret key", "encryption key", "verification code", session, cookie ... Two spellings the
+// classifier does not cover stay listed here: "pin" (exempt there because a gate PIN is kept data, so it has
+// its own gate-code rule) and "login code". "access code" is a gate/door code and is in neither.
+// The credential name must END the label ("Wifi password", "Private key"); "Password hint" and "Private key
+// pairs" are not credentials.
+const PIN_LABEL_RE = /\b(?:pin|passcode)$/i;
+const LOGIN_CODE_RE = /\blogin[ _-]?code$/i;
+const endsWithCredentialName = (label) => {
+  const words = nameWords(label);
+  // the last word alone ("wifi password"), or the last two words as a listed pair ("private key", "secret key")
+  return isCredentialName(words.slice(-1).join(' '), FREE_TEXT_EXEMPT_WORDS) || (words.length > 1 && isCredentialPair(words[words.length - 2], words[words.length - 1]));
+};
+const labelIsCredential = (label) => PIN_LABEL_RE.test(label) || LOGIN_CODE_RE.test(label) || endsWithCredentialName(label);
+// Plain English words that are also credential names: alone in a label they count only when the value is
+// secret-shaped ("Session: weekly service" stays, "Session: a1b2c3" goes). A label with any other
+// credential word ("session token", "wifi password") is a credential label whatever follows.
+const PROSE_LABEL_WORDS = new Set(['session', 'sessions', 'cookie', 'cookies', 'credential', 'credentials', 'auth', 'tokens', 'secrets']);
+const isProseLabel = (label) => !PIN_LABEL_RE.test(label) && !LOGIN_CODE_RE.test(label)
+  && !isCredentialName(nameWords(label).filter((word) => !PROSE_LABEL_WORDS.has(word)).join(' '), FREE_TEXT_EXEMPT_WORDS);
+const secretShaped = (value) => !/\s/.test(value) && (/[\d%=+/\\_-]/.test(value) || value.length >= 16);
+// label (1 to 3 words), then the separator (":" / "=" / " is "). The value clause that follows runs to
+// the closing quote when quoted, otherwise to the end of the sentence or line (a passphrase is several
+// words: "token: alpha beta gamma"), at most 120 characters. A "." inside a value ("abc.def") does not
+// end it; a "." followed by a space or the end does.
 // After ':' or '=' ONE line break (with spaces or tabs around it) may come before the value
 // ("Password:\nhunter2"); after " is " it may not.
 // A line that runs on for more than 120 characters with no sentence end still
 // loses the value: the first 120 characters after the label are removed.
-const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b(${AFTER_SEPARATOR}|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()((?:[^\\n]{1,120}?(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))|[^\\n]{120}))`, 'gi');
+const LABEL_RE = new RegExp(`\\b([A-Za-z][A-Za-z0-9]*(?:[ \\t]+[A-Za-z][A-Za-z0-9]*){0,2})(${AFTER_SEPARATOR}|[ \\t]+is[ \\t]+)`, 'g');
+const LABEL_VALUE_RE = /(?:(["'`])([^"'`\n]{1,120})\1|()((?:[^\n]{1,120}?(?=[.;!?,]?[ \t]*(?:\n|$)|[.;!?][ \t]))|[^\n]{120}))/y;
 // "gate PIN: 1234", "lockbox pin 1234": a PIN or passcode that opens a gate,
 // door or lockbox is the same kept data as a gate code.
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
@@ -182,27 +250,33 @@ const ACCESS_WORD_RE = /\b(?:gate|gates|door|doors|lockbox|lock\s?box|garage|key
 // another sentence and is still removed. A clause that names an account
 // (portal, bank, app, login, wifi, ...) is never an access code.
 const ACCOUNT_WORD_RE = /\b(?:portal|bank|banking|app|account|login|log-in|online|website|wifi|wi-fi|email|card|debit|credit|atm|voicemail|phone|zoom|meeting|conference|call-in|dial-in|webinar|teams)\b/i;
-// The clause around `offset`: from the nearest "\n", ". ", ";", "! " or "? " before it to the
-// nearest "\n", ";" or sentence end after it.
+// A clause is short, so every clause lookup reads a window of CLAUSE_WINDOW characters on each side of the
+// match, never the whole text: the work for one match does not grow with the length of the note.
+const CLAUSE_WINDOW = 300;
+// Where the clause that holds `offset` starts: after the nearest "\n", ". ", ";", "! " or "? " before it
+// (or at the window edge).
+function clauseStart(text, offset) {
+  const from = Math.max(0, offset - CLAUSE_WINDOW);
+  const before = text.slice(from, offset);
+  const found = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? '));
+  return found === -1 ? from : from + found + 1;
+}
+// The clause around `offset`: from clauseStart to the nearest "\n", ";" or sentence end after it.
 function clauseAt(text, offset) {
-  const start = clauseStart(text, offset);
-  const rest = text.slice(offset);
+  const rest = text.slice(offset, offset + CLAUSE_WINDOW);
   const end = rest.search(/\n|;|[.!?](?:\s|$)/);
-  return text.slice(start, end === -1 ? text.length : offset + end);
+  return text.slice(clauseStart(text, offset), end === -1 ? Math.min(text.length, offset + CLAUSE_WINDOW) : offset + end);
 }
 // The credential phrase around a PIN: from the clause start to the end of the PIN's value, plus up to 4 more
 // plain words (no comma, no sentence end). "PIN: 4821 for the gate, call customer phone before arrival" has the
 // phrase "PIN: 4821 for the gate"; "phone" is another instruction in the clause.
-function clauseStart(text, offset) {
-  const before = text.slice(0, offset);
-  return Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
-}
 function credentialPhrase(text, offset, valueEnd) {
   const head = text.slice(clauseStart(text, offset), valueEnd);
+  const after = text.slice(valueEnd, valueEnd + CLAUSE_WINDOW);
   // A value that ends its sentence ("Door passcode: 7788.") takes no words
   // from the next sentence.
-  if (/[.!?;][ \t]*$/.test(head) || /^[.!?;]/.test(text.slice(valueEnd))) return head;
-  const tail = text.slice(valueEnd).match(/^(?:[ \t]+[^\s,;.!?]+){0,4}/)[0];
+  if (/[.!?;][ \t]*$/.test(head) || /^[.!?;]/.test(after)) return head;
+  const tail = after.match(/^(?:[ \t]+[^\s,;.!?]+){0,4}/)[0];
   return head + tail;
 }
 function accessCodeLine(text, offset, valueEnd) {
@@ -247,17 +321,61 @@ function proseOnly(clause) {
   return AMBIGUOUS_FIRST.has(words[0].replace(/[^a-z/]/g, '')) ? words.every(statusWord) : true;
 }
 
-function labelledReplacement(match, label, separator, quote, quoted, _empty, bare, offset, text) {
+// A PIN or passcode label that opens a gate, door or lockbox: kept data.
+function keptAccessPin(label, separator, value, offset, text) {
+  if (!/\b(?:pin|passcode)\s*$/i.test(label)) return false;
+  if (KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length))) return true;
+  return accessCodeLine(text, offset, offset + label.length + separator.length + (value.match(/^\S+/) || [''])[0].length);
+}
+
+// The replacement text for a credential label's value, or null when the value stays.
+function labelledReplacement(label, separator, quote, quoted, bare, offset, text) {
   const value = (quote ? quoted : bare || '').trim();
   // An earlier pattern may already have removed the first word; a value that
   // is ONLY the removed marker is done, anything after it is still the value.
-  if (!value || /^\[removed[^\]]*\]$/.test(value) || proseOnly(value)) return match;
-  if (/^pin|passcode/i.test(label) && (KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length)) || accessCodeLine(text, offset, offset + label.length + separator.length + (value.match(/^\S+/) || [''])[0].length))) return match;
+  if (!value || /^\[removed[^\]]*\]$/.test(value) || proseOnly(value)) return null;
+  if (isProseLabel(label) && !secretShaped(value)) return null;
+  // "tokens: 40" is a quantity, as it is in an assignment.
+  if (isCounterName(label) && /^\d{1,6}$/.test(value)) return null;
+  if (keptAccessPin(label, separator, value, offset, text)) return null;
   const viaIs = /\bis[ \t]*$/i.test(separator);
   // After " is " one short plain word ("pin is blue") reads as prose; anything
   // longer, several words, or a digit or symbol is taken as the value.
-  if (viaIs && !quote && !/\s/.test(value) && !/[\d!@#$%^&*_+=~/\\|-]/.test(value) && value.length < 6) return match;
-  return `${label}${separator}${quote || ''}${REMOVED}${quote || ''}`;
+  if (viaIs && !quote && !/\s/.test(value) && !/[\d!@#$%^&*_+=~/\\|-]/.test(value) && value.length < 6) return null;
+  return `${quote || ''}${REMOVED}${quote || ''}`;
+}
+
+// Walks the credential labels of `source`. A kept value (an access PIN, prose, a short word) keeps only its
+// first word: scanning resumes right after it, so "PIN is 4821 for the gate, password is hunter2" still
+// loses the password. A label that is not a credential does not swallow what follows it.
+function scrubLabelled(source) {
+  let out = '';
+  let cursor = 0;
+  let removed = 0;
+  LABEL_RE.lastIndex = 0;
+  let match;
+  while ((match = LABEL_RE.exec(source)) !== null) {
+    const [whole, label, separator] = match;
+    const valueStart = match.index + whole.length;
+    LABEL_RE.lastIndex = valueStart;
+    if (!labelIsCredential(label)) continue;
+    LABEL_VALUE_RE.lastIndex = valueStart;
+    const found = LABEL_VALUE_RE.exec(source);
+    if (!found) continue;
+    const replacement = labelledReplacement(label, separator, found[1], found[2], found[4], match.index, source);
+    if (replacement !== null) {
+      out += source.slice(cursor, valueStart) + replacement;
+      cursor = valueStart + found[0].length;
+      // A clause whose first word an earlier pattern already removed was counted there.
+      if (!found[0].includes(REMOVED)) removed += 1;
+      LABEL_RE.lastIndex = cursor;
+    } else if (found[1]) {
+      LABEL_RE.lastIndex = valueStart + found[0].length;
+    } else {
+      LABEL_RE.lastIndex = valueStart + (found[0].match(/^\s*\S+/)?.[0].length || found[0].length);
+    }
+  }
+  return { text: out + source.slice(cursor), removed };
 }
 
 // Returns { text, removed } where removed counts the secrets taken out.
@@ -274,22 +392,8 @@ function scrubSecretText(input) {
       text = text.replace(re, (...args) => { removed += 1; return `${keep ? args[keep] : ''}${REMOVED}`; });
     }
   }
-  const scrubLabelled = (source) => source.replace(LABELLED_RE, (...args) => {
-    const replaced = labelledReplacement(...args);
-    // A clause whose first word an earlier pattern already removed was counted there.
-    if (replaced !== args[0] && !args[0].includes(REMOVED)) removed += 1;
-    if (replaced !== args[0]) return replaced;
-    // A kept value (an access PIN, prose, a short word) keeps only its first
-    // word: the rest of the clause is scanned again, so "PIN is 4821 for the
-    // gate, password is hunter2" still loses the password.
-    const [match, label, separator, quote, quoted] = args;
-    if (quote) return `${label}${separator}${quote}${quoted}${quote}${scrubLabelled(match.slice(label.length + separator.length + quoted.length + 2))}`;
-    const value = match.slice(label.length + separator.length);
-    const firstWord = value.match(/^\s*\S+/)?.[0] || value;
-    return `${label}${separator}${firstWord}${scrubLabelled(value.slice(firstWord.length))}`;
-  });
-  text = scrubLabelled(text);
-  return { text, removed };
+  const labelled = scrubLabelled(text);
+  return { text: labelled.text, removed: removed + labelled.removed };
 }
 
 module.exports = { SECRET_PATTERNS, REMOVED, scrubSecretText, clauseAt, ACCESS_WORD_RE, AFTER_SEPARATOR, labelGap };
