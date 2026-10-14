@@ -4327,13 +4327,40 @@ const shutdownStampSql = (conn) => conn.raw(
 // is the model's choice between two labels for the same message, so the
 // caller's own words are a second basis: a not-spam voicemail message whose
 // transcript asks for the call back. Spam stays out on the verdict, as before.
-const VOICEMAIL_CALLBACK_WORDS = /\b(?:call|ring|phone)\s+(?:me|us|him|her)\s+back\b|\bcall\s+(?:me|us)\b|\bcall\s+back\b|\breturn(?:ing)?\s+(?:my|this|our|the)\s+call\b|\bgive\s+(?:me|us)\s+a\s+(?:call|ring)\b|\bget\s+back\s+(?:to|with)\s+(?:me|us)\b/i;
+// English and Spanish (the Spanish menu has its own voicemail branch).
+const VOICEMAIL_CALLBACK_WORDS = new RegExp([
+  String.raw`\b(?:call|ring|phone)\s+(?:me|us|him|her)\s+back\b`,
+  String.raw`\bcall\s+(?:me|us)\b`,
+  String.raw`\bcall\s+back\b`,
+  String.raw`\breturn(?:ing)?\s+(?:my|this|our|the)\s+call\b`,
+  String.raw`\bgive\s+(?:me|us)\s+a\s+(?:call|ring)\b`,
+  String.raw`\bget\s+back\s+(?:to|with)\s+(?:me|us)\b`,
+  String.raw`\bll[aá]m[ae](?:me|nme|nos|nnos)\b`,
+  String.raw`\bdevu[eé]lv[ae]n?(?:me|nos)\s+la\s+llamada\b`,
+  String.raw`\b(?:me|nos)\s+(?:puede[ns]?|podr[ií]an?)\s+(?:llamar|devolver\s+la\s+llamada)\b`,
+  String.raw`\b(?:regres|devolv)[a-zé]*\s+(?:la|mi|esta)\s+llamada\b`,
+].join('|'), 'i');
+// A refusal just before the match: "no need to call me back", "please don't
+// call me", "no me llame". The caller asked for the opposite.
+const VOICEMAIL_CALLBACK_NEGATED_BEFORE = /(?:\b(?:do\s+not|don'?t|don’t|never|no\s+need\s+to|not\s+(?:need|have)\s+to|need\s+not|won'?t\s+need\s+to|stop|rather\s+you\s+(?:not|didn'?t))|\bno(?:\s+(?:me|nos))?|\bno\s+(?:hace\s+falta|es\s+necesario|necesita[ns]?)(?:\s+que)?(?:\s+(?:me|nos))?)\s*(?:please\s+|por\s+favor\s+|to\s+|ever\s+)*$/i;
+// Only the caller's own turns count: a transferred call that fell to voicemail
+// carries the relay dialogue ahead of the message, agent turns included.
+function voicemailAsksForCallback(transcript) {
+  const text = callerOnlyText(String(transcript || ''));
+  const scan = new RegExp(VOICEMAIL_CALLBACK_WORDS.source, 'gi');
+  let m;
+  while ((m = scan.exec(text))) {
+    if (!VOICEMAIL_CALLBACK_NEGATED_BEFORE.test(text.slice(Math.max(0, m.index - 40), m.index))) return true;
+    if (scan.lastIndex === m.index) scan.lastIndex++;
+  }
+  return false;
+}
 function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled(), transcript = '' } = {}) {
   if (!v2Primary) return false;
   const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
   if (v2?.spam_verdict?.spam_kind !== 'not_spam') return false;
   if (v2.recommended_disposition === 'callback_task_created') return true;
-  return v2.call_nature === 'voicemail_message' && VOICEMAIL_CALLBACK_WORDS.test(String(transcript || ''));
+  return v2.call_nature === 'voicemail_message' && voicemailAsksForCallback(transcript);
 }
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or

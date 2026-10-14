@@ -114,6 +114,22 @@ describe('voicemailCallbackAlertPlan', () => {
     expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'existing_customer_service' }), words)).toBe(false);
     expect(voicemailCallbackAsked(v2({ ...filed, spam_verdict: { spam_kind: 'solicitation' } }), { ...primary, transcript: 'Please return this call at your earliest convenience.' })).toBe(false);
     expect(voicemailCallbackAsked(v2(filed, 'invalid'), words)).toBe(false);
+    const heard = (transcript) => voicemailCallbackAsked(v2(filed), { ...primary, transcript });
+    // A refusal is the opposite ask.
+    expect(heard('Caller: Do not call me back, I found someone.')).toBe(false);
+    expect(heard("Caller: Please don't call me.")).toBe(false);
+    expect(heard('Caller: There is no need to call us back.')).toBe(false);
+    expect(heard('Caller: No me llame, gracias.')).toBe(false);
+    expect(heard("Caller: Don't worry about the gate. Call me back after five.")).toBe(true);
+    // Spanish voicemail branch.
+    expect(heard('Caller: Por favor llámeme al nueve cuatro uno.')).toBe(true);
+    expect(heard('Caller: Devuélvame la llamada cuando pueda.')).toBe(true);
+    expect(heard('Caller: Me pueden llamar mañana.')).toBe(true);
+    // Only the caller's turns: relay dialogue ahead of the message carries agent turns.
+    expect(heard('Agent: If you need anything else, give us a call.\nCaller: Okay, goodbye.')).toBe(false);
+    expect(heard('Agent: Leave a message.\nCaller: Please call me back.')).toBe(true);
+    // No labels at all: the whole message is the caller.
+    expect(heard('Hi, this is Sam, call me back please.')).toBe(true);
     expect(voicemailCallbackAsked(v2(filed), { v2Primary: false, transcript: words.transcript })).toBe(false);
     // Shadow mode (V2 on, routing off): the verdict is evaluation data and rings nothing.
     expect(voicemailCallbackAsked(v2(asked), { v2Primary: false })).toBe(false);
