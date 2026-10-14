@@ -1,6 +1,7 @@
 // Shared delivery lifecycle for inbound SMS alerts and durable recovery.
 const db = require('../models/db');
 const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
 
 // Reserve briefly; confirm four hours only after a durable delivery receipt.
 const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
@@ -90,10 +91,11 @@ const isOlderMessage = (ms, sid, base) => {
 };
 // A lead's CALL / TEXT choice (GATE_LEAD_CALL_TEXT_PREFERENCE) stays on the
 // standing row while it is unread, so a later text cannot drop the label the
-// owner sorts his callbacks by. A read or done row starts over.
-const threadRefresh = (MessageSid, receivedAtMs, leadPreference = null) => (existing, base) => {
+// owner sorts his callbacks by. A read or done row starts over. Read at
+// refresh time: with the gate off a standing row stops carrying the choice.
+const threadRefresh = (MessageSid, receivedAtMs, leadPreference) => (existing, base) => {
   const count = Math.max(1, Math.floor(Number(base.textCount)) || 1);
-  const keepPreference = (pref) => (pref ? { leadPreference: pref } : {});
+  const keepPreference = (pref) => (pref && isEnabled('leadCallTextPreference') ? { leadPreference: pref } : {});
   if (base.twilioSid === MessageSid) return { payload: { textCount: count, ...keepPreference(base.leadPreference) } };
   if (existing.read_at || existing.done_at) return { payload: { textCount: 1 } };
   // An OLDER text arriving late never overrides the newer text's choice.
@@ -132,8 +134,8 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
     threadId: customer?.id || null,
     twilioSid: MessageSid,
     ...(customer ? { textCount: 1, receivedAtMs: arrivedAtMs } : {}),
-    ...(leadPreference ? { leadPreference } : {}),
-  }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs, leadPreference || null) } : {}) });
+    leadPreference,
+  }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs, leadPreference) } : {}) });
   let receiptWritten = false;
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
     stats.deliveredAt = existingBell?.created_at || new Date();

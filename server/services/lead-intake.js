@@ -14,8 +14,7 @@
  * knows a quote is waiting to be priced. Estimate creation is blocked
  * until an address is on file — the owner's hard requirement.
  *
- *   handleIntakeReply(customer, body) -> { handled: boolean, next?: string,
- *                                          callTextPreference?: 'call' | 'text' }
+ *   handleIntakeReply(customer, body) -> { handled: boolean, next?: string }
  *
  * Returns handled=false when the reply can't be routed (unknown intent,
  * empty body). The webhook caller should fall through to the normal
@@ -278,7 +277,7 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
 // unambiguous replies match, so "call me after 5" or "ants in kitchen" stay
 // ordinary inbound text. Returns 'call' | 'text' | null.
 const CALL_REPLIES = new Set(['call', 'call me', 'please call', 'call please']);
-const TEXT_REPLIES = new Set(['text', 'text me', 'text please', 'texting', 'txt']);
+const TEXT_REPLIES = new Set(['text', 'text me', 'please text', 'text please', 'texting', 'txt']);
 
 function parseCallTextReply(body) {
   if (typeof body !== 'string') return null;
@@ -286,61 +285,70 @@ function parseCallTextReply(body) {
     .toLowerCase()
     .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
     .replace(/\s+/g, ' ');
-  if (!cleaned || cleaned.length > 20) return null;
   if (CALL_REPLIES.has(cleaned)) return 'call';
   if (TEXT_REPLIES.has(cleaned)) return 'text';
   return null;
 }
 
-// Gate on (GATE_LEAD_CALL_TEXT_PREFERENCE): save the choice on the customer's
-// property_preferences row and note it on their newest lead. Sends nothing and
-// never touches lead_intake_status. Fail-soft: the caller still owes the text
-// its normal inbox/bell handling, so a save error is logged by customer id only.
-async function recordCallTextPreference(customer, preference) {
+// GATE_LEAD_CALL_TEXT_PREFERENCE. Called by the SMS webhook for a lead in
+// intake whose reply the intake machine did NOT consume. A bare CALL / TEXT
+// reply is saved on property_preferences.contact_preference and noted on the
+// customer's newest lead; the choice is returned so the admin bell can name it
+// (undefined = gate off or not a CALL / TEXT reply). Sends nothing and never
+// touches lead_intake_status. Fail-soft: the text still gets its normal inbox
+// and bell handling, so errors are logged by customer id only.
+// Two replies can be processed at once: the write is serialized per customer
+// and skipped when a newer reply's choice is already recorded, so an older
+// CALL never overwrites a newer TEXT. The ordering key is the source SMS time,
+// kept in the lead note's metadata.
+async function recordCallTextReply(customer, body, { triggerSmsLogId } = {}) {
+  if (!isEnabled('leadCallTextPreference')) return undefined;
+  const preference = parseCallTextReply(body);
+  if (!preference) return undefined;
   try {
-    await db('property_preferences')
-      .insert({ customer_id: customer.id, contact_preference: preference })
-      .onConflict('customer_id')
-      .merge({ contact_preference: preference, updated_at: new Date() });
-  } catch (e) {
-    logger.error(`[lead-intake] call/text preference save failed for customer ${customer.id}: ${e.message}`);
-  }
-  try {
-    const lead = await db('leads')
-      .where({ customer_id: customer.id })
-      .whereNull('deleted_at')
-      .orderBy('created_at', 'desc')
-      .first('id');
-    if (lead) {
-      await db('lead_activities').insert({
+    const row = triggerSmsLogId
+      ? await db('sms_log').where({ id: triggerSmsLogId }).first('created_at')
+      : null;
+    const sourceAt = (row?.created_at ? new Date(row.created_at) : new Date()).toISOString();
+    await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lead-call-text:${customer.id}`]);
+      const newer = await trx('lead_activities as a')
+        .join('leads as l', 'l.id', 'a.lead_id')
+        .where('l.customer_id', customer.id)
+        .where('a.activity_type', 'contact_preference')
+        .whereRaw("a.metadata->>'source_at' > ?", [sourceAt])
+        .first('a.id');
+      if (newer) return;
+      await trx('property_preferences')
+        .insert({ customer_id: customer.id, contact_preference: preference })
+        .onConflict('customer_id')
+        .merge({ contact_preference: preference, updated_at: new Date() });
+      const lead = await trx('leads')
+        .where({ customer_id: customer.id })
+        .whereNull('deleted_at')
+        .orderBy('created_at', 'desc')
+        .first('id');
+      if (!lead) return;
+      await trx('lead_activities').insert({
         lead_id: lead.id,
         activity_type: 'contact_preference',
         description: preference === 'call'
           ? 'Lead replied CALL: wants a phone call'
           : 'Lead replied TEXT: prefers text',
         performed_by: 'system',
-        metadata: JSON.stringify({ contact_preference: preference, source: 'sms_reply' }),
+        metadata: JSON.stringify({ contact_preference: preference, source: 'sms_reply', source_at: sourceAt }),
       });
-    }
+    });
   } catch (e) {
-    logger.error(`[lead-intake] call/text preference note failed for customer ${customer.id}: ${e.message}`);
+    logger.error(`[lead-intake] call/text preference save failed for customer ${customer.id}: ${e.message}`);
   }
+  return preference;
 }
 
 async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
   if (!customer || !body || typeof body !== 'string') return { handled: false };
   const status = customer.lead_intake_status;
   if (!status || status === 'estimate_drafted') return { handled: false };
-
-  // Bare CALL / TEXT reply: record the choice, consume nothing. The text
-  // still gets the normal inbox + bell handling (the bell names the choice).
-  if (isEnabled('leadCallTextPreference')) {
-    const preference = parseCallTextReply(body);
-    if (preference) {
-      await recordCallTextPreference(customer, preference);
-      return { handled: false, callTextPreference: preference };
-    }
-  }
 
   // ── State: awaiting_service ────────────────────────────────────────
   if (status === 'awaiting_service') {
@@ -568,4 +576,4 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
   return { handled: false };
 }
 
-module.exports = { handleIntakeReply, parseCallTextReply };
+module.exports = { handleIntakeReply, recordCallTextReply, parseCallTextReply };

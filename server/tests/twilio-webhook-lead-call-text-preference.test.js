@@ -88,7 +88,11 @@ jest.mock('../services/photo-assessment-create', () => ({
 
 
 const mockIntake = jest.fn();
-jest.mock('../services/lead-intake', () => ({ handleIntakeReply: (...args) => mockIntake(...args) }));
+const mockRecord = jest.fn();
+jest.mock('../services/lead-intake', () => ({
+  handleIntakeReply: (...args) => mockIntake(...args),
+  recordCallTextReply: (...args) => mockRecord(...args),
+}));
 
 const { EventEmitter } = require('node:events');
 const numbers = require('../config/twilio-numbers');
@@ -123,27 +127,40 @@ beforeEach(() => {
 });
 afterAll(() => { process.env = savedEnv; });
 
-test.each(['call', 'text'])('intake reports a %s choice: the bell is told, nothing is sent, the ack is empty', async (choice) => {
-  mockIntake.mockResolvedValue({ handled: false, callTextPreference: choice });
+test.each(['call', 'text'])('a %s choice from recordCallTextReply: the bell is told, nothing is sent, the ack is empty', async (choice) => {
+  mockIntake.mockResolvedValue({ handled: false });
+  mockRecord.mockResolvedValue(choice);
   const res = await receive(choice);
   expect(res.body).toBe('<Response></Response>');
   expect(mockIntake).toHaveBeenCalledTimes(1);
+  expect(mockRecord).toHaveBeenCalledTimes(1);
+  expect(mockRecord.mock.calls[0][1]).toBe(choice);
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
   expect(ringSmsReplyBell.mock.calls[0][0]).toMatchObject({ customer: { id: CUSTOMER.id }, message: choice, leadPreference: choice });
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
-test('no choice from intake (gate off, or an ordinary reply): the bell call carries no leadPreference key', async () => {
+test('no choice (gate off, or an ordinary reply): the bell is told nothing', async () => {
   mockIntake.mockResolvedValue({ handled: false });
+  mockRecord.mockResolvedValue(undefined);
   await receive('ants in the kitchen');
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
-  expect(ringSmsReplyBell.mock.calls[0][0]).not.toHaveProperty('leadPreference');
+  expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
-test('an intake failure is swallowed and the bell still rings without a choice', async () => {
-  mockIntake.mockRejectedValue(new Error('intake down'));
+test('a reply the intake machine consumed is never recorded as a choice', async () => {
+  mockIntake.mockResolvedValue({ handled: true, next: 'estimate_drafted' });
+  const res = await receive('100 Sample St');
+  expect(res.body).toBe('<Response></Response>');
+  expect(mockRecord).not.toHaveBeenCalled();
+  expect(ringSmsReplyBell).not.toHaveBeenCalled();
+});
+
+test('a failure inside the preference step is swallowed and the bell still rings without a choice', async () => {
+  mockIntake.mockResolvedValue({ handled: false });
+  mockRecord.mockRejectedValue(new Error('prefs down'));
   await receive('call');
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
-  expect(ringSmsReplyBell.mock.calls[0][0]).not.toHaveProperty('leadPreference');
+  expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
 });

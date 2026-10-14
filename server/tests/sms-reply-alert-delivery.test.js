@@ -2,6 +2,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+let mockPrefGate = true;
+jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => name === 'leadCallTextPreference' && mockPrefGate }));
 const db = require('../models/db');
 const { triggerNotification } = require('../services/notification-triggers');
 const delivery = require('../services/sms-reply-alert-delivery');
@@ -11,6 +13,7 @@ const afterRead = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockPrefGate = true;
   row = { metadata: { sms_reply_eligible: true } };
   bell = null; receiptFailure = null; reads = []; mutations = []; priorReceipt = null; stampFailure = null; claimHeld = false;
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings,
@@ -244,7 +247,7 @@ describe('known-sender thread bell', () => {
 
   test('a lead preference rides in the bell payload only when given', async () => {
     await ring();
-    expect(lastCall()[1]).not.toHaveProperty('leadPreference');
+    expect(lastCall()[1].leadPreference).toBeUndefined();
     await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-9', message: 'Call', leadPreference: 'call' });
     const [key, payload, options] = lastCall();
     expect(key).toBe('sms_reply');
@@ -266,6 +269,16 @@ describe('known-sender thread bell', () => {
     expect(await decide(read)).toEqual({ payload: { textCount: 1 } });
     const plain = rowAt();
     expect((await decide(plain)).payload).not.toHaveProperty('leadPreference');
+  });
+
+  test('gate off: a standing row stops carrying the choice (nothing copied forward)', async () => {
+    mockPrefGate = false;
+    const open = rowAt({}, { leadPreference: 'call' });
+    expect((await decide(open)).payload).toEqual({ textCount: 3 });
+    // The row's own text being replayed drops it too.
+    await ring('SM-2');
+    const same = rowAt({}, { leadPreference: 'text', twilioSid: 'SM-2' });
+    expect((await lastCall()[2].refreshPayload(same, same.metadata.payload)).payload).not.toHaveProperty('leadPreference');
   });
 
   test('a late, older CALL never overrides the newer TEXT choice on the row', async () => {

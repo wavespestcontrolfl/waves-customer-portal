@@ -1140,8 +1140,9 @@ router.post('/sms', async (req, res) => {
     // hand. Only the quote-generating branch is skipped.
     let intakeScopeVetoed = false;
     // Set when a lead in intake answers with a bare CALL / TEXT and
-    // GATE_LEAD_CALL_TEXT_PREFERENCE is on; only names the choice on the bell.
-    let intakeCallTextPreference = null;
+    // GATE_LEAD_CALL_TEXT_PREFERENCE is on (recordCallTextReply); only names the
+    // choice on the bell.
+    let intakeCallTextPreference;
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
@@ -1151,7 +1152,6 @@ router.post('/sms', async (req, res) => {
         const LeadIntake = require('../services/lead-intake');
         const intakeResult = await LeadIntake.handleIntakeReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
         const outcome = intakeOutcome(intakeResult);
-        if (intakeResult?.callTextPreference) intakeCallTextPreference = intakeResult.callTextPreference;
         if (outcome === 'continue_without_quote') {
           logger.info(`[lead-intake] Scope-vetoed (no draft) for ${customer.first_name}: ${customer.lead_intake_status} — continuing to normal inbound handling`);
           intakeScopeVetoed = true;
@@ -1169,6 +1169,7 @@ router.post('/sms', async (req, res) => {
           await fireContactCorrection(smsLogEntry.id);
           return res.type('text/xml').send('<Response></Response>');
         }
+        intakeCallTextPreference = await LeadIntake.recordCallTextReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
@@ -1368,7 +1369,7 @@ router.post('/sms', async (req, res) => {
     let knownInboundNotified = rescheduleFlagged;
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
-        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, ...(intakeCallTextPreference ? { leadPreference: intakeCallTextPreference } : {}) });
+        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, leadPreference: intakeCallTextPreference });
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.
