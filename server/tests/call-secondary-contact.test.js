@@ -1065,6 +1065,12 @@ describe('withoutAnsweringStaffName', () => {
     expect(withoutAnsweringStaffName(list, answered(''))).toBe(list);
   });
 
+  test('a role label is not a name: nothing is filtered', () => {
+    const list = [spouse({ first_name: 'Office' }), spouse({ first_name: 'Waves' })];
+    expect(withoutAnsweringStaffName(list, answered('Office Manager'))).toBe(list);
+    expect(withoutAnsweringStaffName(list, answered('Waves'))).toBe(list);
+  });
+
   test('reads metadata stored as a JSON string', () => {
     const call = { direction: 'inbound', metadata: JSON.stringify({ forward_acceptance: { accepted: true, csr_name: 'Robin' } }) };
     expect(withoutAnsweringStaffName([spouse()], call)[0].first_name).toBeNull();
