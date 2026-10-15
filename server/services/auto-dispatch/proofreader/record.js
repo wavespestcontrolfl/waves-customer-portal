@@ -224,9 +224,11 @@ const TIME_WORDS_RE = new RegExp([
   // (r17); "every week" is read below.
   // Only with a word that makes it a limit ("TOMORROW ONLY", "NOT ON
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
-  '\\b(?:today|tonight|tomorrow|holidays?)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
+  '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
   // An article may stand before holidays ("AFTER THE HOLIDAYS"): r54.
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?holidays?)(?![\\w]))',
+  // ...after a validity word too ("EXPIRES TOMORROW"), and named holidays
+  // ("RETURN AFTER CHRISTMAS"): r55.
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
@@ -284,8 +286,9 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
-  // Not a color or a plant or bird ("MIDNIGHT BLUE", "MORNING GLORY"): r47, r52.
-  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose)\\b)',
+  // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
+  // GLORY", "AFTERNOON SUN"): r47, r52, r55.
+  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose|sun|shade|light|exposure)\\b)',
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
   // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
   // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
@@ -453,10 +456,16 @@ const PRIOR_MARK_RE = /\[redacted\]/gi;
 
 function hiddenTimeIn(text, raw, masked) {
   if (raw === masked) return false;
+  // The masked form can be far longer than the raw one (short words become
+  // "[redacted]"): one past the record's limit makes the record too long, so
+  // no model is asked and nothing is scanned; the budget is charged the
+  // longer of the two (security r55).
+  if (masked.length > MAX_RECORD_CHARS) return false;
+  const size = Math.max(raw.length, masked.length);
   const budget = scanBudget.getStore();
-  if (budget && raw.length > budget.left) return true;
-  if (budget) budget.left -= raw.length;
-  const prior = raw.includes(MARK);
+  if (budget && size > budget.left) return true;
+  if (budget) budget.left -= size;
+  const prior = /\[redacted\]/i.test(raw);
   const scanRaw = prior ? raw.replace(PRIOR_MARK_RE, '[prior]') : raw;
   const scanMasked = prior ? redactAccessCodes(scanRaw) : masked;
   const lines = prior ? keepLines(text).replace(PRIOR_MARK_RE, '[prior]') : keepLines(text);

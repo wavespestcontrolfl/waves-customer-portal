@@ -501,6 +501,9 @@ describe('the customer record', () => {
       'GATE CODE 4821, THIS COMING FRIDAY',
       'GATE CODE 4821, MONDAY APPOINTMENTS ONLY',
       'GATE CODE 4821, RETURN AFTER THE HOLIDAYS',
+      'GATE CODE 4821, RETURN AFTER CHRISTMAS',
+      'GATE CODE 4821 EXPIRES TOMORROW',
+      'GATE CODE 4821 STARTS TODAY',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
       'Gate code 4821, ON MONDAY',
@@ -566,6 +569,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, HOY HABL\u00c9 CON EL DUE\u00d1O',
       'GATE CODE 4821, TECH MAY ONLY USE SIDE GATE',
       'GATE CODE 4821, MORNING GLORY IN FLOWER BED',
+      'GATE CODE 4821, AFTERNOON SUN IN BACK YARD',
       'GATE CODE 4821, FIRST THING ON LEFT IS THE SHED',
       'Gate code 4821, ask MANAGER\nFriday works.',
       'Gate code 4821, ask MANAGER. Friday works.',
@@ -597,8 +601,11 @@ describe('the customer record', () => {
     });
 
     test('one record shares one scan budget: a text past what is left is not scanned and counts as not fully read', async () => {
-      const long = `Gate code 4821. ${'word '.repeat(70000)}`; // 350 KB raw, past the whole budget
-      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: long }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      // Two long credential runs: each masks to a few words, so the record is
+      // short, but their raw texts together pass the budget.
+      const long = `Gate code ${'A'.repeat(200000)}1 please call`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: long, crm_notes: long }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.tooLong).toBe(false);
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
       // The flag never reaches the returned entries.
       expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
@@ -631,6 +638,19 @@ describe('the customer record', () => {
     test('a [redacted] already in the stored text is not taken for the mask', async () => {
       const note = 'Gate code 4821. Prior caller [redacted] Monday appointment.';
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('an upper-case [REDACTED] already in the stored text is not taken for the mask', async () => {
+      const note = 'Gate code 4821 prior [REDACTED] Monday appointment completed';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a masked text past the record limit is not scanned (the record is too long, no model is asked)', async () => {
+      const note = `Gate code 4821 ${'AB '.repeat(100000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.tooLong).toBe(true);
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
     });
 
