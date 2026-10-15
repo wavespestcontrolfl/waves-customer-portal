@@ -297,7 +297,7 @@ const TIME_WORDS_RE = new RegExp([
   // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
@@ -453,6 +453,15 @@ const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]
 // the scan it is renamed first, so only the mask's own markers are judged
 // ("Prior caller [redacted] Monday": r47). The model reads the text as is.
 const PRIOR_MARK_RE = /\[redacted\]/gi;
+// The mask's other passes (a card number, an SSN, a CVV) hide no words
+// about when: for the scan they are renamed first too, so their markers are
+// not judged by the neighbor rule ("Card 4111..., MONDAY ONLY": r56).
+const NON_ACCESS_RES = [
+  [/\b(?:\d[ -]?){12,19}\b/g, '[card]'],
+  [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
+  [/\b(cvv|cvc|cvv2|security\s{1,3}code)(\W{0,3})\d{3,4}\b/gi, '$1$2[cvv]'],
+];
+const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
 
 function hiddenTimeIn(text, raw, masked) {
   if (raw === masked) return false;
@@ -465,10 +474,11 @@ function hiddenTimeIn(text, raw, masked) {
   const budget = scanBudget.getStore();
   if (budget && size > budget.left) return true;
   if (budget) budget.left -= size;
-  const prior = /\[redacted\]/i.test(raw);
-  const scanRaw = prior ? raw.replace(PRIOR_MARK_RE, '[prior]') : raw;
-  const scanMasked = prior ? redactAccessCodes(scanRaw) : masked;
-  const lines = prior ? keepLines(text).replace(PRIOR_MARK_RE, '[prior]') : keepLines(text);
+  const scanRaw = forScan(raw);
+  const renamed = scanRaw !== raw;
+  const scanMasked = renamed ? redactAccessCodes(scanRaw) : masked;
+  if (scanRaw === scanMasked) return false;
+  const lines = forScan(keepLines(text));
   return maskHidTime(scanRaw, scanMasked, lines.includes('\n') ? redactAccessCodes(lines) : null);
 }
 

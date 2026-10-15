@@ -504,6 +504,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, RETURN AFTER CHRISTMAS',
       'GATE CODE 4821 EXPIRES TOMORROW',
       'GATE CODE 4821 STARTS TODAY',
+      'GATE CODE 4821, ONLY WORKS MONDAY',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
       'Gate code 4821, ON MONDAY',
@@ -651,6 +652,13 @@ describe('the customer record', () => {
       const note = `Gate code 4821 ${'AB '.repeat(100000)}`;
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
       expect(record.tooLong).toBe(true);
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a card number masked beside a visible day is not taken for a hidden time', async () => {
+      const note = 'Card 4111111111111111, MONDAY ONLY';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('4111111111111111');
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
     });
 
