@@ -225,7 +225,8 @@ const TIME_WORDS_RE = new RegExp([
   // Only with a word that makes it a limit ("TOMORROW ONLY", "NOT ON
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
   '\\b(?:today|tonight|tomorrow|holidays?)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no)(?=\\s{1,5}(?:today|tonight|tomorrow|holidays?)(?![\\w]))',
+  // An article may stand before holidays ("AFTER THE HOLIDAYS"): r54.
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?holidays?)(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
