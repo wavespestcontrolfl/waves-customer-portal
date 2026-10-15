@@ -1,7 +1,6 @@
 // Shared delivery lifecycle for inbound SMS alerts and durable recovery.
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
 
 // Reserve briefly; confirm four hours only after a durable delivery receipt.
 const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
@@ -89,32 +88,12 @@ const isOlderMessage = (ms, sid, base) => {
   if (!Number.isFinite(other)) return false;
   return ms < other || (ms === other && String(sid) < String(base.twilioSid || ''));
 };
-// A lead's CALL / TEXT choice (GATE_LEAD_CALL_TEXT_PREFERENCE) stays on the
-// standing row while it is unread, so a later text cannot drop the label the
-// owner sorts his callbacks by. A read or done row starts over. Read at
-// refresh time: with the gate off a standing row stops carrying the choice.
-// Choices are ordered ONLY by their own token (leadPreferenceAtMs, taken by
-// the webhook before any await and shared with the saved choice), never by
-// the displayed text's time: an ordinary text that lands between a CALL and a
-// later-processed, newer TEXT must not pin the CALL. Explicit undefined clears
-// a key the payload merge would keep. When the incoming choice loses, the
-// push for it is withheld (state.lost), since it would carry the losing title.
-const threadRefresh = (MessageSid, receivedAtMs, { leadPreference, leadPreferenceAtMs } = {}, state = {}) => (existing, base) => {
+const threadRefresh = (MessageSid, receivedAtMs) => (existing, base) => {
   const count = Math.max(1, Math.floor(Number(base.textCount)) || 1);
-  const keep = (pref, atMs) => (pref && isEnabled('leadCallTextPreference')
-    ? { leadPreference: pref, leadPreferenceAtMs: atMs }
-    : { leadPreference: undefined, leadPreferenceAtMs: undefined });
-  if (base.twilioSid === MessageSid) return { payload: { textCount: count, ...keep(base.leadPreference, base.leadPreferenceAtMs) } };
+  if (base.twilioSid === MessageSid) return { payload: { textCount: count } };
   if (existing.read_at || existing.done_at) return { payload: { textCount: 1 } };
-  const incomingWins = leadPreference && !(base.leadPreference && base.leadPreferenceAtMs > leadPreferenceAtMs);
-  state.lost = Boolean(leadPreference) && !incomingWins;
-  const kept = incomingWins ? keep(leadPreference, leadPreferenceAtMs) : keep(base.leadPreference, base.leadPreferenceAtMs);
-  return { payload: { textCount: count + 1, ...kept }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
+  return { payload: { textCount: count + 1 }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
 };
-
-// The push waits on the thread still being unread AND on the incoming choice
-// not having lost its refresh (decided inside notifyAdmin's lock, before the push).
-const pushWanted = (stillUnread, state) => async () => (await stillUnread()) && !state.lost;
 
 // When the text reached us: the unified message row's own time, else now.
 async function receivedAtMs(MessageSid) {
@@ -127,7 +106,7 @@ async function receivedAtMs(MessageSid) {
   }
 }
 
-async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadChoice }) {
+async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadPreference }) {
   if (!customer && typeof afterRead !== 'function') throw new Error('Unknown SMS delivery requires read reconciliation');
   const { triggerNotification } = require('./notification-triggers');
   const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
@@ -137,7 +116,6 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
   // Keep identity outside the mutable payload: reads can retarget that payload.
   const dedupeKey = customer ? threadBellKey(customer.id) : `sms-reply:${MessageSid}`;
   const arrivedAtMs = customer ? await receivedAtMs(MessageSid) : null;
-  const refreshState = {};
   const existingBell = !customer && await db('notifications')
     .where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id', 'created_at');
   const stats = existingBell ? { bellWritten: true, push: null, deduped: true } : await triggerNotification('sms_reply', {
@@ -147,8 +125,9 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
     threadId: customer?.id || null,
     twilioSid: MessageSid,
     ...(customer ? { textCount: 1, receivedAtMs: arrivedAtMs } : {}),
-    ...leadChoice,
-  }, { beforePush: pushWanted(unifiedStillUnread, refreshState), dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs, leadChoice, refreshState) } : {}) });
+    // Only the text that carried a lead's bare CALL / TEXT; undefined is dropped.
+    leadPreference,
+  }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) } : {}) });
   let receiptWritten = false;
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
     stats.deliveredAt = existingBell?.created_at || new Date();

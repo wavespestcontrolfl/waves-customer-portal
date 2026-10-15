@@ -370,9 +370,9 @@ const TRIGGER_REGISTRY = {
       // row while it is still open, so a count leads the title ("3 texts from
       // Name") and the body is always the latest text.
       // A lead's bare CALL / TEXT reply (GATE_LEAD_CALL_TEXT_PREFERENCE) leads
-      // with the choice so the owner calls the CALL leads first.
-      // A later text keeps the choice (the row carries it while unread) and
-      // adds the count after the name.
+      // with the choice so the owner calls the CALL leads first. Only the text
+      // that carried it has it: the next text's payload replaces the row's, and
+      // an older late text never changes the title (the row keeps its content).
       title: (p.leadPreference === 'call' || p.leadPreference === 'text')
         ? `${p.leadPreference === 'call' ? 'Wants a call:' : 'Prefers text:'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}${Number(p.textCount) > 1 ? ` (${Math.floor(Number(p.textCount))} texts)` : ''}`
         : `${Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,

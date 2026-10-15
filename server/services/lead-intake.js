@@ -274,65 +274,43 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
 
 // GATE_LEAD_CALL_TEXT_PREFERENCE. Called by the SMS webhook for a lead in
 // intake whose reply the intake machine did NOT consume. A bare CALL / TEXT
-// reply is saved through the SMS profile writer (sms-operational-actions:
-// locked compare-and-set, newer-proposal guard, proposal retirement, critical
-// audit event) and noted on the customer's newest lead. Returns
-// { leadPreference, leadPreferenceAtMs } so the admin bell can name the choice;
-// undefined = gate off, not a CALL / TEXT reply, or a newer choice was already
-// recorded (the older reply must not label the bell). Sends nothing and never
-// touches lead_intake_status. Fail-soft: the text still gets its normal inbox
-// and bell handling, so errors are logged by customer id only.
-// Order of near-simultaneous replies is ONE token, receivedAtMs, taken by the
-// webhook before any await and used the same way by the bell. The write runs
-// under the writer's per-customer lock and is skipped when a reply with a later
-// token is already noted. The sms_log time below is only the clock the writer's
-// newer-pending-proposal guard compares against (proposals are stamped with it);
-// it never orders one choice against another.
-async function recordCallTextReply(customer, body, { triggerSmsLogId, receivedAtMs } = {}) {
+// reply is noted once on the customer's newest lead so the owner sees the
+// choice on the lead and on the admin bell for THAT text. Nothing else is
+// stored and nothing is sent; lead_intake_status is never changed.
+// The customer row is locked and its status re-read first: a service reply
+// processed at the same moment may have advanced intake to estimate_drafted, and
+// then the note would describe a lead that is no longer waiting. Returns
+// 'call' | 'text' only when the note was written, else undefined (gate off, not
+// a bare CALL / TEXT, intake over, no lead, or an error: no label when nothing
+// was saved). Errors are logged by customer id only.
+async function recordCallTextReply(customer, body, { triggerSmsLogId } = {}) {
   if (!isEnabled('leadCallTextPreference')) return undefined;
-  const preference = parseCallTextReply(body);
-  if (!preference) return undefined;
-  const choice = { leadPreference: preference, leadPreferenceAtMs: receivedAtMs ?? Date.now() };
+  const choice = parseCallTextReply(body);
+  if (!choice) return undefined;
   try {
-    const row = triggerSmsLogId
-      ? await db('sms_log').where({ id: triggerSmsLogId }).first('created_at', 'twilio_sid')
-      : null;
-    const messageAt = (row?.created_at ? new Date(row.created_at) : new Date()).toISOString();
-    const { lockPreferenceOwner, applyLeadContactPreference } = require('./sms-operational-actions');
     return await db.transaction(async (trx) => {
-      if (!(await lockPreferenceOwner(trx, customer.id))) return undefined;
-      const newer = await trx('lead_activities as a')
-        .join('leads as l', 'l.id', 'a.lead_id')
-        .where('l.customer_id', customer.id)
-        .where('a.activity_type', 'contact_preference')
-        .whereRaw("(a.metadata->>'received_at_ms')::double precision > ?", [choice.leadPreferenceAtMs])
-        .first('a.id');
-      if (newer) return undefined;
-      const applied = await applyLeadContactPreference(trx, {
-        customerId: customer.id, value: preference, messageAt, twilioSid: row?.twilio_sid || null, smsLogId: triggerSmsLogId || null,
-      });
-      if (applied !== 'applied') return undefined;
+      const locked = await trx('customers').where({ id: customer.id }).forUpdate().first('lead_intake_status');
+      if (!locked?.lead_intake_status || locked.lead_intake_status === 'estimate_drafted') return undefined;
       const lead = await trx('leads')
         .where({ customer_id: customer.id })
         .whereNull('deleted_at')
         .orderBy('created_at', 'desc')
         .first('id');
-      if (lead) {
-        await trx('lead_activities').insert({
-          lead_id: lead.id,
-          activity_type: 'contact_preference',
-          description: preference === 'call'
-            ? 'Lead replied CALL: wants a phone call'
-            : 'Lead replied TEXT: prefers text',
-          performed_by: 'system',
-          metadata: JSON.stringify({ contact_preference: preference, source: 'sms_reply', received_at_ms: choice.leadPreferenceAtMs }),
-        });
-      }
+      if (!lead) return undefined;
+      await trx('lead_activities').insert({
+        lead_id: lead.id,
+        activity_type: 'contact_preference',
+        description: choice === 'call'
+          ? 'Lead replied CALL: wants a phone call'
+          : 'Lead replied TEXT: prefers text',
+        performed_by: 'system',
+        metadata: JSON.stringify({ choice, source: 'sms_reply', smsLogId: triggerSmsLogId || null }),
+      });
       return choice;
     });
   } catch (e) {
-    logger.error(`[lead-intake] call/text preference save failed for customer ${customer.id}: ${e.message}`);
-    return choice;
+    logger.error(`[lead-intake] call/text note failed for customer ${customer.id}: ${e.message}`);
+    return undefined;
   }
 }
 

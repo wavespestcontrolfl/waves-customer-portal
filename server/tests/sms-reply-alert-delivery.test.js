@@ -2,8 +2,6 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-let mockPrefGate = true;
-jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => name === 'leadCallTextPreference' && mockPrefGate }));
 const db = require('../models/db');
 const { triggerNotification } = require('../services/notification-triggers');
 const delivery = require('../services/sms-reply-alert-delivery');
@@ -13,7 +11,6 @@ const afterRead = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockPrefGate = true;
   row = { metadata: { sms_reply_eligible: true } };
   bell = null; receiptFailure = null; reads = []; mutations = []; priorReceipt = null; stampFailure = null; claimHeld = false;
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings,
@@ -245,18 +242,14 @@ describe('known-sender thread bell', () => {
     expect(payload).toMatchObject({ threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 1, receivedAtMs: expect.any(Number) });
   });
 
-  const choice = (leadPreference, leadPreferenceAtMs) => ({ leadPreference, leadPreferenceAtMs });
-  const ringChoice = (MessageSid, c, message = 'Reply') => delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid, message, leadChoice: c });
-
-  test('a lead choice rides in the bell payload only when given', async () => {
+  test('a lead CALL / TEXT choice rides in the payload of THAT text only', async () => {
     await ring();
     expect(lastCall()[1].leadPreference).toBeUndefined();
-    expect(lastCall()[1].leadPreferenceAtMs).toBeUndefined();
-    await ringChoice('SM-9', choice('call', 1000), 'Call');
-    const [key, payload, options] = lastCall();
-    expect(key).toBe('sms_reply');
-    expect(payload).toMatchObject({ leadPreference: 'call', leadPreferenceAtMs: 1000, threadId: 'cust-1', twilioSid: 'SM-9' });
-    expect(options).toMatchObject({ dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
+    await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-9', message: 'Call', leadPreference: 'call' });
+    expect(lastCall()[1]).toMatchObject({ leadPreference: 'call', threadId: 'cust-1', twilioSid: 'SM-9' });
+    // The refresh never copies a choice forward: it returns only the count.
+    const row = { read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-1', textCount: 1, receivedAtMs: 0, leadPreference: 'text' } } };
+    expect((await lastCall()[2].refreshPayload(row, row.metadata.payload)).payload).toEqual({ textCount: 2 });
   });
 
   // refreshPayload runs inside notifyAdmin's keyed lock on the row as it stands.
@@ -265,56 +258,6 @@ describe('known-sender thread bell', () => {
     return lastCall()[2].refreshPayload(row, row.metadata.payload);
   };
   const rowAt = (over = {}, payload = {}) => ({ read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-2', textCount: 2, receivedAtMs: 0, ...payload } }, ...over });
-
-  test('an unread row keeps the lead\'s CALL / TEXT choice when a later text arrives; a read row drops it', async () => {
-    const open = rowAt({}, { leadPreference: 'call', leadPreferenceAtMs: 500 });
-    expect(await decide(open)).toMatchObject({ payload: { textCount: 3, leadPreference: 'call', leadPreferenceAtMs: 500 } });
-    const read = rowAt({ read_at: new Date() }, { leadPreference: 'call', leadPreferenceAtMs: 500 });
-    expect(await decide(read)).toEqual({ payload: { textCount: 1 } });
-    const plain = rowAt();
-    expect((await decide(plain)).payload.leadPreference).toBeUndefined();
-  });
-
-  test('gate off: a standing row stops carrying the choice (nothing copied forward)', async () => {
-    mockPrefGate = false;
-    const open = rowAt({}, { leadPreference: 'call', leadPreferenceAtMs: 500 });
-    expect((await decide(open)).payload).toEqual({ textCount: 3 });
-    // The row's own text being replayed drops it too.
-    await ring('SM-2');
-    const same = rowAt({}, { leadPreference: 'text', leadPreferenceAtMs: 500, twilioSid: 'SM-2' });
-    expect((await lastCall()[2].refreshPayload(same, same.metadata.payload)).payload.leadPreference).toBeUndefined();
-  });
-
-  // Choices are ordered by their own token only, never by the displayed text's time.
-  test('CALL (token 100), ordinary text, TEXT (token 300) processed CALL / ordinary / TEXT: the bell ends on TEXT', async () => {
-    // Row after the ordinary text: shows the ordinary text (newest content), still carries CALL.
-    const afterOrdinary = rowAt({}, { leadPreference: 'call', leadPreferenceAtMs: 100, receivedAtMs: Date.now() + 5000, twilioSid: 'SM-3' });
-    await ringChoice('SM-2', choice('text', 300), 'Text');
-    const r = await lastCall()[2].refreshPayload(afterOrdinary, afterOrdinary.metadata.payload);
-    // The TEXT's displayed text is older (content kept), its choice is newer (choice replaced).
-    expect(r).toMatchObject({ keepContent: true, payload: { leadPreference: 'text', leadPreferenceAtMs: 300 } });
-    expect(await lastCall()[2].beforePush()).toBe(true);
-  });
-
-  test('a late, older CALL never overrides the newer TEXT, whatever the displayed times say, and its push is withheld', async () => {
-    const row = rowAt({}, { leadPreference: 'text', leadPreferenceAtMs: 300, receivedAtMs: 0 });
-    // The CALL's displayed text is NEWER than the row's (receivedAtMs 0), but its token is older.
-    await ringChoice('SM-OLD', choice('call', 100), 'Call');
-    const r = await lastCall()[2].refreshPayload(row, row.metadata.payload);
-    expect(r.payload).toMatchObject({ leadPreference: 'text', leadPreferenceAtMs: 300 });
-    // No push may go out carrying the losing "Wants a call" title.
-    expect(await lastCall()[2].beforePush()).toBe(false);
-  });
-
-  test('a winning choice keeps its push; an ordinary text never loses one', async () => {
-    const row = rowAt({}, { leadPreference: 'call', leadPreferenceAtMs: 100 });
-    await ringChoice('SM-NEW', choice('text', 300), 'Text');
-    await lastCall()[2].refreshPayload(row, row.metadata.payload);
-    expect(await lastCall()[2].beforePush()).toBe(true);
-    await ring('SM-PLAIN');
-    await lastCall()[2].refreshPayload(row, row.metadata.payload);
-    expect(await lastCall()[2].beforePush()).toBe(true);
-  });
 
   test('a newer text on a still-open row counts one more and takes over the row', async () => {
     expect(await decide(rowAt())).toEqual({ payload: { textCount: 3 }, keepContent: false });
