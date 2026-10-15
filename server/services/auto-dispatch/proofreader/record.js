@@ -237,7 +237,7 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
   // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
   // "SECOND TUESDAY OF THE MONTH"): r49, r50.
-  '\\b(?:first|second|third|fourth|last|\\d(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
+  '\\b(?:first|second|third|fourth|last|\\d(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
   // "AS EARLY AS 9", "as late as 5": r35.
   `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
@@ -352,7 +352,7 @@ function maskHidTime(raw, masked, lineMasked = null) {
   // model is asked; shorter (the mask took a long credential run), it is
   // counted as not fully read, unscanned (r9).
   if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
-  return timeWords(masked) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked, lineMasked);
+  return timeWords(masked) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked, lineMasked, numberMarkers(raw, masked));
 }
 
 // The broad rule beside the count (Codex #6328 r22, after 21 rounds that each
@@ -399,10 +399,36 @@ function lastClause(text) {
   return text.slice(end);
 }
 
-function maskBesideTimeWord(masked, lineMasked = null) {
+// Which markers stand for a number (a gate code after "Front gate", a card,
+// an SSN): the masked text is lined up with the raw text word by word, and a
+// marker whose raw word has no letter is a number. A number is no word
+// about when for the neighbor rule; a number that is a time ("10/20",
+// "9:00") is read by the count. Null when the two do not line up (r57).
+function numberMarkers(raw, masked) {
+  const rawWords = raw.split(/\s+/);
+  const maskedWords = masked.split(/\s+/);
+  if (rawWords.length !== maskedWords.length) return null;
+  const numbers = new Set();
+  let ordinal = 0;
+  maskedWords.forEach((word, i) => {
+    const count = word.split(MARK).length - 1;
+    if (!count) return;
+    if (!/[A-Za-z]/.test(rawWords[i])) for (let k = 0; k < count; k += 1) numbers.add(ordinal + k);
+    ordinal += count;
+  });
+  return numbers;
+}
+
+function maskBesideTimeWord(masked, lineMasked = null, numbers = null) {
   if (lineMasked != null && lineMasked !== masked && !maskBesideTimeWord(lineMasked)) return false;
   let at = masked.indexOf(MARK);
+  let ordinal = -1;
   while (at !== -1) {
+    ordinal += 1;
+    if (numbers && numbers.has(ordinal)) {
+      at = masked.indexOf(MARK, at + MARK.length);
+      continue;
+    }
     // Within the mask's own sentence (r25): "ask [redacted]. Friday works" is
     // two statements. The dots inside "A.M." are not an end.
     const before = lastClause(masked.slice(Math.max(0, at - 60), at));
@@ -459,6 +485,7 @@ const PRIOR_MARK_RE = /\[redacted\]/gi;
 const NON_ACCESS_RES = [
   [/\b(?:\d[ -]?){12,19}\b/g, '[card]'],
   [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
+  [/\b(ssn|social(?:\s+security)?(?:\s+number)?)\b([^.\n]{0,20}?)\b(\d[\d- ]{7,13}\d)\b/gi, '$1$2[ssn]'],
   [/\b(cvv|cvc|cvv2|security\s{1,3}code)(\W{0,3})\d{3,4}\b/gi, '$1$2[cvv]'],
 ];
 const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
