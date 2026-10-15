@@ -242,6 +242,16 @@ describe('known-sender thread bell', () => {
     expect(payload).toMatchObject({ threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 1, receivedAtMs: expect.any(Number) });
   });
 
+  test('a lead CALL / TEXT choice rides in the payload of THAT text only', async () => {
+    await ring();
+    expect(lastCall()[1].leadPreference).toBeUndefined();
+    await delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid: 'SM-9', message: 'Call', leadPreference: 'call' });
+    expect(lastCall()[1]).toMatchObject({ leadPreference: 'call', threadId: 'cust-1', twilioSid: 'SM-9' });
+    // The refresh never copies a choice forward: it returns only the count.
+    const row = { read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-1', textCount: 1, receivedAtMs: 0, leadPreference: 'text' } } };
+    expect((await lastCall()[2].refreshPayload(row, row.metadata.payload)).payload).toEqual({ textCount: 2 });
+  });
+
   // refreshPayload runs inside notifyAdmin's keyed lock on the row as it stands.
   const decide = async (row, sid = 'SM-3', at = 3000) => {
     await ring(sid);

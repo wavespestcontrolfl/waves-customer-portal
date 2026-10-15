@@ -24,8 +24,9 @@
 const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
 const TwilioService = require('./twilio');
-const { classifyServiceIntent } = require('./sms-service-intent');
+const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
   blockIfAutomatedEstimateDuplicate,
@@ -271,6 +272,48 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
   }
 }
 
+// GATE_LEAD_CALL_TEXT_PREFERENCE. Called by the SMS webhook for a lead in
+// intake whose reply the intake machine did NOT consume. A bare CALL / TEXT
+// reply is noted once on the customer's newest lead so the owner sees the
+// choice on the lead and on the admin bell for THAT text. Nothing else is
+// stored and nothing is sent; lead_intake_status is never changed.
+// The customer row is locked and its status re-read first: a service reply
+// processed at the same moment may have advanced intake to estimate_drafted, and
+// then the note would describe a lead that is no longer waiting. Returns
+// 'call' | 'text' only when the note was written, else undefined (gate off, not
+// a bare CALL / TEXT, intake over, no lead, or an error: no label when nothing
+// was saved). Errors are logged by customer id only.
+async function recordCallTextReply(customer, body, { triggerSmsLogId } = {}) {
+  if (!isEnabled('leadCallTextPreference')) return undefined;
+  const choice = parseCallTextReply(body);
+  if (!choice) return undefined;
+  try {
+    return await db.transaction(async (trx) => {
+      const locked = await trx('customers').where({ id: customer.id }).forUpdate().first('lead_intake_status');
+      if (!locked?.lead_intake_status || locked.lead_intake_status === 'estimate_drafted') return undefined;
+      const lead = await trx('leads')
+        .where({ customer_id: customer.id })
+        .whereNull('deleted_at')
+        .orderBy('created_at', 'desc')
+        .first('id');
+      if (!lead) return undefined;
+      await trx('lead_activities').insert({
+        lead_id: lead.id,
+        activity_type: 'contact_preference',
+        description: choice === 'call'
+          ? 'Lead replied CALL: wants a phone call'
+          : 'Lead replied TEXT: prefers text',
+        performed_by: 'system',
+        metadata: JSON.stringify({ choice, source: 'sms_reply', smsLogId: triggerSmsLogId || null }),
+      });
+      return choice;
+    });
+  } catch (e) {
+    logger.error(`[lead-intake] call/text note failed for customer ${customer.id}: ${e.message}`);
+    return undefined;
+  }
+}
+
 async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
   if (!customer || !body || typeof body !== 'string') return { handled: false };
   const status = customer.lead_intake_status;
@@ -502,4 +545,4 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
   return { handled: false };
 }
 
-module.exports = { handleIntakeReply };
+module.exports = { handleIntakeReply, recordCallTextReply };

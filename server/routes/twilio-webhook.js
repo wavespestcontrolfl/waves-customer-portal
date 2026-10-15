@@ -1142,6 +1142,9 @@ router.post('/sms', async (req, res) => {
     // backyard") would exist only in the comms log for someone to find by
     // hand. Only the quote-generating branch is skipped.
     let intakeScopeVetoed = false;
+    // 'call' | 'text' when a lead in intake sent a bare CALL / TEXT and
+    // GATE_LEAD_CALL_TEXT_PREFERENCE noted it; only names the choice on the bell.
+    let intakeLeadPreference;
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
@@ -1168,6 +1171,7 @@ router.post('/sms', async (req, res) => {
           await fireContactCorrection(smsLogEntry.id);
           return res.type('text/xml').send('<Response></Response>');
         }
+        intakeLeadPreference = await LeadIntake.recordCallTextReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
@@ -1367,7 +1371,7 @@ router.post('/sms', async (req, res) => {
     let knownInboundNotified = rescheduleFlagged;
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
-        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
+        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, leadPreference: intakeLeadPreference });
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.

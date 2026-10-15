@@ -1740,6 +1740,15 @@ const gates = {
   // bell, legacy SMS only as delivery fallback).
   leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
 
+  // Lead Call/Text Preference — a lead still in SMS intake who answers the
+  // auto-reply with a bare CALL or TEXT (owner 2026-10-14) gets one note on
+  // their newest lead, and the admin bell for that text reads "Wants a call:
+  // Name" or "Prefers text: Name". Sends nothing, stores no preference, never
+  // changes lead_intake_status. Off unless exactly 'true'; off, inbound
+  // handling is as before EXCEPT that a bare CALL / TEXT never goes to the
+  // service classifier (always, by design: it names no service).
+  leadCallTextPreference: process.env.GATE_LEAD_CALL_TEXT_PREFERENCE === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.

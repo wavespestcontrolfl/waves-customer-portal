@@ -106,7 +106,7 @@ async function receivedAtMs(MessageSid) {
   }
 }
 
-async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead }) {
+async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadPreference }) {
   if (!customer && typeof afterRead !== 'function') throw new Error('Unknown SMS delivery requires read reconciliation');
   const { triggerNotification } = require('./notification-triggers');
   const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
@@ -125,6 +125,8 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
     threadId: customer?.id || null,
     twilioSid: MessageSid,
     ...(customer ? { textCount: 1, receivedAtMs: arrivedAtMs } : {}),
+    // Only the text that carried a lead's bare CALL / TEXT; undefined is dropped.
+    leadPreference,
   }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) } : {}) });
   let receiptWritten = false;
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {

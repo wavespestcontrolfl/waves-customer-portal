@@ -145,7 +145,29 @@ Rules:
   }
 }
 
+// A bare CALL / TEXT answer to the lead auto-reply ("Reply CALL and we'll call
+// you shortly, or TEXT to handle it right here"). Strict on purpose: only
+// short, unambiguous replies match, so "call me after 5" or "ants in kitchen"
+// stay ordinary inbound text. Names no service, so classifyServiceIntent
+// never classifies it. Returns 'call' | 'text' | null.
+const CALL_REPLIES = new Set(['call', 'call me', 'please call', 'call please']);
+const TEXT_REPLIES = new Set(['text', 'text me', 'please text', 'text please', 'texting', 'txt']);
+
+function parseCallTextReply(body) {
+  if (typeof body !== 'string') return null;
+  const cleaned = body
+    .toLowerCase()
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+    .replace(/\s+/g, ' ');
+  if (CALL_REPLIES.has(cleaned)) return 'call';
+  if (TEXT_REPLIES.has(cleaned)) return 'text';
+  return null;
+}
+
 async function classifyServiceIntent(body) {
+  // A bare CALL / TEXT is a contact choice, not a service: no regex match,
+  // no paid model call, no intake advance or draft.
+  if (parseCallTextReply(body)) return { interest: null, confidence: 0, method: 'none' };
   const regexResult = regexClassify(body);
   if (regexResult) return regexResult;
   return claudeClassify(body);
@@ -315,6 +337,7 @@ async function classifyPhotoDiagnosisIntent(body, { allowModel = async () => tru
 
 module.exports = {
   classifyServiceIntent,
+  parseCallTextReply,
   classifyPhotoDiagnosisIntent,
   TREE_SHRUB_TRIAGE_TYPE,
 };
