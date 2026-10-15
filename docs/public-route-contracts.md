@@ -3645,7 +3645,16 @@ The identical detection table is shared with `resolveLeadSource`
 use — see those entries below — so an AI-referred visitor is classified
 the same way regardless of which endpoint their lead lands on. Abuse
 guards on both endpoints: honeypot silent-200, then Turnstile, enforced
-under `GATE_LEAD_TURNSTILE`. An enforced Turnstile failure answers 403
+under `GATE_LEAD_TURNSTILE`. Owner alert call (owner 2026-10-14): a verified
+lead places the paid Twilio call to Adam's cell (the announce call, or the
+Press-1 bridge under `GATE_LEAD_AUTO_BRIDGE`) ONLY when
+`GATE_LEAD_ALERT_CALL` is exactly `true` AND it is 8 AM-8 PM ET
+(`shouldPlaceLeadAlertCall`, `server/routes/lead-webhook.js`). Off (the
+default), no call goes out at any hour: the lead takes the after-hours path
+(the `new_lead` bell; the legacy lead SMS to the owner only if that bell
+fails). The gate never changes the response, the lead's one automated text,
+or the estimate draft. A diff that places the call with the gate off is a
+P0. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
 on, `false` = no exception): when the verdict is `missing_token` AND

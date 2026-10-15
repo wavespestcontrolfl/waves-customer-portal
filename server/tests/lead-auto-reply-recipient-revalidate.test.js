@@ -40,7 +40,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/sms-suggest-mode', () => ({ HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'] }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: async () => 'Hello Sam! Waves Pest Control here.' }));
+jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: async () => 'Hello Sam! Waves Pest Control here.' }));
 jest.mock('../utils/customer-comms-lock', () => ({
   withSmsConsentLock: async (_db, key, fn) => {
     mockLockCalls.push(key);
