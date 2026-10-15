@@ -129,14 +129,16 @@ afterAll(() => { process.env = savedEnv; });
 
 test.each(['call', 'text'])('a %s choice from recordCallTextReply: the bell is told, nothing is sent, the ack is empty', async (choice) => {
   mockIntake.mockResolvedValue({ handled: false });
-  mockRecord.mockResolvedValue(choice);
+  mockRecord.mockResolvedValue({ leadPreference: choice, leadPreferenceAtMs: 123 });
   const res = await receive(choice);
   expect(res.body).toBe('<Response></Response>');
   expect(mockIntake).toHaveBeenCalledTimes(1);
   expect(mockRecord).toHaveBeenCalledTimes(1);
   expect(mockRecord.mock.calls[0][1]).toBe(choice);
+  // One ordering token, taken at webhook entry, goes to the saved choice (the bell gets it inside leadChoice).
+  expect(mockRecord.mock.calls[0][2].receivedAtMs).toEqual(expect.any(Number));
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
-  expect(ringSmsReplyBell.mock.calls[0][0]).toMatchObject({ customer: { id: CUSTOMER.id }, message: choice, leadPreference: choice });
+  expect(ringSmsReplyBell.mock.calls[0][0]).toMatchObject({ customer: { id: CUSTOMER.id }, message: choice, leadChoice: { leadPreference: choice, leadPreferenceAtMs: 123 } });
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
@@ -145,7 +147,7 @@ test('no choice (gate off, or an ordinary reply): the bell is told nothing', asy
   mockRecord.mockResolvedValue(undefined);
   await receive('ants in the kitchen');
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
-  expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
+  expect(ringSmsReplyBell.mock.calls[0][0].leadChoice).toBeUndefined();
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
@@ -162,5 +164,5 @@ test('a failure inside the preference step is swallowed and the bell still rings
   mockRecord.mockRejectedValue(new Error('prefs down'));
   await receive('call');
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
-  expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
+  expect(ringSmsReplyBell.mock.calls[0][0].leadChoice).toBeUndefined();
 });

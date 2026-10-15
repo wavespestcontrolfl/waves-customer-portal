@@ -328,11 +328,12 @@ async function lockPreferenceOwner(trx, customerId) {
 // A lead's bare CALL / TEXT reply (GATE_LEAD_CALL_TEXT_PREFERENCE, lead-intake)
 // goes through the same writer as an SMS fact: the newer-proposal guard, the
 // locked compare-and-set, proposal retirement and the critical audit event.
-// The caller holds lockPreferenceOwner's locks. Returns 'applied' or 'superseded'
+// The caller holds lockPreferenceOwner's locks; messageAt is the reply's sms_log
+// time, the clock pending proposals are stamped with. Returns 'applied' or 'superseded'
 // (a newer pending proposal for the field outranks this reply).
-async function applyLeadContactPreference(trx, { customerId, value, sourceAt, twilioSid = null, smsLogId = null }) {
+async function applyLeadContactPreference(trx, { customerId, value, messageAt, twilioSid = null, smsLogId = null }) {
   if (await findPendingExtractionProposal({ trx, scope_id: customerId, field: 'contact_preference',
-    newerThan: sourceAt, sameMessageSid: twilioSid })) return 'superseded';
+    newerThan: messageAt, sameMessageSid: twilioSid })) return 'superseded';
   const [current] = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().limit(1).select('*');
   await writeAutoAppliedField(trx, { customerId, field: 'contact_preference', value, current,
     metadata: { sms_log_id: smsLogId, customer_id: customerId, field: 'contact_preference', via: 'lead_call_text_reply', extractor_version: VERSION } });

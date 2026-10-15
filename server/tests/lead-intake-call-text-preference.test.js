@@ -13,6 +13,7 @@ let mockPrefFails;
 let mockNewerActivity;
 let mockSmsLogRow;
 let mockLocks;
+let mockWhereRaw;
 
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (name) => name === 'leadCallTextPreference' && mockGateOn,
@@ -26,7 +27,7 @@ jest.mock('../models/db', () => {
       where() { return chain; },
       whereNull() { return chain; },
       whereIn() { return chain; },
-      whereRaw() { return chain; },
+      whereRaw(sql, bindings) { mockWhereRaw.push({ sql, bindings }); return chain; },
       orderBy() { return chain; },
       limit() { return chain; },
       async first() {
@@ -108,6 +109,7 @@ beforeEach(() => {
   mockNewerActivity = null;
   mockSmsLogRow = { created_at: new Date('2026-10-14T15:00:00.000Z'), twilio_sid: 'SM-synthetic-1' };
   mockLocks = [];
+  mockWhereRaw = [];
   mockApplyCalls = [];
   mockApplyResult = 'applied';
   mockLockResult = { id: 'cust-1' };
@@ -117,16 +119,16 @@ describe('recordCallTextReply, gate on', () => {
   test.each([['CALL', 'call', 'Lead replied CALL: wants a phone call'], ['Text me', 'text', 'Lead replied TEXT: prefers text']])(
     '%j saves %s through the SMS profile writer and notes the newest lead',
     async (body, preference, description) => {
-      const result = await recordCallTextReply(CUSTOMER(), body, { triggerSmsLogId: 'log-1' });
-      expect(result).toBe(preference);
+      const result = await recordCallTextReply(CUSTOMER(), body, { triggerSmsLogId: 'log-1', receivedAtMs: 5000.25 });
+      expect(result).toEqual({ leadPreference: preference, leadPreferenceAtMs: 5000.25 });
       // One writer call, under the writer's per-customer lock, carrying the source SMS time.
       expect(mockLocks).toEqual([{ id: 'cust-1' }]);
       expect(mockApplyCalls).toEqual([{
-        customerId: 'cust-1', value: preference, sourceAt: '2026-10-14T15:00:00.000Z', twilioSid: 'SM-synthetic-1', smsLogId: 'log-1',
+        customerId: 'cust-1', value: preference, messageAt: '2026-10-14T15:00:00.000Z', twilioSid: 'SM-synthetic-1', smsLogId: 'log-1',
       }]);
       expect(mockActivityInserts).toHaveLength(1);
       expect(mockActivityInserts[0]).toMatchObject({ lead_id: 'lead-1', description, performed_by: 'system' });
-      expect(JSON.parse(mockActivityInserts[0].metadata)).toMatchObject({ contact_preference: preference, source_at: '2026-10-14T15:00:00.000Z' });
+      expect(JSON.parse(mockActivityInserts[0].metadata)).toMatchObject({ contact_preference: preference, received_at_ms: 5000.25 });
       expect(mockSmsSends).toEqual([]);
     },
   );
@@ -136,6 +138,14 @@ describe('recordCallTextReply, gate on', () => {
     expect(mockApplyCalls).toEqual([]);
     expect(mockActivityInserts).toEqual([]);
     expect(mockLocks).toEqual([]);
+  });
+
+  test('ordering is the webhook-entry token, not the sms_log time: it is compared in the lock and stored', async () => {
+    await recordCallTextReply(CUSTOMER(), 'call', { triggerSmsLogId: 'log-1', receivedAtMs: 4242.5 });
+    expect(mockWhereRaw).toHaveLength(1);
+    expect(mockWhereRaw[0].sql).toContain('received_at_ms');
+    expect(mockWhereRaw[0].bindings).toEqual([4242.5]);
+    expect(JSON.parse(mockActivityInserts[0].metadata).received_at_ms).toBe(4242.5);
   });
 
   test('a newer reply is already noted: nothing is written and the stale choice is NOT returned', async () => {
@@ -160,14 +170,14 @@ describe('recordCallTextReply, gate on', () => {
 
   test('no lead row: preference still saved, no activity', async () => {
     mockLeadRow = null;
-    expect(await recordCallTextReply(CUSTOMER(), 'text', {})).toBe('text');
+    expect(await recordCallTextReply(CUSTOMER(), 'text', { receivedAtMs: 7 })).toEqual({ leadPreference: 'text', leadPreferenceAtMs: 7 });
     expect(mockApplyCalls).toHaveLength(1);
     expect(mockActivityInserts).toEqual([]);
   });
 
   test('a save failure is logged by customer id only and never blocks the reply', async () => {
     mockPrefFails = true;
-    expect(await recordCallTextReply(CUSTOMER(), 'call', {})).toBe('call');
+    expect(await recordCallTextReply(CUSTOMER(), 'call', { receivedAtMs: 7 })).toEqual({ leadPreference: 'call', leadPreferenceAtMs: 7 });
     expect(mockLogger.error).toHaveBeenCalledTimes(1);
     const logged = mockLogger.error.mock.calls[0][0];
     expect(logged).toContain('cust-1');

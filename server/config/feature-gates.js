@@ -1739,8 +1739,9 @@ const gates = {
   // auto-reply with a bare CALL or TEXT (owner 2026-10-14) has the choice
   // saved (property_preferences.contact_preference + one lead_activities
   // row) and named on the admin bell ("Wants a call: Name"). Sends nothing,
-  // never changes lead_intake_status. Off unless exactly 'true'; off, the
-  // reply flows through inbound handling exactly as before.
+  // never changes lead_intake_status. Off unless exactly 'true'; off, inbound
+  // handling is as before EXCEPT that a bare CALL / TEXT never goes to the
+  // service classifier (always, by design: it names no service).
   leadCallTextPreference: process.env.GATE_LEAD_CALL_TEXT_PREFERENCE === 'true',
 
   // Lead Auto-Bridge — when a website lead comes in during business hours,

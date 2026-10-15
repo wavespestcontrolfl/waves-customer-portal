@@ -217,6 +217,10 @@ function intakeOutcome(intakeResult) {
 }
 
 router.post('/sms', async (req, res) => {
+  // The ONE ordering token for near-simultaneous lead CALL / TEXT replies
+  // (GATE_LEAD_CALL_TEXT_PREFERENCE): taken before any await so webhook entry
+  // order is the order, for the saved choice and for the bell alike.
+  const enteredAtMs = performance.timeOrigin + performance.now();
   // Whether THIS delivery actually took the dedupe ledger row. Only an owner
   // may release the claim on error (a fail-open delivery must not delete a
   // sibling delivery's good claim). Declared out here so the catch can read it.
@@ -1142,7 +1146,7 @@ router.post('/sms', async (req, res) => {
     // Set when a lead in intake answers with a bare CALL / TEXT and
     // GATE_LEAD_CALL_TEXT_PREFERENCE is on (recordCallTextReply); only names the
     // choice on the bell.
-    let intakeCallTextPreference;
+    let intakeLeadChoice;
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
@@ -1169,7 +1173,7 @@ router.post('/sms', async (req, res) => {
           await fireContactCorrection(smsLogEntry.id);
           return res.type('text/xml').send('<Response></Response>');
         }
-        intakeCallTextPreference = await LeadIntake.recordCallTextReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
+        intakeLeadChoice = await LeadIntake.recordCallTextReply(customer, Body, { triggerSmsLogId: smsLogEntry.id, receivedAtMs: enteredAtMs });
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
@@ -1369,7 +1373,7 @@ router.post('/sms', async (req, res) => {
     let knownInboundNotified = rescheduleFlagged;
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
-        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, leadPreference: intakeCallTextPreference });
+        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, leadChoice: intakeLeadChoice });
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.

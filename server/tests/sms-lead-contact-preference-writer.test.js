@@ -28,7 +28,7 @@ const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = requi
 const { lockPreferenceOwner, applyLeadContactPreference } = require('../services/sms-operational-actions');
 
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000201';
-const SOURCE_AT = '2026-10-14T15:00:00.000Z';
+const MESSAGE_AT = '2026-10-14T15:00:00.000Z';
 
 function fakeTrx(currentRow) {
   const calls = [];
@@ -59,9 +59,9 @@ test('lockPreferenceOwner takes the portal preference advisory lock, then the cu
 
 test('applies through the shared writer: guard, locked row, CAS on the current value, retirement, critical audit', async () => {
   const trx = fakeTrx({ id: 'pref-1', contact_preference: 'text' });
-  const result = await applyLeadContactPreference(trx, { customerId: CUSTOMER_ID, value: 'call', sourceAt: SOURCE_AT, twilioSid: 'SM-1', smsLogId: 'log-1' });
+  const result = await applyLeadContactPreference(trx, { customerId: CUSTOMER_ID, value: 'call', messageAt: MESSAGE_AT, twilioSid: 'SM-1', smsLogId: 'log-1' });
   expect(result).toBe('applied');
-  expect(findPendingExtractionProposal).toHaveBeenCalledWith(expect.objectContaining({ scope_id: CUSTOMER_ID, field: 'contact_preference', newerThan: SOURCE_AT, sameMessageSid: 'SM-1' }));
+  expect(findPendingExtractionProposal).toHaveBeenCalledWith(expect.objectContaining({ scope_id: CUSTOMER_ID, field: 'contact_preference', newerThan: MESSAGE_AT, sameMessageSid: 'SM-1' }));
   expect(resolvePropertyPreferencesTarget).toHaveBeenCalledWith(expect.objectContaining({
     proposal: { scope_id: CUSTOMER_ID, field: 'contact_preference', resource_id: 'pref-1' }, currentRaw: 'text',
   }));
@@ -76,7 +76,7 @@ test('applies through the shared writer: guard, locked row, CAS on the current v
 });
 
 test('no preferences row yet: CAS runs against an empty before value (the writer creates the row)', async () => {
-  await applyLeadContactPreference(fakeTrx(null), { customerId: CUSTOMER_ID, value: 'text', sourceAt: SOURCE_AT });
+  await applyLeadContactPreference(fakeTrx(null), { customerId: CUSTOMER_ID, value: 'text', messageAt: MESSAGE_AT });
   expect(resolvePropertyPreferencesTarget).toHaveBeenCalledWith(expect.objectContaining({
     proposal: { scope_id: CUSTOMER_ID, field: 'contact_preference', resource_id: null }, currentRaw: null,
   }));
@@ -84,7 +84,7 @@ test('no preferences row yet: CAS runs against an empty before value (the writer
 
 test('a newer pending proposal outranks the reply: nothing is written', async () => {
   findPendingExtractionProposal.mockResolvedValueOnce({ id: 'prop-newer' });
-  const result = await applyLeadContactPreference(fakeTrx({ id: 'pref-1', contact_preference: 'text' }), { customerId: CUSTOMER_ID, value: 'call', sourceAt: SOURCE_AT });
+  const result = await applyLeadContactPreference(fakeTrx({ id: 'pref-1', contact_preference: 'text' }), { customerId: CUSTOMER_ID, value: 'call', messageAt: MESSAGE_AT });
   expect(result).toBe('superseded');
   expect(applyPropertyPreferenceValue).not.toHaveBeenCalled();
   expect(stalePendingExtractionProposals).not.toHaveBeenCalled();
