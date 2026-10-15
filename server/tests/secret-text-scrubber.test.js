@@ -23,6 +23,9 @@ const FORMATS = {
   jwt: ['ey' + 'Jhbgci0i.' + 'eyJ' + 'zdWIiOjEy.' + b64(20)],
   pem_private_key: ['-----BEGIN ' + 'PRIVATE KEY-----\n' + b64(30) + '\n-----END ' + 'PRIVATE KEY-----', '-----BEGIN RSA ' + 'PRIVATE KEY-----\n' + b64(30)],
   authorization_header: ['Authorization: Basic ' + x(12, 'b')],
+  authorization_scheme: ['Authorization: Negotiate ' + x(24, 'n'), 'authorization: token ' + x(12, 't')],
+  cookie_header: ['{"cookie": "' + x(24, 'k') + '"}', 'Set-Cookie: ' + x(20, 'k')],
+  cookie_pair: ['cookie: sid=' + x(20, 'd')],
   basic_credentials: ['Basic ' + x(12, 'c')],
   bearer_token: ['Bearer ' + x(24, 'a')],
   credential_identifier_assignment: ['AWS_SECRET' + '_ACCESS_KEY=' + x(40, 'q')],
@@ -108,8 +111,12 @@ describe('labelled secrets in prose', () => {
     expect(scrubSecretText(text)).toEqual({ text, removed: 0 });
   });
 
-  test('a separator across a line break does not swallow the next line', () => {
-    expect(scrubSecretText('password:\nnext line stays').text).toBe('password:\nnext line stays');
+  // Codex round 4 on #6324: "Password:\nhunter2" is a label with its value on the next line. ONE line
+  // break after ":" or "=" is allowed; the value is that line only, and a blank line ends the search.
+  test('a value on the line after "label:" is removed, and only that line', () => {
+    expect(scrubSecretText('password:\nnext line goes\nthis line stays').text).toBe('password:\n[removed]\nthis line stays');
+    expect(scrubSecretText('password:\n\nnext line stays').text).toBe('password:\n\nnext line stays');
+    expect(scrubSecretText('password is\nnext line stays').text).toBe('password is\nnext line stays');
   });
 });
 
@@ -146,7 +153,9 @@ describe('credential-named identifiers (environment-style assignments)', () => {
     ['SIGNING_' + 'KEY: ' + V + '.', 'SIGNING_' + 'KEY: [removed].'],
     ['encryption_' + 'key=' + V, 'encryption_' + 'key=[removed]'],
     ['CERT_' + 'KEY=' + V, 'CERT_' + 'KEY=[removed]'],
-    ['client_' + 'secret=' + V + ' next', 'client_' + 'secret=[removed] next'],
+    // An unquoted value runs to the end of its clause (a dotenv passphrase has spaces).
+    ['client_' + 'secret=' + V + ' next', 'client_' + 'secret=[removed]'],
+    ['client_' + 'secret=' + V + '. Next', 'client_' + 'secret=[removed]. Next'],
     ['SMTP_PWD:' + V, 'SMTP_PWD:[removed]'],
     ['GIT_' + 'PASSPHRASE = "' + V + '"', 'GIT_' + 'PASSPHRASE = "[removed]"'],
     ['AUTH_' + 'HEADER=' + V, 'AUTH_' + 'HEADER=[removed]'],
@@ -244,4 +253,55 @@ describe('authorization headers and Basic credentials', () => {
   test.each(['Basic lawn care plan', 'Authorization is required before the visit', 'The Basic package covers ants'])('prose stays: %s', (text) => {
     expect(scrubSecretText(text).text).toBe(text);
   });
+});
+
+// Codex: a labelled secret at the start of a long unpunctuated line is still removed.
+describe('labelled secret in a long line', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  test('the value goes even when the line has no sentence end within 120 characters', () => {
+    const value = ['hun', 'ter', '2x9'].join('');
+    const tail = ' and then the customer explained at length that the side yard floods every summer so the technician should plan around it'.repeat(3);
+    const out = scrubSecretText(`password is ${value}${tail}`).text;
+    expect(out).not.toContain(value);
+    expect(out.startsWith('password is [removed]')).toBe(true);
+    expect(out).toContain('plan around it');
+  });
+});
+
+// Pre-push audit: a kept value (access PIN, prose) must not shield a later label in the same clause.
+describe('a kept labelled value does not hide a later one', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const pw = ['hun', 'ter', '2q'].join('');
+  test.each([
+    [`PIN is 4821 for the gate, password is ${pw}`, 'PIN is 4821 for the gate, password is [removed]'],
+    [`password is required, token: ${pw}`, 'password is required, token: [removed]'],
+  ])('%s', (text, expected) => {
+    expect(scrubSecretText(text).text).toBe(expected);
+  });
+  test('the access PIN alone still stays', () => {
+    expect(scrubSecretText('PIN is 4821 at the front gate').text).toBe('PIN is 4821 at the front gate');
+  });
+});
+
+// Pre-push audit: a credential assignment in a long run-on line still loses its value.
+test('a long run-on dotenv line still loses its value', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const value = ['hun', 'ter', '2z'].join('');
+  const out = scrubSecretText(`DB_PASSWORD=${value} ${'ordinary words '.repeat(20)}`).text;
+  expect(out).not.toContain(value);
+});
+
+// Pre-push audit: a value with a digit or symbol is never a status word.
+test.each(['DB_PASSWORD=secret123', 'DB_PASSWORD=changed2026!', 'password: secret1'])('a digit-bearing value is removed: %s', (text) => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  expect(scrubSecretText(text).text).toMatch(/\[removed\]/);
+});
+
+// Pre-push audit: a later assignment or quoted value does not shield the first one.
+test('a value followed by another assignment is still removed', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const value = ['hun', 'ter', '2w'].join('');
+  const out = scrubSecretText(`DB_PASSWORD=${value} OTHER_VAR="value"`).text;
+  expect(out).not.toContain(value);
+  expect(out).toContain('OTHER_VAR="value"');
 });

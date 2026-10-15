@@ -1,17 +1,15 @@
 /**
- * Codex round 9 (P1): a reviewed row's `freeText` key must be the key the
- * endpoint RETURNS, not the table column. `/admin/customers/:id/autopay-state`
- * declared `autopay_pause_reason` (the column) while its handler returns
- * `pause_reason`, so the note passed through. Each fixture below is the
- * response shape verified by reading the handler (and the service or query it
- * calls); the line that proves each key is cited. Values are synthetic and the
- * fake secrets are built by concatenation so a scanner does not flag the repo.
+ * Owner ruling 2026-10-13: the general read RETURNS free-text notes (payer notes,
+ * credit notes, Auto Pay pause reason and details, payout notes, settings notes,
+ * discount-rule notes, blocked-number reasons, property access instructions) with
+ * the signed-link redaction and the secret scrubber applied to every string.
+ * Nothing is withheld for being free text. The scrubber is best effort.
  *
- * Round 10: EVERY catalog endpoint has a fixture (the run-time read also withholds
- * any key whose name looks like free text unless the row declares it content), so
- * a test fails when a fixture holds a note value that the read does not withhold,
- * when a withheld key is not a declared note or a name-matched key, and when an
- * endpoint has no verified fixture.
+ * Every catalog endpoint has a fixture built from the response shape verified by
+ * reading the handler (and the service or query it calls), with the line cited.
+ * `notes` lists the paths of text staff or customers typed; `content` maps the
+ * paths of business reference text to their values. Values are synthetic and the
+ * fake secrets are built by concatenation so a scanner does not flag the repo.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -20,12 +18,22 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const { executeAdminReadTool } = require('../services/intelligence-bar/admin-read-tools');
+const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 
 const AUTH = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoidG9rZW4ifQ.c2lnbmF0dXJl';
 const UUID = '10000000-0000-4000-8000-00000000000a';
-const PASSWORD_NOTE = 'portal pass' + 'word is swords' + 'fish';
-const LINK_NOTE = 'Pay at https://portal.example.test/pay/home' + '?session=' + 'abc' + '123';
-const FAKE_PIECES = ['swords' + 'fish', 'abc' + '123', 'session='];
+const NOTE = 'Customer prefers morning calls.';
+// A note a person typed with three pasted secrets, one per line (the scrubber removes a labelled value and an
+// Authorization header to the end of the line).
+const SECRET_NOTE = [
+  'Call before arriving.',
+  'portal pass' + 'word is swords' + 'fish',
+  'Pay at https://portal.example.test/pay/home' + '?session=' + 'abc' + '123 now.',
+  'Authorization: Bearer ' + 'eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoidG9rZW4ifQ.c2lnbmF0dXJl',
+  'Thanks for waiting.',
+].join('\n');
+const SCRUBBED_NOTE = 'Call before arriving.\nportal password is [removed]\nPay at [signed link removed] now.\nAuthorization: [removed]\nThanks for waiting.';
+const FAKE_PIECES = ['swords' + 'fish', 'abc' + '123', 'session=', 'c2lnbmF0dXJl'];
 
 const jsonResponse = body => ({
   status: 200,
@@ -33,12 +41,12 @@ const jsonResponse = body => ({
   text: async () => JSON.stringify(body),
 });
 
-// endpoint -> { params, body, withheld: dotted paths, kept: { path: value }, content: { path: value } }
+// endpoint -> { params, body, notes: dotted paths, kept: { path: value }, content: { path: value } }
 const SHAPES = {
   // admin-communications.js:4343-4349 maps r.reason to `reason` inside `numbers[]`.
   '/admin/communications/blocked-numbers': {
-    body: { numbers: [{ number: '+15555550100', blockType: 'spam', reason: PASSWORD_NOTE, autoBlocked: false, blockedAt: '2026-10-01T00:00:00Z' }] },
-    withheld: ['numbers.0.reason'],
+    body: { numbers: [{ number: '+15555550100', blockType: 'spam', reason: NOTE, autoBlocked: false, blockedAt: '2026-10-01T00:00:00Z' }] },
+    notes: ['numbers.0.reason'],
     kept: { 'numbers.0.number': '+15555550100', 'numbers.0.blockType': 'spam' },
   },
   // admin-billing-health.js:55 `pause_reason: customer.autopay_pause_reason` (the column is aliased);
@@ -46,49 +54,49 @@ const SHAPES = {
   '/admin/customers/:id/autopay-state': {
     params: { id: UUID },
     body: {
-      state: 'paused', autopay_enabled: true, paused_until: '2026-11-01', pause_reason: PASSWORD_NOTE, billing_day: 1,
-      recent_events: [{ id: UUID, event_type: 'autopay_paused', details: { reason: LINK_NOTE }, created_at: '2026-10-01T00:00:00Z' }],
+      state: 'paused', autopay_enabled: true, paused_until: '2026-11-01', pause_reason: NOTE, billing_day: 1,
+      recent_events: [{ id: UUID, event_type: 'autopay_paused', details: { reason: NOTE }, created_at: '2026-10-01T00:00:00Z' }],
     },
-    withheld: ['pause_reason', 'recent_events.0.details'],
+    notes: ['pause_reason', 'recent_events.0.details'],
     kept: { state: 'paused', billing_day: 1, 'recent_events.0.event_type': 'autopay_paused' },
   },
   // admin-customers.js:6511 `{ balance, ledger }`; ledger = customer_credit_ledger rows (customer-credit.js:52-56), column `note`.
   '/admin/customers/:id/credits': {
     params: { id: UUID },
-    body: { balance: 25, ledger: [{ id: 1, source: 'goodwill', note: LINK_NOTE, created_by: 'Office', created_at: '2026-10-01T00:00:00Z' }] },
-    withheld: ['ledger.0.note'],
+    body: { balance: 25, ledger: [{ id: 1, source: 'goodwill', note: NOTE, created_by: 'Office', created_at: '2026-10-01T00:00:00Z' }] },
+    notes: ['ledger.0.note'],
     kept: { balance: 25, 'ledger.0.source': 'goodwill' },
   },
   // admin-neighborhood-access.js:507 `instructions: e.instructions || null` inside properties[].entries[].
   '/admin/neighborhood-access/customers/:customerId/properties': {
     params: { customerId: UUID },
-    body: { properties: [{ id: UUID, label: 'Home', entries: [{ id: UUID, gateLabel: 'Main', accessType: 'instructions', code: null, instructions: PASSWORD_NOTE, status: 'live' }] }] },
-    withheld: ['properties.0.entries.0.instructions'],
+    body: { properties: [{ id: UUID, label: 'Home', entries: [{ id: UUID, gateLabel: 'Main', accessType: 'instructions', code: null, instructions: NOTE, status: 'live' }] }] },
+    notes: ['properties.0.entries.0.instructions'],
     kept: { 'properties.0.label': 'Home', 'properties.0.entries.0.gateLabel': 'Main' },
   },
   // admin-payers.js:44-48 `{ payers }`; services/payer.js:93 select * (column `notes`).
   '/admin/payers': {
-    body: { payers: [{ id: 3, display_name: 'Synthetic Payer LLC', ap_email: 'ap@example.test', notes: LINK_NOTE }] },
-    withheld: ['payers.0.notes'],
+    body: { payers: [{ id: 3, display_name: 'Synthetic Payer LLC', ap_email: 'ap@example.test', notes: NOTE }] },
+    notes: ['payers.0.notes'],
     kept: { 'payers.0.display_name': 'Synthetic Payer LLC' },
   },
   // admin-payers.js:69 `{ payer }`; services/payer.js:107-111 first() (column `notes`).
   '/admin/payers/:id': {
     params: { id: '3' },
-    body: { payer: { id: 3, display_name: 'Synthetic Payer LLC', notes: PASSWORD_NOTE } },
-    withheld: ['payer.notes'],
+    body: { payer: { id: 3, display_name: 'Synthetic Payer LLC', notes: NOTE } },
+    notes: ['payer.notes'],
     kept: { 'payer.display_name': 'Synthetic Payer LLC' },
   },
   // admin-referrals-v2.js:209-221 `{ payouts }` = referral_payouts.* joined to promoters (column `admin_notes`).
   '/admin/referrals/payouts': {
-    body: { payouts: [{ id: 5, status: 'pending', amount_cents: 2500, admin_notes: LINK_NOTE, first_name: 'Sam', last_name: 'Sample' }] },
-    withheld: ['payouts.0.admin_notes'],
+    body: { payouts: [{ id: 5, status: 'pending', amount_cents: 2500, admin_notes: NOTE, first_name: 'Sam', last_name: 'Sample' }] },
+    notes: ['payouts.0.admin_notes'],
     kept: { 'payouts.0.status': 'pending', 'payouts.0.first_name': 'Sam' },
   },
   // admin-revenue.js:188,199 `{ settings }` = latest company_financials row (column `notes`).
   '/admin/revenue/settings': {
-    body: { settings: { id: 1, effective_date: '2026-10-01', notes: PASSWORD_NOTE } },
-    withheld: ['settings.notes'],
+    body: { settings: { id: 1, effective_date: '2026-10-01', notes: NOTE } },
+    notes: ['settings.notes'],
     kept: { 'settings.effective_date': '2026-10-01' },
   },
 
@@ -141,8 +149,7 @@ const SHAPES = {
     body: { checklists: [{ id: 1, service_type: 'pest', notes: 'Rinse the sprayer.', checklist_items: ['Sprayer', 'Gloves'] }] },
     content: { 'checklists.0.notes': 'Rinse the sprayer.' },
   },
-  // admin-protocols.js:783-784 `{ scripts }` = communication_scripts rows (`script`, `tone_notes`). The wrapper key `scripts`
-  // is a name-match (the default would withhold the whole list), so it is declared content too.
+  // admin-protocols.js:783-784 `{ scripts }` = communication_scripts rows (`script`, `tone_notes`).
   '/admin/protocols/scripts': {
     body: { scripts: [{ id: 1, title: 'Greeting', script: 'Say hello first.', tone_notes: 'Warm and brief.' }] },
     content: { 'scripts.0.script': 'Say hello first.', 'scripts.0.tone_notes': 'Warm and brief.' },
@@ -156,8 +163,7 @@ const SHAPES = {
   // admin-communications.js:3766 `{ enabled }` (system_config boolean).
   '/admin/communications/ai-auto-reply-status': { body: { enabled: true }, kept: { enabled: true } },
   // csr-coach.js:685-698: csrStats[] (names and counts), lossReasons[{ reason, count, pct }] where `reason` is the
-  // csrEnum loss_reason (csr-coach.js:224, a closed set), so it is system text. The wrapper key `lossReasons`
-  // (csr-coach.js:692) is a name-match for the same reason, so both are declared content.
+  // csrEnum loss_reason (csr-coach.js:224, a closed set), so it is system text.
   '/admin/csr/overview': {
     body: { csrStats: [{ name: 'Office A', calls: 9, booked: 4, bookingRate: 44 }], teamTotals: { calls: 9, booked: 4 }, lossReasons: [{ reason: 'pricing', count: 3, pct: 60 }], period: '30d' },
     kept: { 'csrStats.0.name': 'Office A', 'teamTotals.calls': 9 },
@@ -221,10 +227,10 @@ const SHAPES = {
     kept: { outstanding_total: 300, 'by_terms.net_30.count': 2, 'payers.0.payer_name': 'Synthetic Payer LLC' },
   },
   // admin-pricing-config.js:988-989 `{ rules }` = service_discount_rules rows (migration 20260414000011 line 177: text `notes`).
-  // The Codex round 10 reproduction: the PUT (line 999) accepts arbitrary `notes`, so it can hold a pasted phrase.
+  // The PUT (line 999) accepts arbitrary `notes`, so a note can hold a pasted secret.
   '/admin/pricing-config/discount-rules': {
-    body: { rules: [{ id: 1, service_key: 'pest_control', tier_qualifier: true, max_discount_pct: null, flat_credit: null, exclude_from_pct_discount: false, notes: 'Vendor recovery phrase correct horse battery staple' }] },
-    withheld: ['rules.0.notes'],
+    body: { rules: [{ id: 1, service_key: 'pest_control', tier_qualifier: true, max_discount_pct: null, flat_credit: null, exclude_from_pct_discount: false, notes: 'Capped for margin protection.' }] },
+    notes: ['rules.0.notes'],
     kept: { 'rules.0.service_key': 'pest_control', 'rules.0.tier_qualifier': true },
   },
   // admin-pricing-config.js:892-898 `{ tracks: { track: [rows] } }`; columns are grass_track, sqft_bracket, tier, monthly_price.
@@ -252,21 +258,21 @@ const SHAPES = {
 };
 
 const getAt = (value, path) => path.split('.').reduce((node, key) => (node == null ? undefined : node[key]), value);
-const keyOf = path => path.split('.').pop();
-const { isFreeTextName, FREE_TEXT_WORDS } = require('../utils/signed-link-redaction');
-const MARKER = /^\[note withheld: \d+ characters\]$/;
-
-// Every path in `value` whose string is a withheld marker.
-function markerPaths(value, prefix = '') {
-  if (typeof value === 'string') return MARKER.test(value) ? [prefix] : [];
-  if (!value || typeof value !== 'object') return [];
-  return Object.entries(value).flatMap(([key, item]) => markerPaths(item, prefix ? `${prefix}.${key}` : key));
-}
+const setAt = (value, path, next) => {
+  const keys = path.split('.');
+  const last = keys.pop();
+  keys.reduce((node, key) => node[key], value)[last] = next;
+};
+const clone = value => JSON.parse(JSON.stringify(value));
+const textPaths = shape => [...(shape.notes || []), ...Object.keys(shape.content || {})];
 
 const READER = { fullAccess: true, isAdmin: true, staffAuthorization: AUTH };
-const readOf = (endpoint, shape) => executeAdminReadTool('read_admin_data', {
-  endpoint, ...(shape.params ? { params: shape.params } : {}), ...(shape.query ? { query: shape.query } : {}),
-}, READER);
+const readOf = (endpoint, shape, body) => {
+  global.fetch = jest.fn(async () => jsonResponse(body));
+  return executeAdminReadTool('read_admin_data', {
+    endpoint, ...(shape.params ? { params: shape.params } : {}), ...(shape.query ? { query: shape.query } : {}),
+  }, READER);
+};
 
 beforeEach(() => {
   process.env.GATE_IB_GENERAL_READ = 'true';
@@ -282,109 +288,53 @@ describe('every catalog endpoint has a verified response fixture', () => {
     for (const endpoint of Object.keys(SHAPES)) expect(reviewedRows.has(endpoint)).toBe(true);
   });
 
-  test.each(catalog.entries.map(entry => [entry.endpoint, entry]))('%s: declared keys are in the fixture, and the fixture agrees with the kinds', (endpoint, entry) => {
-    const shape = SHAPES[endpoint];
-    const freeText = entry.freeText || {};
-    const noteKeys = Object.keys(freeText).filter(key => freeText[key] === 'note');
-    const contentKeys = Object.keys(freeText).filter(key => freeText[key] === 'content');
-    // Every declared key must appear somewhere in the response fixture (a key that is not a response key withholds nothing).
-    for (const key of Object.keys(freeText)) expect(JSON.stringify(shape.body)).toContain(`"${key}"`);
-    // Every withheld key is a declared note or a key the default catches, and is not declared content.
-    for (const path of shape.withheld || []) {
-      const key = keyOf(path);
-      expect(noteKeys.includes(key) || isFreeTextName(key)).toBe(true);
-      expect(contentKeys).not.toContain(key);
-    }
-    // Every declared note key is withheld in the fixture.
-    for (const key of noteKeys) expect((shape.withheld || []).map(keyOf)).toContain(key);
-    // Every returned content path names a declared content key.
-    for (const path of Object.keys(shape.content || {})) expect(contentKeys).toContain(keyOf(path));
-    // A name-matched key that the fixture returns must be a declared content key.
-    for (const path of [...Object.keys(shape.content || {}), ...Object.keys(shape.kept || {})]) {
-      const key = keyOf(path);
-      if (isFreeTextName(key)) expect(contentKeys).toContain(key);
-    }
-  });
-
-  test.each(catalog.entries.map(entry => [entry.endpoint]))('%s: exactly the expected keys are withheld, the rest come back', async (endpoint) => {
-    const shape = SHAPES[endpoint];
-    global.fetch = jest.fn(async () => jsonResponse(shape.body));
-    const result = await readOf(endpoint, shape);
-    expect(result.status).toBe(200);
-    const text = JSON.stringify(result);
-    // The withheld set is exact: nothing else in the answer is a withheld marker.
-    expect(markerPaths(result.data).sort()).toEqual([...(shape.withheld || [])].sort());
-    for (const path of shape.withheld || []) {
-      const original = getAt(shape.body, path);
-      const length = typeof original === 'string' ? original.length : JSON.stringify(original).length;
-      expect(getAt(result.data, path)).toBe(`[note withheld: ${length} characters]`);
-    }
-    for (const piece of FAKE_PIECES) expect(text).not.toContain(piece);
-    for (const [path, value] of Object.entries(shape.kept || {})) expect(getAt(result.data, path)).toEqual(value);
-    for (const [path, value] of Object.entries(shape.content || {})) expect(getAt(result.data, path)).toBe(value);
-    if (shape.withheld && shape.withheld.length) expect(result.notes_withheld).toBe(shape.withheld.length);
-    else expect(result).not.toHaveProperty('notes_withheld');
-  });
-
-  test('Codex round 10 reproduction: a recovery phrase in discount-rules notes never reaches the model', async () => {
-    const shape = SHAPES['/admin/pricing-config/discount-rules'];
-    global.fetch = jest.fn(async () => jsonResponse(shape.body));
-    const result = await readOf('/admin/pricing-config/discount-rules', shape);
-    const text = JSON.stringify(result);
-    for (const piece of ['recovery phrase', 'correct horse', 'battery staple']) expect(text).not.toContain(piece);
-    expect(result.data.rules[0].notes).toBe(`[note withheld: ${'Vendor recovery phrase correct horse battery staple'.length} characters]`);
-    expect(result.notes_withheld).toBe(1);
+  test.each(Object.entries(SHAPES))('%s: every text path exists in the fixture', (endpoint, shape) => {
+    for (const path of textPaths(shape)) expect(getAt(shape.body, path)).toBeDefined();
   });
 });
 
-describe('the default withholds a name-matched key that no row declared', () => {
-  const PHRASE = 'Vendor recovery phrase correct horse battery staple';
-  const NO_DECLARATION = catalog.entries.find(entry => !entry.freeText && entry.params.length === 0 && entry.query.length === 0);
-  const CONTENT_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
-  const contentKey = Object.keys(CONTENT_ENTRY.freeText).find(key => CONTENT_ENTRY.freeText[key] === 'content');
-  const run = async (entry, body) => {
-    global.fetch = jest.fn(async () => jsonResponse(body));
-    return executeAdminReadTool('read_admin_data', { endpoint: entry.endpoint }, READER);
-  };
-
-  test.each(['notes', 'adminNotes', 'special_instructions', 'Reason', 'details', 'message', 'description', 'body', 'summary', 'textColor'])('an undeclared "%s" on a row with no freeText is withheld', async (key) => {
-    const result = await run(NO_DECLARATION, { id: 1, count: 4, nested: [{ [key]: PHRASE }] });
-    expect(result.data.nested[0][key]).toBe(`[note withheld: ${PHRASE.length} characters]`);
-    expect(result.notes_withheld).toBe(1);
-    expect(JSON.stringify(result)).not.toContain('correct horse');
-    expect(result.data.count).toBe(4);
-    expect(result.note).toMatch(/Free-text notes are not read through this tool/);
-  });
-
-  test('objects and arrays under such a key are withheld whole; numbers, booleans, null and empty text are not counted', async () => {
-    const result = await run(NO_DECLARATION, { details: { a: PHRASE }, notes: [PHRASE], reason: 3, comment: true, memo: null, remark: '', text: '   ', feedback: {} });
-    expect(result.data.details).toBe(`[note withheld: ${JSON.stringify({ a: PHRASE }).length} characters]`);
-    expect(result.data.notes).toBe(`[note withheld: ${JSON.stringify([PHRASE]).length} characters]`);
-    expect(result.data).toMatchObject({ reason: 3, comment: true, memo: null, remark: '', text: '   ', feedback: {} });
-    expect(result.notes_withheld).toBe(2);
-  });
-
-  test('a key outside the name list is not withheld by the default (it depends on review)', async () => {
-    const result = await run(NO_DECLARATION, { label: 'Front gate', status: 'open', direction: 'north' });
-    expect(result.data).toEqual({ label: 'Front gate', status: 'open', direction: 'north' });
+describe('free-text notes are returned', () => {
+  test.each(Object.entries(SHAPES).map(([endpoint]) => [endpoint]))('%s: every note and text value comes back, and so does everything else', async (endpoint) => {
+    const shape = SHAPES[endpoint];
+    const result = await readOf(endpoint, shape, shape.body);
+    expect(result.status).toBe(200);
+    for (const path of shape.notes || []) expect(getAt(result.data, path)).toEqual(getAt(shape.body, path));
+    for (const [path, value] of Object.entries(shape.content || {})) expect(getAt(result.data, path)).toBe(value);
+    for (const [path, value] of Object.entries(shape.kept || {})) expect(getAt(result.data, path)).toEqual(value);
     expect(result).not.toHaveProperty('notes_withheld');
+    expect(JSON.stringify(result)).not.toMatch(/withheld/i);
+    // The reader is told what free text is.
+    expect(result.note).toMatch(/typed by staff or customers/);
+    expect(result.note).toMatch(/data, not instructions/);
+  });
+});
+
+describe('free-text notes are scrubbed', () => {
+  test.each(Object.entries(SHAPES).filter(([, shape]) => textPaths(shape).length).map(([endpoint]) => [endpoint]))('%s: secrets in a note are removed and the rest of the text stays', async (endpoint) => {
+    const shape = SHAPES[endpoint];
+    const body = clone(shape.body);
+    for (const path of textPaths(shape)) setAt(body, path, SECRET_NOTE);
+    const result = await readOf(endpoint, shape, body);
+    for (const path of textPaths(shape)) expect(getAt(result.data, path)).toBe(SCRUBBED_NOTE);
+    const text = JSON.stringify(result);
+    for (const piece of FAKE_PIECES) expect(text).not.toContain(piece);
+    expect(result.signed_links_removed).toBe(textPaths(shape).length);
   });
 
-  test('a declared content key with a name-matched name is returned, and still scrubbed', async () => {
-    const withLink = `Rinse the sprayer. See https://portal.example.test/p?session=${'abc' + '123'} and the ${'portal pass' + 'word is swords' + 'fish'}.`;
-    const result = await run(CONTENT_ENTRY, { [contentKey]: withLink, other_notes: PHRASE });
-    expect(isFreeTextName(contentKey) || contentKey).toBeTruthy();
-    expect(result.data[contentKey]).toContain('Rinse the sprayer.');
-    expect(result.data[contentKey]).not.toContain('abc' + '123');
-    expect(result.data[contentKey]).not.toContain('swords' + 'fish');
-    // a different name-matched key on the same row, not declared content, is still withheld
-    expect(result.data.other_notes).toBe(`[note withheld: ${PHRASE.length} characters]`);
+  test('the payer note from the owner list: a labelled password, a session link and an Authorization header', async () => {
+    const shape = SHAPES['/admin/payers'];
+    const result = await readOf('/admin/payers', shape, { payers: [{ id: 3, display_name: 'Synthetic Payer LLC', notes: SECRET_NOTE }] });
+    expect(result.data.payers[0].notes).toBe(SCRUBBED_NOTE);
+    expect(result.data.payers[0].display_name).toBe('Synthetic Payer LLC');
   });
+});
 
-  test('the name list is one exported constant and covers the owner list', () => {
-    for (const word of ['note', 'notes', 'comment', 'comments', 'reason', 'instruction', 'instructions', 'detail', 'details', 'memo', 'remark', 'remarks', 'message', 'description', 'text', 'body', 'summary', 'script', 'feedback', 'explanation', 'directions', 'special']) {
-      expect(FREE_TEXT_WORDS).toContain(word);
-    }
-    expect(Object.isFrozen(FREE_TEXT_WORDS)).toBe(true);
+describe('a read that returned a note taints the request', () => {
+  test('after the payers note comes back, owner-direct edits need a card', async () => {
+    const shape = SHAPES['/admin/payers'];
+    const result = await readOf('/admin/payers', shape, shape.body);
+    const taint = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteUntrustedRead(taint, 'read_admin_data', result);
+    expect(taint.untrustedRead).toBe(true);
   });
 });

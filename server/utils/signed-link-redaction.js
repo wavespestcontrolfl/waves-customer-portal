@@ -35,8 +35,9 @@
  * Defense in depth behind the catalog generator, which keeps routes that
  * select or build such values out of the catalog.
  */
-const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
-const { scrubSecretText } = require('./secret-text-scrubber');
+const { isCredentialField, isCredentialName } = require('./credential-fields');
+const { scrubSecretText, clauseAt, ACCESS_WORD_RE, labelGap } = require('./secret-text-scrubber');
+const { scrubPansDetailed, luhnValid } = require('./pan-scrub');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -59,7 +60,8 @@ const SIGNED_KEYS = new Set([
   'key', 'auth', 'sid', 'ticket', 'pwd', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'bearer',
 ]);
 const STORAGE_HOST_RE = /(^|\.)(amazonaws\.com|r2\.cloudflarestorage\.com|r2\.dev|storage\.googleapis\.com|storage\.cloud\.google\.com|blob\.core\.windows\.net|digitaloceanspaces\.com|backblazeb2\.com|wasabisys\.com)$/i;
-const URL_IN_TEXT_RE = /https?:\/\/[^\s"'<>\\]+/gi;
+// A hierarchical URL of ANY scheme (https, wss, ftp, postgres, a custom app scheme): all are judged the same way.
+const URL_IN_TEXT_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>\\]+/gi;
 // A first path segment that marks an ordinary public content page.
 const PUBLIC_CONTENT_SEGMENTS = new Set(['blog', 'services', 'service', 'service-area', 'service-areas', 'areas', 'locations', 'about', 'contact', 'faq', 'resources']);
 // OWN-DOMAIN RULE. The business's own hosts: the literal domain (and every
@@ -183,6 +185,10 @@ const PROTOCOL_RELATIVE_RE = /(?<![\w:/.@-])\/\/(?=[A-Za-z0-9])[^\s"'<>\\]+/g;
 // follow a word character, "/", ":" or "." (so "10/12/2026", "and/or" and the
 // inside of an absolute URL are not starts).
 const RELATIVE_LINK_RE = /(?<![\w/:.@-])\/[A-Za-z0-9._~%@+=-]*(?:\/[A-Za-z0-9._~%@+=-]*)*(?:[?#][^\s"'<>\\]*)?/g;
+// A path with no leading slash and a query: "reset?ticket=...", "login/reset?ticket=...", "ws?sid=...". A
+// path word (or words joined by "/") directly followed by "?" and a key=value pair. It starts at a word
+// boundary that is not inside a longer path, host or address.
+const PATH_QUERY_RE = /(?<![\w/.:@%~+=-])[A-Za-z0-9._~%-]+(?:\/[A-Za-z0-9._~%@+=-]+)*\?[A-Za-z0-9_.[\]%-]+=[^\s"'<>\\]*/g;
 // A bare query string that carries a credential: "?token=...", "?sig=...&x=1".
 const BARE_QUERY_RE = /(?<![\w/])\?[A-Za-z0-9_.[\]-]+=[^\s"'<>\\]*/g;
 
@@ -258,88 +264,135 @@ function redactString(text, state) {
     const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
     return verdict ? count(verdict) + tail : match;
   });
-  return relative.replace(BARE_QUERY_RE, (match) => {
+  // The same credential-query verdict as an absolute link; a plain query ("faq?page=2") stays.
+  const pathQuery = relative.replace(PATH_QUERY_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    let url;
+    try { url = new URL(link, 'https://relative.invalid'); } catch { return match; }
+    return carriesCredential(url.search) ? count(REDACTED_LINK) + tail : match;
+  });
+  return pathQuery.replace(BARE_QUERY_RE, (match) => {
     const { link, tail } = splitTail(match);
     return carriesCredential(link.slice(1)) && /=[^&]/.test(link) ? count(REDACTED_LINK) + tail : match;
   });
 }
 
 function newState() {
-  return { links: 0, privateLinks: 0, fields: 0, notes: 0 };
-}
-
-// OPERATOR NOTES. A free-text field typed by staff or customers about a record
-// (notes, admin_notes, reason, instructions ...) is where a password, a
-// session link or a card number gets pasted, and a best-effort scrubber cannot
-// win that. Such a value is not read through the general read at all: it is
-// replaced by a marker that carries only its length.
-//
-// Fail closed (Codex round 10): a reviewer who forgets to declare a field must
-// not leak it, so on EVERY endpoint a response key whose NAME looks like free
-// text is withheld, unless the reviewed row declares that key "content"
-// (business reference text that is the point of the read). A row may also
-// declare "note" for a key the name test would not catch. Matched by key name
-// at any depth. A free-text field whose name is outside this list still
-// depends on the review (see the README).
-//
-// The list is words of the key (snake_case, camelCase, kebab-case), singular
-// and plural written out. `direction` alone is not on it (a sort direction);
-// `directions` is. Added beyond the owner's first list: transcript(s),
-// transcription, narrative, excerpt, snippet (spoken or typed text of a call or
-// message). Dropped: none.
-const FREE_TEXT_WORDS = Object.freeze([
-  'note', 'notes', 'comment', 'comments', 'reason', 'reasons', 'instruction', 'instructions', 'detail', 'details',
-  'memo', 'memos', 'remark', 'remarks', 'message', 'messages', 'description', 'descriptions', 'text', 'texts', 'body',
-  'summary', 'summaries', 'script', 'scripts', 'feedback', 'explanation', 'explanations', 'directions', 'special',
-  'transcript', 'transcripts', 'transcription', 'narrative', 'excerpt', 'snippet',
-]);
-const FREE_TEXT_WORD_SET = new Set(FREE_TEXT_WORDS);
-
-function isFreeTextName(key) {
-  return nameWords(key).some(word => FREE_TEXT_WORD_SET.has(word));
-}
-
-function withheldMarker(length) {
-  return `[note withheld: ${length} characters]`;
-}
-
-// A value worth withholding: a non-blank string, or a non-empty object or array
-// (the JSON `details` case). Numbers, booleans, null and empty text are not.
-function hasFreeText(item) {
-  if (typeof item === 'string') return item.trim() !== '';
-  return item !== null && typeof item === 'object' && Object.keys(item).length > 0;
-}
-
-function shouldWithhold(key, item, freeText) {
-  const kind = Object.hasOwn(freeText, key) ? freeText[key] : undefined;
-  const flagged = kind === 'note' || (kind !== 'content' && isFreeTextName(key));
-  return flagged && hasFreeText(item);
-}
-
-// `freeText` is the reviewed row's map { key: 'note' | 'content' }.
-function withholdNotes(value, freeText, state, depth = 0) {
-  if (!value || typeof value !== 'object' || depth > MAX_DEPTH) return value;
-  if (Array.isArray(value)) return value.map(item => withholdNotes(item, freeText, state, depth + 1));
-  const out = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (shouldWithhold(key, item, freeText)) {
-      state.notes += 1;
-      out[key] = withheldMarker(typeof item === 'string' ? item.length : JSON.stringify(item).length);
-    } else out[key] = withholdNotes(item, freeText, state, depth + 1);
-  }
-  return out;
+  return { links: 0, privateLinks: 0, fields: 0 };
 }
 
 // Credentials pasted into free text (best effort; see secret-text-scrubber.js).
+// Card numbers and CVVs go through the shared card scrubber (Luhn-checked, so
+// phone numbers, invoice numbers and ids stay), then three passes of this path:
+//  - a card number written like a phone number ("Card number: 424 242 4242 424242"),
+//    removed when a card word leads the run in its clause and the digits pass Luhn;
+//  - a CVV after its label, removed unless the clause names a physical entry device and
+//    no card or payment word ("Security code for the gate: 4455" stays; a card wins);
+//  - a Social Security number in its dashed form or after its label.
+// The 3-2-4 shape with one separator used twice (dashes or spaces). A phone
+// number is 3-3-4 and does not match.
+const SSN_DASHED_RE = /(?<![\d-])\d{3}([- ])\d{2}\1\d{4}(?![\d-])/g;
+// Only "SSN" or the whole phrase "Social Security" is a label ("Social media ID" is not).
+// "SSN", "Social Security", "Social Security Number", "Social Security No.", "SSN #": the label may be
+// followed by "number"/"no", ordinary punctuation (". : #") and spaces, then at most one line break, or by up
+// to 20 other characters that hold no digit, period or line break ("SSN on file is "): the shared label gap.
+const SSN_LABELLED_RE = new RegExp(`\\b(ssn|social\\s+security)\\b((?:[ \\t]+(?:number|num|no)\\b)?[ \\t.:#]{0,8}(?:[ \\t]*\\r?\\n[ \\t]*)?|${labelGap(20)})(\\d[\\d -]{7,11}\\d)\\b`, 'gi');
+// ONE list of words that put a clause in card territory: the card-run pass (a card word leads a digit run) and
+// the security-code pass (a code beside a card word is a card code) both read it.
+const CARD_TERMS = 'card|cc|credit|debit|pan|visa|master\\s?card|amex|american\\s+express|discover|diners(?:\\s+club)?|jcb|union\\s?pay';
+const CARD_WORD = `(?:card(?:\\s*(?:number|no|num)\\b\\.?)?|${CARD_TERMS.replace(/^card\|/, '')})`;
+// Digit groups on a card line are separated by a space, tab, comma, dash, dot or slash (up to 3 characters),
+// or one line break: "424 242 4242 424242", "424, 242, 4242, 424242", "4242\n4242\n4242\n4242".
+const GROUP_GAP = '[ \\t,.\\/-]{0,3}(?:\\r?\\n[ \\t]*)?';
+// The card word may sit anywhere earlier in the clause (up to 120 characters,
+// no digit or sentence end between): "Card number given by customer over the
+// phone is 424 242 ...".
+const CARD_RUN_RE = new RegExp(`\\b(${CARD_WORD})\\b(${labelGap(120)})(\\d(?:${GROUP_GAP}\\d)*)(?!\\d)`, 'gi');
+// Every card length from 13 to 19 digits, the common 16 and 15 first (an 8-digit-IIN card may be 17 or 18 long).
+const PAN_LENGTHS = [16, 15, 19, 18, 17, 14, 13];
+function scrubGroupedCard(text) {
+  let removed = 0;
+  const clean = text.replace(CARD_RUN_RE, (match, word, between, run) => {
+    const digits = run.replace(/\D/g, '');
+    if (digits.length < 13) return match;
+    for (const length of PAN_LENGTHS) {
+      if (length > digits.length || !luhnValid(digits.slice(0, length))) continue;
+      // the run's characters up to and including its `length`-th digit
+      let seen = 0;
+      let end = 0;
+      while (seen < length) { if (/\d/.test(run[end])) seen += 1; end += 1; }
+      removed += 1;
+      // Digits that ride the same run after the card number are its expiry and
+      // security code ("424, 242, 4242, 424242, 12/28, 123"): they go too.
+      const rest = run.slice(end);
+      return `${word}${between}[card ending ${digits.slice(length - 4, length)}]${/\d/.test(rest) ? ' [card details removed]' : rest}`;
+    }
+    return match;
+  });
+  return { text: clean, removed };
+}
+// The code must sit in the label's own clause: "Security code missing. ID 123" keeps 123.
+const CVV_RE = new RegExp(`\\b(cvv2?|cvc2?|csc|cid|security code|card code|card verification(?: (?:value|code))?)\\b((?:\\s+(?:no\\.?|num\\.?|number|#))?${labelGap(15)})(\\d{3,4})(?!\\d)`, 'gi');
+const CARD_CONTEXT_RE = new RegExp(`\\b(?:${CARD_TERMS}|paid|payment)\\b`, 'i');
+function scrubCvv(text) {
+  let removed = 0;
+  const clean = text.replace(CVV_RE, (match, label, between, _digits, offset) => {
+    const clause = clauseAt(text, offset);
+    // "CID" is also a customer id: it is a card code only beside a card word ("Amex CID: 1234").
+    if (/^cid$/i.test(label) && !CARD_CONTEXT_RE.test(clause)) return match;
+    if (ACCESS_WORD_RE.test(clause) && !CARD_CONTEXT_RE.test(clause)) return match;
+    removed += 1;
+    return `${label}${between}[code removed]`;
+  });
+  return { text: clean, removed };
+}
+function scrubFinancialIdentifiers(text) {
+  const cards = scrubPansDetailed(text);
+  let removed = cards.count;
+  const grouped = scrubGroupedCard(cards.text);
+  const cvv = scrubCvv(grouped.text);
+  removed += grouped.removed + cvv.removed;
+  const clean = cvv.text
+    .replace(SSN_DASHED_RE, () => { removed += 1; return '[SSN removed]'; })
+    .replace(SSN_LABELLED_RE, (_match, label, between) => { removed += 1; return `${label}${between}[SSN removed]`; });
+  return { text: clean, removed };
+}
+
 function scrubFreeText(text, state) {
-  const { text: clean, removed } = scrubSecretText(text);
-  state.fields += removed;
-  return clean;
+  const secrets = scrubSecretText(text);
+  const financial = scrubFinancialIdentifiers(secrets.text);
+  state.fields += secrets.removed + financial.removed;
+  return financial.text;
+}
+
+// Detection reads ASCII: every Unicode space (NBSP, narrow NBSP, thin, figure and the rest of \p{Zs}, the
+// line and paragraph separators), every Unicode dash (\p{Pd}, the minus sign) becomes its ASCII form, and
+// zero-width characters are dropped, once, before any pass runs. A string with nothing removed comes back
+// as the original; a string with a removal comes back normalised (spaces and dashes in ASCII).
+const UNICODE_SPACE_RE = /[\p{Zs}\u0085]/gu;
+const UNICODE_BREAK_RE = /[\u2028\u2029]/g;
+const UNICODE_DASH_RE = /[\p{Pd}\u2212]/gu;
+const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF]/g;
+function foldUnicode(text) {
+  return text.replace(ZERO_WIDTH_RE, '').replace(UNICODE_SPACE_RE, ' ').replace(UNICODE_BREAK_RE, '\n').replace(UNICODE_DASH_RE, '-');
+}
+// A string longer than this is cut before any pass runs (a note is short; a 190,000-character one is a paste
+// or a runaway log). The cut is counted as a removal and the text ends with TEXT_CUT_MARKER; the answer's own
+// size limit is applied later.
+const MAX_TEXT_CHARS = 20000;
+const TEXT_CUT_MARKER = '[text cut at 20,000 characters]';
+function redactText(value, state) {
+  const cut = value.length > MAX_TEXT_CHARS;
+  const folded = foldUnicode(cut ? value.slice(0, MAX_TEXT_CHARS) : value);
+  const before = state.fields;
+  const out = scrubFreeText(redactString(folded, state), state);
+  if (cut) { state.fields += 1; return `${out} ${TEXT_CUT_MARKER}`; }
+  return state.fields === before && out === folded ? value : out;
 }
 
 // A copy of `value` with credentials removed. `state` counts what was removed.
 function redactSecrets(value, state, depth = 0) {
-  if (typeof value === 'string') return scrubFreeText(redactString(value, state), state);
+  if (typeof value === 'string') return redactText(value, state);
   if (!value || typeof value !== 'object') return value;
   if (depth > MAX_DEPTH) { state.fields += 1; return '[too deeply nested]'; }
   if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1));
@@ -354,5 +407,5 @@ function redactSecrets(value, state, depth = 0) {
 }
 
 module.exports = {
-  withholdNotes, isFreeTextName, FREE_TEXT_WORDS, REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
+  REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, MAX_TEXT_CHARS, TEXT_CUT_MARKER, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
 };
