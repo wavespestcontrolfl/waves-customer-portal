@@ -302,6 +302,43 @@ async function proposeFact(trx, message, fact, current) {
   return { id: proposal.id, created: proposal.inserted, retired_proposal_ids: retired.map((row) => row.id).sort() };
 }
 
+// The one write for a typed, auto-applied preference field: compare-and-set on
+// the locked row, retirement of any pending extraction proposal, and a critical
+// audit event. Callers hold the preference lock and have run the newer-proposal guard.
+async function writeAutoAppliedField(trx, { customerId, field, value, current, metadata }) {
+  const proposal = { scope_id: customerId, field, resource_id: current?.id || null };
+  const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: current?.[field] ?? null });
+  await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: value });
+  // The admin extraction phase may already hold a pending proposal for this
+  // field; its approve would now fail the before-value check, so retire it
+  // here instead of leaving stale review work.
+  await stalePendingExtractionProposals({ trx, scope_id: customerId, field });
+  await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.property_preference.updated',
+    resource_type: 'property_preferences', resource_id: target.id, metadata });
+  return target;
+}
+
+// Same lock order as portal preference saves and merges: the preference
+// advisory lock, then the customer row. Returns the locked customer, if any.
+async function lockPreferenceOwner(trx, customerId) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+  return trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
+}
+
+// A lead's bare CALL / TEXT reply (GATE_LEAD_CALL_TEXT_PREFERENCE, lead-intake)
+// goes through the same writer as an SMS fact: the newer-proposal guard, the
+// locked compare-and-set, proposal retirement and the critical audit event.
+// The caller holds lockPreferenceOwner's locks. Returns 'applied' or 'superseded'
+// (a newer pending proposal for the field outranks this reply).
+async function applyLeadContactPreference(trx, { customerId, value, sourceAt, twilioSid = null, smsLogId = null }) {
+  if (await findPendingExtractionProposal({ trx, scope_id: customerId, field: 'contact_preference',
+    newerThan: sourceAt, sameMessageSid: twilioSid })) return 'superseded';
+  const [current] = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().limit(1).select('*');
+  await writeAutoAppliedField(trx, { customerId, field: 'contact_preference', value, current,
+    metadata: { sms_log_id: smsLogId, customer_id: customerId, field: 'contact_preference', via: 'lead_call_text_reply', extractor_version: VERSION } });
+  return 'applied';
+}
+
 async function applyFacts(trx, message, facts, context) {
   const outcomes = [];
   let persistedCurrent = context.current;
@@ -339,16 +376,8 @@ async function applyFacts(trx, message, facts, context) {
       outcomes.push({ ...fact, outcome: 'superseded' });
       continue;
     }
-    const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
-    const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: persistedCurrent?.[fact.field] ?? null });
-    await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: fact.value });
-    // The admin extraction phase may already hold a pending proposal for this
-    // field; its approve would now fail the before-value check, so retire it
-    // here instead of leaving stale review work.
-    await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field });
-    await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.property_preference.updated',
-      resource_type: 'property_preferences', resource_id: target.id,
-      metadata: { sms_log_id: message.id, customer_id: message.customer_id, property_id: fact.property_id,
+    const target = await writeAutoAppliedField(trx, { customerId: message.customer_id, field: fact.field, value: fact.value,
+      current: persistedCurrent, metadata: { sms_log_id: message.id, customer_id: message.customer_id, property_id: fact.property_id,
         field: fact.field, extractor_version: VERSION } });
     persistedCurrent = { ...target, [fact.field]: fact.value };
     // A row created by this batch hydrates DB defaults, not customer
@@ -530,9 +559,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
   return conn.transaction(async (trx) => {
     // Match portal preference saves and merges: preference advisory lock,
     // customer, then its SMS rows. Do not hold a child row while awaiting its owner.
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['property-preferences', String(message.customer_id)]);
-    const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
+    const customer = await lockPreferenceOwner(trx, message.customer_id);
     if (!customer) return { skipped: 'customer_unavailable' };
     const source = await trx('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log')
       .where({ id: message.id }).forUpdate().first();
@@ -1362,4 +1389,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, lockPreferenceOwner, applyLeadContactPreference, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

@@ -26,7 +26,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const TwilioService = require('./twilio');
-const { classifyServiceIntent } = require('./sms-service-intent');
+const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
   blockIfAutomatedEstimateDuplicate,
@@ -272,77 +272,63 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
   }
 }
 
-// A bare CALL / TEXT answer to the auto-reply ("Reply CALL and we'll call you
-// shortly, or TEXT to handle it right here"). Strict on purpose: only short,
-// unambiguous replies match, so "call me after 5" or "ants in kitchen" stay
-// ordinary inbound text. Returns 'call' | 'text' | null.
-const CALL_REPLIES = new Set(['call', 'call me', 'please call', 'call please']);
-const TEXT_REPLIES = new Set(['text', 'text me', 'please text', 'text please', 'texting', 'txt']);
-
-function parseCallTextReply(body) {
-  if (typeof body !== 'string') return null;
-  const cleaned = body
-    .toLowerCase()
-    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
-    .replace(/\s+/g, ' ');
-  if (CALL_REPLIES.has(cleaned)) return 'call';
-  if (TEXT_REPLIES.has(cleaned)) return 'text';
-  return null;
-}
-
 // GATE_LEAD_CALL_TEXT_PREFERENCE. Called by the SMS webhook for a lead in
 // intake whose reply the intake machine did NOT consume. A bare CALL / TEXT
-// reply is saved on property_preferences.contact_preference and noted on the
-// customer's newest lead; the choice is returned so the admin bell can name it
-// (undefined = gate off or not a CALL / TEXT reply). Sends nothing and never
-// touches lead_intake_status. Fail-soft: the text still gets its normal inbox
-// and bell handling, so errors are logged by customer id only.
-// Two replies can be processed at once: the write is serialized per customer
-// and skipped when a newer reply's choice is already recorded, so an older
-// CALL never overwrites a newer TEXT. The ordering key is the source SMS time,
-// kept in the lead note's metadata.
+// reply is saved through the SMS profile writer (sms-operational-actions:
+// locked compare-and-set, newer-proposal guard, proposal retirement, critical
+// audit event) and noted on the customer's newest lead. Returns the choice so
+// the admin bell can name it; undefined = gate off, not a CALL / TEXT reply,
+// or a newer choice was already recorded (the older reply must not label the
+// bell). Sends nothing and never touches lead_intake_status. Fail-soft: the
+// text still gets its normal inbox and bell handling, so errors are logged by
+// customer id only. Two replies can be processed at once: the write runs under
+// the writer's per-customer lock and is skipped when a newer reply's choice is
+// already noted (source SMS time kept in the lead note's metadata).
 async function recordCallTextReply(customer, body, { triggerSmsLogId } = {}) {
   if (!isEnabled('leadCallTextPreference')) return undefined;
   const preference = parseCallTextReply(body);
   if (!preference) return undefined;
   try {
     const row = triggerSmsLogId
-      ? await db('sms_log').where({ id: triggerSmsLogId }).first('created_at')
+      ? await db('sms_log').where({ id: triggerSmsLogId }).first('created_at', 'twilio_sid')
       : null;
     const sourceAt = (row?.created_at ? new Date(row.created_at) : new Date()).toISOString();
-    await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lead-call-text:${customer.id}`]);
+    const { lockPreferenceOwner, applyLeadContactPreference } = require('./sms-operational-actions');
+    return await db.transaction(async (trx) => {
+      if (!(await lockPreferenceOwner(trx, customer.id))) return undefined;
       const newer = await trx('lead_activities as a')
         .join('leads as l', 'l.id', 'a.lead_id')
         .where('l.customer_id', customer.id)
         .where('a.activity_type', 'contact_preference')
         .whereRaw("a.metadata->>'source_at' > ?", [sourceAt])
         .first('a.id');
-      if (newer) return;
-      await trx('property_preferences')
-        .insert({ customer_id: customer.id, contact_preference: preference })
-        .onConflict('customer_id')
-        .merge({ contact_preference: preference, updated_at: new Date() });
+      if (newer) return undefined;
+      const applied = await applyLeadContactPreference(trx, {
+        customerId: customer.id, value: preference, sourceAt, twilioSid: row?.twilio_sid || null, smsLogId: triggerSmsLogId || null,
+      });
+      if (applied !== 'applied') return undefined;
       const lead = await trx('leads')
         .where({ customer_id: customer.id })
         .whereNull('deleted_at')
         .orderBy('created_at', 'desc')
         .first('id');
-      if (!lead) return;
-      await trx('lead_activities').insert({
-        lead_id: lead.id,
-        activity_type: 'contact_preference',
-        description: preference === 'call'
-          ? 'Lead replied CALL: wants a phone call'
-          : 'Lead replied TEXT: prefers text',
-        performed_by: 'system',
-        metadata: JSON.stringify({ contact_preference: preference, source: 'sms_reply', source_at: sourceAt }),
-      });
+      if (lead) {
+        await trx('lead_activities').insert({
+          lead_id: lead.id,
+          activity_type: 'contact_preference',
+          description: preference === 'call'
+            ? 'Lead replied CALL: wants a phone call'
+            : 'Lead replied TEXT: prefers text',
+          performed_by: 'system',
+          metadata: JSON.stringify({ contact_preference: preference, source: 'sms_reply', source_at: sourceAt }),
+        });
+      }
+      return preference;
     });
   } catch (e) {
     logger.error(`[lead-intake] call/text preference save failed for customer ${customer.id}: ${e.message}`);
+    return preference;
   }
-  return preference;
 }
 
 async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
@@ -576,4 +562,4 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
   return { handled: false };
 }
 
-module.exports = { handleIntakeReply, recordCallTextReply, parseCallTextReply };
+module.exports = { handleIntakeReply, recordCallTextReply };
