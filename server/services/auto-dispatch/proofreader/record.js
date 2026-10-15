@@ -53,6 +53,8 @@ const PART_OVERLAP_CHARS = 600;
 // The whole record's limit. Past it no model is asked and the verdict is
 // "unknown" (measured 2026-10-09 over 112 customers: median 6k, max 56k).
 const MAX_RECORD_CHARS = 300000;
+// The longest text the hidden-time scan reads (hiddenTimeIn).
+const MAX_SCAN_ENTRY_CHARS = 24000;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
@@ -149,7 +151,7 @@ const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
 // "TWO AND A HALF HOURS": r22.
 // Spelled tens too ("THIRTY MINUTES NOTICE"): r30.
-const QTY = `(?:\\d{1,3}|a|an|half|an?\\s{1,3}half|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
+const QTY = `(?:an?\\s{1,3}(?:few|couple(?:\\s{1,5}of)?)|\\d{1,3}|a|an|half|an?\\s{1,3}half|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
 // A word after the number must be one that goes with a time ("before 9
@@ -237,7 +239,7 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
   // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
   // "SECOND TUESDAY OF THE MONTH"): r49, r50.
-  '\\b(?:first|second|third|fourth|last|\\d(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
+  '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
   // "AS EARLY AS 9", "as late as 5": r35.
   `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
@@ -410,17 +412,40 @@ function numberMarkers(raw, masked) {
   if (rawWords.length !== maskedWords.length) return null;
   const numbers = new Set();
   let ordinal = 0;
+  const bare = (word) => (word || '').toLowerCase().replace(/^\W+|\W+$/g, '');
   maskedWords.forEach((word, i) => {
     const count = word.split(MARK).length - 1;
     if (!count) return;
-    if (!/[A-Za-z]/.test(rawWords[i])) for (let k = 0; k < count; k += 1) numbers.add(ordinal + k);
+    // Only a code-length number (3 digits or more) is skipped: a one- or
+    // two-digit number can be an hour ("Monday 10"), and a four-digit time
+    // beside a word that says when ("Monday 0800") is kept too (r58).
+    const digits = (rawWords[i].match(/\d/g) || []).length;
+    const besideTime = [bare(rawWords[i - 1]), bare(rawWords[i + 1])].some((w) => NEIGHBOR_TIME_WORDS.has(w) || PREV_LIMITS.has(w) || w === 'at' || w === 'by');
+    const time = digits <= 2 || (new RegExp(`^\\W*${HHMM}\\W*$`).test(rawWords[i]) && besideTime);
+    if (!/[A-Za-z]/.test(rawWords[i]) && !time) for (let k = 0; k < count; k += 1) numbers.add(ordinal + k);
     ordinal += count;
   });
   return numbers;
 }
 
+// The line-kept form must agree on the same marker (r58): when both forms
+// have the same markers, a hit counts only if that marker also hits with the
+// line breaks kept; otherwise any hit there is enough.
 function maskBesideTimeWord(masked, lineMasked = null, numbers = null) {
-  if (lineMasked != null && lineMasked !== masked && !maskBesideTimeWord(lineMasked)) return false;
+  const hits = neighborHits(masked, numbers);
+  if (!hits.size) return false;
+  if (lineMasked == null || lineMasked === masked) return true;
+  const markers = (text) => text.split(MARK).length - 1;
+  if (markers(lineMasked) === markers(masked)) {
+    const lineHits = neighborHits(lineMasked, numbers);
+    return [...hits].some((k) => lineHits.has(k));
+  }
+  return neighborHits(lineMasked, null).size > 0;
+}
+
+// The ordinals of the markers the neighbor rule finds beside a time word.
+function neighborHits(masked, numbers = null) {
+  const hits = new Set();
   let at = masked.indexOf(MARK);
   let ordinal = -1;
   while (at !== -1) {
@@ -438,21 +463,21 @@ function maskBesideTimeWord(masked, lineMasked = null, numbers = null) {
       const prev = wordsOf(before).pop();
       const next = wordsOf(after)[0];
       const following = wordsOf(after);
-      if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) return true;
+      if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) hits.add(ordinal);
       // "May" is also a verb: a month only when nothing, or a joining word,
       // follows it ("expires [redacted] May", "... May only"): r24, r25.
-      if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) return true;
+      if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) hits.add(ordinal);
       // One hidden word after the limit ("NEVER [redacted]"): a longer
       // hidden run ("ONLY [redacted] [redacted]", "ONLY TWO DOGS") is a
       // phrase, not a time (r33, r43); a time in it is read by the count.
       const run = (masked.slice(at).match(/^(?:\[redacted\]\s{0,3}){1,3}/) || [''])[0].split(MARK).length - 1;
       // The limit must stand right before this mask, not before an earlier one.
       const afterMask = /\[redacted\][\s,]*$/.test(before);
-      if (PREV_LIMITS.has(prev) && !afterMask && run <= 1 && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
+      if (PREV_LIMITS.has(prev) && !afterMask && run <= 1 && (next === undefined || AFTER_LIMIT_OK.has(next))) hits.add(ordinal);
     }
     at = masked.indexOf(MARK, at + MARK.length);
   }
-  return false;
+  return hits;
 }
 
 // The entries of one stored text: one, or its parts when it is long. `ms`
@@ -498,6 +523,11 @@ function hiddenTimeIn(text, raw, masked) {
   // longer of the two (security r55).
   if (masked.length > MAX_RECORD_CHARS) return false;
   const size = Math.max(raw.length, masked.length);
+  // One entry is scanned only up to MAX_SCAN_ENTRY_CHARS: a longer text the
+  // mask changed is counted as not fully read without a scan, so one stored
+  // reply cannot cost the event loop more than a few milliseconds (security
+  // r58: a 280 KB reply took 260 ms per build).
+  if (size > MAX_SCAN_ENTRY_CHARS) return true;
   const budget = scanBudget.getStore();
   if (budget && size > budget.left) return true;
   if (budget) budget.left -= size;

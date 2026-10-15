@@ -507,6 +507,11 @@ describe('the customer record', () => {
       'GATE CODE 4821, ONLY WORKS MONDAY',
       'GATE CODE 4821, LAST DAY OF THE MONTH ONLY',
       'GATE CODE 4821, FIRST DAY OF THE MONTH',
+      'GATE CODE 4821, RETURN IN A COUPLE OF DAYS',
+      'GATE CODE 4821, AWAY FOR A FEW WEEKS',
+      'GATE CODE 4821, TENTH DAY OF THE MONTH ONLY',
+      'GATE CODE 4821, 15TH DAY OF THE MONTH',
+      'Gate code 4821, Monday 10',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
       'Gate code 4821, ON MONDAY',
@@ -621,12 +626,13 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
-    test('an entry both mask steps change is charged once against the scan budget', async () => {
-      // The first step masks 4821; only the one-line step masks 5555 (split across lines).
-      const note = `Gate code 4821\n${'word '.repeat(32000)}\n5555 is the\ngate code`;
-      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-      expect(record.tooLong).toBe(false);
-      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    test('a long text the mask changed is counted as not fully read without a scan', async () => {
+      const masked = `Gate code 4821 ${'word '.repeat(6000)}`; // 30 KB, past the per-entry scan limit
+      const plain = `Gate opens by itself ${'word '.repeat(6000)}`; // 30 KB, the mask changes nothing
+      const flagged = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: masked }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      const clear = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: plain }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(flagged.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+      expect(clear.unread.some((u) => u.reason === 'time_masked')).toBe(false);
     });
 
     test('a multi-word password on the next line is masked as before in the text the model reads', async () => {
@@ -660,6 +666,7 @@ describe('the customer record', () => {
     test.each([
       'SSN 123456789, MONDAY ONLY',
       'Front gate 4821, Monday only',
+      'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
