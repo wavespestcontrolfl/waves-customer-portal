@@ -126,7 +126,8 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // Not "on": "spoke with the owner on 10/10" is history (r12).
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing';
+// skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -242,7 +243,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
   // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
   // AFTER CHRISTMAS"): r55.
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|was|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
@@ -266,7 +267,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
