@@ -590,11 +590,14 @@ const NON_ACCESS_RES = [
 ];
 const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
 
-// Counted on the renamed text, where each number is replaced once, so one
-// SSN that two patterns match is not counted twice (pre-push r65).
-function onlyNonAccessMarkers(raw, masked) {
-  const explained = (forScan(raw).match(/\[(?:card|ssn|cvv|prior)\]/g) || []).length;
-  return masked.split(MARK).length - 1 <= explained;
+// The access mask itself changed nothing: with cards, SSNs, CVVs and a
+// stored [redacted] renamed first, the mask leaves the text as it is. A
+// direct test, not a count: a renamed pattern that the mask would not have
+// hidden can never explain away an access marker (pre-push r71). One more
+// pass of the shared mask, which already runs on every text for the model.
+function onlyNonAccessMarkers(raw) {
+  const renamed = forScan(raw);
+  return redactAccessCodes(renamed) === renamed;
 }
 
 function hiddenTimeIn(text, raw, masked) {
@@ -614,7 +617,7 @@ function hiddenTimeIn(text, raw, masked) {
   // itself changed it: markers that only a card, an SSN, a CVV or a stored
   // [redacted] explain are not the access mask's (r65). Counting those is
   // one linear pass.
-  const onlyOthers = onlyNonAccessMarkers(raw, masked);
+  const onlyOthers = onlyNonAccessMarkers(raw);
   if (size > MAX_SCAN_ENTRY_CHARS) return !onlyOthers;
   // Nothing for the access scan: not charged to the budget either (r66).
   if (onlyOthers) return false;
