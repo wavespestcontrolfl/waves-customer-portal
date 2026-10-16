@@ -266,7 +266,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|must|should|will|shall|needs?|has|have|got)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
@@ -338,7 +338,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
