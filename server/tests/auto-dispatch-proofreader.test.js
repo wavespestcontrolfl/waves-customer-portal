@@ -644,6 +644,12 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
     });
 
+    test('a long text with an SSN and an access code is still counted as not fully read', async () => {
+      const note = `SSN 123-45-6789, gate code 4821 FRIDAYS ONLY. ${'word '.repeat(6000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
     test('the stored text is charged at its own length, spaces included', async () => {
       const spaced = `Gate code 4821,${' '.repeat(30000)}MONDAY ONLY`; // short once collapsed
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: spaced }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });

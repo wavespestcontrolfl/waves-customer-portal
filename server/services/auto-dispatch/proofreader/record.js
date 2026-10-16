@@ -555,9 +555,10 @@ const NON_ACCESS_RES = [
 ];
 const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
 
+// Counted on the renamed text, where each number is replaced once, so one
+// SSN that two patterns match is not counted twice (pre-push r65).
 function onlyNonAccessMarkers(raw, masked) {
-  const count = (re) => (raw.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)) || []).length;
-  const explained = NON_ACCESS_RES.reduce((n, [re]) => n + count(re), 0) + count(PRIOR_MARK_RE);
+  const explained = (forScan(raw).match(/\[(?:card|ssn|cvv|prior)\]/g) || []).length;
   return masked.split(MARK).length - 1 <= explained;
 }
 
