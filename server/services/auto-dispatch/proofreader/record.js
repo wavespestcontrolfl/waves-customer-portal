@@ -53,12 +53,15 @@ const PART_OVERLAP_CHARS = 600;
 // The whole record's limit. Past it no model is asked and the verdict is
 // "unknown" (measured 2026-10-09 over 112 customers: median 6k, max 56k).
 const MAX_RECORD_CHARS = 300000;
-// The longest text the hidden-time scan reads (hiddenTimeIn).
-const MAX_SCAN_ENTRY_CHARS = 24000;
+// The longest text the hidden-time scan reads (hiddenTimeIn). Measured on
+// a worst-case text ("a a a ..."), the scan costs about 7 microseconds a
+// character: 12,000 is about 85 ms, and one record reads at most 16,000
+// (security r77; production: 5 of 243 customers flagged).
+const MAX_SCAN_ENTRY_CHARS = 12000;
 // All of one record's scans together read at most this much; a text past
 // what is left is counted as not fully read without a scan (security r61:
 // twelve 23 KB replies took 240 ms per build).
-const MAX_SCAN_RECORD_CHARS = 48000;
+const MAX_SCAN_RECORD_CHARS = 16000;
 // The most masks one text may have and still be scanned.
 const MAX_SCAN_MARKERS = 200;
 
@@ -243,7 +246,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
   // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
   // AFTER CHRISTMAS"): r55.
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|be|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
@@ -360,10 +363,15 @@ const TIME_WORDS_RE = new RegExp([
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
 // (Codex security r8).
+// One compiled pattern, reused: the scan is synchronous, so resetting
+// lastIndex is enough (compiling the large pattern on every call was most of
+// its cost: Codex security r77).
 function timeWords(text) {
-  const re = new RegExp(TIME_WORDS_RE.source, 'gi');
+  const re = TIME_WORDS_RE;
+  re.lastIndex = 0;
   let n = 0;
   while (re.exec(text)) n += 1;
+  re.lastIndex = 0;
   return n;
 }
 
