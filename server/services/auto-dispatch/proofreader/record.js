@@ -55,6 +55,10 @@ const PART_OVERLAP_CHARS = 600;
 const MAX_RECORD_CHARS = 300000;
 // The longest text the hidden-time scan reads (hiddenTimeIn).
 const MAX_SCAN_ENTRY_CHARS = 24000;
+// All of one record's scans together read at most this much; a text past
+// what is left is counted as not fully read without a scan (security r61:
+// twelve 23 KB replies took 240 ms per build).
+const MAX_SCAN_RECORD_CHARS = 48000;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
@@ -201,7 +205,7 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
   // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
   // Not the verb in "TECH MAY ONLY USE" (r51).
-  `(?<![\\w/-])(?!may\\b(?!\\s{1,5}\\d))${DATE_SHAPES}(?=[\\s,]{1,5}(?:only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))${DATE_SHAPES}(?=[\\s,]{1,5}(?:only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
@@ -240,11 +244,11 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
   // "late in the day"): r49.
-  '\\b(?:early|earlier|late|later)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
+  '\\b(?:early|earlier|earliest|late|later|latest)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
   '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
   // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
   // "SECOND TUESDAY OF THE MONTH"): r49, r50.
-  '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
+  '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:(?:two|three|four|five|2|3|4|5|few|couple\\s{1,3}of)\\s{1,3})?(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
   // "AS EARLY AS 9", "as late as 5": r35.
   `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
@@ -282,6 +286,12 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:on\\s{1,3}hold|indefinitely)(?![\\w])',
   '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?)(?:paused|suspended)(?![\\w])',
   '\\b(?:pause|suspend|paused|suspended)(?=\\s{1,3}(?:the\\s{1,3})?(?:service|services|visits?|appointments?|account|treatments?|program|plan)\\b)',
+  // Spanish clock times ("SOLO A LAS 10", "A LAS DIEZ"): r61.
+  '(?<=\\b(?:a|desde|hasta|de|antes\\s{1,3}de|despu[eé]s\\s{1,3}de)\\s{1,3})las?(?=\\s{1,3}(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\\b)',
+  // A direct no-move directive ("DO NOT RESCHEDULE", "DO NOT MOVE
+  // APPOINTMENT", "NO RESCHEDULING"): r61.
+  '(?<=\\b(?:not|never|no|don.?t|cannot|can.?t|won.?t)\\s{1,3})(?:reschedule|rescheduling|re-schedule)(?![\\w])',
+  '(?<=\\b(?:not|never|don.?t|cannot|can.?t)\\s{1,3})(?:move|change|switch|shift|cancel)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|our\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -388,6 +398,9 @@ const NEXT_MONTHS = new Set(['january', 'february', 'march', 'april', 'june', 'j
 const PREV_LIMITS = new Set(['until', 'till', 'before', 'after', 'except', 'never', 'every', 'only']);
 const AFTER_LIMIT_OK = new Set(['and', 'or', 'please', 'only', 'ok', 'okay', 'then', 'at', 'in', 'on', 'before', 'after', 'until', 'till', 'thanks', 'thank']);
 const MARK = '[redacted]';
+const SINGLE_WEEKDAYS = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'tue', 'tues', 'thu', 'thur', 'thurs', 'fri']);
+const DAY_LEADS = new Set(['on', 'by', 'at', 'from', 'next', 'this', 'any', 'for', 'expires', 'starts', 'ends', 'valid', 'coming', 'other', 'second', 'third']);
+const WEEKDAY_FOLLOWS = new Set(['only', 'ok', 'okay', 'works', 'work', 'is', 'are', 'please', 'preferred', 'morning', 'mornings', 'afternoon', 'afternoons', 'evening', 'evenings', 'and', 'or', 'thru', 'through', 'to', 'appointments', 'appointment', 'visits', 'visit', 'after', 'before', 'at']);
 const CODE_NOUN_BEFORE_RE = /\b(?:code|password|passcode|passphrase|pin|combo|combination)\b\s{0,5}(?:(?:is|=|:|#|-)\s{0,5})?$/i;
 const CODE_NOUN_AFTER_RE = new RegExp(String.raw`^\s{0,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:${CODE_PLACES}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b`, 'i');
 const wordsOf = (text) => (text.replace(/\[redacted\]/g, ' ').toLowerCase().match(/[a-z][a-z.']*/g) || []).map((w) => w.replace(/\.+$/, ''));
@@ -473,7 +486,12 @@ function neighborHits(masked, numbers = null) {
       const prev = wordsOf(before).pop();
       const next = wordsOf(after)[0];
       const following = wordsOf(after);
-      if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) hits.add(ordinal);
+      // One weekday after the mask counts only when tied to the visit: the
+      // mask follows a limit or a lead ("every [redacted] Tuesday"), or a
+      // scheduling word follows the weekday. "spoke to [redacted] Monday." is
+      // history (r61).
+      const loneDay = SINGLE_WEEKDAYS.has(next) && !PREV_LIMITS.has(prev) && !DAY_LEADS.has(prev) && !WEEKDAY_FOLLOWS.has(following[1]);
+      if (NEIGHBOR_TIME_WORDS.has(prev) || (NEIGHBOR_TIME_WORDS.has(next) && !loneDay) || NEXT_MONTHS.has(next)) hits.add(ordinal);
       // "May" is also a verb: a month only when nothing, or a joining word,
       // follows it ("expires [redacted] May", "... May only"): r24, r25.
       if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) hits.add(ordinal);
@@ -853,7 +871,7 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const args = {
     customerId, serviceId, asOf, customer, customerEmail: customer && customer.email,
   };
-  const budget = { left: MAX_RECORD_CHARS };
+  const budget = { left: MAX_SCAN_RECORD_CHARS };
   for (const [channel, read] of SOURCES) {
     try {
       found.push(...(await scanBudget.run(budget, () => read(conn, args, unread))).flat(2));

@@ -514,6 +514,12 @@ describe('the customer record', () => {
       'Gate code 4821, Monday 10',
       'Gate code 4821, Monday 900',
       'Gate code 4821, appointment at 930',
+      'GATE CODE 4821, EARLIEST APPOINTMENT ONLY',
+      'GATE CODE 4821, LAST TWO WEEKS OF THE MONTH ONLY',
+      'GATE CODE 4821, SOLO A LAS 10',
+      'GATE CODE 4821, A LAS DIEZ',
+      'GATE CODE 4821, DO NOT RESCHEDULE',
+      'GATE CODE 4821, DO NOT MOVE APPOINTMENT',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
       'Gate code 4821, ON MONDAY',
@@ -672,6 +678,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, PUMP HAS 1400 HOURS',
       'GATE CODE 4821, MOWER HAS 900 HOURS',
       'Gate code 4821, unit 5, Monday only',
+      'Gate code 4821, spoke to MANAGER Monday.',
+      'GATE CODE 4821, MIX RATIO 1/10 ONLY',
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
