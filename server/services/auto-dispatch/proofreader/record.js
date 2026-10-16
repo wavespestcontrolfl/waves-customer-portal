@@ -246,7 +246,7 @@ const TIME_WORDS_RE = new RegExp([
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
   // "late in the day"): r49.
   '\\b(?:early|earlier|earliest|late|later|latest)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
-  '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
+  '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3}(?:(?:too|very|so|any|no|real|really|super)\\s{1,3})?)(?:early|earlier|late|later)(?![\\w])',
   // A named part of the month ("MIDDLE OF THE MONTH ONLY", "BEGINNING OF
   // THE MONTH", "start of the month"): r63.
   // ...only with a limit ("... ONLY", "by the end of the month"): "END OF
@@ -261,9 +261,11 @@ const TIME_WORDS_RE = new RegExp([
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
   `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at|for)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // ...and a date after one ("APPOINTMENT IS OCTOBER 20", "booked for 10/20"): r69.
-  `\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:is|are|was|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?${DATE_SHAPES})`,
+  // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
+  // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
+  `\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:is|are|was|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
-  '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|mid-?day)(?![\\w])',
+  '\\b(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])',
   // "first thing" as a time only with in the morning / AM / only / please or
   // after come / be here ("FIRST THING ON LEFT" is a place): r53.
   '\\bfirst\\s{1,3}thing(?=\\s{1,3}(?:in\\s{1,3}the\\s{1,3}morning|tomorrow|am|a\\.m|only|please|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b|\\s{0,3}(?:[,;!]|\\.(?:\\s|$)|$))',
