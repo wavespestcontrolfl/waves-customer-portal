@@ -249,7 +249,10 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
   // A named part of the month ("MIDDLE OF THE MONTH ONLY", "BEGINNING OF
   // THE MONTH", "start of the month"): r63.
-  '\\b(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?month\\b)',
+  // ...only with a limit ("... ONLY", "by the end of the month"): "END OF
+  // MONTH REPORT IS DUE" is a deadline (r69).
+  '\\b(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?month\\s{0,3}(?:(?:only|ok|okay|please|works?|is\\s{1,3}best)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|until|till|by|before|after|at|in|around|near|toward|towards|during|not|no|except|prefer|prefers)\\s{1,3}(?:the\\s{1,3})?)(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?month\\b)',
   // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
   // "SECOND TUESDAY OF THE MONTH"): r49, r50.
   '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:(?:two|three|four|five|2|3|4|5|few|couple\\s{1,3}of)\\s{1,3})?(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
@@ -257,6 +260,8 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
   `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at|for)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
+  // ...and a date after one ("APPOINTMENT IS OCTOBER 20", "booked for 10/20"): r69.
+  `\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:is|are|was|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?${DATE_SHAPES})`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|mid-?day)(?![\\w])',
   // "first thing" as a time only with in the morning / AM / only / please or
@@ -297,11 +302,16 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:not|never|no|don.?t|cannot|can.?t|won.?t)\\s{1,3})(?:reschedule|rescheduling|re-schedule)(?![\\w])',
   '(?<=\\b(?:not|never|don.?t|cannot|can.?t)\\s{1,3})(?:move|change|switch|shift|cancel)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|our\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\b)',
   // Passive ("APPOINTMENT CANNOT BE MOVED", "visit is not to be changed"): r62.
-  '(?<=\\b(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)(?:moved|rescheduled|changed|shifted|switched|cancell?ed)(?![\\w])',
+  // ...with a scheduling subject ("THE GATE CANNOT BE MOVED" is the gate):
+  // r69. "rescheduled" needs none.
+  '(?<=\\b(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)(?:moved|changed|shifted|switched|cancell?ed)(?![\\w])',
+  '(?<=\\b(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)rescheduled(?![\\w])',
   // A season with a limit or a lead ("NO SERVICE UNTIL SPRING", "WINTER
   // ONLY", "AWAY FOR THE SUMMER"): r68.
   '\\b(?:until|till|til|before|after|during|over|through|thru|for|in|this|next|every|each|by|except|not|no|from)(?=\\s{1,5}(?:the\\s{1,5})?(?:spring|summer|fall|autumn|winter)s?(?![\\w]))',
   '\\b(?:spring|summer|fall|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|is|are|months?|break|vacation|season)\\b)',
+  // "DAYLIGHT ONLY", "daytime only": r69.
+  '\\b(?:daylight|day[\\s-]?time)(?=\\s{0,3}(?:only|ok|okay|hours?|please)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
