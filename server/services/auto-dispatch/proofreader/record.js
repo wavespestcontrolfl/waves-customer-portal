@@ -235,12 +235,12 @@ const TIME_WORDS_RE = new RegExp([
   // (r17); "every week" is read below.
   // Only with a word that makes it a limit ("TOMORROW ONLY", "NOT ON
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
-  '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
+  '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
   // An article may stand before holidays ("AFTER THE HOLIDAYS"): r54.
   // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
   // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
   // AFTER CHRISTMAS"): r55.
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|was|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|was|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
@@ -263,7 +263,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...and a date after one ("APPOINTMENT IS OCTOBER 20", "booked for 10/20"): r69.
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
-  `\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:is|are|was|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|was|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   '\\b(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])',
   // "first thing" as a time only with in the morning / AM / only / please or
@@ -311,7 +311,10 @@ const TIME_WORDS_RE = new RegExp([
   // A season with a limit or a lead ("NO SERVICE UNTIL SPRING", "WINTER
   // ONLY", "AWAY FOR THE SUMMER"): r68.
   '\\b(?:until|till|til|before|after|during|over|through|thru|for|in|this|next|every|each|by|except|not|no|from)(?=\\s{1,5}(?:the\\s{1,5})?(?:spring|summer|fall|autumn|winter)s?(?![\\w]))',
-  '\\b(?:spring|summer|fall|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|is|are|months?|break|vacation|season)\\b)',
+  // spring / fall are also a gate part and a verb: not before is / are
+  // ("SPRING IS BROKEN"): r71.
+  '\\b(?:spring|fall)s?(?=\\s{1,3}(?:only|ok|okay|works?|months?|break|vacation|season)\\b)',
+  '\\b(?:summer|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|is|are|months?|break|vacation|season)\\b)',
   // "DAYLIGHT ONLY", "daytime only": r69.
   '\\b(?:daylight|day[\\s-]?time)(?=\\s{0,3}(?:only|ok|okay|hours?|please)\\b)',
   // "AFTER HOURS": r22.
