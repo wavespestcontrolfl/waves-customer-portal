@@ -225,7 +225,7 @@ const TIME_WORDS_RE = new RegExp([
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
-  '(?<!\\bi\\s{1,5}(?:[a-z]{2,15}ly\\s{1,5})?)\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
+  '(?<!\\bi\\s{1,5}(?:[a-z]{2,15}ly\\s{1,5})?)\\bam(?![\\w])(?!\\s{1,5}i\\b)|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
   // PM alone only before a word that makes it a time ("PM ONLY", "PM is
   // best"); otherwise it is the property manager ("PM approved access",
   // "SPOKE TO PM": r24, r39).
@@ -246,6 +246,9 @@ const TIME_WORDS_RE = new RegExp([
   // "late in the day"): r49.
   '\\b(?:early|earlier|earliest|late|later|latest)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
   '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})(?:early|earlier|late|later)(?![\\w])',
+  // A named part of the month ("MIDDLE OF THE MONTH ONLY", "BEGINNING OF
+  // THE MONTH", "start of the month"): r63.
+  '\\b(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?month\\b)',
   // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
   // "SECOND TUESDAY OF THE MONTH"): r49, r50.
   '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:(?:two|three|four|five|2|3|4|5|few|couple\\s{1,3}of)\\s{1,3})?(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
@@ -404,7 +407,7 @@ const MARK = '[redacted]';
 const MONTH_LEADS = new Set(['expires', 'expire', 'expiring', 'expired', 'through', 'thru', 'until', 'till', 'til', 'by', 'before', 'after', 'on', 'from', 'starting', 'starts', 'start', 'ends', 'ending', 'valid', 'changes', 'since', 'in', 'of', 'except', 'only', 'not', 'never']);
 const SINGLE_WEEKDAYS = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'tue', 'tues', 'thu', 'thur', 'thurs', 'fri']);
 const DAY_LEADS = new Set(['on', 'by', 'at', 'from', 'next', 'this', 'any', 'for', 'expires', 'starts', 'ends', 'valid', 'coming', 'other', 'second', 'third']);
-const WEEKDAY_FOLLOWS = new Set(['only', 'ok', 'okay', 'works', 'work', 'is', 'are', 'please', 'preferred', 'morning', 'mornings', 'afternoon', 'afternoons', 'evening', 'evenings', 'and', 'or', 'thru', 'through', 'to', 'appointments', 'appointment', 'visits', 'visit', 'after', 'before', 'at']);
+const WEEKDAY_FOLLOWS = new Set(['only', 'ok', 'okay', 'works', 'work', 'is', 'are', 'please', 'preferred', 'and', 'or', 'thru', 'through', 'to', 'appointments', 'appointment', 'visits', 'visit', 'after', 'before', 'at']);
 const CODE_NOUN_BEFORE_RE = /\b(?:code|password|passcode|passphrase|pin|combo|combination)\b\s{0,5}(?:(?:is|=|:|#|-)\s{0,5})?$/i;
 const CODE_NOUN_AFTER_RE = new RegExp(String.raw`^\s{0,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:${CODE_PLACES}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b`, 'i');
 const wordsOf = (text) => (text.replace(/\[redacted\]/g, ' ').toLowerCase().match(/[a-z][a-z.']*/g) || []).map((w) => w.replace(/\.+$/, ''));

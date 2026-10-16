@@ -521,6 +521,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, DO NOT RESCHEDULE',
       'GATE CODE 4821, DO NOT MOVE APPOINTMENT',
       'GATE CODE 4821, APPOINTMENT CANNOT BE MOVED',
+      'GATE CODE 4821, MIDDLE OF THE MONTH ONLY',
+      'GATE CODE 4821, BEGINNING OF THE MONTH ONLY',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
       'Gate code 4821, ON MONDAY',
@@ -683,6 +685,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, MIX RATIO 1/10 ONLY',
       'GOOD MORNING! GATE CODE IS 4821',
       'Gate code 4821, ask MANAGER April',
+      'Gate code 4821, spoke to MANAGER Monday morning.',
+      'GATE CODE 4821, AM I THE OWNER ON FILE',
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
