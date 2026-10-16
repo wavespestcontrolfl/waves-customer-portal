@@ -292,6 +292,8 @@ const TIME_WORDS_RE = new RegExp([
   // APPOINTMENT", "NO RESCHEDULING"): r61.
   '(?<=\\b(?:not|never|no|don.?t|cannot|can.?t|won.?t)\\s{1,3})(?:reschedule|rescheduling|re-schedule)(?![\\w])',
   '(?<=\\b(?:not|never|don.?t|cannot|can.?t)\\s{1,3})(?:move|change|switch|shift|cancel)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|our\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\b)',
+  // Passive ("APPOINTMENT CANNOT BE MOVED", "visit is not to be changed"): r62.
+  '(?<=\\b(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)(?:moved|rescheduled|changed|shifted|switched|cancell?ed)(?![\\w])',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -304,8 +306,9 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
-  // GLORY", "AFTERNOON SUN"): r47, r52, r55.
-  '\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose|sun|shade|light|exposure)\\b)',
+  // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
+  // r55, r62.
+  '(?<!\\bgood\\s{1,3})\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose|sun|shade|light|exposure)\\b)',
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
   // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
   // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
@@ -398,6 +401,7 @@ const NEXT_MONTHS = new Set(['january', 'february', 'march', 'april', 'june', 'j
 const PREV_LIMITS = new Set(['until', 'till', 'before', 'after', 'except', 'never', 'every', 'only']);
 const AFTER_LIMIT_OK = new Set(['and', 'or', 'please', 'only', 'ok', 'okay', 'then', 'at', 'in', 'on', 'before', 'after', 'until', 'till', 'thanks', 'thank']);
 const MARK = '[redacted]';
+const MONTH_LEADS = new Set(['expires', 'expire', 'expiring', 'expired', 'through', 'thru', 'until', 'till', 'til', 'by', 'before', 'after', 'on', 'from', 'starting', 'starts', 'start', 'ends', 'ending', 'valid', 'changes', 'since', 'in', 'of', 'except', 'only', 'not', 'never']);
 const SINGLE_WEEKDAYS = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'tue', 'tues', 'thu', 'thur', 'thurs', 'fri']);
 const DAY_LEADS = new Set(['on', 'by', 'at', 'from', 'next', 'this', 'any', 'for', 'expires', 'starts', 'ends', 'valid', 'coming', 'other', 'second', 'third']);
 const WEEKDAY_FOLLOWS = new Set(['only', 'ok', 'okay', 'works', 'work', 'is', 'are', 'please', 'preferred', 'morning', 'mornings', 'afternoon', 'afternoons', 'evening', 'evenings', 'and', 'or', 'thru', 'through', 'to', 'appointments', 'appointment', 'visits', 'visit', 'after', 'before', 'at']);
@@ -491,10 +495,13 @@ function neighborHits(masked, numbers = null) {
       // scheduling word follows the weekday. "spoke to [redacted] Monday." is
       // history (r61).
       const loneDay = SINGLE_WEEKDAYS.has(next) && !PREV_LIMITS.has(prev) && !DAY_LEADS.has(prev) && !WEEKDAY_FOLLOWS.has(following[1]);
-      if (NEIGHBOR_TIME_WORDS.has(prev) || (NEIGHBOR_TIME_WORDS.has(next) && !loneDay) || NEXT_MONTHS.has(next)) hits.add(ordinal);
+      // A month after the mask only with a date or validity lead before the
+      // mask ("expires [redacted] October"); "ask [redacted] April" is a name (r62).
+      const monthHit = NEXT_MONTHS.has(next) && MONTH_LEADS.has(prev);
+      if (NEIGHBOR_TIME_WORDS.has(prev) || (NEIGHBOR_TIME_WORDS.has(next) && !loneDay) || monthHit) hits.add(ordinal);
       // "May" is also a verb: a month only when nothing, or a joining word,
       // follows it ("expires [redacted] May", "... May only"): r24, r25.
-      if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) hits.add(ordinal);
+      if (next === 'may' && MONTH_LEADS.has(prev) && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) hits.add(ordinal);
       // One hidden word after the limit ("NEVER [redacted]"): a longer
       // hidden run ("ONLY [redacted] [redacted]", "ONLY TWO DOGS") is a
       // phrase, not a time (r33, r43); a time in it is read by the count.
