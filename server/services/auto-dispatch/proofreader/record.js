@@ -237,9 +237,10 @@ const TIME_WORDS_RE = new RegExp([
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
   '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:only|not|ok|okay|works?|is|are)\\b)',
   // An article may stand before holidays ("AFTER THE HOLIDAYS"): r54.
-  // ...after a validity word too ("EXPIRES TOMORROW"), and named holidays
-  // ("RETURN AFTER CHRISTMAS"): r55.
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
+  // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
+  // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
+  // AFTER CHRISTMAS"): r55.
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|was|for|scheduled|booked|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
