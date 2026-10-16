@@ -323,7 +323,7 @@ const TIME_WORDS_RE = new RegExp([
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:(?:morning|afternoon|evening|night)s?\\s{1,3}(?:only|ok|okay|works?|please|preferred|is|are)\\b|[,/&-]|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to)\\b))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:(?:morning|afternoon|evening|night)s?\\s{1,3}(?:only|ok|okay|works?|please|preferred|is|are)\\b|[/&-]|,\\s{0,3}(?:and\\s{1,3}|or\\s{1,3})?(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\\b|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?!\\s{0,3}\\d+\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal)\\b)(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
@@ -555,6 +555,12 @@ const NON_ACCESS_RES = [
 ];
 const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
 
+function onlyNonAccessMarkers(raw, masked) {
+  const count = (re) => (raw.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)) || []).length;
+  const explained = NON_ACCESS_RES.reduce((n, [re]) => n + count(re), 0) + count(PRIOR_MARK_RE);
+  return masked.split(MARK).length - 1 <= explained;
+}
+
 function hiddenTimeIn(text, raw, masked) {
   if (raw === masked) return false;
   // The masked form can be far longer than the raw one (short words become
@@ -568,9 +574,14 @@ function hiddenTimeIn(text, raw, masked) {
   // mask changed is counted as not fully read without a scan, so one stored
   // reply cannot cost the event loop more than a few milliseconds (security
   // r58: a 280 KB reply took 260 ms per build).
-  if (size > MAX_SCAN_ENTRY_CHARS) return true;
+  // Unscanned, a text counts as not fully read only when the access mask
+  // itself changed it: markers that only a card, an SSN, a CVV or a stored
+  // [redacted] explain are not the access mask's (r65). Counting those is
+  // one linear pass.
+  const unscanned = () => !onlyNonAccessMarkers(raw, masked);
+  if (size > MAX_SCAN_ENTRY_CHARS) return unscanned();
   const budget = scanBudget.getStore();
-  if (budget && size > budget.left) return true;
+  if (budget && size > budget.left) return unscanned();
   if (budget) budget.left -= size;
   const scanRaw = forScan(raw);
   const renamed = scanRaw !== raw;

@@ -638,6 +638,12 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
+    test('a long text whose only mask is a card number is not taken for a hidden time', async () => {
+      const note = `Paid with card 4111111111111111. ${'word '.repeat(6000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
     test('the stored text is charged at its own length, spaces included', async () => {
       const spaced = `Gate code 4821,${' '.repeat(30000)}MONDAY ONLY`; // short once collapsed
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: spaced }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
@@ -698,6 +704,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, OWNER CALLED MONDAY MORNING',
       'GATE CODE 4821, PM ONLY HAS THE KEY',
       'GATE CODE 4821, SHED SAT 10 FEET FROM HOUSE',
+      'GATE CODE 4821, OWNER CALLED MONDAY, LATCH BROKEN',
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
