@@ -270,7 +270,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
