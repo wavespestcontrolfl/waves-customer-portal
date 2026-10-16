@@ -411,6 +411,8 @@ function lastClause(text) {
 // marker whose raw word has no letter is a number. A number is no word
 // about when for the neighbor rule; a number that is a time ("10/20",
 // "9:00") is read by the count. Null when the two do not line up (r57).
+const PLACE_LABELS = new Set(['unit', 'apt', 'apartment', 'suite', 'ste', 'lot', 'building', 'bldg', 'house', 'no', 'number', 'num', 'space', 'slip', 'box', 'stall', 'phase', 'room', 'rm', 'floor', 'fl', 'dock', 'bay', 'pier', 'tower', 'block', 'section', 'gate', 'door', 'site', 'pad', 'villa', 'cabin', 'lane']);
+
 function numberMarkers(raw, masked) {
   const rawWords = raw.split(/\s+/);
   const maskedWords = masked.split(/\s+/);
@@ -426,7 +428,10 @@ function numberMarkers(raw, masked) {
     // beside a word that says when ("Monday 0800") is kept too (r58).
     const digits = (rawWords[i].match(/\d/g) || []).length;
     const besideTime = [bare(rawWords[i - 1]), bare(rawWords[i + 1])].some((w) => NEIGHBOR_TIME_WORDS.has(w) || PREV_LIMITS.has(w) || w === 'at' || w === 'by');
-    const time = digits <= 2 || (new RegExp(`^\\W*(?:${HHMM}|${H3})\\W*$`).test(rawWords[i]) && besideTime);
+    // A number after a word that labels a place ("unit 5", "lot 12") is that
+    // place, not an hour (r60).
+    const label = PLACE_LABELS.has(bare(rawWords[i - 1])) || /^#/.test(rawWords[i]);
+    const time = !label && (digits <= 2 || (new RegExp(`^\\W*(?:${HHMM}|${H3})\\W*$`).test(rawWords[i]) && besideTime));
     if (!/[A-Za-z]/.test(rawWords[i]) && !time) for (let k = 0; k < count; k += 1) numbers.add(ordinal + k);
     ordinal += count;
   });

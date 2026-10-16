@@ -671,6 +671,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, I REALLY AM THE OWNER',
       'GATE CODE 4821, PUMP HAS 1400 HOURS',
       'GATE CODE 4821, MOWER HAS 900 HOURS',
+      'Gate code 4821, unit 5, Monday only',
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
