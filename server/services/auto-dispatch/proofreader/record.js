@@ -476,46 +476,61 @@ function maskBesideTimeWord(masked, lineMasked = null, numbers = null) {
 }
 
 // The ordinals of the markers the neighbor rule finds beside a time word.
-function neighborHits(masked, numbers = null) {
-  const hits = new Set();
+// The neighbor rule's tests, one per way a hidden word can sit in a
+// statement about when. Each reads the words around one marker.
+const NEIGHBOR_RULES = [
+  // A visible word that only says when, right before the mask.
+  (m) => NEIGHBOR_TIME_WORDS.has(m.prev),
+  // ...or right after it. One weekday after the mask counts only when tied
+  // to the visit: the mask follows a limit or a lead ("every [redacted]
+  // Tuesday"), or a scheduling word follows the weekday. "spoke to
+  // [redacted] Monday." is history (r61).
+  (m) => NEIGHBOR_TIME_WORDS.has(m.next)
+    && !(SINGLE_WEEKDAYS.has(m.next) && !PREV_LIMITS.has(m.prev) && !DAY_LEADS.has(m.prev) && !WEEKDAY_FOLLOWS.has(m.following[1])),
+  // A month after the mask only with a date or validity lead before the mask
+  // ("expires [redacted] October"); "ask [redacted] April" is a name (r62).
+  (m) => NEXT_MONTHS.has(m.next) && MONTH_LEADS.has(m.prev),
+  // "May" is also a verb: a month only when nothing, or a joining word,
+  // follows it ("expires [redacted] May", "... May only"): r24, r25.
+  (m) => m.next === 'may' && MONTH_LEADS.has(m.prev) && (m.following.length === 1 || AFTER_LIMIT_OK.has(m.following[1])),
+  // One hidden word right after a limit ("NEVER [redacted]"), ending the
+  // clause or before a joining word. A longer hidden run ("ONLY [redacted]
+  // [redacted]", "ONLY TWO DOGS") is a phrase, not a time (r33, r43); a limit
+  // before an earlier mask does not count.
+  (m) => PREV_LIMITS.has(m.prev) && !m.afterMask && m.run <= 1 && (m.next === undefined || AFTER_LIMIT_OK.has(m.next)),
+];
+
+// Each marker of the mask with the words around it, within its own clause
+// (r25: "ask [redacted]. Friday works" is two statements; the dots inside
+// "A.M." are not an end).
+function* markerSites(masked) {
   let at = masked.indexOf(MARK);
-  let ordinal = -1;
-  while (at !== -1) {
-    ordinal += 1;
-    if (numbers && numbers.has(ordinal)) {
-      at = masked.indexOf(MARK, at + MARK.length);
-      continue;
-    }
-    // Within the mask's own sentence (r25): "ask [redacted]. Friday works" is
-    // two statements. The dots inside "A.M." are not an end.
+  for (let ordinal = 0; at !== -1; ordinal += 1) {
     const before = lastClause(masked.slice(Math.max(0, at - 60), at));
     const after = firstClause(masked.slice(at + MARK.length, at + MARK.length + 80));
-    const own = CODE_NOUN_BEFORE_RE.test(before) || CODE_NOUN_AFTER_RE.test(after);
-    if (!own) {
-      const prev = wordsOf(before).pop();
-      const next = wordsOf(after)[0];
-      const following = wordsOf(after);
-      // One weekday after the mask counts only when tied to the visit: the
-      // mask follows a limit or a lead ("every [redacted] Tuesday"), or a
-      // scheduling word follows the weekday. "spoke to [redacted] Monday." is
-      // history (r61).
-      const loneDay = SINGLE_WEEKDAYS.has(next) && !PREV_LIMITS.has(prev) && !DAY_LEADS.has(prev) && !WEEKDAY_FOLLOWS.has(following[1]);
-      // A month after the mask only with a date or validity lead before the
-      // mask ("expires [redacted] October"); "ask [redacted] April" is a name (r62).
-      const monthHit = NEXT_MONTHS.has(next) && MONTH_LEADS.has(prev);
-      if (NEIGHBOR_TIME_WORDS.has(prev) || (NEIGHBOR_TIME_WORDS.has(next) && !loneDay) || monthHit) hits.add(ordinal);
-      // "May" is also a verb: a month only when nothing, or a joining word,
-      // follows it ("expires [redacted] May", "... May only"): r24, r25.
-      if (next === 'may' && MONTH_LEADS.has(prev) && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) hits.add(ordinal);
-      // One hidden word after the limit ("NEVER [redacted]"): a longer
-      // hidden run ("ONLY [redacted] [redacted]", "ONLY TWO DOGS") is a
-      // phrase, not a time (r33, r43); a time in it is read by the count.
-      const run = (masked.slice(at).match(/^(?:\[redacted\]\s{0,3}){1,3}/) || [''])[0].split(MARK).length - 1;
-      // The limit must stand right before this mask, not before an earlier one.
-      const afterMask = /\[redacted\][\s,]*$/.test(before);
-      if (PREV_LIMITS.has(prev) && !afterMask && run <= 1 && (next === undefined || AFTER_LIMIT_OK.has(next))) hits.add(ordinal);
-    }
+    yield { ordinal, at, before, after };
     at = masked.indexOf(MARK, at + MARK.length);
+  }
+}
+
+// The ordinals of the markers the neighbor rule finds beside a time word.
+// Not a marker that stands for a number, nor the credential's own (right
+// after a code noun, or before "is the ... code").
+function neighborHits(masked, numbers = null) {
+  const hits = new Set();
+  for (const site of markerSites(masked)) {
+    const skip = (numbers && numbers.has(site.ordinal)) || CODE_NOUN_BEFORE_RE.test(site.before) || CODE_NOUN_AFTER_RE.test(site.after);
+    if (!skip) {
+      const following = wordsOf(site.after);
+      const context = {
+        prev: wordsOf(site.before).pop(),
+        next: following[0],
+        following,
+        run: (masked.slice(site.at).match(/^(?:\[redacted\]\s{0,3}){1,3}/) || [''])[0].split(MARK).length - 1,
+        afterMask: /\[redacted\][\s,]*$/.test(site.before),
+      };
+      if (NEIGHBOR_RULES.some((rule) => rule(context))) hits.add(site.ordinal);
+    }
   }
   return hits;
 }
@@ -579,10 +594,12 @@ function hiddenTimeIn(text, raw, masked) {
   // itself changed it: markers that only a card, an SSN, a CVV or a stored
   // [redacted] explain are not the access mask's (r65). Counting those is
   // one linear pass.
-  const unscanned = () => !onlyNonAccessMarkers(raw, masked);
-  if (size > MAX_SCAN_ENTRY_CHARS) return unscanned();
+  const onlyOthers = onlyNonAccessMarkers(raw, masked);
+  if (size > MAX_SCAN_ENTRY_CHARS) return !onlyOthers;
+  // Nothing for the access scan: not charged to the budget either (r66).
+  if (onlyOthers) return false;
   const budget = scanBudget.getStore();
-  if (budget && size > budget.left) return unscanned();
+  if (budget && size > budget.left) return true;
   if (budget) budget.left -= size;
   const scanRaw = forScan(raw);
   const renamed = scanRaw !== raw;
