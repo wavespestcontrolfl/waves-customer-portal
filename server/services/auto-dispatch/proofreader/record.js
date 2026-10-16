@@ -298,6 +298,10 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:not|never|don.?t|cannot|can.?t)\\s{1,3})(?:move|change|switch|shift|cancel)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|our\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\b)',
   // Passive ("APPOINTMENT CANNOT BE MOVED", "visit is not to be changed"): r62.
   '(?<=\\b(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)(?:moved|rescheduled|changed|shifted|switched|cancell?ed)(?![\\w])',
+  // A season with a limit or a lead ("NO SERVICE UNTIL SPRING", "WINTER
+  // ONLY", "AWAY FOR THE SUMMER"): r68.
+  '\\b(?:until|till|til|before|after|during|over|through|thru|for|in|this|next|every|each|by|except|not|no|from)(?=\\s{1,5}(?:the\\s{1,5})?(?:spring|summer|fall|autumn|winter)s?(?![\\w]))',
+  '\\b(?:spring|summer|fall|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|is|are|months?|break|vacation|season)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
