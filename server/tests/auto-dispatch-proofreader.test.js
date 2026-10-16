@@ -522,6 +522,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, DO NOT MOVE APPOINTMENT',
       'GATE CODE 4821, APPOINTMENT CANNOT BE MOVED',
       'GATE CODE 4821, MIDDLE OF THE MONTH ONLY',
+      'GATE CODE 4821, MONDAY MORNING ONLY',
       'GATE CODE 4821, BEGINNING OF THE MONTH ONLY',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
@@ -637,6 +638,13 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
+    test('the stored text is charged at its own length, spaces included', async () => {
+      const spaced = `Gate code 4821,${' '.repeat(30000)}MONDAY ONLY`; // short once collapsed
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: spaced }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      // Past the per-entry scan limit at its stored length: not scanned, counted as not fully read.
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
     test('a long text the mask changed is counted as not fully read without a scan', async () => {
       const masked = `Gate code 4821 ${'word '.repeat(6000)}`; // 30 KB, past the per-entry scan limit
       const plain = `Gate opens by itself ${'word '.repeat(6000)}`; // 30 KB, the mask changes nothing
@@ -687,6 +695,9 @@ describe('the customer record', () => {
       'Gate code 4821, ask MANAGER April',
       'Gate code 4821, spoke to MANAGER Monday morning.',
       'GATE CODE 4821, AM I THE OWNER ON FILE',
+      'GATE CODE 4821, OWNER CALLED MONDAY MORNING',
+      'GATE CODE 4821, PM ONLY HAS THE KEY',
+      'GATE CODE 4821, SHED SAT 10 FEET FROM HOUSE',
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });

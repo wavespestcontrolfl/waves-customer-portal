@@ -229,7 +229,7 @@ const TIME_WORDS_RE = new RegExp([
   // PM alone only before a word that makes it a time ("PM ONLY", "PM is
   // best"); otherwise it is the property manager ("PM approved access",
   // "SPOKE TO PM": r24, r39).
-  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b))',
+  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?!\\s{1,3}only\\s{1,3}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?)\\b)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b))',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
   // (r17); "every week" is read below.
@@ -310,8 +310,10 @@ const TIME_WORDS_RE = new RegExp([
   '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
-  // r55, r62.
-  '(?<!\\bgood\\s{1,3})\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose|sun|shade|light|exposure)\\b)',
+  // r55, r62. After a weekday the part of the day goes with it ("CALLED
+  // MONDAY MORNING" is history; "MONDAY MORNING ONLY" is read by the
+  // weekday): r64.
+  '(?<!\\bgood\\s{1,3})(?<!\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\s{1,3})\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose|sun|shade|light|exposure)\\b)',
   // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
   // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
   // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
@@ -321,8 +323,8 @@ const TIME_WORDS_RE = new RegExp([
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:(?:morning|afternoon|evening|night)s?\\s{1,3}(?:only|ok|okay|works?|please|preferred|is|are)\\b|[,/&-]|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to)\\b))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?!\\s{0,3}\\d+\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal)\\b)(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
 // (Codex security r8).
@@ -560,7 +562,8 @@ function hiddenTimeIn(text, raw, masked) {
   // no model is asked and nothing is scanned; the budget is charged the
   // longer of the two (security r55).
   if (masked.length > MAX_RECORD_CHARS) return false;
-  const size = Math.max(raw.length, masked.length);
+  const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+  // The stored text's own length counts too, before any work on it (r64).
   // One entry is scanned only up to MAX_SCAN_ENTRY_CHARS: a longer text the
   // mask changed is counted as not fully read without a scan, so one stored
   // reply cannot cost the event loop more than a few milliseconds (security
