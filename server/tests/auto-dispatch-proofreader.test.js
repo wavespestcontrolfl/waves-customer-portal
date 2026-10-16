@@ -540,6 +540,7 @@ describe('the customer record', () => {
       "GATE CODE 4821, NOT ON MOTHER'S DAY",
       'GATE CODE 4821, END OF DAY ONLY',
       'GATE CODE 4821, NEXT APPOINTMENT IS MONDAY',
+      'GATE CODE 4821, SCHEDULE DATE IS OCTOBER 20',
       'GATE CODE 4821, BEGINNING OF THE MONTH ONLY',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
@@ -656,10 +657,15 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
-    test('a long text whose only mask is a card number is not taken for a hidden time', async () => {
-      const note = `Paid with card 4111111111111111. ${'word '.repeat(6000)}`;
-      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    test('within the limits, a text whose only mask is a card number is not taken for a hidden time', async () => {
+      const short = `Paid with card 4111111111111111. ${'word '.repeat(100)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: short }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+      // Past the per-entry limit no more work is done on it: counted as not
+      // fully read, the safe side (security r73).
+      const long = `Paid with card 4111111111111111. ${'word '.repeat(6000)}`;
+      const big = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: long }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(big.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
     test('a long text with an SSN and an access code is still counted as not fully read', async () => {
@@ -668,11 +674,6 @@ describe('the customer record', () => {
       expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
     });
 
-    test('a text whose only mask is a card is not charged to the scan budget', async () => {
-      const card = `Paid with card 4111111111111111. ${'word '.repeat(4700)}`; // about 23.5 KB each
-      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], crm_notes: card, internal_notes: card, follow_up_notes: card, access_notes: 'Gate code 4821' }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
-    });
 
     test('the stored text is charged at its own length, spaces included', async () => {
       const spaced = `Gate code 4821,${' '.repeat(30000)}MONDAY ONLY`; // short once collapsed

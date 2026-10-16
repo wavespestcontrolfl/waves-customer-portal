@@ -264,7 +264,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
@@ -621,17 +621,16 @@ function hiddenTimeIn(text, raw, masked) {
   // mask changed is counted as not fully read without a scan, so one stored
   // reply cannot cost the event loop more than a few milliseconds (security
   // r58: a 280 KB reply took 260 ms per build).
-  // Unscanned, a text counts as not fully read only when the access mask
-  // itself changed it: markers that only a card, an SSN, a CVV or a stored
-  // [redacted] explain are not the access mask's (r65). Counting those is
-  // one linear pass.
-  const onlyOthers = onlyNonAccessMarkers(raw);
-  if (size > MAX_SCAN_ENTRY_CHARS) return !onlyOthers;
-  // Nothing for the access scan: not charged to the budget either (r66).
-  if (onlyOthers) return false;
+  // Within the limits, markers that only a card, an SSN, a CVV or a stored
+  // [redacted] explain are not the access mask's (r65).
+  // The limits come before any more work on the text, the non-access test
+  // included (security r73: that test re-runs the mask). A text past them is
+  // counted as not fully read, whatever its markers stand for: the safe side.
+  if (size > MAX_SCAN_ENTRY_CHARS) return true;
   const budget = scanBudget.getStore();
   if (budget && size > budget.left) return true;
   if (budget) budget.left -= size;
+  if (onlyNonAccessMarkers(raw)) return false;
   const scanRaw = forScan(raw);
   const renamed = scanRaw !== raw;
   const scanMasked = renamed ? redactAccessCodes(scanRaw) : masked;
