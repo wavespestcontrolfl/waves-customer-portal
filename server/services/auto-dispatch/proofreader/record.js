@@ -151,6 +151,8 @@ const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
 // "TWO AND A HALF HOURS": r22.
 // Spelled tens too ("THIRTY MINUTES NOTICE"): r30.
+// A three-digit clock time ("900", "930"): r58, r59.
+const H3 = '[1-9][0-5]\\d(?![\\w:/-])';
 const QTY = `(?:an?\\s{1,3}(?:few|couple(?:\\s{1,5}of)?)|\\d{1,3}|a|an|half|an?\\s{1,3}half|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
 // An hour is 0-23, and a number followed by a unit is a quantity ("about 50
 // lbs", "after 5 minutes"), not a time (r5).
@@ -175,9 +177,12 @@ const TIME_WORDS_RE = new RegExp([
   // lunch" the mask takes BEFORE and leaves lunch, and a match that took
   // both would count one on each side (r12). The anchor's own word counts
   // by its own pattern.
-  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${HOUR_ISH}|${SPELLED_HOUR}|${TIME_ANCHORS}))`,
+  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${H3}(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])|${HOUR_ISH}|${SPELLED_HOUR}|${TIME_ANCHORS}))`,
   `\\b${HOUR_ISH}`,
-  `\\b(?:${HHMM}|[1-9][0-5]\\d(?![\\w:/-]))(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
+  // ...only with a word that makes it a time: "PUMP HAS 1400 HOURS" is a
+  // count (r59).
+  `(?<=\\b(?:at|by|before|after|until|till|til|from|only|not|no|around|about|starts?|ends?|opens?|closes?)\\s{1,5})(?:${HHMM}|${H3})(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
+  `\\b(?:${HHMM}|${H3})(?=\\s{0,3}(?:hours|hrs|h)\\s{0,3}(?:only|ok|okay|please|sharp|or\\s{1,3}later|or\\s{1,3}after|or\\s{1,3}before|start|arrival)\\b)`,
   // Minutes to / past an hour, spelled ("TEN TO TWO"): r23. Digits are read
   // by the range pattern.
   `\\b(?:five|ten|fifteen|twenty(?:[\\s-]{1,3}five)?)(?=\\s{1,5}(?:to|past|after|til|till)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
@@ -216,7 +221,7 @@ const TIME_WORDS_RE = new RegExp([
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
-  '(?<!\\bi\\s{1,5})\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
+  '(?<!\\bi\\s{1,5}(?:[a-z]{2,15}ly\\s{1,5})?)\\bam(?![\\w])|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
   // PM alone only before a word that makes it a time ("PM ONLY", "PM is
   // best"); otherwise it is the property manager ("PM approved access",
   // "SPOKE TO PM": r24, r39).
@@ -421,7 +426,7 @@ function numberMarkers(raw, masked) {
     // beside a word that says when ("Monday 0800") is kept too (r58).
     const digits = (rawWords[i].match(/\d/g) || []).length;
     const besideTime = [bare(rawWords[i - 1]), bare(rawWords[i + 1])].some((w) => NEIGHBOR_TIME_WORDS.has(w) || PREV_LIMITS.has(w) || w === 'at' || w === 'by');
-    const time = digits <= 2 || (new RegExp(`^\\W*${HHMM}\\W*$`).test(rawWords[i]) && besideTime);
+    const time = digits <= 2 || (new RegExp(`^\\W*(?:${HHMM}|${H3})\\W*$`).test(rawWords[i]) && besideTime);
     if (!/[A-Za-z]/.test(rawWords[i]) && !time) for (let k = 0; k < count; k += 1) numbers.add(ordinal + k);
     ordinal += count;
   });
