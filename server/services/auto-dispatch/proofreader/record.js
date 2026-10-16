@@ -263,9 +263,13 @@ const TIME_WORDS_RE = new RegExp([
   // ...and a date after one ("APPOINTMENT IS OCTOBER 20", "booked for 10/20"): r69.
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
-  `\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|was|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
-  '\\b(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])',
+  // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
+  // REPORT IS DUE" is a deadline (r72).
+  '\\b(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])(?=\\s{0,3}(?:(?:only|ok|okay|please|works?|is\\s{1,3}best|preferred)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|until|till|by|before|after|at|around|near|toward|towards|not|no|except|prefer|prefers|come|arrive)\\s{1,3}(?:the\\s{1,3})?)(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])',
   // "first thing" as a time only with in the morning / AM / only / please or
   // after come / be here ("FIRST THING ON LEFT" is a place): r53.
   '\\bfirst\\s{1,3}thing(?=\\s{1,3}(?:in\\s{1,3}the\\s{1,3}morning|tomorrow|am|a\\.m|only|please|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b|\\s{0,3}(?:[,;!]|\\.(?:\\s|$)|$))',
@@ -286,7 +290,7 @@ const TIME_WORDS_RE = new RegExp([
   // Spanish standing statements): weekdays, months, parts of the day and
   // the usual time words ("SOLO LOS MARTES", "NUNCA ANTES DE LAS DIEZ"): r42.
   // Not "hoy" alone: "HOY HABLE CON EL DUENO" is history (r51).
-  '\\b(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?|ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
+  '\\b(?:ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
   // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
   // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
   `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
@@ -317,6 +321,9 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:summer|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|is|are|months?|break|vacation|season)\\b)',
   // "DAYLIGHT ONLY", "daytime only": r69.
   '\\b(?:daylight|day[\\s-]?time)(?=\\s{0,3}(?:only|ok|okay|hours?|please)\\b)',
+  // A Spanish weekday only as a habit or a limit ("LOS MARTES", "SOLO
+  // MARTES", "NO LOS LUNES"); "LLAMÓ EL MARTES" is history (r72).
+  '(?<=\\b(?:los|solo|s\u00f3lo|solamente|cada|no|nunca|excepto|menos|hasta|desde|todos\\s{1,3}los|pr\u00f3ximo|proximo|este)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -327,7 +334,8 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])',
+  // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
@@ -344,7 +352,7 @@ const TIME_WORDS_RE = new RegExp([
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:(?:morning|afternoon|evening|night)s?\\s{1,3}(?:only|ok|okay|works?|please|preferred|is|are)\\b|[/&-]|,\\s{0,3}(?:and\\s{1,3}|or\\s{1,3})?(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\\b|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to)\\b))',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?!\\s{0,3}\\d+\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal)\\b)(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?!\\s{0,3}\\d+\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal)\\b)(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b))',
 ].join('|'), 'gi');
 // Counted in constant memory: a long stored text builds no array of matches
 // (Codex security r8).
