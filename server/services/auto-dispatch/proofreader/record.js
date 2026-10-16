@@ -59,6 +59,8 @@ const MAX_SCAN_ENTRY_CHARS = 24000;
 // what is left is counted as not fully read without a scan (security r61:
 // twelve 23 KB replies took 240 ms per build).
 const MAX_SCAN_RECORD_CHARS = 48000;
+// The most masks one text may have and still be scanned.
+const MAX_SCAN_MARKERS = 200;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
@@ -264,7 +266,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at)\\s{1,5}){0,2}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{1,5}(?:(?:date|day|time)\\s{1,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|must|should|will|shall|needs?|has|have|got)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
@@ -290,7 +292,8 @@ const TIME_WORDS_RE = new RegExp([
   // Spanish standing statements): weekdays, months, parts of the day and
   // the usual time words ("SOLO LOS MARTES", "NUNCA ANTES DE LAS DIEZ"): r42.
   // Not "hoy" alone: "HOY HABLE CON EL DUENO" is history (r51).
-  '\\b(?:ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
+  // Not a greeting ("BUENOS DIAS", "BUENAS TARDES"): r74.
+  '(?<!\\bbuen[oa]s?\\s{1,3})\\b(?:ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
   // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
   // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
   `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
@@ -627,6 +630,10 @@ function hiddenTimeIn(text, raw, masked) {
   // included (security r73: that test re-runs the mask). A text past them is
   // counted as not fully read, whatever its markers stand for: the safe side.
   if (size > MAX_SCAN_ENTRY_CHARS) return true;
+  // The neighbor rule does a little work per marker: a text with more than
+  // MAX_SCAN_MARKERS of them is counted as not fully read without a scan
+  // (security r74: 4,000 markers in 12 KB took 284 ms per build).
+  if (masked.split(MARK).length - 1 > MAX_SCAN_MARKERS) return true;
   const budget = scanBudget.getStore();
   if (budget && size > budget.left) return true;
   if (budget) budget.left -= size;

@@ -541,6 +541,9 @@ describe('the customer record', () => {
       'GATE CODE 4821, END OF DAY ONLY',
       'GATE CODE 4821, NEXT APPOINTMENT IS MONDAY',
       'GATE CODE 4821, SCHEDULE DATE IS OCTOBER 20',
+      'GATE CODE 4821, SERVICE MUST BE MONDAY',
+      'GATE CODE 4821, SERVICE DATE MUST BE OCTOBER 20',
+      'GATE CODE 4821, SERVICE NEEDS TO BE MONDAY',
       'GATE CODE 4821, BEGINNING OF THE MONTH ONLY',
       'GATE CODE 4821, FIRST THING IN THE MORNING',
       'GATE CODE 4821, SERVICE SUSPENDED',
@@ -675,6 +678,12 @@ describe('the customer record', () => {
     });
 
 
+    test('a text with very many masks is counted as not fully read without a scan', async () => {
+      const note = `Gate code 4821, ${'AB '.repeat(2000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
     test('the stored text is charged at its own length, spaces included', async () => {
       const spaced = `Gate code 4821,${' '.repeat(30000)}MONDAY ONLY`; // short once collapsed
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: spaced }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
@@ -744,6 +753,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, END OF DAY REPORT IS DUE',
       'GATE CODE 4821, LAST APPOINTMENT WAS MONDAY',
       'GATE CODE 4821, SHED IS 10-20 FEET FROM HOUSE',
+      'BUENOS DIAS, GATE CODE 4821',
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
       const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
