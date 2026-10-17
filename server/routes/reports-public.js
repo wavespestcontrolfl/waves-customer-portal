@@ -883,6 +883,14 @@ async function heldReportPaymentContext(project) {
   return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
 }
 
+// GATE_REPORT_SIMPLE_WEB: every project type except the two official paper
+// documents (the WDO inspection and the pre-construction termite certificate).
+function simpleWebProjectReport(projectType) {
+  if (projectType === 'wdo_inspection' || projectType === 'pre_treatment_termite_certificate') return false;
+  const gates = require('../config/feature-gates');
+  return typeof gates.reportSimpleWebLive === 'function' && gates.reportSimpleWebLive();
+}
+
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
   // Same privacy headers as the sibling /fdacs-pdf route, set before ANY
@@ -1118,6 +1126,11 @@ router.get('/project/:token/data', async (req, res, next) => {
         status: upcomingAppointment.status,
       } : null,
       photos: photosWithUrls,
+      // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "skip wdo, and pre
+      // treatment, but for everything else the simple layout"): the page
+      // shows the work-order document. Read at call time; a partial gates
+      // module reads as off. The two paper documents never switch.
+      ...(simpleWebProjectReport(project.project_type) ? { simpleWebReport: true } : {}),
     });
   } catch (err) { next(err); }
 });
