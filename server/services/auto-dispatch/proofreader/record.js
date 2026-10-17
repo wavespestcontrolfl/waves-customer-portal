@@ -73,6 +73,14 @@ const MAX_SCAN_MARKERS = 200;
 const SCAN_PAD = 240;
 const MAX_SCAN_WINDOW_CHARS = 2000;
 const MAX_SCAN_WINDOW_RECORD_CHARS = 3000;
+// The texts that wait for the record's order are held until it is sorted:
+// past this many characters of them in one record (the whole record's
+// limit), none is held and each is counted as not fully read without a
+// scan (security r114: 10,000 replies of 11 KB were held at once). The set
+// of waiting texts does not depend on the database's order, so neither
+// does this outcome. A lower limit flagged 9 of 245 production customers
+// (many texts); this one keeps 5.
+const MAX_PENDING_SCAN_CHARS = MAX_RECORD_CHARS;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
@@ -252,7 +260,7 @@ const TIME_WORDS_RE = new RegExp([
   // (r17); "every week" is read below.
   // Only with a word that makes it a limit ("TOMORROW ONLY", "NOT ON
   // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
-  '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:only|not|ok|okay|works?|(?:is|are)\\s{1,3}(?:ok|okay|fine|good|best|better|not|no|out|off|only|bad|busy|free|open|closed|impossible|available|unavailable))\\b)',
+  '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)\'?t|cannot|(?:is|are)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day)|only|not|ok|okay|works?|(?:is|are)\\s{1,3}(?:ok|okay|fine|good|best|better|not|no|out|off|only|bad|busy|free|open|closed|impossible|available|unavailable))\\b)',
   // An article may stand before holidays ("AFTER THE HOLIDAYS"): r54.
   // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
   // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
@@ -301,7 +309,7 @@ const TIME_WORDS_RE = new RegExp([
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
   // ...not a numbered place ("UNIT 9 ONLY", "BAY 9 PLEASE"): r101.
-  `(?<![\\d:/.-])(?<!\\b(?:unit|units|apt|apartment|suite|ste|lot|building|bldg|space|slip|box|stall|phase|room|rm|floor|bay|dock|door|pier|site|pad|row|section|aisle|level|tower|block|house|home|number|num)\\.?\\s{0,3}#?\\s{0,2})(?<!#\\s{0,2})\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\d:/.-])(?<!\\b(?:unit|units|apt|apartment|suite|ste|lot|building|bldg|space|slip|box|stall|phase|room|rm|floor|bay|dock|door|pier|site|pad|row|section|aisle|level|tower|block|house|home|number|num)\\.?\\s{0,3}#?\\s{0,2})(?<!#\\s{0,2})\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:(?:is|are)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3})?(?:(?:appointment|appt|arrival|visit|service|start|best|preferred)\\s{1,3})?(?:time|window|hour|appointment)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // "after work", "before school" (not "at work": a place): r39.
   '\\b(?:before|after|until|till|til|by)(?=\\s{1,5}(?:work|school)\\b)',
   // Spanish, the other language the proofreader reads (its hard cases have
@@ -387,7 +395,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b(?:[01]?\\d|2[0-4])\\s?(?:-|\u2013|\u2014|to|through|thru|till|til|until)\\s?(?:[01]?\\d|2[0-4])(?![\\w/\u2013\u2014-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b(?:[01]?\\d|2[0-4])\\s?(?:-|\u2013|\u2014|to|through|thru|till|til|until)\\s?(?:[01]?\\d|2[0-4])(?![\\w/\u2013\u2014-])(?!\\s{0,3}(?!(?:mondays|tuesdays|wednesdays|thursdays|fridays|saturdays|sundays|weekdays|weekends|mornings|afternoons|evenings|nights|days|hours|minutes|mins|hrs|is|this|was|has)\\b)[a-z]{2,}s\\b)(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
@@ -702,12 +710,17 @@ const PRIOR_MARK_RE = /\[redacted\]/gi;
 // about when: for the scan they are renamed first too, so their markers are
 // not judged by the neighbor rule ("Card 4111..., MONDAY ONLY": r56).
 const NON_ACCESS_RES = [
-  [/\b(?:\d[ -]?){12,19}\b/g, '[card]'],
+  // A card number, unless it holds a date ("APPOINTMENT 10-20-2026
+  // 10-11" is twelve digits too): r114.
+  [/\b(?:\d[ -]?){12,19}\b/g, (m) => (isCardRun(m) ? '[card]' : m)],
   [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
   [/\b(ssn|social(?:\s+security)?(?:\s+number)?)\b([^.\n]{0,20}?)\b(\d[\d- ]{7,13}\d)\b/gi, '$1$2[ssn]'],
   // The shared CVV_RE shape (context-aggregator.js): up to 15 characters between (r88).
   [/\b(cvv2?|cvc|security\s+code|card\s+code)\b([^.\n]{0,15}?)\b\d{3,4}\b/gi, '$1$2[cvv]'],
 ];
+// A twelve-digit run with a date in it ("10-20-2026 10-11") is a date and
+// a time, not a card: the scan judges its markers (r114).
+const isCardRun = (run) => !/\b\d{1,2}-\d{1,2}-\d{2,4}\b/.test(run) && run.replace(/\D/g, '').length >= 12;
 const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
 
 // The access mask itself changed nothing: with cards, SSNs, CVVs and a
@@ -789,8 +802,15 @@ function scanNow(text, raw, masked) {
   if (masked.length > MAX_RECORD_CHARS) return false;
   const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
   if (size > MAX_SCAN_ENTRY_CHARS) return true;
-  return { text, raw, masked };
+  if (masked.split(MARK).length - 1 > MAX_SCAN_MARKERS) return true;
+  // Only the stored text is held (the row's own string); the clean and the
+  // masked forms are made again when it is scanned.
+  return { text, size };
 }
+const heldForms = ({ text }) => {
+  const raw = clean(text);
+  return { text, raw, masked: redactAccessCodes(raw) };
+};
 
 // What the record keeps beside each entry for its own use only: the order
 // key and the waiting scan. Never part of the entry the model or the print
@@ -814,9 +834,24 @@ function entry(channel, from, at, text) {
       channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
       ...(scan === true && i === 0 ? { maskedTime: true } : {}),
     };
-    entryMeta.set(row, { key, part: i, ...(scan && scan !== true && i === 0 ? { scan } : {}) });
+    entryMeta.set(row, { key, part: i, ...(scan && typeof scan === 'object' && i === 0 ? { scan } : {}) });
     return row;
   });
+}
+
+// The held texts of the record so far, after each source is read: past
+// MAX_PENDING_SCAN_CHARS none is held, and each held one is counted as not
+// fully read (r114).
+function holdWithinLimit(found, rows, budget) {
+  const drop = (meta) => { delete meta.scan; meta.over = true; };
+  const held = (row) => { const meta = entryMeta.get(row); return meta && meta.scan ? meta : null; };
+  for (const meta of rows.map(held).filter(Boolean)) {
+    budget.pending += meta.scan.size;
+    if (budget.pendingOver) drop(meta);
+  }
+  if (budget.pendingOver || budget.pending <= MAX_PENDING_SCAN_CHARS) return;
+  budget.pendingOver = true;
+  found.map(held).filter(Boolean).forEach(drop);
 }
 
 // Undated notes first, then oldest to newest; equal times by channel,
@@ -1122,10 +1157,14 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const args = {
     customerId, serviceId, asOf, customer, customerEmail: customer && customer.email,
   };
-  const budget = { left: MAX_SCAN_RECORD_CHARS, nearLeft: MAX_SCAN_WINDOW_RECORD_CHARS };
+  const budget = {
+    left: MAX_SCAN_RECORD_CHARS, nearLeft: MAX_SCAN_WINDOW_RECORD_CHARS, pending: 0, pendingOver: false,
+  };
   for (const [channel, read] of SOURCES) {
     try {
-      found.push(...(await read(conn, args, unread)).flat(2));
+      const rows = (await read(conn, args, unread)).flat(2);
+      found.push(...rows);
+      holdWithinLimit(found, rows, budget);
     } catch (err) {
       unread.push({ channel, reason: 'read_failed' });
       logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${safeError(err)}`);
@@ -1138,6 +1177,10 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   // group: if the group's whole cost fits, each is scanned (then every order
   // fits), otherwise each is counted as not fully read. The result never
   // depends on the database's order or on the hidden words (r103, r106).
+  for (const row of found) {
+    const meta = entryMeta.get(row);
+    if (meta && meta.over) row.maskedTime = true;
+  }
   scanBudget.run(budget, () => {
     for (let i = 0; i < found.length;) {
       const key = (entryMeta.get(found[i]) || {}).key;
@@ -1152,11 +1195,11 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
         let near = 0;
         let over = false;
         for (const row of waiting) {
-          size += scanSize(entryMeta.get(row).scan);
+          size += entryMeta.get(row).scan.size;
           if (size > budget.left) { over = true; break; }
         }
         for (const row of over ? [] : waiting) {
-          near += scanCost(entryMeta.get(row).scan).near;
+          near += scanCost(heldForms(entryMeta.get(row).scan)).near;
           if (near > budget.nearLeft) { over = true; break; }
         }
         if (over) {
@@ -1166,7 +1209,7 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
       for (const row of waiting) {
         const meta = entryMeta.get(row);
         if (!meta.scan) continue;
-        const { text, raw, masked } = meta.scan;
+        const { text, raw, masked } = heldForms(meta.scan);
         delete meta.scan;
         if (hiddenTimeIn(text, raw, masked)) row.maskedTime = true;
       }

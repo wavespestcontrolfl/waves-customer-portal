@@ -430,6 +430,15 @@ describe('the customer record', () => {
       expect(record.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(400);
     });
 
+    test('too many held texts: none is held, each is not fully read (security r114)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const rows = Array.from({ length: 300 }, (_, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: `Gate code ${1000 + i}, side door. ${'the dog is friendly. '.repeat(50)}`, created_at: new Date(Date.UTC(2026, 8, 1, 0, i)) }));
+      const record = await build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF });
+      expect(record.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(300);
+      const few = await build(fakeConn({ customer_interactions: rows.slice(0, 2) }), { customerId: 'c1', asOf: AS_OF });
+      expect(few.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(0);
+    });
+
     test('a worst-case long text with one mask is scanned fast', () => {
       const raw = `gate code 4821. ${'a '.repeat(6000)}`;
       expect(hid(raw)).toBe(false);
@@ -716,6 +725,11 @@ describe('the customer record', () => {
       'GATE CODE 4821, WOULD LIKE TOMORROW',
       'GATE CODE 4821, REQUESTED TOMORROW',
       "GATE CODE 4821, CAN'T MAKE IT TOMORROW",
+      'GATE CODE 4821, TOMORROW IS THE APPOINTMENT',
+      "GATE CODE 4821, TOMORROW WON'T WORK",
+      'GATE CODE 4821, 10 IS THE APPOINTMENT TIME',
+      'GATE CODE 4821, TEN IS THE APPOINTMENT TIME',
+      'Gate code 4821, APPOINTMENT 10-20-2026 10-11',
       'GATE CODE 4821 VALID THROUGH MAY ONLY',
       'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
       'GATE CODE 4821, AVOID 10/20',
@@ -954,6 +968,7 @@ describe('the customer record', () => {
       'Gate code 4821, come 2 times a month',
       'GATE CODE 4821, START 2 IRRIGATION ZONES',
       'GATE CODE 4821, PROPERTY HAS 30-40 PALMS',
+      'GATE CODE 4821, PROPERTY HAS 10-20 PALMS',
       'GATE CODE 4821, SERVICE MONDAY COMPLETED',
       'GATE CODE 4821, APPOINTMENT OCTOBER 20 COMPLETED',
       'GATE CODE 4821, PIPE IS 10-20 CM LONG',
