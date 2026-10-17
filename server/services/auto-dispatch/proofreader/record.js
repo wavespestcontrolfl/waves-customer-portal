@@ -213,7 +213,7 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
   // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
   // Not the verb in "TECH MAY ONLY USE" (r51).
-  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:(?:is|are|was\\s{1,3}set\\s{1,3}as)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3}|their\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|booking|scheduled\\s{1,3}date)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
@@ -303,7 +303,8 @@ const TIME_WORDS_RE = new RegExp([
   // "HASTA OCTUBRE"); "EN OCTUBRE" after a past verb, "POR LAS TARDES" about
   // the dog, are history or habit of something else (r79).
   '(?<=\\b(?:solo|s\u00f3lo|solamente|no|nunca|excepto|menos|hasta|desde|antes\\s{1,3}de|despu[e\u00e9]s\\s{1,3}de|cada)\\s{1,3}(?:(?:en|por|de)\\s{1,3})?(?:(?:la|las|el)\\s{1,3})?)(?:ma[n\u00f1]anas?|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?![\\w\u00c0-\u024f])',
-  '(?<!\\bbuen[oa]s?\\s{1,3})\\b(?:antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?)(?![\\w\u00c0-\u024f])',
+  // ...not after "hace" ("HACE TRES D\u00cdAS" is history): r96.
+  '(?<!\\bbuen[oa]s?\\s{1,3})(?<!\\bhace\\s{1,3}(?:[a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]{1,12}|\\d{1,3})\\s{1,3})\\b(?:antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?)(?![\\w\u00c0-\u024f])',
   // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
   // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
   `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
@@ -370,7 +371,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
