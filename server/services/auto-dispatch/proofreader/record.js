@@ -24,8 +24,11 @@
  * replay too. They come first and are marked undated.
  *
  * Access codes and card / SSN numbers never reach a provider
- * (redactAccessCodes).
+ * (redactAccessCodes). When that mask also hides a word that can say when
+ * (a time or a day in the same sentence as a code), the entry is listed in
+ * `unread` as `time_masked`: the verdict is then never "allow".
  */
+const { createHash } = require('crypto');
 const logger = require('../../logger');
 // A database error's message can carry the query's bindings (a customer's
 // email address, a phone number): logs get the error's code or name only
@@ -51,6 +54,33 @@ const PART_OVERLAP_CHARS = 600;
 // The whole record's limit. Past it no model is asked and the verdict is
 // "unknown" (measured 2026-10-09 over 112 customers: median 6k, max 56k).
 const MAX_RECORD_CHARS = 300000;
+// The longest text the hidden-time scan reads (hiddenTimeIn). Measured on
+// a worst-case text ("a a a ..."), the scan costs about 7 microseconds a
+// character: 12,000 is about 85 ms, and one record reads at most 16,000
+// (security r77; production: 5 of 243 customers flagged).
+const MAX_SCAN_ENTRY_CHARS = 12000;
+// All of one record's scans together read at most this much; a text past
+// what is left is counted as not fully read without a scan (security r61:
+// twelve 23 KB replies took 240 ms per build).
+const MAX_SCAN_RECORD_CHARS = 16000;
+// The most masks one text may have and still be scanned.
+const MAX_SCAN_MARKERS = 200;
+// The count rule reads only the text near the masks: SCAN_PAD characters on
+// each side of each mask, the rest dropped from both forms alike (Codex
+// #6328 security r97: the full scan cost 162 ms on 4 KB). The kept windows
+// of one text, and of one record, have their own limits; past them the text
+// is counted as not fully read without a scan.
+const SCAN_PAD = 240;
+const MAX_SCAN_WINDOW_CHARS = 2000;
+const MAX_SCAN_WINDOW_RECORD_CHARS = 3000;
+// The texts that wait for the record's order are held until it is sorted:
+// past this many characters of them in one record (the whole record's
+// limit), none is held and each is counted as not fully read without a
+// scan (security r114: 10,000 replies of 11 KB were held at once). The set
+// of waiting texts does not depend on the database's order, so neither
+// does this outcome. A lower limit flagged 9 of 245 production customers
+// (many texts); this one keeps 5.
+const MAX_PENDING_SCAN_CHARS = MAX_RECORD_CHARS;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
@@ -92,15 +122,750 @@ function partsOf(body) {
   return parts;
 }
 
+// Words that can say WHEN: a clock time, an hour after a time word ("before
+// 9", "between 9 and 11", "no earlier than 9", "past 3"), "9 o'clock", "9
+// or later", an hour range ("7-7"), a part of the day, a weekday.
+// The access-code mask works on a whole sentence that names a code, and it
+// masks every token with a digit in it and every word in capitals: in "gate
+// code 4821, not before 10am" the 10am goes too, in "CODE 4821 FRIDAYS ONLY"
+// the day, in "the code works 7-7" the hours. The model then cannot see a
+// time statement that is on file. The code never reaches a provider, so the
+// text is not unmasked; the record says it could not read that entry in full
+// (`time_masked`), and a verdict on it is never "allow".
+// A bare number is NOT counted: the mask also takes the day numbers of the
+// date stamps staff notes carry ("[call Fri Aug 14]", "2026-09-25"), and on
+// production notes that was six of seven flags (measured 2026-10-13). A
+// range inside a longer run of digits and dashes or slashes is a date.
+// Words that introduce an hour, and the hours a person spells out (an
+// all-caps note "DO NOT COME BEFORE NINE" loses both to the mask: r4).
+const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|than|past';
+// Words that tie a date to the visit or the access; never taken for the
+// credential either ("access code expires 10/20": r8).
+// Not "good": "good 10/10 service" is a rating; "good until" is read by
+// "until" (r11).
+// Not "on": "spoke with the owner on 10/10" is history (r12).
+// ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
+// 20"): r32.
+// skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make\\s{1,3}(?:it|that|this)|make|be\\s{1,3}(?:there|here|home|around|available|in\\s{1,3}town)|than|like|back|returns?|returning|returned|home\\s{1,3}on|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
+// The hour words that also tie a DATE: not "about / around / than / past /
+// at", which come before quantities ("about 5/8 acre": r9).
+const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
+const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+// The words that may follow an hour in a time ("before 9 please", "after
+// NINE at night"); any other word makes it a count ("about THREE acres",
+// "ONE of the owners"): r5, r7, r15.
+// A time-zone word may follow an hour ("AFTER 3 ET", "AT 10 EST"): r86.
+const AFTER_HOUR_OK = 'et|est|edt|eastern|local|am|pm|a\\.m|p\\.m|o\\W?clock|or|and|to|until|till|only|please|on|at|in|sharp|latest|earliest|ish|then|so|is|works?|thirty|fifteen|forty|twenty';
+const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
+// A quantity in a duration, in digits or words ("TWO DAYS NOTICE", "a week
+// ahead", "every couple of weeks"): r15.
+// A 24-hour clock time in four digits ("before 1400 hours"): only after an
+// hour word or before "hours / hrs", never alone (a four-digit number alone
+// is most often a code or a house number): r16.
+const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
+// The shapes of a calendar date: ISO, slash, month name (with an optional
+// ordinal), an ordinal day alone (with an optional "the"), or a month alone
+// ("VALID THROUGH OCTOBER"; "TILL END OF OCTOBER": r36; not the verb in
+// "CHANGES MAY BE NEEDED": r82; a year alone,
+// "VALID THROUGH 2026": r37; not before a day or a mask, which the
+// month-and-day shape reads), or day first ("EXPIRES 20 OCTOBER"): r7 to
+// r19, r28, r31.
+// Whole month names and their short forms only: "JANITOR" is not January (r33).
+const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const DATE_SHAPES = `(?:(?:the\\s{1,5})?(?:year|month|week)[\\s-]{0,3}end(?![\\w/])|\\d{1,2}-\\d{1,2}-(?:\\d{4}|\\d{2})(?![\\w/-])|(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:(?:the|this|next)\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?!may\\s{1,5}(?!(?:only|please|and|or|thru|through|to)\\b)[a-z])(?!may\\s{1,5}only\\s{1,5}(?:be|do|go|use|enter|make|come|call|open|get|have|take)\\b)(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
+// An hour with "ish" ("around 10ish", "10-ish"): r21.
+const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
+// A word between the quantity and the unit ("2 business days"): r21.
+const DURATION_MOD = '(?:(?:business|calendar|full|working|school|week)[\\s-]{1,3})?';
+// "TWO AND A HALF HOURS": r22.
+// Spelled tens too ("THIRTY MINUTES NOTICE"): r30.
+// A three-digit clock time ("900", "930"): r58, r59.
+const H3 = '[1-9][0-5]\\d(?![\\w:/-])';
+const QTY = `(?:an?\\s{1,3}(?:few|couple(?:\\s{1,5}of)?)|\\d{1,3}|a|an|half|an?\\s{1,3}half|${SPELLED_HOURS}|fifteen|twenty|thirty|forty[\\s-]?five|forty|fifty|sixty|ninety|few|couple(?:\\s{1,5}of)?)(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?`;
+// An hour is 0-23, and a number followed by a unit is a quantity ("about 50
+// lbs", "after 5 minutes"), not a time (r5).
+// A word after the number must be one that goes with a time ("before 9
+// please", "after 9 at night"); any other word makes it a count ("about 5
+// dogs", "50 lbs"): r5, r7.
+const HOUR = `(?:[01]?\\d|2[0-3])(?![\\w:/%-])(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
+// Times a person names instead of an hour ("AFTER LUNCH ONLY", "before
+// sunset", "after work"): r5.
+// Not work / school: "AT WORK" is a place; "after work" is read below (r39).
+const NAMED_TIMES = 'lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk|daylight|dark';
+// The words a lead word may point at that count by their own pattern too
+// ("BEFORE noon", "after DARK", "by Friday"): r12, r21.
+const TIME_ANCHORS = `(?:${NAMED_TIMES}|noon|midnight|mornings?|afternoons?|evenings?|night|weekdays?|weekends?|(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:days?)?)\\b`;
+const TIME_WORDS_RE = new RegExp([
+  // The hour alone is the match, the AM / PM a look-ahead: the mask can take
+  // the hour and leave "A.M.", which counts by its own pattern (r21).
+  // Not a mix ratio ("mix ratio 1:10"): r27.
+  '(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})\\b\\d{1,2}:\\d{2}(?=\\s?[ap]\\.?m\\.?(?![\\w])|-?ish\\b|(?![\\w:]))',
+  '\\b\\d{1,2}(?=\\s?[ap]\\.?m\\.?(?![\\w]))',
+  // The lead word alone is the match, the anchor a look-ahead: in "BEFORE
+  // lunch" the mask takes BEFORE and leaves lunch, and a match that took
+  // both would count one on each side (r12). The anchor's own word counts
+  // by its own pattern.
+  `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${H3}(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])|${HOUR_ISH}|${SPELLED_HOUR}|${TIME_ANCHORS}))`,
+  `\\b${HOUR_ISH}`,
+  // ...only with a word that makes it a time: "PUMP HAS 1400 HOURS" is a
+  // count (r59).
+  `(?<=\\b(?:at|by|before|after|until|till|til|from|only|not|no|around|about|starts?|ends?|opens?|closes?)\\s{1,5})(?:${HHMM}|${H3})(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
+  `\\b(?:${HHMM}|${H3})(?=\\s{0,3}(?:hours|hrs|h)\\s{0,3}(?:only|ok|okay|please|sharp|or\\s{1,3}later|or\\s{1,3}after|or\\s{1,3}before|start|arrival)\\b)`,
+  // Minutes to / past an hour, spelled ("TEN TO TWO"): r23. Digits are read
+  // by the range pattern.
+  `\\b(?:five|ten|fifteen|twenty(?:[\\s-]{1,3}five)?)(?=\\s{1,5}(?:to|past|after|til|till)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
+  // Quarter or half to / past an hour ("QUARTER TO TEN"): r15.
+  `\\b(?:quarter|half)(?=\\s{1,5}(?:to|past|after|til|till|before)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
+  // A meal or a sun time counts only with a word that makes it a time
+  // ("AFTER LUNCH", "lunch only", "by sunset"): "DOG EATS BREAKFAST INSIDE"
+  // is about the dog (r38).
+  '(?<=\\b(?:before|after|until|till|til|by|at|around|about|from|past|during|over|through|thru|only|not|no|never|except)\\s{1,5})(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
+  '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?=\\s{0,3}(?:(?:only|ok|okay|is|works?|time|hour|or\\s{1,3}later|please)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  // A calendar date after a word that ties it to the visit or the access
+  // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
+  // note's own stamp and does not count.
+  // A day of the month after a word that limits the visit to it ("ONLY ON
+  // THE 20TH", "except the 5th"): r17. "on the 20th" alone is history.
+  `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
+  // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
+  // Not the verb in "TECH MAY ONLY USE" (r51).
+  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:would\\s{1,3}be\\s{1,3}(?:best|better|fine|good|ideal|great|perfect|ok|okay|preferred)|(?:is|are|was\\s{1,3}set\\s{1,3}as)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3}|their\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|booking|scheduled\\s{1,3}date)\\b|(?:is|are|will\\s{1,3}be)\\s{1,3}(?:unavailable|busy|booked|full|closed|off|bad|taken|out|impossible|a\\s{1,3}no)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  // A connector may stand between ("expires on 10/20"): r14.
+  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
+  // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
+  // "8 onwards"): r9.
+  // A look-ahead: the phrase is not consumed, so its own time word still
+  // counts on both sides and the hour alone tells the loss.
+  '\\b(?:[01]?\\d|2[0-3])(?=\\s{1,5}(?:in\\s{1,5}the\\s{1,5}(?:morning|afternoon|evening)|at\\s{1,5}night|sharp|onwards?|or\\s{1,5}so)(?![\\w]))',
+  // The same with the hour spelled out, and a spelled hour with spelled
+  // minutes ("TEN THIRTY in the morning"): r13.
+  `\\b(?:${SPELLED_HOURS})(?=\\s{1,5}(?:in\\s{1,5}the\\s{1,5}(?:morning|afternoon|evening)|at\\s{1,5}night|sharp|onwards?|or\\s{1,5}so)(?![\\w]))`,
+  `\\b(?:${SPELLED_HOURS})(?=\\s{1,5}(?:fifteen|thirty|forty[\\s-]?five|forty|twenty|o\\W?clock)(?![\\w]))`,
+  // A notice period or a change interval ("need 7 days notice", "expires
+  // in 2 weeks", "changes every 30 days"): r10. A length or a count is not one.
+  // A hyphen may join the quantity and the unit ("48-hour notice"): r20.
+  `\\b${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|hours?|hrs?|months?|minutes?|mins?)(?:.?s)?(?:\\s{1,5}and\\s{1,5}a\\s{1,5}half)?\\W{0,2}\\s{0,3}(?:(?:minimum|min|at\\s{1,3}least|full)\\W{0,2}\\s{1,3})?(?:notice|warning|lead[\\s-]{0,3}time|heads?[\\s-]{0,3}up|ahead|in\\s{1,5}advance|advance|prior|before|beforehand)(?![\\w])`,
+  `\\b(?:expires?|expiring|changes?|changing|resets?|every|valid|good)(?=\\s{1,5}(?:(?:in|after|for)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
+  // AM or PM on its own ("PM ONLY"): r8.
+  // Not the verb in "I AM" (r11).
+  // Not the property manager: "contact the PM", "PM for access" (r12).
+  '(?<!\\bi\\s{1,5}(?:(?:[a-z]{2,15}ly|also|too|still|just|now|not|sure|always|never)\\s{1,5})?)\\bam(?![\\w])(?!\\s{1,5}i\\b)|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
+  // PM alone only before a word that makes it a time ("PM ONLY", "PM is
+  // best"); otherwise it is the property manager ("PM approved access",
+  // "SPOKE TO PM": r24, r39).
+  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?!\\s{1,3}only\\s{1,3}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?)\\b)(?!\\s{1,3}please\\s{1,3}(?:call|text|email|contact|let|tell|ask|send|have|get|make|check)\\b)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b))',
+  // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
+  // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
+  // (r17); "every week" is read below.
+  // Only with a word that makes it a limit ("TOMORROW ONLY", "NOT ON
+  // HOLIDAYS"): "owner called YESTERDAY" is history (r18).
+  '\\b(?:today|tonight|tomorrow|holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july)(?=\\s{1,5}(?:(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)\'?t|cannot|(?:is|are)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day)|only|not|ok|okay|works?|(?:is|are)\\s{1,3}(?:ok|okay|fine|good|best|better|not|no|out|off|only|bad|busy|free|open|closed|impossible|available|unavailable))\\b)',
+  // An article may stand before holidays ("AFTER THE HOLIDAYS"): r54.
+  // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
+  // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
+  // AFTER CHRISTMAS"): r55.
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|be|for|scheduled|booked|come|coming|visit|arrive|service|spray|treat|schedule|book|reschedule|move|available|unavailable|free|busy|away|gone|out|home|here|there|do|avoid|skip|closed|open|off|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|like|requested|request|make\\s{1,3}it|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
+  // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
+  `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
+  // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
+  // "late in the day"): r49.
+  '\\b(?:early|earlier|earliest|late|later|latest)(?=\\s{1,3}(?:appointments?|appts?|visits?|arrivals?|service|stops?|slots?|in\\s{1,3}the\\s{1,3}day|morning|afternoon|evening)\\b)',
+  '(?<=\\b(?:come|arrive|arrival|visit|service|be|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3}(?:(?:too|very|so|any|no|real|really|super)\\s{1,3})?)(?:early|earlier|late|later)(?![\\w])',
+  // A named part of the month ("MIDDLE OF THE MONTH ONLY", "BEGINNING OF
+  // THE MONTH", "start of the month"): r63.
+  // ...only with a limit ("... ONLY", "by the end of the month"): "END OF
+  // MONTH REPORT IS DUE" is a deadline (r69).
+  '\\b(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?(?:month|week)\\s{0,3}(?:(?:only|ok|okay|please|works?|is\\s{1,3}best)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|until|till|by|before|after|at|in|around|near|toward|towards|during|not|no|except|prefer|prefers)\\s{1,3}(?:the\\s{1,3})?)(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?(?:month|week)\\b)',
+  // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
+  // "SECOND TUESDAY OF THE MONTH"): r49, r50.
+  '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:(?:two|three|four|five|2|3|4|5|few|couple\\s{1,3}of)\\s{1,3})?(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
+  // "AS EARLY AS 9", "as late as 5": r35.
+  `\\b(?:early|late)(?=\\s{1,5}as\\s{1,5}(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
+  // An hour after a word that names the visit's time ("appointment time 9"): r24.
+  `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at|for)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
+  // ...and a date after one ("APPOINTMENT IS OCTOBER 20", "booked for 10/20"): r69.
+  // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
+  // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
+  // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|book|reschedule|move|come|arrive|arrival|date|dates|day|(?:available|preferred|best|open|free|good|usual)\\s{1,3}(?:days?|dates?|times?)|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:me|us|them|him|her|it)\\s{1,3})?(?:(?:is|are|on|in|during|for|to|at|be|stay|stays|remain|remains|kept|left|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b|(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w]))(?![\\s,.-]{0,3}(?:completed|complete|done|finished|serviced|treated|sprayed|performed|happened|went|occurred|was\\s{1,3}(?:done|completed|finished))\\b))`,
+  // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
+  // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
+  // REPORT IS DUE" is a deadline (r72).
+  '\\b(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])(?=\\s{0,3}(?:(?:only|ok|okay|please|works?|is\\s{1,3}best|preferred)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|until|till|by|before|after|at|around|near|toward|towards|not|no|except|prefer|prefers|come|arrive)\\s{1,3}(?:the\\s{1,3})?)(?:(?:end|start|beginning|middle)\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?(?:work\\s{1,3})?day|eod|mid-?day)(?![\\w])',
+  // "first thing" as a time only with in the morning / AM / only / please or
+  // after come / be here ("FIRST THING ON LEFT" is a place): r53.
+  '\\bfirst\\s{1,3}thing(?=\\s{1,3}(?:in\\s{1,3}the\\s{1,3}morning|tomorrow|am|a\\.m|only|please|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b|\\s{0,3}(?:[,;!]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:come|be\\s{1,3}here|arrive|show\\s{1,3}up|get\\s{1,3}here)\\s{1,3})first\\s{1,3}thing\\b',
+  // Night only as a limit ("NIGHT ONLY"); "NIGHT LIGHT" is a thing (r25).
+  '\\b(?:nights?|overnight)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  // "FIRST APPOINTMENT ONLY", "last stop", "1st appointment": r25, r30.
+  // ...only as a wish or a limit ("FIRST APPOINTMENT ONLY", "want the 1st
+  // appointment"): "FIRST APPOINTMENT COMPLETED" is history (r41).
+  '\\b(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\s{0,3}(?:(?:only|please|preferred|ok|okay|works?|of\\s{1,3}the\\s{1,3}day|if\\s{1,3}possible)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|need|needs|want|wants|prefer|prefers|book|schedule|must|always|be|as|request|requests|requested)\\s{1,5}(?:the\\s{1,5})?)(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
+  // A bare hour before a word that makes it a time ("9 works for us", "TEN
+  // ONLY"): r27.
+  // ...not a numbered place ("UNIT 9 ONLY", "BAY 9 PLEASE"): r101.
+  `(?<![\\d:/.-])(?<!\\b(?:unit|units|apt|apartment|suite|ste|lot|building|bldg|space|slip|box|stall|phase|room|rm|floor|bay|dock|door|pier|site|pad|row|section|aisle|level|tower|block|house|home|number|num)\\.?\\s{0,3}#?\\s{0,2})(?<!#\\s{0,2})\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:would\\s{1,3}be\\s{1,3}(?:best|better|fine|good|ideal|great|perfect|ok|okay|preferred)|(?:is|are)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3})?(?:(?:appointment|appt|arrival|visit|service|start|best|preferred)\\s{1,3})?(?:time|window|hour|appointment)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  // "after work", "before school" (not "at work": a place): r39.
+  '\\b(?:before|after|until|till|til|by)(?=\\s{1,5}(?:work|school)\\b)',
+  // Spanish, the other language the proofreader reads (its hard cases have
+  // Spanish standing statements): weekdays, months, parts of the day and
+  // the usual time words ("SOLO LOS MARTES", "NUNCA ANTES DE LAS DIEZ"): r42.
+  // Not "hoy" alone: "HOY HABLE CON EL DUENO" is history (r51).
+  // Not a greeting ("BUENOS DIAS", "BUENAS TARDES"): r74.
+  // Months and parts of the day only with a limit ("SOLO POR LA TARDE",
+  // "HASTA OCTUBRE"); "EN OCTUBRE" after a past verb, "POR LAS TARDES" about
+  // the dog, are history or habit of something else (r79).
+  '(?<=\\b(?:solo|s\u00f3lo|solamente|no|nunca|excepto|menos|hasta|desde|antes\\s{1,3}de|despu[e\u00e9]s\\s{1,3}de|cada)\\s{1,3}(?:(?:en|por|de)\\s{1,3})?(?:(?:la|las|el)\\s{1,3})?)(?:ma[n\u00f1]anas?|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?![\\w\u00c0-\u024f])',
+  // ...not after "hace" ("HACE TRES D\u00cdAS" is history): r96.
+  '(?<!\\bbuen[oa]s?\\s{1,3})(?<!\\bhace\\s{1,3}(?:[a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]{1,12}|\\d{1,3})\\s{1,3})\\b(?:antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?)(?![\\w\u00c0-\u024f])',
+  // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
+  // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
+  `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
+  // A hold with no end date ("NO SERVICE UNTIL FURTHER NOTICE", "ON HOLD"): r48.
+  '\\b(?:until|till|til)(?=\\s{1,5}(?:further|notified|told|advised|we\\s{1,3}call|they\\s{1,3}call|i\\s{1,3}call)\\b)',
+  // paused / suspended only of the service or the visits ("SERVICE
+  // SUSPENDED"; not "SUSPENDED CEILING"): r49.
+  // "on hold" only of the service or the visits ("SERVICE ON HOLD", "put the
+  // account on hold"); "PUT ME ON HOLD" is a phone call (r87).
+  '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan|schedule|everything)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3}|(?:put\\s{1,3})?)?)on\\s{1,3}hold(?![\\w])',
+  '\\bindefinitely(?![\\w])',
+  '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?)(?:paused|suspended)(?![\\w])',
+  '\\b(?:pause|suspend|paused|suspended)(?=\\s{1,3}(?:the\\s{1,3})?(?:service|services|visits?|appointments?|account|treatments?|program|plan)\\b)',
+  // Spanish clock times ("SOLO A LAS 10", "A LAS DIEZ"): r61.
+  '(?<=\\b(?:a|entre|desde|hasta|de|antes\\s{1,3}de|despu[eé]s\\s{1,3}de)\\s{1,3})las?(?=\\s{1,3}(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\\b)',
+  // A direct no-move directive ("DO NOT RESCHEDULE", "DO NOT MOVE
+  // APPOINTMENT", "NO RESCHEDULING"): r61.
+  '(?<=\\b(?:not|never|no|don.?t|cannot|can.?t|won.?t)\\s{1,3})(?:reschedule|rescheduling|re-schedule)(?![\\w])',
+  '(?<=\\b(?:not|never|don.?t|cannot|can.?t)\\s{1,3})(?:move|change|switch|shift|cancel)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|our\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\b)',
+  // Passive ("APPOINTMENT CANNOT BE MOVED", "visit is not to be changed"): r62.
+  // ...with a scheduling subject ("THE GATE CANNOT BE MOVED" is the gate):
+  // r69. "rescheduled" needs none.
+  '(?<=\\b(?:appointments?|appts?|visits?|service|date|day|time|schedule)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)(?:moved|changed|shifted|switched|cancell?ed)(?![\\w])',
+  '(?<=\\b(?:not|never|cannot|can.?t|won.?t|shouldn.?t|mustn.?t)\\s{1,3}(?:to\\s{1,3})?(?:be\\s{1,3})?)rescheduled(?![\\w])',
+  // A season with a limit or a lead ("NO SERVICE UNTIL SPRING", "WINTER
+  // ONLY", "AWAY FOR THE SUMMER"): r68.
+  '\\b(?:until|till|til|before|after|during|over|through|thru|for|in|this|next|every|each|by|except|not|no|from)(?=\\s{1,5}(?:the\\s{1,5})?(?:spring|summer|fall|autumn|winter)s?(?![\\w]))',
+  // A season before is / are is an observation ("SPRING IS BROKEN", "WINTER
+  // IS HARD ON THE LOCK"): r71, r85.
+  '\\b(?:spring|fall)s?(?=\\s{1,3}(?:only|ok|okay|works?|months?|break|vacation|season)\\b)',
+  '\\b(?:summer|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|months?|break|vacation|season)\\b)',
+  // "DAYLIGHT ONLY", "daytime only": r69.
+  '\\b(?:daylight|day[\\s-]?time)(?=\\s{0,3}(?:only|ok|okay|hours?|please)\\b)',
+  // A Spanish weekday only as a habit or a limit ("LOS MARTES", "SOLO
+  // MARTES", "NO LOS LUNES"); "LLAMÓ EL MARTES" is history (r72).
+  '(?<=\\b(?:los|solo|s\u00f3lo|solamente|cada|no|nunca|excepto|menos|hasta|desde|todos\\s{1,3}los|pr\u00f3ximo|proximo|este)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
+  // A placement that must stay ("APPOINTMENT IS FIXED", "DATE IS FIRM",
+  // "KEEP APPOINTMENT AS IS"): r79.
+  '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
+  '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3}|our\\s{1,3})?(?:(?:current|existing|original|same|scheduled|booked|set|regular|usual|present)\\s{1,3}){0,2}(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
+  // A bare hour after a visit verb ("please come 10"): r108.
+  `(?<=\\b(?:(?:come|arrive|arriving|be\\s{1,3}here|show\\s{1,3}up|get\\s{1,3}here|stop\\s{1,3}by)\\s{1,3}(?:(?:at|by|around|after|before)\\s{1,3})?|(?:start|starting)\\s{1,3}(?:at|by|around|after|before)\\s{1,3}))(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?![\\w:/.\u2013\u2014-])(?!\\s{1,3}(?:dogs?|cats?|people|kids|times|units?|homes?|houses?|days?|weeks?|months?|years?|minutes?|mins?|hours?|feet|ft|inches|yards?|miles?)\\b)`,
+  // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
+  `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
+  // A Spanish hour range ("DE 9 A 11", "ENTRE 9 Y 11"): r93.
+  '\\b(?:de|entre|desde)(?=\\s{1,3}(?:las?\\s{1,3})?\\d{1,2}(?::\\d{2})?\\s{1,3}(?:a|y|hasta)\\s{1,3}(?:las?\\s{1,3})?\\d{1,2}\\b)',
+  // A week named by a date ("WEEK OF OCTOBER 20"): r105.
+  `\\bweek(?=\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?${DATE_SHAPES})`,
+  // A month range ("OCT-APR ONLY", "HERE OCTOBER-MAY"): r94.
+  `\\b(?:${MONTHS})\\.?\\s?(?:-|–|to|through|thru|till|til|until)\\s?(?:${MONTHS})\\.?(?![\\w])`,
+  // A spelled hour range ("NINE TO FIVE"): r81.
+  `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
+  // A Spanish appointment day ("CITA EL LUNES", "SERVICIO EL LUNES"): r87.
+  '(?<=\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)\\s{1,3}(?:es\\s{1,3}|ser[a\u00e1]\\s{1,3})?(?:el|los|para\\s{1,3}el)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
+  // A Spanish appointment relative day ("CITA HOY", "SERVICIO MAÑANA"): r95.
+  '(?<=\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)\\s{1,3}(?:(?:es|ser[a\u00e1]|para)\\s{1,3})?)(?:hoy|ma[n\u00f1]ana|pasado\\s{1,3}ma[n\u00f1]ana)(?![\\w\u00c0-\u024f])',
+  // A Spanish appointment date ("CITA EL 20 DE OCTUBRE", "CITA 10/20"): r90.
+  '\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)(?=\\s{1,3}(?:(?:es|ser[a\u00e1]|para)\\s{1,3})?(?:(?:el|la)\\s{1,3})?(?:\\d{1,2}\\s{1,3}de\\s{1,3}(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)|\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?)(?![\\w\u00c0-\u024f/]))',
+  // "AFTER HOURS": r22.
+  // ...not a contact line ("AFTER HOURS EMERGENCY NUMBER"): r81.
+  '\\bafter[\\s-]{1,3}hours\\b(?!\\s{1,3}(?:emergency|emergencies|number|phone|line|contact|call|calls|service\\s{1,3}number|support|hotline))',
+  // A named window of the day ("BUSINESS HOURS ONLY"): r18.
+  '\\b(?:business|office|working|opening|open|normal|regular|school)(?=\\s{1,5}hours\\b)',
+  // Only the lead word is taken, so the noun can start the next match
+  // ("next visit 10/20": r104).
+  '\\b(?:next|this|every|each)(?=\\s+(?:week|month|time|visit)(?![\\w]))',
+  // "EVERY OTHER WEEK", "every second month": r20.
+  '\\b(?:every|each)(?=\\s{1,5}(?:other|second|2nd|third|3rd|fourth|4th)\\s{1,5}(?:week|month|day|visit)s?(?![\\w]))',
+  `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
+  '\\b\\d{1,2}\\s?o\\W?clock\\b',
+  '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
+  // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
+  '(?<![\\d/-])\\b(?:[01]?\\d|2[0-4])\\s?(?:-|\u2013|\u2014|to|through|thru|till|til|until)\\s?(?:[01]?\\d|2[0-4])(?![\\w/\u2013\u2014-])(?!\\s{0,3}(?!(?:mondays|tuesdays|wednesdays|thursdays|fridays|saturdays|sundays|weekdays|weekends|mornings|afternoons|evenings|nights|days|hours|minutes|mins|hrs|is|this|was|has)\\b)[a-z]{2,}s\\b)(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
+  // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
+  // r55, r62. After a weekday the part of the day goes with it ("CALLED
+  // MONDAY MORNING" is history; "MONDAY MORNING ONLY" is read by the
+  // weekday): r64.
+  '(?<!\\bgood\\s{1,3})(?<!\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\s{1,3})\\b(?:noon|midnight|mornings?|afternoons?|evenings?|weekdays?|weekends?)(?![\\w])(?!\\s{1,3}(?:blue|black|green|purple|navy|gr[ae]y|colou?r|paint|glory|glories|dove|doves|star|primrose|sun|shade|light|exposure)\\b)',
+  // Not in a note's own bracketed stamp ("[CALL FRI AUG 14]"): r33.
+  // A short form ("SUN", "SAT", "WED") is also a word ("FULL SUN"): only in
+  // a list or a range, or before only / ok ("Mon-Fri", "Sat only"): r34.
+  // A plural weekday is a habit ("MONDAYS ONLY"); one weekday counts only
+  // with a word that ties it to the visit ("on Monday", "Monday works",
+  // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
+  // CALLED MONDAY" is history (r35, r37).
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])(?![\\s,.-]{0,3}(?:completed|complete|done|finished|serviced|treated|sprayed|performed|happened|went|occurred|was\\s{1,3}(?:done|completed|finished))\\b)',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:(?:morning|afternoon|evening|night)s?\\s{1,3}(?:only|ok|okay|works?|please|preferred|is|are)\\b|[/&-]|,\\s{0,3}(?:and\\s{1,3}|or\\s{1,3})?(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\\b|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to)\\b))',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?!\\s{0,3}\\d+\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal)\\b)(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b))',
+].join('|'), 'gi');
+// Counted in constant memory: a long stored text builds no array of matches
+// (Codex security r8).
+// One compiled pattern, reused: the scan is synchronous, so resetting
+// lastIndex is enough (compiling the large pattern on every call was most of
+// its cost: Codex security r77).
+// A time word right after a mask marker may be the tail of a longer one
+// whose head the mask hid ("OCT. 20 ONLY" -> "[redacted]. 20 ONLY"); on the
+// masked side such a fragment, a number right after the marker, does not
+// count (r95).
+const AFTER_MARK_RE = /\[redacted\][\s.,:/-]{0,3}$/i;
+// Typographic apostrophes read as plain ones ("won\u2019t"): r115. One
+// character for one, so positions do not move.
+function timeWords(input, { skipAfterMark = false } = {}) {
+  const text = input.replace(/[\u2018\u2019\u02bc]/g, "'");
+  const re = TIME_WORDS_RE;
+  re.lastIndex = 0;
+  let n = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (!skipAfterMark || !/^\d/.test(m[0]) || !AFTER_MARK_RE.test(text.slice(Math.max(0, m.index - 16), m.index))) n += 1;
+    if (m[0] === '') re.lastIndex += 1;
+  }
+  re.lastIndex = 0;
+  return n;
+}
+
+// The value that directly follows a code noun is the credential itself, not
+// a statement about when: "gate code Friday", "password is noon". It is left
+// out of the count on the raw side, so a code that happens to be a day or a
+// time word does not make the record incomplete (Codex #6328 r2).
+// A value followed by "only" is a restriction, not the credential ("gate
+// code WEEKDAYS ONLY": r11); a value of digits stays the credential
+// ("GATE CODE 1234 ONLY": r48).
+// A word that introduces an hour is never taken for the credential: in "no
+// gate code after 9" the "after 9" is the statement (r4). Only the ONE token
+// after the noun is taken: a passphrase of several words that are day or time
+// words ("Friday morning") still counts, on purpose. Which it is cannot be
+// told from the text, and the safe side is a person reading it.
+const CODE_PLACES = '(?:gate|front|back|side|main|door|garage|lockbox|lock|box|entry|access|keypad|community|pool|building|alarm|house|home|lanai|shed|fence|unit)';
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS}|works?|working|available|unavailable|open|opens|closed|good|only|not|every|each|new|changes?)\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])(?:(?<=[0-9#*])|(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b))["'\\u201d\\u2019]?`, 'gi');
+// The same in the reverse order the mask also reads: "Friday is the gate
+// code", "Noon is the gate password", "Friday is the front door access
+// code" (r3, r7). Between "is" and the code noun only words that name
+// what the code opens: "TUESDAY is available with gate code" is a day, not
+// the credential (r25).
+// Only "is" and "=", as the mask itself reads: "Friday WAS
+// the gate code" stays visible to the model, so it is not left out (r14).
+// Bounded tokens and gaps in both credential patterns: an unbounded run was
+// retried at every byte of a long stored text (a 64 KB entry took 5.9 s on
+// the event loop: Codex security r5; the forward one's spaces: r7).
+const CREDENTIAL_VALUE_REVERSE_RE = new RegExp(String.raw`(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:${CODE_PLACES}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)`, 'gi');
+const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
+
+// The mask removed at least one word that can say when. The list is the
+// common ways to say when, not every way: a rule that counted every word
+// the mask removes flagged 37 of 244 production records (technicians'
+// product names in capitals), against 4 with this list (measured
+// 2026-10-13); a statement the list misses is the known limit.
+// `lineMasked`: the same text masked with its line breaks kept, when it has
+// any. The neighbor rule must hold there too, so a break ends a clause
+// ("ask MANAGER\nFriday works": r34). The model never reads that form.
+function maskHidTime(raw, masked, lineMasked = null) {
+  if (raw === masked) return false;
+  // A text past the whole record's limit is not scanned (security r8). Its
+  // masked form decides: still past the limit, the record is too long and no
+  // model is asked; shorter (the mask took a long credential run), it is
+  // counted as not fully read, unscanned (r9).
+  if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
+  const [rawNear, maskedNear] = nearMasks(raw, masked);
+  return timeWords(maskedNear, { skipAfterMark: true }) < timeWords(withoutCredentialValues(rawNear)) || maskBesideTimeWord(masked, lineMasked, numberMarkers(raw, masked));
+}
+
+// The text near the masks, in both forms (security r97). The mask only
+// replaces words with MARK, so every stretch between two masks is the same
+// in both forms: the middle of a stretch longer than 2 * SCAN_PAD is dropped
+// from both alike, and only the SCAN_PAD characters next to each mask stay.
+// Both forms lose the same text, so a time word far from every mask counts
+// the same on both sides, as it did in the full scan. A stretch that cannot
+// be found in the raw form (the mask changed more than words) keeps the
+// whole text.
+const NEAR_GAP = '\n\n';
+function nearMasks(raw, masked) {
+  const parts = masked.split(MARK);
+  if (parts.length < 2) return [raw, masked];
+  const cuts = []; // [rawFrom, rawTo, maskedFrom, maskedTo]
+  let rawAt = 0;
+  let maskedAt = 0;
+  const last = parts.length - 1;
+  for (let i = 0; i <= last; i += 1) {
+    const part = parts[i];
+    const from = i === 0 ? 0 : SCAN_PAD;
+    const to = i === last ? part.length : part.length - SCAN_PAD;
+    if (to - from > NEAR_GAP.length) {
+      let rawPart;
+      if (i === 0) rawPart = raw.startsWith(part) ? 0 : -1;
+      else if (i === last) rawPart = raw.endsWith(part) && raw.length - part.length >= rawAt ? raw.length - part.length : -1;
+      else rawPart = raw.indexOf(part, rawAt);
+      if (rawPart < 0) return [raw, masked];
+      cuts.push([rawPart + from, rawPart + to, maskedAt + from, maskedAt + to]);
+      rawAt = rawPart + part.length;
+    }
+    maskedAt += part.length + MARK.length;
+  }
+  if (!cuts.length) return [raw, masked];
+  const stitch = (text, a, b) => {
+    let out = '';
+    let at = 0;
+    for (const cut of cuts) { out += text.slice(at, cut[a]) + NEAR_GAP; at = cut[b]; }
+    return out + text.slice(at);
+  };
+  return [stitch(raw, 0, 1), stitch(masked, 2, 3)];
+}
+
+// The broad rule beside the count (Codex #6328 r22, after 21 rounds that each
+// named a new phrase): a masked word right next to a visible word that only
+// says when ("every [redacted] Tuesday", "[redacted] A.M.", "[redacted]
+// Fridays", "expires [redacted] October") hid part of a statement about when.
+// The credential's own mask (right after a code noun, or before "is the
+// ... code") is left out: it sits next to a time word whenever the note
+// states one ("gate code [redacted] after 9").
+const NEIGHBOR_TIME_WORDS = new Set([
+  // No short forms that are also words (mon, wed, sat, sun): r34.
+  'monday', 'mondays', 'tue', 'tues', 'tuesday', 'tuesdays', 'wednesday', 'wednesdays', 'thu', 'thur', 'thurs', 'thursday', 'thursdays',
+  'fri', 'friday', 'fridays', 'saturday', 'saturdays', 'sunday', 'sundays', 'weekday', 'weekdays', 'weekend', 'weekends',
+  'am', 'pm', 'a.m', 'p.m', 'noon', 'midnight', 'morning', 'mornings', 'afternoon', 'afternoons', 'evening', 'evenings', 'night', 'nights', 'tonight',
+  'today', 'tomorrow', 'lunch', 'lunchtime', 'breakfast', 'dinner', 'supper', 'sunrise', 'sunset', 'dawn', 'dusk',
+  'hour', 'hours', 'hrs', 'notice', "o'clock", 'oclock', 'ish',
+]);
+// A month counts only after the mask ("expires [redacted] October"): before
+// it ("Aug [redacted]") is a month-first date, which the count reads after a
+// lead word, and a note's own date stamp otherwise.
+const NEXT_MONTHS = new Set(['january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec']);
+// A word that limits a time, before the mask ("NEVER [redacted]"): only when
+// nothing but an end or a joining word follows the mask. "only [redacted]
+// dogs" is a count (r23); "every [redacted] Tuesday" is read by the weekday.
+const PREV_LIMITS = new Set(['until', 'till', 'before', 'after', 'except', 'never', 'every', 'only']);
+const AFTER_LIMIT_OK = new Set(['and', 'or', 'please', 'only', 'ok', 'okay', 'then', 'at', 'in', 'on', 'before', 'after', 'until', 'till', 'thanks', 'thank']);
+const MARK = '[redacted]';
+const MONTH_LEADS = new Set(['expires', 'expire', 'expiring', 'expired', 'through', 'thru', 'until', 'till', 'til', 'by', 'before', 'after', 'on', 'from', 'starting', 'starts', 'start', 'ends', 'ending', 'valid', 'changes', 'since', 'in', 'of', 'except', 'only', 'not', 'never']);
+const SINGLE_WEEKDAYS = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'tue', 'tues', 'thu', 'thur', 'thurs', 'fri']);
+const DAY_LEADS = new Set(['on', 'by', 'at', 'from', 'next', 'this', 'any', 'for', 'expires', 'starts', 'ends', 'valid', 'coming', 'other', 'second', 'third']);
+const WEEKDAY_FOLLOWS = new Set(['only', 'ok', 'okay', 'works', 'work', 'is', 'are', 'please', 'preferred', 'and', 'or', 'thru', 'through', 'to', 'appointments', 'appointment', 'visits', 'visit', 'after', 'before', 'at']);
+const CODE_NOUN_BEFORE_RE = /\b(?:code|password|passcode|passphrase|pin|combo|combination)\b\s{0,5}(?:(?:is|=|:|#|-)\s{0,5})?$/i;
+const CODE_NOUN_AFTER_RE = new RegExp(String.raw`^\s{0,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:${CODE_PLACES}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b`, 'i');
+const wordsOf = (text) => (text.replace(/\[redacted\]/g, ' ').toLowerCase().match(/[a-z][a-z.']*/g) || []).map((w) => w.replace(/\.+$/, ''));
+
+const CLAUSE_END_RE = /(?<!\b[ap]\.m)[.!?;](?=\s|$)|\n/gi;
+function firstClause(text) {
+  const re = new RegExp(CLAUSE_END_RE.source, 'gi');
+  const m = re.exec(text);
+  return m ? text.slice(0, m.index) : text;
+}
+function lastClause(text) {
+  const re = new RegExp(CLAUSE_END_RE.source, 'gi');
+  let end = 0;
+  let m;
+  while ((m = re.exec(text))) end = m.index + m[0].length;
+  return text.slice(end);
+}
+
+// Which markers stand for a number (a gate code after "Front gate", a card,
+// an SSN): the masked text is lined up with the raw text word by word, and a
+// marker whose raw word has no letter is a number. A number is no word
+// about when for the neighbor rule; a number that is a time ("10/20",
+// "9:00") is read by the count. Null when the two do not line up (r57).
+const PLACE_LABELS = new Set(['unit', 'apt', 'apartment', 'suite', 'ste', 'lot', 'building', 'bldg', 'house', 'no', 'number', 'num', 'space', 'slip', 'box', 'stall', 'phase', 'room', 'rm', 'floor', 'fl', 'dock', 'bay', 'pier', 'tower', 'block', 'section', 'gate', 'door', 'site', 'pad', 'villa', 'cabin', 'lane']);
+
+function numberMarkers(raw, masked) {
+  const rawWords = raw.split(/\s+/);
+  const maskedWords = masked.split(/\s+/);
+  if (rawWords.length !== maskedWords.length) return null;
+  const numbers = new Set();
+  let ordinal = 0;
+  const bare = (word) => (word || '').toLowerCase().replace(/^\W+|\W+$/g, '');
+  maskedWords.forEach((word, i) => {
+    const count = word.split(MARK).length - 1;
+    if (!count) return;
+    // Only a code-length number (3 digits or more) is skipped: a one- or
+    // two-digit number can be an hour ("Monday 10"), and a four-digit time
+    // beside a word that says when ("Monday 0800") is kept too (r58).
+    const digits = (rawWords[i].match(/\d/g) || []).length;
+    const besideTime = [bare(rawWords[i - 1]), bare(rawWords[i + 1])].some((w) => NEIGHBOR_TIME_WORDS.has(w) || PREV_LIMITS.has(w) || w === 'at' || w === 'by');
+    // A number after a word that labels a place ("unit 5", "lot 12") is that
+    // place, not an hour (r60).
+    const label = PLACE_LABELS.has(bare(rawWords[i - 1])) || /^#/.test(rawWords[i]);
+    const time = !label && (digits <= 2 || (new RegExp(`^\\W*(?:${HHMM}|${H3})\\W*$`).test(rawWords[i]) && besideTime));
+    if (!/[A-Za-z]/.test(rawWords[i]) && !time) for (let k = 0; k < count; k += 1) numbers.add(ordinal + k);
+    ordinal += count;
+  });
+  return numbers;
+}
+
+// The line-kept form must agree on the same marker (r58): when both forms
+// have the same markers, a hit counts only if that marker also hits with the
+// line breaks kept; otherwise any hit there is enough.
+function maskBesideTimeWord(masked, lineMasked = null, numbers = null) {
+  const hits = neighborHits(masked, numbers);
+  if (!hits.size) return false;
+  if (lineMasked == null || lineMasked === masked) return true;
+  const markers = (text) => text.split(MARK).length - 1;
+  if (markers(lineMasked) === markers(masked)) {
+    const lineHits = neighborHits(lineMasked, numbers);
+    return [...hits].some((k) => lineHits.has(k));
+  }
+  return neighborHits(lineMasked, null).size > 0;
+}
+
+// The ordinals of the markers the neighbor rule finds beside a time word.
+// The neighbor rule's tests, one per way a hidden word can sit in a
+// statement about when. Each reads the words around one marker.
+const HISTORY_VERBS = new Set(['called', 'texted', 'emailed', 'said', 'came', 'stopped', 'visited', 'asked', 'told', 'paid', 'left', 'answered', 'replied', 'phoned', 'mentioned', 'reported', 'complained', 'signed', 'was', 'were', 'had']);
+const NEIGHBOR_RULES = [
+  // A visible word that only says when, right before the mask; one weekday
+  // before a masked name and a past verb is history ("Monday [redacted]
+  // called": r99).
+  (m) => NEIGHBOR_TIME_WORDS.has(m.prev) && !(SINGLE_WEEKDAYS.has(m.prev) && m.run <= 1 && HISTORY_VERBS.has(m.next)),
+  // ...or right after it. One weekday after the mask counts only when tied
+  // to the visit: the mask follows a limit or a lead ("every [redacted]
+  // Tuesday"), or a scheduling word follows the weekday. "spoke to
+  // [redacted] Monday." is history (r61).
+  (m) => NEIGHBOR_TIME_WORDS.has(m.next)
+    && !(SINGLE_WEEKDAYS.has(m.next) && !PREV_LIMITS.has(m.prev) && !DAY_LEADS.has(m.prev) && !WEEKDAY_FOLLOWS.has(m.following[1])),
+  // A month after the mask only with a date or validity lead before the mask
+  // ("expires [redacted] October"); "ask [redacted] April" is a name (r62).
+  (m) => NEXT_MONTHS.has(m.next) && MONTH_LEADS.has(m.prev),
+  // "May" is also a verb: a month only when nothing, or a joining word,
+  // follows it ("expires [redacted] May", "... May only"): r24, r25.
+  (m) => m.next === 'may' && MONTH_LEADS.has(m.prev) && (m.following.length === 1 || AFTER_LIMIT_OK.has(m.following[1])),
+  // One hidden word right after a limit ("NEVER [redacted]"), ending the
+  // clause or before a joining word. A longer hidden run ("ONLY [redacted]
+  // [redacted]", "ONLY TWO DOGS") is a phrase, not a time (r33, r43); a limit
+  // before an earlier mask does not count.
+  (m) => PREV_LIMITS.has(m.prev) && !m.afterMask && m.run <= 1 && (m.next === undefined || AFTER_LIMIT_OK.has(m.next)),
+];
+
+// Each marker of the mask with the words around it, within its own clause
+// (r25: "ask [redacted]. Friday works" is two statements; the dots inside
+// "A.M." are not an end).
+function* markerSites(masked) {
+  let at = masked.indexOf(MARK);
+  for (let ordinal = 0; at !== -1; ordinal += 1) {
+    const before = lastClause(masked.slice(Math.max(0, at - 60), at));
+    const after = firstClause(masked.slice(at + MARK.length, at + MARK.length + 80));
+    yield { ordinal, at, before, after };
+    at = masked.indexOf(MARK, at + MARK.length);
+  }
+}
+
+// The ordinals of the markers the neighbor rule finds beside a time word.
+// Not a marker that stands for a number, nor the credential's own (right
+// after a code noun, or before "is the ... code").
+function neighborHits(masked, numbers = null) {
+  const hits = new Set();
+  for (const site of markerSites(masked)) {
+    const skip = (numbers && numbers.has(site.ordinal)) || CODE_NOUN_BEFORE_RE.test(site.before) || CODE_NOUN_AFTER_RE.test(site.after);
+    if (!skip) {
+      const following = wordsOf(site.after);
+      const context = {
+        prev: wordsOf(site.before).pop(),
+        next: following[0],
+        following,
+        run: (masked.slice(site.at).match(/^(?:\[redacted\]\s{0,3}){1,3}/) || [''])[0].split(MARK).length - 1,
+        afterMask: /\[redacted\][\s,]*$/.test(site.before),
+      };
+      if (NEIGHBOR_RULES.some((rule) => rule(context))) hits.add(site.ordinal);
+    }
+  }
+  return hits;
+}
+
 // The entries of one stored text: one, or its parts when it is long. `ms`
-// (sort key) and `split` are dropped before the record is returned.
+// (sort key), `split` and `maskedTime` are dropped before the record is
+// returned.
+//
+// The hidden-time scan runs here, as each text is read, and keeps a yes / no
+// only: no raw text is held until the record is built (Codex #6328 security
+// r12: 300 replies of 800 KB raised the process's memory by 230 MB). One
+// record shares one budget of MAX_RECORD_CHARS raw characters (its own
+// AsyncLocalStorage store, so records built at once do not share it); a text
+// past what is left is counted as not fully read without a scan (r8, r10).
+const { AsyncLocalStorage } = require('async_hooks');
+const scanBudget = new AsyncLocalStorage();
+
+// The model reads the one-line text with the one-line mask, as before this
+// check existed: a mask run on the line-kept text first can let a multi-word
+// password on the next line through (Codex security r41). The line-kept mask
+// only tells the neighbor rule where a clause ends.
+const keepLines = (value) => String(value == null ? '' : value).replace(/[^\S\n]+/g, ' ').replace(/ ?\n\s*/g, '\n').trim();
+
+// One entry is charged once against the record's budget (r36).
+// A "[redacted]" already in the stored text is not this mask's work: for
+// the scan it is renamed first, so only the mask's own markers are judged
+// ("Prior caller [redacted] Monday": r47). The model reads the text as is.
+const PRIOR_MARK_RE = /\[redacted\]/gi;
+// The mask's other passes (a card number, an SSN, a CVV) hide no words
+// about when: for the scan they are renamed first too, so their markers are
+// not judged by the neighbor rule ("Card 4111..., MONDAY ONLY": r56).
+const NON_ACCESS_RES = [
+  // A card number, unless it holds a date ("APPOINTMENT 10-20-2026
+  // 10-11" is twelve digits too): r114.
+  [/\b(?:\d[ -]?){12,19}\b/g, (m) => (isCardRun(m) ? '[card]' : m)],
+  [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
+  [/\b(ssn|social(?:\s+security)?(?:\s+number)?)\b([^.\n]{0,20}?)\b(\d[\d- ]{7,13}\d)\b/gi, '$1$2[ssn]'],
+  // The shared CVV_RE shape (context-aggregator.js): up to 15 characters between (r88).
+  [/\b(cvv2?|cvc|security\s+code|card\s+code)\b([^.\n]{0,15}?)\b\d{3,4}\b/gi, '$1$2[cvv]'],
+];
+// A twelve-digit run with a date in it ("10-20-2026 10-11") is a date and
+// a time, not a card: the scan judges its markers (r114).
+const isCardRun = (run) => !/\b\d{1,2}-\d{1,2}-\d{2,4}\b/.test(run) && run.replace(/\D/g, '').length >= 12;
+const forScan = (text) => NON_ACCESS_RES.reduce((t, [re, to]) => t.replace(re, to), text.replace(PRIOR_MARK_RE, '[prior]'));
+
+// The access mask itself changed nothing: with cards, SSNs, CVVs and a
+// stored [redacted] renamed first, the mask leaves the text as it is. A
+// direct test, not a count: a renamed pattern that the mask would not have
+// hidden can never explain away an access marker (pre-push r71). One more
+// pass of the shared mask, which already runs on every text for the model.
+function onlyNonAccessMarkers(raw) {
+  const renamed = forScan(raw);
+  return redactAccessCodes(renamed) === renamed;
+}
+
+// The most one waiting scan can charge the record's budgets: the longest
+// form of the text, and the longest text near its masks (both cheap: one
+// more pass of the shared mask at most).
+const scanSize = ({ text, raw, masked }) => Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+function scanCost({ text, raw, masked }) {
+  const size = scanSize({ text, raw, masked });
+  // A text with more markers than the scan reads is counted as not fully
+  // read without a scan, so it costs no near budget either (r112).
+  if (masked.split(MARK).length - 1 > MAX_SCAN_MARKERS) return { size, near: 0 };
+  const scanRaw = forScan(raw);
+  const scanMasked = scanRaw !== raw ? redactAccessCodes(scanRaw) : masked;
+  // Only the access mask's own markers are scanned near (hiddenTimeIn stops
+  // before the near budget when nothing else is masked): r107.
+  if (scanRaw === scanMasked) return { size, near: 0 };
+  return { size, near: Math.max(...nearMasks(scanRaw, scanMasked).map((t) => t.length)) };
+}
+
+function hiddenTimeIn(text, raw, masked) {
+  if (raw === masked) return false;
+  // The masked form can be far longer than the raw one (short words become
+  // "[redacted]"): one past the record's limit makes the record too long, so
+  // no model is asked and nothing is scanned; the budget is charged the
+  // longer of the two (security r55).
+  if (masked.length > MAX_RECORD_CHARS) return false;
+  const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+  // The stored text's own length counts too, before any work on it (r64).
+  // One entry is scanned only up to MAX_SCAN_ENTRY_CHARS: a longer text the
+  // mask changed is counted as not fully read without a scan, so one stored
+  // reply cannot cost the event loop more than a few milliseconds (security
+  // r58: a 280 KB reply took 260 ms per build).
+  // Within the limits, markers that only a card, an SSN, a CVV or a stored
+  // [redacted] explain are not the access mask's (r65).
+  // The limits come before any more work on the text, the non-access test
+  // included (security r73: that test re-runs the mask). A text past them is
+  // counted as not fully read, whatever its markers stand for: the safe side.
+  if (size > MAX_SCAN_ENTRY_CHARS) return true;
+  // The neighbor rule does a little work per marker: a text with more than
+  // MAX_SCAN_MARKERS of them is counted as not fully read without a scan
+  // (security r74: 4,000 markers in 12 KB took 284 ms per build).
+  if (masked.split(MARK).length - 1 > MAX_SCAN_MARKERS) return true;
+  const budget = scanBudget.getStore();
+  if (budget && size > budget.left) return true;
+  if (budget) budget.left -= size;
+  if (onlyNonAccessMarkers(raw)) return false;
+  const scanRaw = forScan(raw);
+  const renamed = scanRaw !== raw;
+  const scanMasked = renamed ? redactAccessCodes(scanRaw) : masked;
+  if (scanRaw === scanMasked) return false;
+  // The count reads only the text near the masks; that text has its own
+  // limits, per text and per record (security r97).
+  const near = Math.max(...nearMasks(scanRaw, scanMasked).map((t) => t.length));
+  if (near > MAX_SCAN_WINDOW_CHARS) return true;
+  if (budget && near > budget.nearLeft) return true;
+  if (budget) budget.nearLeft -= near;
+  const lines = forScan(keepLines(text));
+  return maskHidTime(scanRaw, scanMasked, lines.includes('\n') ? redactAccessCodes(lines) : null);
+}
+
+// The scan's yes / no for one entry. The limits of one text decide at once;
+// a text within them waits for the record's own order (pending), so the
+// record's shared budget goes to the same texts on every read, whatever
+// order the database returned the rows in (Codex #6328 r100: a record read
+// twice must give the same print). A pending text is at most
+// MAX_SCAN_ENTRY_CHARS long.
+function scanNow(text, raw, masked) {
+  if (raw === masked) return false;
+  if (masked.length > MAX_RECORD_CHARS) return false;
+  const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+  if (size > MAX_SCAN_ENTRY_CHARS) return true;
+  if (masked.split(MARK).length - 1 > MAX_SCAN_MARKERS) return true;
+  // Only the stored text is held (the row's own string); the clean and the
+  // masked forms are made again when it is scanned.
+  return { text, size };
+}
+const heldForms = ({ text }) => {
+  const raw = clean(text);
+  return { text, raw, masked: redactAccessCodes(raw) };
+};
+
+// What the record keeps beside each entry for its own use only: the order
+// key and the waiting scan. Never part of the entry the model or the print
+// reads.
+const entryMeta = new WeakMap();
+
 function entry(channel, from, at, text) {
-  const body = redactAccessCodes(clean(text));
+  const raw = clean(text);
+  const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
-  return parts.map((part, i) => ({
-    channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
-  }));
+  const scan = scanNow(text, raw, body);
+  // One short order key per source text, from the printed fields only: the
+  // order names the entries the model reads, so it never depends on the
+  // unmasked words (security r106: a digest of them ranked the entries by
+  // the access code). A key holding the whole body made a 2 MB email cost
+  // 369 MB (security r102).
+  const key = `${channel}\u0000${from == null ? '' : from}\u0000${at == null ? '' : String(at)}\u0000${createHash('sha256').update(body).digest('hex')}`;
+  return parts.map((part, i) => {
+    const row = {
+      channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
+      ...(scan === true && i === 0 ? { maskedTime: true } : {}),
+    };
+    entryMeta.set(row, { key, part: i, ...(scan && typeof scan === 'object' && i === 0 ? { scan } : {}) });
+    return row;
+  });
+}
+
+// The held texts of the record so far, after each source is read: past
+// MAX_PENDING_SCAN_CHARS none is held, and each held one is counted as not
+// fully read (r114).
+function holdWithinLimit(found, rows, budget) {
+  const drop = (meta) => { delete meta.scan; meta.over = true; };
+  const held = (row) => { const meta = entryMeta.get(row); return meta && meta.scan ? meta : null; };
+  for (const meta of rows.map(held).filter(Boolean)) {
+    budget.pending += meta.scan.size;
+    if (budget.pendingOver) drop(meta);
+  }
+  if (budget.pendingOver || budget.pending <= MAX_PENDING_SCAN_CHARS) return;
+  budget.pendingOver = true;
+  found.map(held).filter(Boolean).forEach(drop);
+}
+
+// Undated notes first, then oldest to newest; equal times by channel,
+// sender, time and a digest of the text, the parts of one text in their order: the same order on every read.
+function recordOrder(a, b) {
+  const byTime = (a.ms ?? -1) - (b.ms ?? -1);
+  if (byTime) return byTime;
+  const ma = entryMeta.get(a) || { key: '', part: 0 };
+  const mb = entryMeta.get(b) || { key: '', part: 0 };
+  if (ma.key !== mb.key) return ma.key < mb.key ? -1 : 1;
+  return ma.part - mb.part;
 }
 
 // sms_log keeps no time for its status changes. An outbound text created in
@@ -395,21 +1160,78 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const args = {
     customerId, serviceId, asOf, customer, customerEmail: customer && customer.email,
   };
+  const budget = {
+    left: MAX_SCAN_RECORD_CHARS, nearLeft: MAX_SCAN_WINDOW_RECORD_CHARS, pending: 0, pendingOver: false,
+  };
   for (const [channel, read] of SOURCES) {
     try {
-      found.push(...(await read(conn, args, unread)).flat(2));
+      const rows = (await read(conn, args, unread)).flat(2);
+      found.push(...rows);
+      holdWithinLimit(found, rows, budget);
     } catch (err) {
       unread.push({ channel, reason: 'read_failed' });
       logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${safeError(err)}`);
     }
   }
-  // Undated notes first, then oldest to newest.
-  found.sort((a, b) => (a.ms ?? -1) - (b.ms ?? -1));
-  const entries = found.map(({ split: _split, ms: _ms, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
+  found.sort(recordOrder);
+  // The waiting scans run in that order, against one shared budget.
+  // Texts whose printed fields are all alike (one key) can come in either
+  // order and look the same to the model, so they share the budget as one
+  // group: if the group's whole cost fits, each is scanned (then every order
+  // fits), otherwise each is counted as not fully read. The result never
+  // depends on the database's order or on the hidden words (r103, r106).
+  for (const row of found) {
+    const meta = entryMeta.get(row);
+    if (meta && meta.over) row.maskedTime = true;
+  }
+  scanBudget.run(budget, () => {
+    for (let i = 0; i < found.length;) {
+      const key = (entryMeta.get(found[i]) || {}).key;
+      let j = i + 1;
+      while (j < found.length && key !== undefined && (entryMeta.get(found[j]) || {}).key === key) j += 1;
+      const waiting = found.slice(i, j).filter((row) => (entryMeta.get(row) || {}).scan);
+      if (waiting.length > 1) {
+        // The sizes first (no work), and the near cost only while the sum
+        // still fits: a large group stops at the first text past the budget
+        // (security r112).
+        let size = 0;
+        let near = 0;
+        let over = false;
+        for (const row of waiting) {
+          size += entryMeta.get(row).scan.size;
+          if (size > budget.left) { over = true; break; }
+        }
+        for (const row of over ? [] : waiting) {
+          near += scanCost(heldForms(entryMeta.get(row).scan)).near;
+          if (near > budget.nearLeft) { over = true; break; }
+        }
+        if (over) {
+          for (const row of waiting) { row.maskedTime = true; delete entryMeta.get(row).scan; }
+        }
+      }
+      for (const row of waiting) {
+        const meta = entryMeta.get(row);
+        if (!meta.scan) continue;
+        const { text, raw, masked } = heldForms(meta.scan);
+        delete meta.scan;
+        if (hiddenTimeIn(text, raw, masked)) row.maskedTime = true;
+      }
+      i = j;
+    }
+  });
+  // An entry whose access-code mask also hid a word that can say when
+  // (maskHidTime): read, but not in full.
+  for (const row of found) {
+    if (row.maskedTime) unread.push({ channel: row.channel, ...(row.at ? { at: row.at } : {}), reason: 'time_masked' });
+  }
+  const entries = found.map(({ split: _split, ms: _ms, maskedTime: _masked, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
   const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
+  const tooLong = chars > MAX_RECORD_CHARS;
   return {
-    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong: chars > MAX_RECORD_CHARS, serviceTypes: args.serviceTypes || [],
+    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong, serviceTypes: args.serviceTypes || [],
   };
 }
 
-module.exports = { buildCustomerRecord, MAX_ENTRY_CHARS, MAX_RECORD_CHARS };
+module.exports = {
+  buildCustomerRecord, MAX_ENTRY_CHARS, MAX_RECORD_CHARS, _internals: { maskHidTime, nearMasks },
+};
