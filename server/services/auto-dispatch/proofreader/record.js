@@ -247,7 +247,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...after a validity word too ("EXPIRES TOMORROW"), after is / for /
   // scheduled ("APPOINTMENT IS TOMORROW": r67), and named holidays ("RETURN
   // AFTER CHRISTMAS"): r55.
-  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|be|for|scheduled|booked|come|coming|visit|arrive|service|spray|treat|schedule|book|reschedule|move|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
+  '\\b(?:only|not|never|except|after|before|until|by|from|on|no|over|during|through|thru|expires?|expiring|changes?|starts?|starting|ends?|valid|good|is|are|be|for|scheduled|booked|come|coming|visit|arrive|service|spray|treat|schedule|book|reschedule|move|available|unavailable|free|busy|away|gone|out|home|here|there|moved\\s{1,3}to)(?=\\s{1,5}(?:(?:today|tonight|tomorrow)|(?:the\\s{1,5})?(?:holidays?|christmas|xmas|thanksgiving|easter|new\\s{1,3}years?(?:.?s)?(?:\\s{1,3}day)?|halloween|labor\\s{1,3}day|memorial\\s{1,3}day|veteran(?:.?s)?\\s{1,3}day|mother(?:.?s)?\\s{1,3}day|father(?:.?s)?\\s{1,3}day|mlk\\s{1,3}day|martin\\s{1,3}luther\\s{1,3}king\\s{1,3}(?:jr\\.?\\s{1,3})?day|president(?:.?s)?\\s{1,3}day|columbus\\s{1,3}day|indigenous\\s{1,3}people(?:.?s)?\\s{1,3}day|juneteenth|good\\s{1,3}friday|black\\s{1,3}friday|christmas\\s{1,3}eve|new\\s{1,3}years?(?:.?s)?\\s{1,3}eve|independence\\s{1,3}day|july\\s{1,3}4(?:th)?|(?:the\\s{1,3})?4th\\s{1,3}of\\s{1,3}july|fourth\\s{1,3}of\\s{1,3}july))(?![\\w]))',
   // An hour with earliest / latest ("NINE EARLIEST", "5 at the latest"): r24.
   `\\b(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:at\\s{1,5}the\\s{1,5})?(?:earliest|latest)\\b)`,
   // early / late of a visit ("NO EARLY APPOINTMENTS", "PLEASE COME LATE",
@@ -327,10 +327,10 @@ const TIME_WORDS_RE = new RegExp([
   // A season with a limit or a lead ("NO SERVICE UNTIL SPRING", "WINTER
   // ONLY", "AWAY FOR THE SUMMER"): r68.
   '\\b(?:until|till|til|before|after|during|over|through|thru|for|in|this|next|every|each|by|except|not|no|from)(?=\\s{1,5}(?:the\\s{1,5})?(?:spring|summer|fall|autumn|winter)s?(?![\\w]))',
-  // spring / fall are also a gate part and a verb: not before is / are
-  // ("SPRING IS BROKEN"): r71.
+  // A season before is / are is an observation ("SPRING IS BROKEN", "WINTER
+  // IS HARD ON THE LOCK"): r71, r85.
   '\\b(?:spring|fall)s?(?=\\s{1,3}(?:only|ok|okay|works?|months?|break|vacation|season)\\b)',
-  '\\b(?:summer|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|is|are|months?|break|vacation|season)\\b)',
+  '\\b(?:summer|autumn|winter)s?(?=\\s{1,3}(?:only|ok|okay|works?|months?|break|vacation|season)\\b)',
   // "DAYLIGHT ONLY", "daytime only": r69.
   '\\b(?:daylight|day[\\s-]?time)(?=\\s{0,3}(?:only|ok|okay|hours?|please)\\b)',
   // A Spanish weekday only as a habit or a limit ("LOS MARTES", "SOLO
