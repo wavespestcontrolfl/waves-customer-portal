@@ -339,8 +339,11 @@ const TIME_WORDS_RE = new RegExp([
   // "KEEP APPOINTMENT AS IS"): r79.
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
   '\\bkeep(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
+  // A spelled hour range ("NINE TO FIVE"): r81.
+  `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
   // "AFTER HOURS": r22.
-  '\\bafter[\\s-]{1,3}hours\\b',
+  // ...not a contact line ("AFTER HOURS EMERGENCY NUMBER"): r81.
+  '\\bafter[\\s-]{1,3}hours\\b(?!\\s{1,3}(?:emergency|emergencies|number|phone|line|contact|call|calls|service\\s{1,3}number|support|hotline))',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
   '\\b(?:business|office|working|opening|open|normal|regular|school)(?=\\s{1,5}hours\\b)',
   '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
