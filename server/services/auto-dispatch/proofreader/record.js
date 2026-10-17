@@ -348,6 +348,8 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
   // A Spanish appointment day ("CITA EL LUNES", "SERVICIO EL LUNES"): r87.
   '(?<=\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)\\s{1,3}(?:es\\s{1,3}|ser[a\u00e1]\\s{1,3})?(?:el|los|para\\s{1,3}el)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
+  // A Spanish appointment date ("CITA EL 20 DE OCTUBRE", "CITA 10/20"): r90.
+  '\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)(?=\\s{1,3}(?:(?:es|ser[a\u00e1]|para)\\s{1,3})?(?:(?:el|la)\\s{1,3})?(?:\\d{1,2}\\s{1,3}de\\s{1,3}(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)|\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?)(?![\\w\u00c0-\u024f/]))',
   // "AFTER HOURS": r22.
   // ...not a contact line ("AFTER HOURS EMERGENCY NUMBER"): r81.
   '\\bafter[\\s-]{1,3}hours\\b(?!\\s{1,3}(?:emergency|emergencies|number|phone|line|contact|call|calls|service\\s{1,3}number|support|hotline))',
@@ -360,7 +362,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
