@@ -579,6 +579,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, COME ON OCTOBER 20',
       'GATE CODE 4821, ARRIVE OCTOBER 20',
       'GATE CODE 4821, CITA EL LUNES',
+      'GATE CODE 4821, CANNOT DO OCTOBER 20',
+      'GATE CODE 4821 VALID THROUGH MAY ONLY',
       'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
       'GATE CODE 4821, AVOID 10/20',
       'GATE CODE 4821, BEGINNING OF THE MONTH ONLY',
@@ -801,6 +803,9 @@ describe('the customer record', () => {
       'GATE CODE 4821, WINTER IS HARD ON THE LOCK',
       'GATE CODE 4821, CUSTOMER WAS ON HOLD WITH OFFICE',
       'GATE CODE 4821, OWNER PUT ME ON HOLD',
+      'GATE CODE 4821, CHANGES MAY ONLY BE MADE BY OWNER',
+      'CVV number is 123, MONDAY ONLY',
+      'GATE CODE 4821, TODAY IS HOT',
       "GATE CODE 4821, SHED IS 10-20' FROM HOUSE",
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
