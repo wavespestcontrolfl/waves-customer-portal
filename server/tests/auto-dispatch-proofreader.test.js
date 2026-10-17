@@ -355,6 +355,24 @@ describe('the customer record', () => {
     const { redactAccessCodes } = require('../services/context-aggregator');
     const hid = (text) => maskHidTime(text, redactAccessCodes(text));
 
+    // Security r97: the count reads only the text near the masks.
+    test('the count reads the text near the masks only, and still sees a hidden time', () => {
+      const { nearMasks } = require('../services/auto-dispatch/proofreader/record')._internals;
+      const far = 'the dog is friendly. '.repeat(100);
+      const raw = `${far}GATE CODE 4821, MONDAY ONLY. ${far}Tuesday works.`;
+      const [rawNear, maskedNear] = nearMasks(raw, redactAccessCodes(raw));
+      expect(rawNear.length).toBeLessThan(700);
+      expect(maskedNear).toContain('[redacted]');
+      expect(rawNear).not.toContain('Tuesday');
+      expect(hid(raw)).toBe(true);
+      expect(hid(`${far}Gate code 4821. ${far}Monday only.`)).toBe(false);
+    });
+
+    test('a worst-case long text with one mask is scanned fast', () => {
+      const raw = `gate code 4821. ${'a '.repeat(6000)}`;
+      expect(hid(raw)).toBe(false);
+    });
+
     test.each([
       'Gate code 4821, not before 10am please',
       'CODE 4821 FRIDAYS ONLY',
@@ -606,6 +624,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, SERVICIO MA\u00d1ANA',
       'GATE CODE 4821, OCT. 20 ONLY',
       'GATE CODE 4821, OCTOBER 20 IS THE APPOINTMENT',
+      'GATE CODE 4821, KEEP THE CURRENT APPOINTMENT TIME',
       'GATE CODE 4821 VALID THROUGH MAY ONLY',
       'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
       'GATE CODE 4821, AVOID 10/20',

@@ -64,6 +64,14 @@ const MAX_SCAN_ENTRY_CHARS = 12000;
 const MAX_SCAN_RECORD_CHARS = 16000;
 // The most masks one text may have and still be scanned.
 const MAX_SCAN_MARKERS = 200;
+// The count rule reads only the text near the masks: SCAN_PAD characters on
+// each side of each mask, the rest dropped from both forms alike (Codex
+// #6328 security r97: the full scan cost 162 ms on 4 KB). The kept windows
+// of one text, and of one record, have their own limits; past them the text
+// is counted as not fully read without a scan.
+const SCAN_PAD = 240;
+const MAX_SCAN_WINDOW_CHARS = 2000;
+const MAX_SCAN_WINDOW_RECORD_CHARS = 3000;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
@@ -344,7 +352,7 @@ const TIME_WORDS_RE = new RegExp([
   // A placement that must stay ("APPOINTMENT IS FIXED", "DATE IS FIRM",
   // "KEEP APPOINTMENT AS IS"): r79.
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
-  '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
+  '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3}|our\\s{1,3})?(?:(?:current|existing|original|same|scheduled|booked|set|regular|usual|present)\\s{1,3}){0,2}(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
   // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
   `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
   // A Spanish hour range ("DE 9 A 11", "ENTRE 9 Y 11"): r93.
@@ -455,7 +463,49 @@ function maskHidTime(raw, masked, lineMasked = null) {
   // model is asked; shorter (the mask took a long credential run), it is
   // counted as not fully read, unscanned (r9).
   if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
-  return timeWords(masked, { skipAfterMark: true }) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked, lineMasked, numberMarkers(raw, masked));
+  const [rawNear, maskedNear] = nearMasks(raw, masked);
+  return timeWords(maskedNear, { skipAfterMark: true }) < timeWords(withoutCredentialValues(rawNear)) || maskBesideTimeWord(masked, lineMasked, numberMarkers(raw, masked));
+}
+
+// The text near the masks, in both forms (security r97). The mask only
+// replaces words with MARK, so every stretch between two masks is the same
+// in both forms: the middle of a stretch longer than 2 * SCAN_PAD is dropped
+// from both alike, and only the SCAN_PAD characters next to each mask stay.
+// Both forms lose the same text, so a time word far from every mask counts
+// the same on both sides, as it did in the full scan. A stretch that cannot
+// be found in the raw form (the mask changed more than words) keeps the
+// whole text.
+const NEAR_GAP = '\n\n';
+function nearMasks(raw, masked) {
+  const parts = masked.split(MARK);
+  if (parts.length < 2) return [raw, masked];
+  const cuts = []; // [rawFrom, rawTo, maskedFrom, maskedTo]
+  let rawAt = 0;
+  let maskedAt = 0;
+  const last = parts.length - 1;
+  for (let i = 0; i <= last; i += 1) {
+    const part = parts[i];
+    const from = i === 0 ? 0 : SCAN_PAD;
+    const to = i === last ? part.length : part.length - SCAN_PAD;
+    if (to - from > NEAR_GAP.length) {
+      let rawPart;
+      if (i === 0) rawPart = raw.startsWith(part) ? 0 : -1;
+      else if (i === last) rawPart = raw.endsWith(part) && raw.length - part.length >= rawAt ? raw.length - part.length : -1;
+      else rawPart = raw.indexOf(part, rawAt);
+      if (rawPart < 0) return [raw, masked];
+      cuts.push([rawPart + from, rawPart + to, maskedAt + from, maskedAt + to]);
+      rawAt = rawPart + part.length;
+    }
+    maskedAt += part.length + MARK.length;
+  }
+  if (!cuts.length) return [raw, masked];
+  const stitch = (text, a, b) => {
+    let out = '';
+    let at = 0;
+    for (const cut of cuts) { out += text.slice(at, cut[a]) + NEAR_GAP; at = cut[b]; }
+    return out + text.slice(at);
+  };
+  return [stitch(raw, 0, 1), stitch(masked, 2, 3)];
 }
 
 // The broad rule beside the count (Codex #6328 r22, after 21 rounds that each
@@ -690,6 +740,12 @@ function hiddenTimeIn(text, raw, masked) {
   const renamed = scanRaw !== raw;
   const scanMasked = renamed ? redactAccessCodes(scanRaw) : masked;
   if (scanRaw === scanMasked) return false;
+  // The count reads only the text near the masks; that text has its own
+  // limits, per text and per record (security r97).
+  const near = Math.max(...nearMasks(scanRaw, scanMasked).map((t) => t.length));
+  if (near > MAX_SCAN_WINDOW_CHARS) return true;
+  if (budget && near > budget.nearLeft) return true;
+  if (budget) budget.nearLeft -= near;
   const lines = forScan(keepLines(text));
   return maskHidTime(scanRaw, scanMasked, lines.includes('\n') ? redactAccessCodes(lines) : null);
 }
@@ -998,7 +1054,7 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const args = {
     customerId, serviceId, asOf, customer, customerEmail: customer && customer.email,
   };
-  const budget = { left: MAX_SCAN_RECORD_CHARS };
+  const budget = { left: MAX_SCAN_RECORD_CHARS, nearLeft: MAX_SCAN_WINDOW_RECORD_CHARS };
   for (const [channel, read] of SOURCES) {
     try {
       found.push(...(await scanBudget.run(budget, () => read(conn, args, unread))).flat(2));
@@ -1023,5 +1079,5 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
 }
 
 module.exports = {
-  buildCustomerRecord, MAX_ENTRY_CHARS, MAX_RECORD_CHARS, _internals: { maskHidTime },
+  buildCustomerRecord, MAX_ENTRY_CHARS, MAX_RECORD_CHARS, _internals: { maskHidTime, nearMasks },
 };
