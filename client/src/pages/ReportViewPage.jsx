@@ -10478,6 +10478,12 @@ function SimpleWebReport({ data, token }) {
           ><Download size={16} /> Download PDF</a>
         </div>
       ) : null}
+      {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
+      {data.recap?.ready ? (
+        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>
+          <RecapVideoCard recap={data.recap} token={token} />
+        </div>
+      ) : null}
       <ServiceReportDocument data={data} token={token} web />
     </div>
   );
@@ -10726,7 +10732,7 @@ export default function ReportViewPage() {
     if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
     // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): the server set this key, so
     // the report link shows the same work-order document as the PDF.
-    if (mode === 'live' && data.simpleWebReport === true) return <SimpleWebReport data={data} token={token} />;
+    if (mode === 'live' && data.simpleWebReport === true && !data.internalOnly) return <SimpleWebReport data={data} token={token} />;
     // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
     return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }

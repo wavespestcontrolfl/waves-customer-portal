@@ -2552,7 +2552,9 @@ router.get('/:token/data', async (req, res, next) => {
       // and no live-only fields. View tracking above already ran on the live
       // mode. Gate read at call time; a partial gates module reads as off.
       const reportGates = require('../config/feature-gates');
-      const simpleWeb = mode === 'live'
+      // A suppressed (internal-only) report keeps the old page and its
+      // "Not sent to the customer" review bar.
+      const simpleWeb = mode === 'live' && !suppressedTypedReport(service)
         && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
       const buildMode = simpleWeb ? 'pdf' : mode;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
@@ -2572,7 +2574,9 @@ router.get('/:token/data', async (req, res, next) => {
       // /reports/:token/recap/video, meaningless in pdf/static renders.
       // Best-effort — never blocks.
       if (
-        buildMode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
+        // Keyed on the REQUEST mode: the simple web view shows the recap too,
+        // so recap texts and old /recap links (#visit-recap) still play.
+        mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
         && v1Data.serviceLine === 'pest'
         // Cockroach-family typed reports dropped the V2 perimeter story —
         // an ALREADY-approved recap video telling it must not keep serving

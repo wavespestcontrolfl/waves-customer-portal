@@ -338,9 +338,12 @@ function DocPoisonControl({ data, listsProducts = false, titled = false, showApp
   );
 }
 
+// A level-2 heading for screen readers (role, not an <h2>: the glass theme
+// forces every h1/h2 to its own size with !important, which would change
+// the PDF). The look is unchanged.
 function SectionHeader({ children }) {
   return (
-    <div className="doc-keep-with-next" style={{
+    <div role="heading" aria-level={2} className="doc-keep-with-next" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
       color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
@@ -1037,6 +1040,10 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         .service-report-document .doc-station-pin.is-ok { background: #0F7B54; }
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
+        /* GATE_REPORT_SIMPLE_WEB: the sizes are set for a letter-size page,
+           too small for a screen. On the web the whole page is scaled up so body
+           text reads at about 15px. is-web only, so the PDF is unchanged. */
+        .service-report-document.is-web .doc-page { zoom: 1.3; }
         /* GATE_REPORT_SIMPLE_WEB: on a phone the web view stacks what the
            letter-size page sets side by side. is-web only, so the PDF is unchanged. */
         @media (max-width: 640px) {
@@ -1067,7 +1074,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
         }}>
-          <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
+          <div role="heading" aria-level={1} style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
           <div style={{ fontSize: 11, color: MUTED }}>
             Report #{reportNumber} · {fmtServiceDate(data.serviceDate)}
           </div>

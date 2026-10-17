@@ -101,7 +101,7 @@ async function withServer(fn) {
 
 const VALID_TOKEN = '0123456789abcdef0123456789abcdef';
 
-function mockDb() {
+function mockDb(overrides = {}) {
   const fullRecord = {
     id: 'service-1',
     customer_id: 'customer-1',
@@ -109,6 +109,7 @@ function mockDb() {
     structured_notes: null,
     first_name: 'Pat',
     last_name: 'Tester',
+    ...overrides,
   };
   // The param gate's lookup fires first, the /data route's join query second.
   const serviceRead = chain({
@@ -184,6 +185,17 @@ describe('GET /reports/:token/data simple web report (GATE_REPORT_SIMPLE_WEB)', 
       expect(status).toBe(200);
       expect('simpleWebReport' in body).toBe(false);
       expect(buildReportV1Data.mock.calls[0][3].mode).toBe(mode);
+    });
+  });
+
+  test('gate on: a suppressed (internal-only) report is not switched', async () => {
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    mockDb({ structured_notes: { typedReportDelivery: 'shadow' } });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      const body = await res.json();
+      expect('simpleWebReport' in body).toBe(false);
+      expect(buildReportV1Data.mock.calls[0][3].mode).toBe('live');
     });
   });
 });

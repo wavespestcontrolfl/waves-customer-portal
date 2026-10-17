@@ -55,4 +55,23 @@ describe('the simple web report', () => {
     expect(container.textContent).not.toMatch(/Full interactive report/);
     expect(container.textContent).toMatch(/Questions about today.s service\? Call /);
   });
+
+  it('an internal-only payload keeps the old page and its review bar', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, internalOnly: true }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(container.querySelector('.service-report-document')).toBeNull();
+  });
+
+  it('keeps the recap video at #visit-recap', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, recap: { ready: true, durationMs: 30000 } }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(container.querySelector('#visit-recap video')).not.toBeNull();
+  });
+
+  it('gives the page a title heading and section headings', async () => {
+    renderReport(payload({ simpleWebReport: true }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByRole('heading', { level: 1, name: 'SERVICE REPORT' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 2 }).length).toBeGreaterThan(3);
+  });
 });
