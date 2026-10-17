@@ -272,7 +272,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|book|reschedule|move|(?:available|preferred|best|open|free|good|usual)\\s{1,3}(?:days?|dates?|times?)|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|in|during|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b|(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|book|reschedule|move|come|arrive|arrival|(?:available|preferred|best|open|free|good|usual)\\s{1,3}(?:days?|dates?|times?)|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|in|during|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b|(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
@@ -311,7 +311,10 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:until|till|til)(?=\\s{1,5}(?:further|notified|told|advised|we\\s{1,3}call|they\\s{1,3}call|i\\s{1,3}call)\\b)',
   // paused / suspended only of the service or the visits ("SERVICE
   // SUSPENDED"; not "SUSPENDED CEILING"): r49.
-  '\\b(?:on\\s{1,3}hold|indefinitely)(?![\\w])',
+  // "on hold" only of the service or the visits ("SERVICE ON HOLD", "put the
+  // account on hold"); "PUT ME ON HOLD" is a phone call (r87).
+  '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan|schedule|everything)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3}|(?:put\\s{1,3})?)?)on\\s{1,3}hold(?![\\w])',
+  '\\bindefinitely(?![\\w])',
   '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?)(?:paused|suspended)(?![\\w])',
   '\\b(?:pause|suspend|paused|suspended)(?=\\s{1,3}(?:the\\s{1,3})?(?:service|services|visits?|appointments?|account|treatments?|program|plan)\\b)',
   // Spanish clock times ("SOLO A LAS 10", "A LAS DIEZ"): r61.
@@ -343,6 +346,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\bkeep(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
   // A spelled hour range ("NINE TO FIVE"): r81.
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
+  // A Spanish appointment day ("CITA EL LUNES", "SERVICIO EL LUNES"): r87.
+  '(?<=\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)\\s{1,3}(?:es\\s{1,3}|ser[a\u00e1]\\s{1,3})?(?:el|los|para\\s{1,3}el)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
   // "AFTER HOURS": r22.
   // ...not a contact line ("AFTER HOURS EMERGENCY NUMBER"): r81.
   '\\bafter[\\s-]{1,3}hours\\b(?!\\s{1,3}(?:emergency|emergencies|number|phone|line|contact|call|calls|service\\s{1,3}number|support|hotline))',
@@ -355,7 +360,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
