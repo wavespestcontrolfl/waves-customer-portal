@@ -138,7 +138,7 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
 // skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than';
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -606,9 +606,12 @@ function maskBesideTimeWord(masked, lineMasked = null, numbers = null) {
 // The ordinals of the markers the neighbor rule finds beside a time word.
 // The neighbor rule's tests, one per way a hidden word can sit in a
 // statement about when. Each reads the words around one marker.
+const HISTORY_VERBS = new Set(['called', 'texted', 'emailed', 'said', 'came', 'stopped', 'visited', 'asked', 'told', 'paid', 'left', 'answered', 'replied', 'phoned', 'mentioned', 'reported', 'complained', 'signed', 'was', 'were', 'had']);
 const NEIGHBOR_RULES = [
-  // A visible word that only says when, right before the mask.
-  (m) => NEIGHBOR_TIME_WORDS.has(m.prev),
+  // A visible word that only says when, right before the mask; one weekday
+  // before a masked name and a past verb is history ("Monday [redacted]
+  // called": r99).
+  (m) => NEIGHBOR_TIME_WORDS.has(m.prev) && !(SINGLE_WEEKDAYS.has(m.prev) && m.run <= 1 && HISTORY_VERBS.has(m.next)),
   // ...or right after it. One weekday after the mask counts only when tied
   // to the visit: the mask follows a limit or a lead ("every [redacted]
   // Tuesday"), or a scheduling word follows the weekday. "spoke to
