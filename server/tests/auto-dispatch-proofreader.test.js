@@ -402,6 +402,18 @@ describe('the customer record', () => {
       expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
     });
 
+    test('the order the model reads never depends on the access code (security r106)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const textsOf = (code) => build(fakeConn({ customer_interactions: [
+        { id: 1, interaction_type: 'note', subject: null, body: `Gate code ${code}, side door.`, created_at: null },
+        { id: 2, interaction_type: 'note', subject: null, body: 'Ring the bell first.', created_at: null },
+      ] }), { customerId: 'c1', asOf: AS_OF }).then((r) => r.entries.map((e) => e.text));
+      const orders = new Set();
+      for (let code = 1000; code < 1030; code += 1) orders.add(JSON.stringify(await textsOf(code)));
+      expect(JSON.parse([...orders][0])).toHaveLength(2);
+      expect(orders.size).toBe(1);
+    });
+
     test('a worst-case long text with one mask is scanned fast', () => {
       const raw = `gate code 4821. ${'a '.repeat(6000)}`;
       expect(hid(raw)).toBe(false);

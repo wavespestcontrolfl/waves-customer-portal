@@ -718,6 +718,16 @@ function onlyNonAccessMarkers(raw) {
   return redactAccessCodes(renamed) === renamed;
 }
 
+// The most one waiting scan can charge the record's budgets: the longest
+// form of the text, and the longest text near its masks (both cheap: one
+// more pass of the shared mask at most).
+function scanCost({ text, raw, masked }) {
+  const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+  const scanRaw = forScan(raw);
+  const scanMasked = scanRaw !== raw ? redactAccessCodes(scanRaw) : masked;
+  return { size, near: Math.max(...nearMasks(scanRaw, scanMasked).map((t) => t.length)) };
+}
+
 function hiddenTimeIn(text, raw, masked) {
   if (raw === masked) return false;
   // The masked form can be far longer than the raw one (short words become
@@ -784,10 +794,12 @@ function entry(channel, from, at, text) {
   if (!body) return [];
   const parts = partsOf(body);
   const scan = scanNow(text, raw, body);
-  // One short order key per source text, with every printed field and the
-  // unmasked words, which the scan reads (security r102: a key holding the
-  // whole body made a 2 MB email cost 369 MB; r103: two texts masked alike).
-  const key = `${channel}\u0000${from == null ? '' : from}\u0000${at == null ? '' : String(at)}\u0000${createHash('sha256').update(body).update('\u0000').update(raw).digest('hex')}`;
+  // One short order key per source text, from the printed fields only: the
+  // order names the entries the model reads, so it never depends on the
+  // unmasked words (security r106: a digest of them ranked the entries by
+  // the access code). A key holding the whole body made a 2 MB email cost
+  // 369 MB (security r102).
+  const key = `${channel}\u0000${from == null ? '' : from}\u0000${at == null ? '' : String(at)}\u0000${createHash('sha256').update(body).digest('hex')}`;
   return parts.map((part, i) => {
     const row = {
       channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
@@ -1112,13 +1124,34 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   }
   found.sort(recordOrder);
   // The waiting scans run in that order, against one shared budget.
+  // Texts whose printed fields are all alike (one key) can come in either
+  // order and look the same to the model, so they share the budget as one
+  // group: if the group's whole cost fits, each is scanned (then every order
+  // fits), otherwise each is counted as not fully read. The result never
+  // depends on the database's order or on the hidden words (r103, r106).
   scanBudget.run(budget, () => {
-    for (const row of found) {
-      const meta = entryMeta.get(row);
-      if (!meta || !meta.scan) continue;
-      const { text, raw, masked } = meta.scan;
-      delete meta.scan;
-      if (hiddenTimeIn(text, raw, masked)) row.maskedTime = true;
+    for (let i = 0; i < found.length;) {
+      const key = (entryMeta.get(found[i]) || {}).key;
+      let j = i + 1;
+      while (j < found.length && key !== undefined && (entryMeta.get(found[j]) || {}).key === key) j += 1;
+      const waiting = found.slice(i, j).filter((row) => (entryMeta.get(row) || {}).scan);
+      if (waiting.length > 1) {
+        const cost = waiting.reduce((sum, row) => {
+          const c = scanCost(entryMeta.get(row).scan);
+          return { size: sum.size + c.size, near: sum.near + c.near };
+        }, { size: 0, near: 0 });
+        if (cost.size > budget.left || cost.near > budget.nearLeft) {
+          for (const row of waiting) { row.maskedTime = true; delete entryMeta.get(row).scan; }
+        }
+      }
+      for (const row of waiting) {
+        const meta = entryMeta.get(row);
+        if (!meta.scan) continue;
+        const { text, raw, masked } = meta.scan;
+        delete meta.scan;
+        if (hiddenTimeIn(text, raw, masked)) row.maskedTime = true;
+      }
+      i = j;
     }
   });
   // An entry whose access-code mask also hid a word that can say when
