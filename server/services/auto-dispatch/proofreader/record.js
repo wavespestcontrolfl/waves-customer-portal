@@ -130,7 +130,7 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
 // skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable';
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -272,7 +272,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|book|reschedule|move|come|arrive|arrival|(?:available|preferred|best|open|free|good|usual)\\s{1,3}(?:days?|dates?|times?)|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|in|during|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b|(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|book|reschedule|move|come|arrive|arrival|date|dates|day|(?:available|preferred|best|open|free|good|usual)\\s{1,3}(?:days?|dates?|times?)|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|in|during|for|to|at|be|stay|stays|remain|remains|kept|left|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b|(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
@@ -343,7 +343,7 @@ const TIME_WORDS_RE = new RegExp([
   // A placement that must stay ("APPOINTMENT IS FIXED", "DATE IS FIRM",
   // "KEEP APPOINTMENT AS IS"): r79.
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
-  '\\bkeep(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
+  '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
   // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
   `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
   // A spelled hour range ("NINE TO FIVE"): r81.
