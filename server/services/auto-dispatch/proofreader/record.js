@@ -139,7 +139,7 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
 // skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than|like|back|returns?|returning|returned|home\\s{1,3}on|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make\\s{1,3}(?:it|that|this)|make|than|like|back|returns?|returning|returned|home\\s{1,3}on|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -222,7 +222,7 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
   // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
   // Not the verb in "TECH MAY ONLY USE" (r51).
-  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:(?:is|are|was\\s{1,3}set\\s{1,3}as)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3}|their\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|booking|scheduled\\s{1,3}date)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:(?:is|are|was\\s{1,3}set\\s{1,3}as)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3}|their\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|booking|scheduled\\s{1,3}date)\\b|(?:is|are|will\\s{1,3}be)\\s{1,3}(?:unavailable|busy|booked|full|closed|off|bad|taken|out|impossible|a\\s{1,3}no)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
