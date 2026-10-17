@@ -723,8 +723,12 @@ function onlyNonAccessMarkers(raw) {
 // The most one waiting scan can charge the record's budgets: the longest
 // form of the text, and the longest text near its masks (both cheap: one
 // more pass of the shared mask at most).
+const scanSize = ({ text, raw, masked }) => Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
 function scanCost({ text, raw, masked }) {
-  const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+  const size = scanSize({ text, raw, masked });
+  // A text with more markers than the scan reads is counted as not fully
+  // read without a scan, so it costs no near budget either (r112).
+  if (masked.split(MARK).length - 1 > MAX_SCAN_MARKERS) return { size, near: 0 };
   const scanRaw = forScan(raw);
   const scanMasked = scanRaw !== raw ? redactAccessCodes(scanRaw) : masked;
   // Only the access mask's own markers are scanned near (hiddenTimeIn stops
@@ -1141,11 +1145,21 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
       while (j < found.length && key !== undefined && (entryMeta.get(found[j]) || {}).key === key) j += 1;
       const waiting = found.slice(i, j).filter((row) => (entryMeta.get(row) || {}).scan);
       if (waiting.length > 1) {
-        const cost = waiting.reduce((sum, row) => {
-          const c = scanCost(entryMeta.get(row).scan);
-          return { size: sum.size + c.size, near: sum.near + c.near };
-        }, { size: 0, near: 0 });
-        if (cost.size > budget.left || cost.near > budget.nearLeft) {
+        // The sizes first (no work), and the near cost only while the sum
+        // still fits: a large group stops at the first text past the budget
+        // (security r112).
+        let size = 0;
+        let near = 0;
+        let over = false;
+        for (const row of waiting) {
+          size += scanSize(entryMeta.get(row).scan);
+          if (size > budget.left) { over = true; break; }
+        }
+        for (const row of over ? [] : waiting) {
+          near += scanCost(entryMeta.get(row).scan).near;
+          if (near > budget.nearLeft) { over = true; break; }
+        }
+        if (over) {
           for (const row of waiting) { row.maskedTime = true; delete entryMeta.get(row).scan; }
         }
       }

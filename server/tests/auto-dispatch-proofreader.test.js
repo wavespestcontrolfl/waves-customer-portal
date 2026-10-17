@@ -422,6 +422,14 @@ describe('the customer record', () => {
       expect(record.unread.filter((u) => u.reason === 'time_masked')).toEqual([]);
     });
 
+    test('a large group of alike texts stops at the budget (security r112)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const body = `Gate code 4821, ask MANAGER. ${'the dog is friendly. '.repeat(40)}`;
+      const rows = Array.from({ length: 400 }, (_, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body, created_at: null }));
+      const record = await build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF });
+      expect(record.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(400);
+    });
+
     test('a worst-case long text with one mask is scanned fast', () => {
       const raw = `gate code 4821. ${'a '.repeat(6000)}`;
       expect(hid(raw)).toBe(false);
