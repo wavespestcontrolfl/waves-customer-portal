@@ -414,6 +414,14 @@ describe('the customer record', () => {
       expect(orders.size).toBe(1);
     });
 
+    test('two alike card-only notes are not counted as unread by the group budget (r107)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const note = `Card 4111 1111 1111 1111 on file. ${'the dog is friendly. '.repeat(80)}`;
+      const record = await build(fakeConn({ customer_interactions: [1, 2].map((id) => ({ id, interaction_type: 'note', subject: null, body: note, created_at: null })) }), { customerId: 'c1', asOf: AS_OF });
+      expect(record.entries.filter((e) => e.channel === 'note')).toHaveLength(2);
+      expect(record.unread.filter((u) => u.reason === 'time_masked')).toEqual([]);
+    });
+
     test('a worst-case long text with one mask is scanned fast', () => {
       const raw = `gate code 4821. ${'a '.repeat(6000)}`;
       expect(hid(raw)).toBe(false);

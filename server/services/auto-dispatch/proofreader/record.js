@@ -725,6 +725,9 @@ function scanCost({ text, raw, masked }) {
   const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
   const scanRaw = forScan(raw);
   const scanMasked = scanRaw !== raw ? redactAccessCodes(scanRaw) : masked;
+  // Only the access mask's own markers are scanned near (hiddenTimeIn stops
+  // before the near budget when nothing else is masked): r107.
+  if (scanRaw === scanMasked) return { size, near: 0 };
   return { size, near: Math.max(...nearMasks(scanRaw, scanMasked).map((t) => t.length)) };
 }
 
