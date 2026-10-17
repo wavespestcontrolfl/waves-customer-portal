@@ -333,8 +333,8 @@ describe('the customer record', () => {
       customer_interactions: [{ interaction_type: 'note', subject: 'Afternoons only', body: null, created_at: '2026-07-01T10:00:00.000Z' }] });
     const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.serviceTypes).toEqual(['Pest', 'Lawn']);
-    // Undated notes of one channel keep one order on every read: by text (r100).
-    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text)).toEqual(['Lawn: Tuesdays only', 'Pest note']);
+    // Undated notes of one channel keep one fixed order on every read (r100), by a digest: compared sorted.
+    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text).sort()).toEqual(['Lawn: Tuesdays only', 'Pest note']);
     expect(conn.calls.some(([t, method, col, ids]) => t === 'scheduled_services' && method === 'whereIn' && col === 'id' && ids.join() === 'p1,p2,s1,s2')).toBe(true);
     // Another occurrence's note is about that visit: the series' other rows are never read.
     expect(conn.calls.some(([t, method, col]) => t === 'scheduled_services' && method === 'orWhereIn' && col === 'recurring_parent_id')).toBe(false);
@@ -389,6 +389,16 @@ describe('the customer record', () => {
       ];
       const printOf = (list) => build(fakeConn({ customer_interactions: list }), { customerId: 'c1', asOf: AS_OF })
         .then((r) => JSON.stringify(r.entries.map(({ id: _id, ...e }) => e)));
+      expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
+    });
+
+    test('texts masked alike but different underneath keep one order (r103)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const at = new Date('2026-10-01T12:00:00Z');
+      const pad = 'the dog is friendly. '.repeat(430);
+      const rows = ['MONDAY', 'MANAGER'].map((w, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: `Gate code 4821, ask ${w}. ${pad}`, created_at: at }));
+      const printOf = (list) => build(fakeConn({ customer_interactions: list }), { customerId: 'c1', asOf: AS_OF })
+        .then((r) => JSON.stringify([r.entries.map(({ id: _id, ...e }) => e), r.unread]));
       expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
     });
 

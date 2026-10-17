@@ -780,9 +780,10 @@ function entry(channel, from, at, text) {
   if (!body) return [];
   const parts = partsOf(body);
   const scan = scanNow(text, raw, body);
-  // One short order key per source text, with every printed field (security
-  // r102: a key holding the whole body made a 2 MB email cost 369 MB).
-  const key = `${channel}\u0000${from == null ? '' : from}\u0000${at == null ? '' : String(at)}\u0000${createHash('sha256').update(body).digest('hex')}`;
+  // One short order key per source text, with every printed field and the
+  // unmasked words, which the scan reads (security r102: a key holding the
+  // whole body made a 2 MB email cost 369 MB; r103: two texts masked alike).
+  const key = `${channel}\u0000${from == null ? '' : from}\u0000${at == null ? '' : String(at)}\u0000${createHash('sha256').update(body).update('\u0000').update(raw).digest('hex')}`;
   return parts.map((part, i) => {
     const row = {
       channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
@@ -794,7 +795,7 @@ function entry(channel, from, at, text) {
 }
 
 // Undated notes first, then oldest to newest; equal times by channel,
-// sender, time and text, the parts of one text in their order: the same order on every read.
+// sender, time and a digest of the text, the parts of one text in their order: the same order on every read.
 function recordOrder(a, b) {
   const byTime = (a.ms ?? -1) - (b.ms ?? -1);
   if (byTime) return byTime;
