@@ -130,7 +130,7 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
 // skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy';
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -233,7 +233,7 @@ const TIME_WORDS_RE = new RegExp([
   // AM or PM on its own ("PM ONLY"): r8.
   // Not the verb in "I AM" (r11).
   // Not the property manager: "contact the PM", "PM for access" (r12).
-  '(?<!\\bi\\s{1,5}(?:[a-z]{2,15}ly\\s{1,5})?)\\bam(?![\\w])(?!\\s{1,5}i\\b)|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
+  '(?<!\\bi\\s{1,5}(?:(?:[a-z]{2,15}ly|also|too|still|just|now|not|sure|always|never)\\s{1,5})?)\\bam(?![\\w])(?!\\s{1,5}i\\b)|\\b(?:a\\.m\\.|p\\.m\\.)(?![\\w])',
   // PM alone only before a word that makes it a time ("PM ONLY", "PM is
   // best"); otherwise it is the property manager ("PM approved access",
   // "SPOKE TO PM": r24, r39).
@@ -318,7 +318,7 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:service|services|visits?|appointments?|account|treatments?|spraying|program|plan)\\s{1,3}(?:is\\s{1,3}|are\\s{1,3})?)(?:paused|suspended)(?![\\w])',
   '\\b(?:pause|suspend|paused|suspended)(?=\\s{1,3}(?:the\\s{1,3})?(?:service|services|visits?|appointments?|account|treatments?|program|plan)\\b)',
   // Spanish clock times ("SOLO A LAS 10", "A LAS DIEZ"): r61.
-  '(?<=\\b(?:a|desde|hasta|de|antes\\s{1,3}de|despu[eé]s\\s{1,3}de)\\s{1,3})las?(?=\\s{1,3}(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\\b)',
+  '(?<=\\b(?:a|entre|desde|hasta|de|antes\\s{1,3}de|despu[eé]s\\s{1,3}de)\\s{1,3})las?(?=\\s{1,3}(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\\b)',
   // A direct no-move directive ("DO NOT RESCHEDULE", "DO NOT MOVE
   // APPOINTMENT", "NO RESCHEDULING"): r61.
   '(?<=\\b(?:not|never|no|don.?t|cannot|can.?t|won.?t)\\s{1,3})(?:reschedule|rescheduling|re-schedule)(?![\\w])',
@@ -346,6 +346,8 @@ const TIME_WORDS_RE = new RegExp([
   '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
   // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
   `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
+  // A Spanish hour range ("DE 9 A 11", "ENTRE 9 Y 11"): r93.
+  '\\b(?:de|entre|desde)(?=\\s{1,3}(?:las?\\s{1,3})?\\d{1,2}(?::\\d{2})?\\s{1,3}(?:a|y|hasta)\\s{1,3}(?:las?\\s{1,3})?\\d{1,2}\\b)',
   // A spelled hour range ("NINE TO FIVE"): r81.
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
   // A Spanish appointment day ("CITA EL LUNES", "SERVICIO EL LUNES"): r87.
@@ -379,7 +381,7 @@ const TIME_WORDS_RE = new RegExp([
   // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|works?|working|coming|upcoming|expires?|expiring|changes?|starts?|starting|ends?|ending|valid|thru|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)[\\s:,-]{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:(?:morning|afternoon|evening|night)s?\\s{1,3}(?:only|ok|okay|works?|please|preferred|is|are)\\b|[/&-]|,\\s{0,3}(?:and\\s{1,3}|or\\s{1,3})?(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\\b|(?:appointments?|appts?|visits?|service|services|stops?|slots?|available|unavailable|free|busy|closed|off|will\\s{1,3}not|would\\s{1,3}not|wouldn.?t|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?!\\s{0,3}\\d+\\s{0,3}(?:feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal)\\b)(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b))',
 ].join('|'), 'gi');
