@@ -56,6 +56,9 @@ npm run dev:managed-client # assigned frontend port; no database needed
 For isolated backend setup, explicit migrations, debugging and worktree commands,
 see [docs/development.md](docs/development.md).
 
+For optional public-source research in Claude Code, see
+[Parallel Search MCP setup](docs/parallel-search-mcp.md).
+
 Key commands:
 
 - `npm run db:migrate` / `db:rollback` — Knex (always via `server/knexfile.js`)
