@@ -270,7 +270,7 @@ const TIME_WORDS_RE = new RegExp([
   // ...or a weekday, or "the week of" a date ("APPOINTMENT IS MONDAY",
   // "APPOINTMENT IS THE WEEK OF OCTOBER 20"): r70.
   // Not a past one ("LAST APPOINTMENT WAS MONDAY": r72).
-  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b))`,
+  `(?<!\\b(?:last|previous|prior|past)\\s{1,3})\\b(?:appointments?|appts?|visits?|service|schedule|schedules|scheduled|booked|rescheduled|moved)(?=\\s{0,5}(?:(?:date|day|time)\\s{0,5})?:?\\s{0,3}(?:(?:is|are|on|in|during|for|to|at|be|can|could|only|must|should|will|shall|needs?|has|have|got|not|never|cannot|can.?t|isn.?t|won.?t|mustn.?t|shouldn.?t)\\s{1,5}){0,4}(?:the\\s{1,5})?(?:(?:week|weekend)\\s{1,3}of\\s{1,3})?(?:${DATE_SHAPES}|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\\b|(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?![\\w])))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
   // ...only with a limit ("END OF DAY ONLY", "by end of day"): "END OF DAY
   // REPORT IS DUE" is a deadline (r72).
@@ -297,7 +297,11 @@ const TIME_WORDS_RE = new RegExp([
   // the usual time words ("SOLO LOS MARTES", "NUNCA ANTES DE LAS DIEZ"): r42.
   // Not "hoy" alone: "HOY HABLE CON EL DUENO" is history (r51).
   // Not a greeting ("BUENOS DIAS", "BUENAS TARDES"): r74.
-  '(?<!\\bbuen[oa]s?\\s{1,3})\\b(?:ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
+  // Months and parts of the day only with a limit ("SOLO POR LA TARDE",
+  // "HASTA OCTUBRE"); "EN OCTUBRE" after a past verb, "POR LAS TARDES" about
+  // the dog, are history or habit of something else (r79).
+  '(?<=\\b(?:solo|s\u00f3lo|solamente|no|nunca|excepto|menos|hasta|desde|antes\\s{1,3}de|despu[e\u00e9]s\\s{1,3}de|cada)\\s{1,3}(?:(?:en|por|de)\\s{1,3})?(?:(?:la|las|el)\\s{1,3})?)(?:ma[n\u00f1]anas?|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?![\\w\u00c0-\u024f])',
+  '(?<!\\bbuen[oa]s?\\s{1,3})\\b(?:antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
   // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
   // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
   `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
@@ -331,6 +335,10 @@ const TIME_WORDS_RE = new RegExp([
   // A Spanish weekday only as a habit or a limit ("LOS MARTES", "SOLO
   // MARTES", "NO LOS LUNES"); "LLAMÓ EL MARTES" is history (r72).
   '(?<=\\b(?:los|solo|s\u00f3lo|solamente|cada|no|nunca|excepto|menos|hasta|desde|todos\\s{1,3}los|pr\u00f3ximo|proximo|este)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
+  // A placement that must stay ("APPOINTMENT IS FIXED", "DATE IS FIRM",
+  // "KEEP APPOINTMENT AS IS"): r79.
+  '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
+  '\\bkeep(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -388,7 +396,7 @@ function timeWords(text) {
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
 const CODE_PLACES = '(?:gate|front|back|side|main|door|garage|lockbox|lock|box|entry|access|keypad|community|pool|building|alarm|house|home|lanai|shed|fence|unit)';
-const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])(?:(?<=[0-9#*])|(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b))["'\\u201d\\u2019]?`, 'gi');
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS}|works?|working|available|unavailable|open|opens|closed|good|only|not)\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])(?:(?<=[0-9#*])|(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b))["'\\u201d\\u2019]?`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
 // code" (r3, r7). Between "is" and the code noun only words that name
