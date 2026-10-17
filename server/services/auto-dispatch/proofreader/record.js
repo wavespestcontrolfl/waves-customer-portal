@@ -213,7 +213,7 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
   // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
   // Not the verb in "TECH MAY ONLY USE" (r51).
-  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))${DATE_SHAPES}(?=[\\s,]{1,5}(?:only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
@@ -344,6 +344,8 @@ const TIME_WORDS_RE = new RegExp([
   // "KEEP APPOINTMENT AS IS"): r79.
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
   '\\bkeep(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3})?(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
+  // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
+  `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
   // A spelled hour range ("NINE TO FIVE"): r81.
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
   // A Spanish appointment day ("CITA EL LUNES", "SERVICIO EL LUNES"): r87.

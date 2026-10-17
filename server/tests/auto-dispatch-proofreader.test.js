@@ -585,6 +585,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, CLOSED THANKSGIVING DAY',
       'GATE CODE 4821, CITA EL 20 DE OCTUBRE',
       'GATE CODE 4821, CITA 10/20',
+      'GATE CODE 4821, 0900-1100 ONLY',
       'GATE CODE 4821 VALID THROUGH MAY ONLY',
       'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
       'GATE CODE 4821, AVOID 10/20',
@@ -813,6 +814,7 @@ describe('the customer record', () => {
       'GATE CODE 4821, TODAY IS HOT',
       'GATE CODE 4821, SHED IS 10-20 SQ FT',
       'GATE CODE 4821, SHED IS 10-20 SQUARE FEET',
+      'GATE CODE 4821, APRIL ONLY HAS THE KEY',
       "GATE CODE 4821, SHED IS 10-20' FROM HOUSE",
       'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
     ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
