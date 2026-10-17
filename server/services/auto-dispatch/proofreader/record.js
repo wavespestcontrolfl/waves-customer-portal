@@ -355,6 +355,8 @@ const TIME_WORDS_RE = new RegExp([
   // "KEEP APPOINTMENT AS IS"): r79.
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
   '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3}|our\\s{1,3})?(?:(?:current|existing|original|same|scheduled|booked|set|regular|usual|present)\\s{1,3}){0,2}(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
+  // A bare hour after a visit verb ("please come 10"): r108.
+  '(?<=\\b(?:come|arrive|arriving|start|starting|be\\s{1,3}here|show\\s{1,3}up|get\\s{1,3}here|stop\\s{1,3}by)\\s{1,3}(?:(?:at|by|around|after|before)\\s{1,3})?)(?:[01]?\\d|2[0-3])(?![\\w:/.\u2013\u2014-])(?!\\s{1,3}(?:dogs?|cats?|people|kids|times|units?|homes?|houses?|days?|weeks?|months?|years?|minutes?|mins?|hours?|feet|ft|inches|yards?|miles?)\\b)',
   // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
   `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
   // A Spanish hour range ("DE 9 A 11", "ENTRE 9 Y 11"): r93.
