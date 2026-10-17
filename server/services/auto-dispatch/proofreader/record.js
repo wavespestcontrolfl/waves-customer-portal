@@ -354,6 +354,8 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:${SPELLED_HOURS})(?=\\s{1,3}(?:to|through|thru|till|til|until|-)\\s{1,3}(?:${SPELLED_HOURS})\\b)`,
   // A Spanish appointment day ("CITA EL LUNES", "SERVICIO EL LUNES"): r87.
   '(?<=\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)\\s{1,3}(?:es\\s{1,3}|ser[a\u00e1]\\s{1,3})?(?:el|los|para\\s{1,3}el)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
+  // A Spanish appointment relative day ("CITA HOY", "SERVICIO MAÑANA"): r95.
+  '(?<=\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)\\s{1,3}(?:(?:es|ser[a\u00e1]|para)\\s{1,3})?)(?:hoy|ma[n\u00f1]ana|pasado\\s{1,3}ma[n\u00f1]ana)(?![\\w\u00c0-\u024f])',
   // A Spanish appointment date ("CITA EL 20 DE OCTUBRE", "CITA 10/20"): r90.
   '\\b(?:cita|citas|servicio|visita|fumigaci[o\u00f3]n|tratamiento|limpieza)(?=\\s{1,3}(?:(?:es|ser[a\u00e1]|para)\\s{1,3})?(?:(?:el|la)\\s{1,3})?(?:\\d{1,2}\\s{1,3}de\\s{1,3}(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)|\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?)(?![\\w\u00c0-\u024f/]))',
   // "AFTER HOURS": r22.
@@ -392,11 +394,20 @@ const TIME_WORDS_RE = new RegExp([
 // One compiled pattern, reused: the scan is synchronous, so resetting
 // lastIndex is enough (compiling the large pattern on every call was most of
 // its cost: Codex security r77).
-function timeWords(text) {
+// A time word right after a mask marker may be the tail of a longer one
+// whose head the mask hid ("OCT. 20 ONLY" -> "[redacted]. 20 ONLY"); on the
+// masked side such a fragment, a number right after the marker, does not
+// count (r95).
+const AFTER_MARK_RE = /\[redacted\][\s.,:/-]{0,3}$/i;
+function timeWords(text, { skipAfterMark = false } = {}) {
   const re = TIME_WORDS_RE;
   re.lastIndex = 0;
   let n = 0;
-  while (re.exec(text)) n += 1;
+  let m;
+  while ((m = re.exec(text))) {
+    if (!skipAfterMark || !/^\d/.test(m[0]) || !AFTER_MARK_RE.test(text.slice(Math.max(0, m.index - 16), m.index))) n += 1;
+    if (m[0] === '') re.lastIndex += 1;
+  }
   re.lastIndex = 0;
   return n;
 }
@@ -443,7 +454,7 @@ function maskHidTime(raw, masked, lineMasked = null) {
   // model is asked; shorter (the mask took a long credential run), it is
   // counted as not fully read, unscanned (r9).
   if (raw.length > MAX_RECORD_CHARS) return masked.length <= MAX_RECORD_CHARS;
-  return timeWords(masked) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked, lineMasked, numberMarkers(raw, masked));
+  return timeWords(masked, { skipAfterMark: true }) < timeWords(withoutCredentialValues(raw)) || maskBesideTimeWord(masked, lineMasked, numberMarkers(raw, masked));
 }
 
 // The broad rule beside the count (Codex #6328 r22, after 21 rounds that each
