@@ -1006,7 +1006,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
 
   return (
     <div
-      className="service-report-v1 service-report-document"
+      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}`}
       style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
@@ -1037,11 +1037,22 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         .service-report-document .doc-station-pin.is-ok { background: #0F7B54; }
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
+        /* GATE_REPORT_SIMPLE_WEB: on a phone the web view stacks what the
+           letter-size page sets side by side. is-web only, so the PDF is unchanged. */
+        @media (max-width: 640px) {
+          .service-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
+          .service-report-document.is-web .doc-letterhead,
+          .service-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 8px !important; }
+          .service-report-document.is-web .doc-letterhead > div { text-align: left !important; }
+          .service-report-document.is-web .doc-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+          .service-report-document.is-web .doc-products th,
+          .service-report-document.is-web .doc-products td { white-space: normal !important; }
+        }
       `}</style>
       <div className="doc-page">
 
         {/* Letterhead */}
-        <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
             <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
@@ -1052,7 +1063,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         </div>
 
         {/* Title row */}
-        <div className="doc-keep" style={{
+        <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
         }}>
@@ -1063,7 +1074,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         </div>
 
         {/* Info grid */}
-        <div className="doc-keep" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
           {/* minWidth:0 on each column: grid otherwise honours a long unbroken
               email's min-content width and squeezes the other two columns. */}
           <div style={{ minWidth: 0 }}>
@@ -1413,7 +1424,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         {appliedProducts.length > 0 && (
           <div>
             <SectionHeader>Products applied</SectionHeader>
-            <table style={{ fontSize: 11 }}>
+            <table className="doc-products" style={{ fontSize: 11 }}>
               <thead className="doc-keep-with-next">
                 <tr>
                   {['Product', 'EPA Reg. No.', 'Rate', 'Total applied'].map((heading, i) => (
@@ -1709,7 +1720,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                 {data.reportV2?.photoSummary || data.typedReport?.photoSummary}
               </p>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
               {photos.map((photo) => (
                 <figure key={photo.id || photo.url} className="doc-keep" style={{ margin: 0 }}>
                   {/* fixed-height contain thumbnails: a portrait field photo
