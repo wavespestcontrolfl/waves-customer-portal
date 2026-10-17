@@ -236,7 +236,7 @@ const TIME_WORDS_RE = new RegExp([
   // PM alone only before a word that makes it a time ("PM ONLY", "PM is
   // best"); otherwise it is the property manager ("PM approved access",
   // "SPOKE TO PM": r24, r39).
-  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?!\\s{1,3}only\\s{1,3}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?)\\b)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b))',
+  '(?<!\\b(?:the|a|our|my|your|their|contact|call|text|email|ask|tell|notify|with)\\s{1,5})\\bpm(?!\\s{1,3}only\\s{1,3}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?)\\b)(?!\\s{1,3}please\\s{1,3}(?:call|text|email|contact|let|tell|ask|send|have|get|make|check)\\b)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service|is\\s{1,3}(?:best|better|fine|ok|okay))\\b))',
   // Relative days ("TOMORROW ONLY", "NOT TODAY", "next week"): r6.
   // Not daily / weekly: in "DOG GETS DAILY MEDICATION" it is about the dog
   // (r17); "every week" is read below.
@@ -258,8 +258,8 @@ const TIME_WORDS_RE = new RegExp([
   // THE MONTH", "start of the month"): r63.
   // ...only with a limit ("... ONLY", "by the end of the month"): "END OF
   // MONTH REPORT IS DUE" is a deadline (r69).
-  '\\b(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?month\\s{0,3}(?:(?:only|ok|okay|please|works?|is\\s{1,3}best)\\b|[,;!)]|\\.(?:\\s|$)|$))',
-  '(?<=\\b(?:only|until|till|by|before|after|at|in|around|near|toward|towards|during|not|no|except|prefer|prefers)\\s{1,3}(?:the\\s{1,3})?)(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?month\\b)',
+  '\\b(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?(?:month|week)\\s{0,3}(?:(?:only|ok|okay|please|works?|is\\s{1,3}best)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  '(?<=\\b(?:only|until|till|by|before|after|at|in|around|near|toward|towards|during|not|no|except|prefer|prefers)\\s{1,3}(?:the\\s{1,3})?)(?:beginning|middle|start|mid|end|early|late)(?=[\\s-]{1,3}(?:of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?)?(?:month|week)\\b)',
   // A week or a weekday of the month ("FIRST WEEK OF THE MONTH ONLY",
   // "SECOND TUESDAY OF THE MONTH"): r49, r50.
   '\\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]?first|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,3}(?:(?:two|three|four|five|2|3|4|5|few|couple\\s{1,3}of)\\s{1,3})?(?:week|weekend|half|day|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)s?\\s{1,3}of\\s{1,3}(?:the\\s{1,3}|each\\s{1,3}|every\\s{1,3})?month\\b)',
@@ -302,7 +302,7 @@ const TIME_WORDS_RE = new RegExp([
   // "HASTA OCTUBRE"); "EN OCTUBRE" after a past verb, "POR LAS TARDES" about
   // the dog, are history or habit of something else (r79).
   '(?<=\\b(?:solo|s\u00f3lo|solamente|no|nunca|excepto|menos|hasta|desde|antes\\s{1,3}de|despu[e\u00e9]s\\s{1,3}de|cada)\\s{1,3}(?:(?:en|por|de)\\s{1,3})?(?:(?:la|las|el)\\s{1,3})?)(?:ma[n\u00f1]anas?|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?![\\w\u00c0-\u024f])',
-  '(?<!\\bbuen[oa]s?\\s{1,3})\\b(?:antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|aviso)(?![\\w\u00c0-\u024f])',
+  '(?<!\\bbuen[oa]s?\\s{1,3})\\b(?:antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?)(?![\\w\u00c0-\u024f])',
   // A stretch of time after a visit word ("DO NOT COME FOR TWO WEEKS",
   // "COME BACK IN TWO WEEKS", "wait 3 days"): r45.
   `\\b(?:come|coming|back|return|visit|service|wait|hold|pause|skip|away|gone|out(?:\\s{1,3}of\\s{1,3}(?:town|state|the\\s{1,3}country|country))?|traveling|travelling|vacation)(?=\\s{1,5}(?:(?:for|in|after|within|another|the\\s{1,5}next)\\s{1,5})?${QTY}[\\s-]{0,3}${DURATION_MOD}(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)(?![\\w]))`,
