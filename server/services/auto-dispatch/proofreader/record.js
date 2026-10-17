@@ -299,7 +299,8 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:only|need|needs|want|wants|prefer|prefers|book|schedule|must|always|be|as|request|requests|requested)\\s{1,5}(?:the\\s{1,5})?)(?:first|second|third|last|\\d{1,2}(?:st|nd|rd|th))(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
-  `(?<![\\d:/.-])\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  // ...not a numbered place ("UNIT 9 ONLY", "BAY 9 PLEASE"): r101.
+  `(?<![\\d:/.-])(?<!\\b(?:unit|units|apt|apartment|suite|ste|lot|building|bldg|space|slip|box|stall|phase|room|rm|floor|bay|dock|door|pier|site|pad|row|section|aisle|level|tower|block|house|home|number|num)\\.?\\s{0,3}#?\\s{0,2})(?<!#\\s{0,2})\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // "after work", "before school" (not "at work": a place): r39.
   '\\b(?:before|after|until|till|til|by)(?=\\s{1,5}(?:work|school)\\b)',
   // Spanish, the other language the proofreader reads (its hard cases have
@@ -379,7 +380,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|\u2013|\u2014|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/\u2013\u2014-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
