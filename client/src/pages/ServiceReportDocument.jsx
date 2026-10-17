@@ -356,7 +356,10 @@ function Bullet({ children }) {
   );
 }
 
-export default function ServiceReportDocument({ data, token }) {
+// `web` (GATE_REPORT_SIMPLE_WEB, owner 2026-10-17): the same document is the
+// page a customer sees at the report link. It then IS the online report, so
+// the lines that point "to your online report" read as plain facts instead.
+export default function ServiceReportDocument({ data, token, web = false }) {
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -1598,7 +1601,7 @@ export default function ServiceReportDocument({ data, token }) {
                   stationMap.summary.activity ? `${stationMap.summary.activity} ${STATION_ACTIVITY_SUMMARY[stationMap.program] || 'with activity'}` : null,
                   stationMap.summary.inaccessible ? `${stationMap.summary.inaccessible} inaccessible` : null,
                 ].filter(Boolean).join(' · ')}
-                {' '}· positions to scale — satellite view in your online report
+                {' '}· positions to scale{web ? '' : ' — satellite view in your online report'}
               </div>
             )}
           </div>
@@ -1718,7 +1721,7 @@ export default function ServiceReportDocument({ data, token }) {
                       width: '100%', height: 190, background: '#F7F8F9', borderRadius: 10,
                       border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
                     }}>
-                      Photo unavailable in this document — view it in your online report
+                      {web ? 'Photo unavailable right now' : 'Photo unavailable in this document — view it in your online report'}
                     </div>
                   ) : (
                   <img
@@ -1879,14 +1882,20 @@ export default function ServiceReportDocument({ data, token }) {
             {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
                 the pest program's re-service wording, so a lawn report prints nothing here. */}
             {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
-            Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
-            <br />
-            Full interactive report:{' '}
-            {/* a real <a> so the PDF carries a link annotation — viewer URL
-                autodetection is optional, and this is the only route to the
-                analysis this record intentionally omits */}
-            <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
-            <br />
+            {web
+              ? <>Questions about today&apos;s service? Call {WAVES_SUPPORT_PHONE_DISPLAY}.<br /></>
+              : (
+                <>
+                  Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
+                  <br />
+                  Full interactive report:{' '}
+                  {/* a real <a> so the PDF carries a link annotation — viewer URL
+                      autodetection is optional, and this is the only route to the
+                      analysis this record intentionally omits */}
+                  <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+                  <br />
+                </>
+              )}
             {/* Owner ask 2026-09-28: every record of service links to the
                 public Products & Safety page. The footer prints on every
                 record, product rows or not; the URL shows in full so a
