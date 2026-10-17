@@ -139,7 +139,7 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
 // skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than|back|returns?|returning|returned|home\\s{1,3}on|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than|like|back|returns?|returning|returned|home\\s{1,3}on|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -356,7 +356,7 @@ const TIME_WORDS_RE = new RegExp([
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
   '\\b(?:keep|leave)(?=\\s{1,3}(?:the\\s{1,3}|my\\s{1,3}|this\\s{1,3}|our\\s{1,3})?(?:(?:current|existing|original|same|scheduled|booked|set|regular|usual|present)\\s{1,3}){0,2}(?:appointments?|appts?|visits?|date|day|time|schedule)\\b)',
   // A bare hour after a visit verb ("please come 10"): r108.
-  '(?<=\\b(?:come|arrive|arriving|start|starting|be\\s{1,3}here|show\\s{1,3}up|get\\s{1,3}here|stop\\s{1,3}by)\\s{1,3}(?:(?:at|by|around|after|before)\\s{1,3})?)(?:[01]?\\d|2[0-3])(?![\\w:/.\u2013\u2014-])(?!\\s{1,3}(?:dogs?|cats?|people|kids|times|units?|homes?|houses?|days?|weeks?|months?|years?|minutes?|mins?|hours?|feet|ft|inches|yards?|miles?)\\b)',
+  `(?<=\\b(?:(?:come|arrive|arriving|be\\s{1,3}here|show\\s{1,3}up|get\\s{1,3}here|stop\\s{1,3}by)\\s{1,3}(?:(?:at|by|around|after|before)\\s{1,3})?|(?:start|starting)\\s{1,3}(?:at|by|around|after|before)\\s{1,3}))(?:[01]?\\d|2[0-3]|${SPELLED_HOURS})(?![\\w:/.\u2013\u2014-])(?!\\s{1,3}(?:dogs?|cats?|people|kids|times|units?|homes?|houses?|days?|weeks?|months?|years?|minutes?|mins?|hours?|feet|ft|inches|yards?|miles?)\\b)`,
   // A four-digit 24-hour range ("0900-1100 ONLY"): r91.
   `(?<![\\d/-])\\b(?:[01]\\d|2[0-3])[0-5]\\d\\s?(?:-|to|through|thru|till|til|until)\\s?${HHMM}`,
   // A Spanish hour range ("DE 9 A 11", "ENTRE 9 Y 11"): r93.
@@ -387,7 +387,7 @@ const TIME_WORDS_RE = new RegExp([
   '\\b\\d{1,2}\\s?o\\W?clock\\b',
   '\\b\\d{1,2}\\s+(?:or|and)\\s+(?:later|earlier|after|before)\\b',
   // Not a measurement ("10-20 FEET", "10-20 LBS"): r72.
-  '(?<![\\d/-])\\b\\d{1,2}\\s?(?:-|\u2013|\u2014|to|through|thru|till|til|until)\\s?\\d{1,2}(?![\\w/\u2013\u2014-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
+  '(?<![\\d/-])\\b(?:[01]?\\d|2[0-4])\\s?(?:-|\u2013|\u2014|to|through|thru|till|til|until)\\s?(?:[01]?\\d|2[0-4])(?![\\w/\u2013\u2014-])(?!\\s{0,3}[\\x27\\x22\u2019\u201d\u2032\u2033])(?!\\s{0,3}(?:sq\\.?|square|cubic|cu\\.?|linear|lin\\.?)\\b)(?!\\s{0,3}(?:degrees?|deg|f|c|cm|mm|m|km|ounces?|oz|fl|liters?|litres?|l|ml|quarts?|qt|pints?|pt|kg|g|grams?|psi|volts?|v|amps?|watts?|w|feet|ft|foot|inch|inches|in|yards?|yds?|meters?|miles?|mi|lbs?|pounds?|gallons?|gal|%|percent|acres?|years?|yrs?|months?|weeks?|days?|minutes?|mins?|seconds?|dogs?|cats?|people|kids|units?|homes?|houses?)\\b)',
   // Not a color, a plant or bird, or the light ("MIDNIGHT BLUE", "MORNING
   // GLORY", "AFTERNOON SUN"), nor a greeting ("GOOD MORNING"): r47, r52,
   // r55, r62. After a weekday the part of the day goes with it ("CALLED
