@@ -138,7 +138,8 @@ const SPELLED_HOURS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|t
 // The words that may follow an hour in a time ("before 9 please", "after
 // NINE at night"); any other word makes it a count ("about THREE acres",
 // "ONE of the owners"): r5, r7, r15.
-const AFTER_HOUR_OK = 'am|pm|a\\.m|p\\.m|o\\W?clock|or|and|to|until|till|only|please|on|at|in|sharp|latest|earliest|ish|then|so|is|works?|thirty|fifteen|forty|twenty';
+// A time-zone word may follow an hour ("AFTER 3 ET", "AT 10 EST"): r86.
+const AFTER_HOUR_OK = 'et|est|edt|eastern|local|am|pm|a\\.m|p\\.m|o\\W?clock|or|and|to|until|till|only|please|on|at|in|sharp|latest|earliest|ish|then|so|is|works?|thirty|fifteen|forty|twenty';
 const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\\b)[A-Za-z])`;
 // A quantity in a duration, in digits or words ("TWO DAYS NOTICE", "a week
 // ahead", "every couple of weeks"): r15.
@@ -400,7 +401,7 @@ function timeWords(text) {
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
 const CODE_PLACES = '(?:gate|front|back|side|main|door|garage|lockbox|lock|box|entry|access|keypad|community|pool|building|alarm|house|home|lanai|shed|fence|unit)';
-const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS}|works?|working|available|unavailable|open|opens|closed|good|only|not)\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])(?:(?<=[0-9#*])|(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b))["'\\u201d\\u2019]?`, 'gi');
+const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS}|works?|working|available|unavailable|open|opens|closed|good|only|not|every|each|new|changes?)\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])(?:(?<=[0-9#*])|(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b))["'\\u201d\\u2019]?`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
 // code" (r3, r7). Between "is" and the code noun only words that name
