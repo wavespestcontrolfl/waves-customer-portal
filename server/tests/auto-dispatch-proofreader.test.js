@@ -669,6 +669,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, 9 \u2014 11',
       'GATE CODE 4821, OUT OF TOWN, BACK OCTOBER 20',
       'GATE CODE 4821, RETURNING OCTOBER 20',
+      'Gate code 4821, next visit 10/20',
+      'Gate code 4821, every visit 10/20',
       'GATE CODE 4821 VALID THROUGH MAY ONLY',
       'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
       'GATE CODE 4821, AVOID 10/20',

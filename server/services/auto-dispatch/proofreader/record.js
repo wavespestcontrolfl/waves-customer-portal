@@ -374,7 +374,9 @@ const TIME_WORDS_RE = new RegExp([
   '\\bafter[\\s-]{1,3}hours\\b(?!\\s{1,3}(?:emergency|emergencies|number|phone|line|contact|call|calls|service\\s{1,3}number|support|hotline))',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
   '\\b(?:business|office|working|opening|open|normal|regular|school)(?=\\s{1,5}hours\\b)',
-  '\\b(?:next|this|every|each)\\s+(?:week|month|time|visit)(?![\\w])',
+  // Only the lead word is taken, so the noun can start the next match
+  // ("next visit 10/20": r104).
+  '\\b(?:next|this|every|each)(?=\\s+(?:week|month|time|visit)(?![\\w]))',
   // "EVERY OTHER WEEK", "every second month": r20.
   '\\b(?:every|each)(?=\\s{1,5}(?:other|second|2nd|third|3rd|fourth|4th)\\s{1,5}(?:week|month|day|visit)s?(?![\\w]))',
   `\\b(?:${SPELLED_HOURS})\\s?o\\W?clock\\b`,
