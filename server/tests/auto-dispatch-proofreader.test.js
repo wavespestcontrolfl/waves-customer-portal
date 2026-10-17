@@ -214,7 +214,8 @@ describe('the customer record', () => {
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, sms_log: [
       text({ message_type: 'manual', operator_sent: false }), text({ message_type: 'ai_approved', operator_sent: false }), text({ message_type: 'manual', operator_sent: true }),
     ] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-    expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.from)).toEqual(['system', 'staff', 'staff']);
+    // Equal times sort by sender (r102), so the senders are compared sorted.
+    expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.from).sort()).toEqual(['staff', 'staff', 'system']);
   });
 
   test('an outbound text created in the minutes before the move may not have been sent yet: unread', async () => {
@@ -376,6 +377,18 @@ describe('the customer record', () => {
       const printOf = (rows) => build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF })
         .then((r) => JSON.stringify([r.entries.map((e) => e.text), r.unread]));
       const rows = texts.map((t, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: t, created_at: new Date('2026-10-01T12:00:00Z') }));
+      expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
+    });
+
+    test('rows equal in time, channel and text keep one order by sender (r102)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const at = new Date('2026-10-01T12:00:00Z');
+      const rows = [
+        { id: 1, interaction_type: 'note', subject: null, body: 'Same words', created_at: at, created_by: 'staff' },
+        { id: 2, interaction_type: 'customer_message', subject: null, body: 'Same words', created_at: at },
+      ];
+      const printOf = (list) => build(fakeConn({ customer_interactions: list }), { customerId: 'c1', asOf: AS_OF })
+        .then((r) => JSON.stringify(r.entries.map(({ id: _id, ...e }) => e)));
       expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
     });
 
@@ -644,6 +657,8 @@ describe('the customer record', () => {
       'GATE CODE 4821, NEED OCTOBER 20',
       'GATE CODE 4821, 9\u201311',
       'GATE CODE 4821, 9 \u2014 11',
+      'GATE CODE 4821, OUT OF TOWN, BACK OCTOBER 20',
+      'GATE CODE 4821, RETURNING OCTOBER 20',
       'GATE CODE 4821 VALID THROUGH MAY ONLY',
       'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
       'GATE CODE 4821, AVOID 10/20',

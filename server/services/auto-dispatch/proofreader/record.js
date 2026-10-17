@@ -28,6 +28,7 @@
  * (a time or a day in the same sentence as a code), the entry is listed in
  * `unread` as `time_masked`: the verdict is then never "allow".
  */
+const { createHash } = require('crypto');
 const logger = require('../../logger');
 // A database error's message can carry the query's bindings (a customer's
 // email address, a phone number): logs get the error's code or name only
@@ -138,7 +139,7 @@ const HOUR_LEADS = 'before|after|by|until|till|til|at|from|around|about|between|
 // ends / ending / stops / until: the end of the access ("ACCESS ENDS OCTOBER
 // 20"): r32.
 // skip / avoid before a date ("SKIP OCTOBER 20", "AVOID 10/20"): r76.
-const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
+const DATE_LEADS = 'expires?|expiring|expired|through|thru|starting|starts?|valid|ends?|ending|ended|stops?|stopping|changes?|changing|skip|avoid|except|do|unavailable|available|free|open|closed|booked|busy|away|gone|town|home|vacation|traveling|travelling|make|than|back|returns?|returning|returned|home\\s{1,3}on|requested|request|requests|prefer|prefers|preferred|need|needs|needed|want|wants|wanted|asked\\s{1,3}for';
 // The hour words that also tie a DATE: not "about / around / than / past /
 // at", which come before quantities ("about 5/8 acre": r9).
 const DATE_HOUR_LEADS = 'before|after|by|until|till|til|from|between';
@@ -779,18 +780,21 @@ function entry(channel, from, at, text) {
   if (!body) return [];
   const parts = partsOf(body);
   const scan = scanNow(text, raw, body);
+  // One short order key per source text, with every printed field (security
+  // r102: a key holding the whole body made a 2 MB email cost 369 MB).
+  const key = `${channel}\u0000${from == null ? '' : from}\u0000${at == null ? '' : String(at)}\u0000${createHash('sha256').update(body).digest('hex')}`;
   return parts.map((part, i) => {
     const row = {
       channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
       ...(scan === true && i === 0 ? { maskedTime: true } : {}),
     };
-    entryMeta.set(row, { key: `${channel}\u0000${body}`, part: i, ...(scan && scan !== true && i === 0 ? { scan } : {}) });
+    entryMeta.set(row, { key, part: i, ...(scan && scan !== true && i === 0 ? { scan } : {}) });
     return row;
   });
 }
 
-// Undated notes first, then oldest to newest; equal times by channel and
-// text, the parts of one text in their order: the same order on every read.
+// Undated notes first, then oldest to newest; equal times by channel,
+// sender, time and text, the parts of one text in their order: the same order on every read.
 function recordOrder(a, b) {
   const byTime = (a.ms ?? -1) - (b.ms ?? -1);
   if (byTime) return byTime;
