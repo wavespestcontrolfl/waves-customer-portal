@@ -230,7 +230,7 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:only|except|never|not)(?=\\s{1,5}(?:on\\s{1,5})?${DATE_SHAPES})`,
   // ...and the date first ("on 10/20 only", "10/31 works"): r20, r29.
   // Not the verb in "TECH MAY ONLY USE" (r51).
-  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:would\\s{1,3}be\\s{1,3}(?:best|better|fine|good|ideal|great|perfect|ok|okay|preferred)|(?:is|are|was\\s{1,3}set\\s{1,3}as)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3}|their\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|booking|scheduled\\s{1,3}date)\\b|(?:is|are|will\\s{1,3}be)\\s{1,3}(?:unavailable|busy|booked|full|closed|off|bad|taken|out|impossible|a\\s{1,3}no)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\w/-])(?<!\\b(?:ratio|mix|mixed|dilution|dilute|diluted|rate|scale)\\s{1,5})(?!may\\b(?!\\s{1,5}\\d))(?!(?:${MONTHS})\\s{1,5}only\\s{1,5}(?:has|have|knows?|can|holds?|keeps?|gets?|opens?|is|will)\\b)${DATE_SHAPES}(?=[\\s,]{1,5}(?:would\\s{1,3}be\\s{1,3}(?:best|better|fine|good|ideal|great|perfect|ok|okay|preferred)|(?:would|will|should|could|might|can)\\s{1,3}work|(?:is|are|was\\s{1,3}set\\s{1,3}as)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3}|their\\s{1,3})?(?:appointments?|appts?|visits?|service|date|day|booking|scheduled\\s{1,3}date)\\b|(?:is|are|will\\s{1,3}be)\\s{1,3}(?:unavailable|busy|booked|full|closed|off|bad|taken|out|impossible|a\\s{1,3}no)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|only|works?|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // A connector may stand between ("expires on 10/20"): r14.
   `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?${DATE_SHAPES})`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
@@ -309,7 +309,7 @@ const TIME_WORDS_RE = new RegExp([
   // A bare hour before a word that makes it a time ("9 works for us", "TEN
   // ONLY"): r27.
   // ...not a numbered place ("UNIT 9 ONLY", "BAY 9 PLEASE"): r101.
-  `(?<![\\d:/.-])(?<!\\b(?:unit|units|apt|apartment|suite|ste|lot|building|bldg|space|slip|box|stall|phase|room|rm|floor|bay|dock|door|pier|site|pad|row|section|aisle|level|tower|block|house|home|number|num)\\.?\\s{0,3}#?\\s{0,2})(?<!#\\s{0,2})\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:would\\s{1,3}be\\s{1,3}(?:best|better|fine|good|ideal|great|perfect|ok|okay|preferred)|(?:is|are)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3})?(?:(?:appointment|appt|arrival|visit|service|start|best|preferred)\\s{1,3})?(?:time|window|hour|appointment)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
+  `(?<![\\d:/.-])(?<!\\b(?:unit|units|apt|apartment|suite|ste|lot|building|bldg|space|slip|box|stall|phase|room|rm|floor|bay|dock|door|pier|site|pad|row|section|aisle|level|tower|block|house|home|number|num)\\.?\\s{0,3}#?\\s{0,2})(?<!#\\s{0,2})\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:would\\s{1,3}be\\s{1,3}(?:best|better|fine|good|ideal|great|perfect|ok|okay|preferred)|(?:would|will|should|could|might|can)\\s{1,3}work|(?:is|are)\\s{1,3}(?:the\\s{1,3}|our\\s{1,3}|my\\s{1,3})?(?:(?:appointment|appt|arrival|visit|service|start|best|preferred)\\s{1,3})?(?:time|window|hour|appointment)\\b|(?:will|does|do|would|is)\\s{1,3}not|(?:won|doesn|don|wouldn|isn|can)'?t|cannot|is\\s{1,3}too|too\\s{1,3}(?:early|late)|works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // "after work", "before school" (not "at work": a place): r39.
   '\\b(?:before|after|until|till|til|by)(?=\\s{1,5}(?:work|school)\\b)',
   // Spanish, the other language the proofreader reads (its hard cases have
@@ -359,6 +359,8 @@ const TIME_WORDS_RE = new RegExp([
   // A Spanish weekday only as a habit or a limit ("LOS MARTES", "SOLO
   // MARTES", "NO LOS LUNES"); "LLAMÓ EL MARTES" is history (r72).
   '(?<=\\b(?:los|solo|s\u00f3lo|solamente|cada|no|nunca|excepto|menos|hasta|desde|todos\\s{1,3}los|pr\u00f3ximo|proximo|este)\\s{1,3})(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?)(?![\\w\u00c0-\u024f])',
+  // "APPOINTMENT STAYS AS IS", "REMAINS THE SAME": r117.
+  '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3})(?:stays?|remains?|stands?)(?=\\s{1,3}(?:as\\s{1,3}is|the\\s{1,3}same|put|unchanged|where\\s{1,3}it\\s{1,3}is|fixed|firm)\\b)',
   // A placement that must stay ("APPOINTMENT IS FIXED", "DATE IS FIRM",
   // "KEEP APPOINTMENT AS IS"): r79.
   '(?<=\\b(?:appointments?|appts?|visits?|date|day|time|schedule|service)\\s{1,3}(?:is|are)\\s{1,3})(?:fixed|firm|locked|final|set\\s{1,3}in\\s{1,3}stone|not\\s{1,3}flexible|non-?negotiable)(?![\\w])',
