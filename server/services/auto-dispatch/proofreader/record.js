@@ -753,16 +753,50 @@ function hiddenTimeIn(text, raw, masked) {
   return maskHidTime(scanRaw, scanMasked, lines.includes('\n') ? redactAccessCodes(lines) : null);
 }
 
+// The scan's yes / no for one entry. The limits of one text decide at once;
+// a text within them waits for the record's own order (pending), so the
+// record's shared budget goes to the same texts on every read, whatever
+// order the database returned the rows in (Codex #6328 r100: a record read
+// twice must give the same print). A pending text is at most
+// MAX_SCAN_ENTRY_CHARS long.
+function scanNow(text, raw, masked) {
+  if (raw === masked) return false;
+  if (masked.length > MAX_RECORD_CHARS) return false;
+  const size = Math.max(String(text == null ? '' : text).length, raw.length, masked.length);
+  if (size > MAX_SCAN_ENTRY_CHARS) return true;
+  return { text, raw, masked };
+}
+
+// What the record keeps beside each entry for its own use only: the order
+// key and the waiting scan. Never part of the entry the model or the print
+// reads.
+const entryMeta = new WeakMap();
+
 function entry(channel, from, at, text) {
   const raw = clean(text);
   const body = redactAccessCodes(raw);
   if (!body) return [];
   const parts = partsOf(body);
-  const hidden = hiddenTimeIn(text, raw, body);
-  return parts.map((part, i) => ({
-    channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
-    ...(hidden && i === 0 ? { maskedTime: true } : {}),
-  }));
+  const scan = scanNow(text, raw, body);
+  return parts.map((part, i) => {
+    const row = {
+      channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
+      ...(scan === true && i === 0 ? { maskedTime: true } : {}),
+    };
+    entryMeta.set(row, { key: `${channel}\u0000${body}`, part: i, ...(scan && scan !== true && i === 0 ? { scan } : {}) });
+    return row;
+  });
+}
+
+// Undated notes first, then oldest to newest; equal times by channel and
+// text, the parts of one text in their order: the same order on every read.
+function recordOrder(a, b) {
+  const byTime = (a.ms ?? -1) - (b.ms ?? -1);
+  if (byTime) return byTime;
+  const ma = entryMeta.get(a) || { key: '', part: 0 };
+  const mb = entryMeta.get(b) || { key: '', part: 0 };
+  if (ma.key !== mb.key) return ma.key < mb.key ? -1 : 1;
+  return ma.part - mb.part;
 }
 
 // sms_log keeps no time for its status changes. An outbound text created in
@@ -1060,14 +1094,23 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const budget = { left: MAX_SCAN_RECORD_CHARS, nearLeft: MAX_SCAN_WINDOW_RECORD_CHARS };
   for (const [channel, read] of SOURCES) {
     try {
-      found.push(...(await scanBudget.run(budget, () => read(conn, args, unread))).flat(2));
+      found.push(...(await read(conn, args, unread)).flat(2));
     } catch (err) {
       unread.push({ channel, reason: 'read_failed' });
       logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${safeError(err)}`);
     }
   }
-  // Undated notes first, then oldest to newest.
-  found.sort((a, b) => (a.ms ?? -1) - (b.ms ?? -1));
+  found.sort(recordOrder);
+  // The waiting scans run in that order, against one shared budget.
+  scanBudget.run(budget, () => {
+    for (const row of found) {
+      const meta = entryMeta.get(row);
+      if (!meta || !meta.scan) continue;
+      const { text, raw, masked } = meta.scan;
+      delete meta.scan;
+      if (hiddenTimeIn(text, raw, masked)) row.maskedTime = true;
+    }
+  });
   // An entry whose access-code mask also hid a word that can say when
   // (maskHidTime): read, but not in full.
   for (const row of found) {

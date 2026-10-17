@@ -332,7 +332,8 @@ describe('the customer record', () => {
       customer_interactions: [{ interaction_type: 'note', subject: 'Afternoons only', body: null, created_at: '2026-07-01T10:00:00.000Z' }] });
     const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.serviceTypes).toEqual(['Pest', 'Lawn']);
-    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text)).toEqual(['Pest note', 'Lawn: Tuesdays only']);
+    // Undated notes of one channel keep one order on every read: by text (r100).
+    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text)).toEqual(['Lawn: Tuesdays only', 'Pest note']);
     expect(conn.calls.some(([t, method, col, ids]) => t === 'scheduled_services' && method === 'whereIn' && col === 'id' && ids.join() === 'p1,p2,s1,s2')).toBe(true);
     // Another occurrence's note is about that visit: the series' other rows are never read.
     expect(conn.calls.some(([t, method, col]) => t === 'scheduled_services' && method === 'orWhereIn' && col === 'recurring_parent_id')).toBe(false);
@@ -366,6 +367,16 @@ describe('the customer record', () => {
       expect(rawNear).not.toContain('Tuesday');
       expect(hid(raw)).toBe(true);
       expect(hid(`${far}Gate code 4821. ${far}Monday only.`)).toBe(false);
+    });
+
+    test('the scan budget goes to the same texts whatever order the rows come in (r100)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const note = (n) => `Gate code 4821, the dog is friendly. ${'x'.repeat(n)}`;
+      const texts = [note(11000), note(5000), note(5000), note(5000)];
+      const printOf = (rows) => build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF })
+        .then((r) => JSON.stringify([r.entries.map((e) => e.text), r.unread]));
+      const rows = texts.map((t, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: t, created_at: new Date('2026-10-01T12:00:00Z') }));
+      expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
     });
 
     test('a worst-case long text with one mask is scanned fast', () => {
