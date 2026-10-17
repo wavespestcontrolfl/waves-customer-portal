@@ -148,13 +148,14 @@ const SPELLED_HOUR = `(?:${SPELLED_HOURS})\\b(?!\\s{1,5}(?!(?:${AFTER_HOUR_OK})\
 const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // The shapes of a calendar date: ISO, slash, month name (with an optional
 // ordinal), an ordinal day alone (with an optional "the"), or a month alone
-// ("VALID THROUGH OCTOBER"; "TILL END OF OCTOBER": r36; a year alone,
+// ("VALID THROUGH OCTOBER"; "TILL END OF OCTOBER": r36; not the verb in
+// "CHANGES MAY BE NEEDED": r82; a year alone,
 // "VALID THROUGH 2026": r37; not before a day or a mask, which the
 // month-and-day shape reads), or day first ("EXPIRES 20 OCTOBER"): r7 to
 // r19, r28, r31.
 // Whole month names and their short forms only: "JANITOR" is not January (r33).
 const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const DATE_SHAPES = `(?:(?:the\\s{1,5})?(?:year|month|week)[\\s-]{0,3}end(?![\\w/])|\\d{1,2}-\\d{1,2}-(?:\\d{4}|\\d{2})(?![\\w/-])|(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:(?:the|this|next)\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
+const DATE_SHAPES = `(?:(?:the\\s{1,5})?(?:year|month|week)[\\s-]{0,3}end(?![\\w/])|\\d{1,2}-\\d{1,2}-(?:\\d{4}|\\d{2})(?![\\w/-])|(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:(?:the|this|next)\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?!may\\s{1,5}(?!(?:only|please|and|or|thru|through|to)\\b)[a-z])(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
