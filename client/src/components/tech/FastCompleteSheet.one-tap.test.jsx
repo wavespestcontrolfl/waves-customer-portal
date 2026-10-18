@@ -5,8 +5,9 @@
 //  - the note is not read for products (its facts are still read);
 //  - a product at 0 in stock holds nothing, and a line says so;
 //  - the trace is optional: typed feet cover a perimeter spray with no saved trace.
-// A re-service (and, with it, every lane, typed, station and prepare path) and a
-// context without the key keep the sheet as it was (FastCompleteSheet.report-flow.test.jsx).
+// A re-service (and, with it, every lane, typed, station and prepare path), a first
+// cleanout that opens with no house mix, and a context without the key keep the sheet
+// as it was (FastCompleteSheet.report-flow.test.jsx).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -169,6 +170,14 @@ describe('one-tap: a product at 0 in stock', () => {
     expect(request.bodies('/complete')).toHaveLength(1);
   });
 
+  test('every product at 0 in stock gets its own line, with one Check stock', async () => {
+    const twoOut = () => CATALOG.map((p) => (p.id === 'surfactant' ? p : { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' }));
+    await openSheet(makeRequest({ products: twoOut }));
+    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. Tell the office to restock it.')).toBeTruthy();
+    expect(screen.getByText('Atticus Talak 7.9 F shows 0 in stock. You can still send. Tell the office to restock it.')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Check stock' })).toHaveLength(1);
+  });
+
   test('gate off: the hold stays as it was', async () => {
     await openSheet(makeRequest({ products: NO_STOCK, context: {} }));
     writeNote();
@@ -267,5 +276,20 @@ describe('one-tap: not a plain recurring pest report', () => {
     await openReport();
     expect(request.bodies('/voice-fill/products')).toEqual([{ note: NOTE }]);
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
+  });
+
+  test('a first cleanout opens with no house mix: the tap writes nothing and Generate still reads the note for products', async () => {
+    const CLEANOUT = { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' };
+    const request = makeRequest({ service: CLEANOUT });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
+    await screen.findByRole('button', { name: 'Generate AI report' });
+    expect(screen.getByText('None selected')).toBeTruthy();
+    writeNote();
+    tapRating();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reportCalls(request)).toHaveLength(0);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await waitFor(() => expect(request.bodies('/voice-fill/products')).toEqual([{ note: NOTE }]));
   });
 });
