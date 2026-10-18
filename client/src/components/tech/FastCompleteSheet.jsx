@@ -446,6 +446,11 @@ const wrapUpGateOf = (data) => data?.wrapUp === true;
 // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17): the recurring pest report sheet writes on the rating tap, reads no note for
 // products, lets a 0-in-stock product through and takes typed feet where no trace is saved. The server says so with `oneTap: true`.
 const oneTapGateOf = (data) => data?.oneTap === true;
+// It runs on the plain recurring pest report only: a lane or typed record, a re-service and a stop's part (prepare mode)
+// keep the sheet as it was.
+const oneTapOf = ({ ctx, mode, isReservice, sharedNote }) => ctx.oneTap === true && !mode && !isReservice && sharedNote == null;
+// Typed feet count only as a whole number above 0.
+const wholeFeetOf = (text) => (/^\d+$/.test(String(text).trim()) && Number(text) > 0 ? Number(text) : null);
 
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
@@ -1161,13 +1166,16 @@ const NO_PRODUCT_HOLDS = {
 // What an empty product list says for this record mode (null: no hold).
 const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
 
+// A product whose stock shows 0 for the unit it was measured in.
+const isOutOfStockRow = (row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit);
+
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
 // reads the products out of the note first, so neither an empty list nor a row
 // still missing its amount holds it; both are judged again once the note is read.
-// `stockAdvisory` (the one-tap report): a 0-in-stock product holds nothing; the sheet says so beside the button
-// (`stockNotice`) because the server treats stock as advisory (owner 2026-08-03).
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, stationHold = '', stockAdvisory = false, ...sendInputs }) {
-  const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+// `stockAdvisory` (the one-tap report): a 0-in-stock product holds nothing, because the server treats stock as
+// advisory (owner 2026-08-03); the sheet says so in its own line (StockNotice).
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, stationHold = '', stockAdvisory, ...sendInputs }) {
+  const outOfStock = active.find(isOutOfStockRow);
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
   const noProduct = unread ? null : noProductHold(mode);
@@ -1193,7 +1201,7 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
       [voiceHolds.checks > 0, 'Check what I couldn\'t fill.'],
     ] : []),
   ].find(([missing]) => missing) || [];
-  return { reason, stockRow, fix, stockNotice: stockAdvisory ? outOfStock || null : null };
+  return { reason, stockRow, fix };
 }
 
 // The one-tap report's line for a 0-in-stock product: it never holds the send.
@@ -1201,6 +1209,52 @@ const stockNoticeText = (row) => (row ? `${row.name} shows 0 in stock. You can s
 
 function StockNotice({ row }) {
   return row ? <p className="tech-visit-muted tech-visit-status--warn" role="status">{stockNoticeText(row)}</p> : null;
+}
+
+// One-tap: the "Feet sprayed" box, where a perimeter spray has no saved trace to give its feet (the trace's own read
+// settles first, so the box never flashes). Null: no box.
+function feetFieldFor({ oneTap, trace, perimeterFeet, active, draft, value, onChange }) {
+  if (!oneTap || !trace.loaded || trace.failed || perimeterFeet || !perimeterSprayRow(active, draft)) return null;
+  return { value, onChange };
+}
+
+// The feet the tech types for that spray (the trace stays offered beside it).
+function FeetSprayedField({ field, locked }) {
+  if (!field) return null;
+  return (
+    <Field label="Feet sprayed" className="tech-visit-field">
+      <Input className="tech-visit-control" type="number" inputMode="numeric" min="1" step="1" value={field.value} disabled={locked} onChange={(e) => field.onChange(e.target.value)} />
+    </Field>
+  );
+}
+
+// One-tap: a rating tap asks for ONE report write in the background. It starts once the generate holds clear and
+// nothing is writing (no draft: a normal write; a stale one: a fresh write; a current one needs none), and any write
+// that starts, this one or the tech's own tap, clears the request. While it runs the visit step stays shown.
+function useBackgroundWrite({ enabled, draft, stale, writing, preReading, holdReason, start }) {
+  const [requested, setRequested] = useState(false);
+  const [background, setBackground] = useState(false);
+  const current = !!draft && !stale;
+  const held = writing || preReading || !!holdReason;
+  useEffect(() => {
+    if (!requested) return;
+    if (current) {
+      setRequested(false);
+      return;
+    }
+    if (!held) start();
+  }, [requested, current, held]);
+  return {
+    request: () => { if (enabled) setRequested(true); },
+    began: (isBackground) => {
+      setRequested(false);
+      setBackground(isBackground === true);
+    },
+    // The rating tap's write is running: the footer only opens the report step.
+    running: writing && background,
+    // A write the tech asked for, which the visit step's footer shows as busy.
+    foreground: writing && !background,
+  };
 }
 
 // What else holds Complete & send: the report itself; the note's read of
@@ -1818,9 +1872,8 @@ function ReportFlowForm({
   // A lane or typed visit's own record (or none: a pest visit).
   const recordState = useVisitRecord(service, request, form.note);
   const { lane, mode, record } = recordState;
-  // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17) is the plain recurring pest report only: a lane or typed
-  // record, a re-service and a stop's part (prepare mode) keep the sheet as it was.
-  const oneTap = ctx.oneTap === true && !mode && !isReservice && sharedNote == null;
+  // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17).
+  const oneTap = oneTapOf({ ctx, mode, isReservice, sharedNote });
   // The server refused the completion because the property's stations changed
   // since they were read: the sheet loads them again and reads the note again.
   const { errorCode: submitCode } = submission;
@@ -1858,7 +1911,7 @@ function ReportFlowForm({
   // One-tap: the feet the tech typed where no saved trace gives them. Typed here only, never copied from an earlier trace or
   // visit (owner: no trace reuse), and not part of what the writer reads, so it stays out of the signature.
   const [typedFeet, setTypedFeet] = useState('');
-  const typedFeetValue = oneTap && /^\d+$/.test(typedFeet.trim()) && Number(typedFeet) > 0 ? Number(typedFeet) : null;
+  const typedFeetValue = wholeFeetOf(typedFeet);
   const traceAvailable = trace.enabled && service.traceEligible !== false;
   // The property this sheet loaded: a trace saved or removed here is refused
   // if the office has moved the visit to another one since.
@@ -1901,17 +1954,16 @@ function ReportFlowForm({
     }
     setCheckingStock(false);
   };
-  const stockButton = (generateMissing.stockRow || generateMissing.stockNotice) && !locked ? (
+  // One-tap: the 0-in-stock product the sheet names instead of holding the send.
+  const stockNotice = oneTap ? active.find(isOutOfStockRow) : undefined;
+  const stockButton = (generateMissing.stockRow || stockNotice) && !locked ? (
     <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
   ) : null;
 
-  // One-tap: a rating tap asks for ONE write in the background; the visit step stays shown while it runs.
-  const [writeRequested, setWriteRequested] = useState(false);
-  const [backgroundWrite, setBackgroundWrite] = useState(false);
-  const write = async (fresh, { background = false } = {}) => {
+  // `background` (one-tap): the rating tap's write, which leaves the visit step shown.
+  const write = async (fresh, background) => {
     if (writing || preReading || generateMissing.reason) return;
-    setWriteRequested(false);
-    setBackgroundWrite(background);
+    backgroundWrite.began(background);
     // What Generate would hold on, were this note not about to be read: no
     // product where the visit needs one, or a row with no amount. The note is
     // then read for products first, and the rows it leaves are judged: a note
@@ -1959,17 +2011,9 @@ function ReportFlowForm({
       fresh,
     });
   };
-  // The request starts its write once the generate holds clear and nothing is writing: no draft is a normal write,
-  // a stale one a fresh write, a current one needs none. Any write that starts (this one or the tech's tap) clears it.
-  useEffect(() => {
-    if (!writeRequested) return;
-    if (draft && !stale) {
-      setWriteRequested(false);
-      return;
-    }
-    if (writing || preReading || generateMissing.reason) return;
-    write(!!action?.fresh, { background: true });
-  }, [writeRequested, draft, stale, writing, preReading, generateMissing.reason]);
+  const backgroundWrite = useBackgroundWrite({
+    enabled: oneTap, draft, stale, writing, preReading, holdReason: generateMissing.reason, start: () => write(!!action?.fresh, true),
+  });
   const summary = () => {
     // A typed visit's places live in its form, so its record names the form.
     const where = { lane: () => record.areas, typed: () => [recordState.schema.label] }[mode];
@@ -1977,7 +2021,7 @@ function ReportFlowForm({
     return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
   };
   const buildBody = () => reportCompletionBody({
-    form, rows, draft, perimeterFeet: perimeterFeet || typedFeetValue, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
+    form, rows, draft, perimeterFeet: oneTap && !perimeterFeet ? typedFeetValue : perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
     recordFields: recordState.inputs(record, draft?.facts),
     traceOnReport: ctx.traceOnReport,
     photos: visitPhotos.photos,
@@ -2073,9 +2117,8 @@ function ReportFlowForm({
         removingTrace={removingTrace}
         reuse={reuse}
         traceError={traceError}
-        feetField={oneTap && trace.loaded && !trace.failed && !perimeterFeet && perimeterSprayRow(active, draft)
-          ? { value: typedFeet, onChange: setTypedFeet }
-          : null}
+        feetField={feetFieldFor({ oneTap, trace, perimeterFeet, active, draft, value: typedFeet, onChange: setTypedFeet })}
+        stockNotice={stockNotice}
         sources={writerSources({
           productCount: active.length,
           photoCount: visitPhotos.photos.length,
@@ -2130,15 +2173,15 @@ function ReportFlowForm({
       onAddProduct={addProduct}
       productVoice={productVoice}
       noteClipEnabled={voiceFill}
-      onRate={oneTap ? () => setWriteRequested(true) : null}
-      stockNotice={generateMissing.stockNotice}
+      onRate={backgroundWrite.request}
+      stockNotice={stockNotice}
       footer={action
         // One-tap: while the rating tap's write runs, the button only opens the report step; it never starts a second write.
-        ? { reason: generateMissing.reason, label: action.label, onAction: () => (writing && backgroundWrite ? setStep('report') : write(action.fresh)) }
+        ? { reason: generateMissing.reason, label: action.label, onAction: () => (backgroundWrite.running ? setStep('report') : write(action.fresh)) }
         // A photo change in hand (a description open, a change saving, a
         // removal to answer) holds the way back too (codex local r2).
         : { reason: photoHold, label: 'Back to the report', onAction: () => setStep('report') }}
-      writing={(writing && !backgroundWrite) || preReading}
+      writing={backgroundWrite.foreground || preReading}
       warn={!!generateMissing.stockRow}
       stockButton={stockButton}
     />
@@ -2181,7 +2224,7 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
 function ReportStep({
   wrapUp, service, report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, reuse = NO_REUSE, onAutoTrace = null, feetField = null,
+  onBackFromPrompt, reuse = NO_REUSE, onAutoTrace = null, feetField, stockNotice,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2219,7 +2262,7 @@ function ReportStep({
         {writing && <WritingView sources={sources} />}
         {writeError && !writing && <ActionFeedback error className="tech-visit-feedback">{writeError}</ActionFeedback>}
         {traceError && <ActionFeedback error className="tech-visit-feedback">{traceError}</ActionFeedback>}
-        <StockNotice row={generateMissing.stockNotice} />
+        <StockNotice row={stockNotice} />
         {showDraft && (
           <ReportCard
             draft={draft}
@@ -2241,12 +2284,7 @@ function ReportStep({
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
         {laneCard}
         {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
-        {/* One-tap: where no saved trace gives the feet, the tech types them (the trace stays offered above). */}
-        {showDraft && feetField && (
-          <Field label="Feet sprayed" className="tech-visit-field">
-            <Input className="tech-visit-control" type="number" inputMode="numeric" min="1" step="1" value={feetField.value} disabled={locked} onChange={(e) => feetField.onChange(e.target.value)} />
-          </Field>
-        )}
+        <FeetSprayedField field={feetField} locked={locked} />
         {wrapUp.enabled && <fieldset className="tech-visit-form" disabled={locked}><FastCompleteWrapUp wrapUp={wrapUp} /></fieldset>}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
@@ -2261,7 +2299,7 @@ function VisitStep({
   wrapUp, service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
-  productVoice, noteClipEnabled = false, sharedNote, onRate = null, stockNotice = null,
+  productVoice, noteClipEnabled = false, sharedNote, onRate, stockNotice,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -2351,8 +2389,8 @@ function VisitStep({
               locked={locked}
               onChange={(rating) => {
                 setForm((prev) => ({ ...prev, rating, ratingPrefilled: false }));
-                // One-tap: the tap asks for the report to be written in the background.
-                onRate?.();
+                // One-tap: the tap asks for the report to be written in the background (a no-op otherwise).
+                onRate();
               }}
             />
           )}
