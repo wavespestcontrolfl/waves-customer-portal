@@ -28,7 +28,8 @@ const CATALOG = [
 const REGULAR = {
   id: 'svc-1', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
   serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-01', address: { line1: '123 Main St' },
-  serviceKey: 'pest_general_quarterly', status: 'confirmed',
+  // As the server sends them: a free callback or not, and a visit of a recurring series (the one-tap scope).
+  serviceKey: 'pest_general_quarterly', status: 'confirmed', isCallback: false, isRecurring: true,
 };
 const RESERVICE = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' };
 const REPORT = ['WHAT WE FOUND', 'Ants on the counter.', '', 'WHAT WE DID AND WHY', 'We treated the kitchen.', '', 'WHAT TO EXPECT', 'Fewer ants.', '', "WHAT'S NEXT", 'Wipe the counters.'].join('\n');
@@ -274,6 +275,30 @@ describe('one-tap: the trace is optional', () => {
     expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
     expect(completeButton().disabled).toBe(true);
+  });
+});
+
+describe('one-tap: the visit identity echoes the series', () => {
+  async function completeVisit(request, props) {
+    await openSheet(request, props);
+    writeNote();
+    tapRating();
+    await openReport();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await screen.findByTestId('fast-complete-sent');
+    return request.bodies('/complete')[0];
+  }
+
+  test('gate on: /complete sends isRecurring with the visit identity, for the server to re-check under its lock', async () => {
+    const body = await completeVisit(makeRequest());
+    expect(body.expectedVisit).toMatchObject({ isRecurring: true, isCallback: false });
+  });
+
+  test('gate off: the identity is as it was, with no series', async () => {
+    const body = await completeVisit(makeRequest({ context: {} }), { voiceFillEnabled: false });
+    expect(body.expectedVisit).toMatchObject({ isCallback: false });
+    expect('isRecurring' in body.expectedVisit).toBe(false);
   });
 });
 

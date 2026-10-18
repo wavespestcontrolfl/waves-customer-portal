@@ -100,6 +100,20 @@ test('the context says whether the visit is a free callback', async () => {
 
 // The one-tap report (GATE_ONE_TAP_REPORT) is the recurring pest sheet only: the context says whether the visit
 // belongs to a recurring series. A plan's booster or add-on (a parent, but not recurring) does not.
+// The one-tap report echoes the series it was opened for: a visit taken out of (or put into) a recurring series
+// since then is a changed visit, refused under the lock. A form that sent no series is never judged on it.
+test('a change to the recurring series since the form loaded is a changed visit', () => {
+  const { recapVisitIdentityChanged } = require('../services/pest-recap');
+  const locked = { is_recurring: true, is_callback: false };
+  expect(recapVisitIdentityChanged({ isRecurring: true }, locked, {})).toBe(false);
+  expect(recapVisitIdentityChanged({ isRecurring: true }, { ...locked, is_recurring: false }, {})).toBe(true);
+  expect(recapVisitIdentityChanged({ isRecurring: false }, locked, {})).toBe(true);
+  expect(recapVisitIdentityChanged({}, { ...locked, is_recurring: false }, {})).toBe(false);
+  // The callback flag keeps its own rule beside it.
+  expect(recapVisitIdentityChanged({ isCallback: false }, { ...locked, is_callback: true }, {})).toBe(true);
+  expect(recapVisitIdentityChanged({ isCallback: true }, { ...locked, is_callback: true }, {})).toBe(false);
+});
+
 test('the context says whether the visit is part of a recurring series', async () => {
   expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_recurring: true }))).service.isRecurring).toBe(true);
   expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_recurring: false, recurring_parent_id: 'plan-1' }))).service.isRecurring).toBe(false);

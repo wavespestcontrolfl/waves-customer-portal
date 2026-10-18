@@ -429,9 +429,11 @@ function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
 // The identity the server re-checks under its lock. The report flow's pay
 // link and review ask follow whether the visit is a free callback, so that
 // flow echoes it too.
-function sheetVisitIdentity(visit, reportFlow) {
+// The one-tap report (`oneTap`) runs only on a visit of a recurring series, so that flow echoes the series too: a
+// visit the office took out of its series since the sheet opened is refused and reopened as today's sheet.
+function sheetVisitIdentity(visit, reportFlow, oneTap) {
   return reportFlow && typeof visit.isCallback === 'boolean'
-    ? { ...recapVisitIdentity(visit), isCallback: visit.isCallback }
+    ? { ...recapVisitIdentity(visit), isCallback: visit.isCallback, ...(oneTap ? { isRecurring: visit.isRecurring === true } : {}) }
     : recapVisitIdentity(visit);
 }
 
@@ -509,7 +511,7 @@ function useFastCompleteContext({
           // re-service, never a lane or typed one: the visits the full form
           // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
           houseMix,
-          visitIdentity: sheetVisitIdentity(visit, reportFlow),
+          visitIdentity: sheetVisitIdentity(visit, reportFlow, oneTapGateOf(data)),
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
           traceOnReport: data?.traceOnReport !== false,
