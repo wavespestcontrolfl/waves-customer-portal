@@ -6732,6 +6732,15 @@ function fastCompleteWrapUpLive() {
 }
 // GATE_FAST_COMPLETE_WRAP_UP reader, on its own line so gate PRs never conflict.
 module.exports.fastCompleteWrapUpLive = fastCompleteWrapUpLive;
+
+// GATE_ONE_TAP_REPORT read at CALL time, strict `=== 'true'`, dark in every environment.
+// On, the recurring pest report sheet starts its AI writer on the 1-5 rating tap, makes the trace optional
+// (typed feet cover it), reads no AI note for products and lets a 0-in-stock product through. Off = today's sheet.
+function oneTapReportLive() {
+  return process.env.GATE_ONE_TAP_REPORT === 'true';
+}
+// GATE_ONE_TAP_REPORT reader, on its own line so gate PRs never conflict.
+module.exports.oneTapReportLive = oneTapReportLive;
 // GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
 module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
 

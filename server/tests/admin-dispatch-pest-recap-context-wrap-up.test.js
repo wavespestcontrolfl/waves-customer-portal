@@ -99,3 +99,45 @@ describe('GET pest-recap/context carries the Wrap-up gate (GATE_FAST_COMPLETE_WR
     expect(other.statusCode).toBe(403);
   });
 });
+
+describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)', () => {
+  const saved = process.env.GATE_ONE_TAP_REPORT;
+  const savedWrap = process.env.GATE_FAST_COMPLETE_WRAP_UP;
+  const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1' }, products: [] };
+  beforeEach(() => {
+    delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+    mockDbCurrent = dbWithOwner('tech-1');
+    PestRecap.buildRecapContext.mockReset().mockResolvedValue(CONTEXT);
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = saved;
+    if (savedWrap === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = savedWrap;
+    mockDbCurrent = null;
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p: no oneTap key, the context exactly as before', async (value) => {
+    if (value === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = value;
+    const res = await invoke('get', CONTEXT_PATH, { params });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(CONTEXT);
+    expect('oneTap' in res.body).toBe(false);
+  });
+
+  test('gate on (exactly true): oneTap is true beside the unchanged context, and wrapUp stays its own key', async () => {
+    process.env.GATE_ONE_TAP_REPORT = 'true';
+    const res = await invoke('get', CONTEXT_PATH, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ...CONTEXT, oneTap: true });
+    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+    const both = await invoke('get', CONTEXT_PATH, { params });
+    expect(both.body).toEqual({ ...CONTEXT, wrapUp: true, oneTap: true });
+  });
+
+  test('gate on: a refused context carries no oneTap', async () => {
+    process.env.GATE_ONE_TAP_REPORT = 'true';
+    PestRecap.buildRecapContext.mockResolvedValue({ ok: false, reason: 'not_found' });
+    const missing = await invoke('get', CONTEXT_PATH, { params });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.body).toEqual({ error: 'not_found' });
+  });
+});
