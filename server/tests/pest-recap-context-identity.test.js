@@ -98,6 +98,14 @@ test('the context says whether the visit is a free callback', async () => {
   expect((await buildRecapContext(visit.id, contextDb(visit))).service.isCallback).toBe(false);
 });
 
+// The one-tap report (GATE_ONE_TAP_REPORT) is the recurring pest sheet only: the context says whether the visit
+// belongs to a recurring series. A plan's booster or add-on (a parent, but not recurring) does not.
+test('the context says whether the visit is part of a recurring series', async () => {
+  expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_recurring: true }))).service.isRecurring).toBe(true);
+  expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_recurring: false, recurring_parent_id: 'plan-1' }))).service.isRecurring).toBe(false);
+  expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_recurring: null }))).service.isRecurring).toBe(false);
+});
+
 // The sheet's report flow is the only reader of the lane and the typed form,
 // so both need GATE_FAST_COMPLETE_REPORT; the cases below run with it on.
 const savedReportGate = process.env.GATE_FAST_COMPLETE_REPORT;

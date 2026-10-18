@@ -103,7 +103,8 @@ describe('GET pest-recap/context carries the Wrap-up gate (GATE_FAST_COMPLETE_WR
 describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)', () => {
   const saved = process.env.GATE_ONE_TAP_REPORT;
   const savedWrap = process.env.GATE_FAST_COMPLETE_WRAP_UP;
-  const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1' }, products: [] };
+  // A visit of a recurring series: the one-tap report is the recurring pest sheet only.
+  const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1', isRecurring: true }, products: [] };
   beforeEach(() => {
     delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
     mockDbCurrent = dbWithOwner('tech-1');
@@ -131,6 +132,15 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
     const both = await invoke('get', CONTEXT_PATH, { params });
     expect(both.body).toEqual({ ...CONTEXT, wrapUp: true, oneTap: true });
+  });
+
+  test.each([false, undefined])('gate on, a visit outside a recurring series (isRecurring %p): no oneTap key', async (isRecurring) => {
+    process.env.GATE_ONE_TAP_REPORT = 'true';
+    const oneTime = { ...CONTEXT, service: { id: 'visit-1', ...(isRecurring === undefined ? {} : { isRecurring }) } };
+    PestRecap.buildRecapContext.mockResolvedValue(oneTime);
+    const res = await invoke('get', CONTEXT_PATH, { params });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(oneTime);
   });
 
   test('gate on: a refused context carries no oneTap', async () => {

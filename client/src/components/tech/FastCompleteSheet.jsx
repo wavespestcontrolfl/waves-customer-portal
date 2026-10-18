@@ -1221,10 +1221,10 @@ function StockNotices({ rows, checking, locked, onCheck }) {
   );
 }
 
-// One-tap: the "Feet sprayed" box, where a perimeter spray has no saved trace to give its feet (the trace's own read
-// settles first, so the box never flashes). Null: no box.
-function feetFieldFor({ oneTap, trace, perimeterFeet, active, draft, value, onChange }) {
-  if (!oneTap || !trace.loaded || trace.failed || perimeterFeet || !perimeterSprayRow(active, draft)) return null;
+// One-tap: the "Feet sprayed" box, where a perimeter spray has no saved trace at all (the trace's own read settles
+// first, so the box never flashes). Null: no box.
+function feetFieldFor({ oneTap, trace, active, draft, value, onChange }) {
+  if (!oneTap || !trace.loaded || trace.failed || trace.zone || !perimeterSprayRow(active, draft)) return null;
   return { value, onChange };
 }
 
@@ -1428,12 +1428,13 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
 // 2026-10-10), so the record goes as it was heard.
 // The one-tap report (`oneTap`, owner 2026-10-17): the trace is optional. A perimeter spray with no saved trace is
 // covered by the feet the tech types (`typedFeet`, a whole number above 0), so the trace still can be done but
-// never has to be, and "can't be traced here" never sends the tech to the Full form.
+// never has to be, and "can't be traced here" never sends the tech to the Full form. A saved trace that gives no
+// feet (an outline, an old trace) keeps the rules below: the record would show it beside the typed feet.
 function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead, oneTap = false, typedFeet = null }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
-  if (oneTap) {
+  if (oneTap && !traceRead.zone) {
     return [
       ...ready.report,
       ...ready.trace,
@@ -2030,7 +2031,7 @@ function ReportFlowForm({
     return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
   };
   const buildBody = () => reportCompletionBody({
-    form, rows, draft, perimeterFeet: oneTap && !perimeterFeet ? typedFeetValue : perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
+    form, rows, draft, perimeterFeet: oneTap && !trace.zone ? typedFeetValue : perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
     recordFields: recordState.inputs(record, draft?.facts),
     traceOnReport: ctx.traceOnReport,
     photos: visitPhotos.photos,
@@ -2126,7 +2127,7 @@ function ReportFlowForm({
         removingTrace={removingTrace}
         reuse={reuse}
         traceError={traceError}
-        feetField={feetFieldFor({ oneTap, trace, perimeterFeet, active, draft, value: typedFeet, onChange: setTypedFeet })}
+        feetField={feetFieldFor({ oneTap, trace, active, draft, value: typedFeet, onChange: setTypedFeet })}
         stockNotices={stockNotices}
         sources={writerSources({
           productCount: active.length,

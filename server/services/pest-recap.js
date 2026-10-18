@@ -278,6 +278,9 @@ function recapServiceIdentity(svc, profile) {
     // ask), so that flow echoes it back and a visit the office changed to or
     // from a callback meanwhile is refused (recapVisitIdentityChanged).
     isCallback: svc.is_callback === true,
+    // A visit of a recurring series (a plan's booster or add-on is not): the one-tap report
+    // (GATE_ONE_TAP_REPORT) is the recurring pest sheet only.
+    isRecurring: svc.is_recurring === true,
   };
 }
 

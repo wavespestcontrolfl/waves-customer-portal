@@ -238,6 +238,19 @@ describe('one-tap: the trace is optional', () => {
     }
   });
 
+  test('a saved trace that gives no feet (an outline) keeps today\'s trace hold: no feet box', async () => {
+    const outline = { linear_ft: null, capture_mode: 'yard', updated_at: '2026-10-02T05:00:00.000Z' };
+    const request = makeRequest({ facts: PERIMETER, trace: { enabled: true, treatmentZone: outline } });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
+    expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
+    expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+  });
+
   test('a visit that cannot be traced still takes typed feet, with no Full form hold', async () => {
     const request = makeRequest({ facts: PERIMETER });
     render(<FastCompleteSheet service={{ ...SERVICE, traceEligible: false }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
