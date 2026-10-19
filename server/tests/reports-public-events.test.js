@@ -574,7 +574,8 @@ describe('offer composition is opt-in, and only the render path opts in (PR r15 
   test('exactly one call site opts in, and it is the /data render', () => {
     const optIns = src.match(/composeOffers: true/g) || [];
     expect(optIns).toHaveLength(1);
-    expect(src).toMatch(/mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true/);
+    // GATE_REPORT_SIMPLE_WEB: the live view may be built in mode 'pdf' (buildMode).
+    expect(src).toMatch(/mode: buildMode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true/);
   });
 
   test('the Q&A call site does NOT opt in', () => {

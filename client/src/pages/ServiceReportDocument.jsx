@@ -338,9 +338,12 @@ function DocPoisonControl({ data, listsProducts = false, titled = false, showApp
   );
 }
 
+// A level-2 heading for screen readers (role, not an <h2>: the glass theme
+// forces every h1/h2 to its own size with !important, which would change
+// the PDF). The look is unchanged.
 function SectionHeader({ children }) {
   return (
-    <div className="doc-keep-with-next" style={{
+    <div role="heading" aria-level={2} className="doc-keep-with-next" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
       color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
@@ -356,7 +359,10 @@ function Bullet({ children }) {
   );
 }
 
-export default function ServiceReportDocument({ data, token }) {
+// `web` (GATE_REPORT_SIMPLE_WEB, owner 2026-10-17): the same document is the
+// page a customer sees at the report link. It then IS the online report, so
+// the lines that point "to your online report" read as plain facts instead.
+export default function ServiceReportDocument({ data, token, web = false }) {
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -1003,7 +1009,7 @@ export default function ServiceReportDocument({ data, token }) {
 
   return (
     <div
-      className="service-report-v1 service-report-document"
+      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}`}
       style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
@@ -1034,11 +1040,26 @@ export default function ServiceReportDocument({ data, token }) {
         .service-report-document .doc-station-pin.is-ok { background: #0F7B54; }
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
+        /* GATE_REPORT_SIMPLE_WEB: the sizes are set for a letter-size page,
+           too small for a screen. On the web the whole page is scaled up so body
+           text reads at about 15px. is-web only, so the PDF is unchanged. */
+        .service-report-document.is-web .doc-page { zoom: 1.3; }
+        /* GATE_REPORT_SIMPLE_WEB: on a phone the web view stacks what the
+           letter-size page sets side by side. is-web only, so the PDF is unchanged. */
+        @media (max-width: 640px) {
+          .service-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
+          .service-report-document.is-web .doc-letterhead,
+          .service-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 8px !important; }
+          .service-report-document.is-web .doc-letterhead > div { text-align: left !important; }
+          .service-report-document.is-web .doc-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+          .service-report-document.is-web .doc-products th,
+          .service-report-document.is-web .doc-products td { white-space: normal !important; }
+        }
       `}</style>
       <div className="doc-page">
 
         {/* Letterhead */}
-        <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
             <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
@@ -1049,18 +1070,18 @@ export default function ServiceReportDocument({ data, token }) {
         </div>
 
         {/* Title row */}
-        <div className="doc-keep" style={{
+        <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
         }}>
-          <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
+          <div role="heading" aria-level={1} style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
           <div style={{ fontSize: 11, color: MUTED }}>
             Report #{reportNumber} · {fmtServiceDate(data.serviceDate)}
           </div>
         </div>
 
         {/* Info grid */}
-        <div className="doc-keep" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
           {/* minWidth:0 on each column: grid otherwise honours a long unbroken
               email's min-content width and squeezes the other two columns. */}
           <div style={{ minWidth: 0 }}>
@@ -1410,7 +1431,7 @@ export default function ServiceReportDocument({ data, token }) {
         {appliedProducts.length > 0 && (
           <div>
             <SectionHeader>Products applied</SectionHeader>
-            <table style={{ fontSize: 11 }}>
+            <table className="doc-products" style={{ fontSize: 11 }}>
               <thead className="doc-keep-with-next">
                 <tr>
                   {['Product', 'EPA Reg. No.', 'Rate', 'Total applied'].map((heading, i) => (
@@ -1598,7 +1619,7 @@ export default function ServiceReportDocument({ data, token }) {
                   stationMap.summary.activity ? `${stationMap.summary.activity} ${STATION_ACTIVITY_SUMMARY[stationMap.program] || 'with activity'}` : null,
                   stationMap.summary.inaccessible ? `${stationMap.summary.inaccessible} inaccessible` : null,
                 ].filter(Boolean).join(' · ')}
-                {' '}· positions to scale — satellite view in your online report
+                {' '}· positions to scale{web ? '' : ' — satellite view in your online report'}
               </div>
             )}
           </div>
@@ -1706,7 +1727,7 @@ export default function ServiceReportDocument({ data, token }) {
                 {data.reportV2?.photoSummary || data.typedReport?.photoSummary}
               </p>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
               {photos.map((photo) => (
                 <figure key={photo.id || photo.url} className="doc-keep" style={{ margin: 0 }}>
                   {/* fixed-height contain thumbnails: a portrait field photo
@@ -1718,7 +1739,7 @@ export default function ServiceReportDocument({ data, token }) {
                       width: '100%', height: 190, background: '#F7F8F9', borderRadius: 10,
                       border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
                     }}>
-                      Photo unavailable in this document — view it in your online report
+                      {web ? 'Photo unavailable right now' : 'Photo unavailable in this document — view it in your online report'}
                     </div>
                   ) : (
                   <img
@@ -1879,14 +1900,20 @@ export default function ServiceReportDocument({ data, token }) {
             {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
                 the pest program's re-service wording, so a lawn report prints nothing here. */}
             {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
-            Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
-            <br />
-            Full interactive report:{' '}
-            {/* a real <a> so the PDF carries a link annotation — viewer URL
-                autodetection is optional, and this is the only route to the
-                analysis this record intentionally omits */}
-            <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
-            <br />
+            {web
+              ? <>Questions about today&apos;s service? Call {WAVES_SUPPORT_PHONE_DISPLAY}.<br /></>
+              : (
+                <>
+                  Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
+                  <br />
+                  Full interactive report:{' '}
+                  {/* a real <a> so the PDF carries a link annotation — viewer URL
+                      autodetection is optional, and this is the only route to the
+                      analysis this record intentionally omits */}
+                  <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+                  <br />
+                </>
+              )}
             {/* Owner ask 2026-09-28: every record of service links to the
                 public Products & Safety page. The footer prints on every
                 record, product rows or not; the URL shows in full so a

@@ -10444,6 +10444,51 @@ function reportDataUrl(token, mode, pinnedAssessment) {
 // the map fields, silently, instead of leaving a dead map behind.
 const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 
+// GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "the simpler service reports,
+// that we modeled after trugreen and all u need"): the report link shows the
+// work-order document the PDF prints, with one Download PDF button over it.
+// The server builds this payload as it builds the PDF's (same compliance
+// strips), and sets data.simpleWebReport only while the gate is live.
+function SimpleWebReport({ data, token }) {
+  const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
+  useEffect(() => {
+    trackReportEvent(token, 'service_report_viewed', { layout: 'simple' });
+  }, [token]);
+  return (
+    <div style={{ background: '#fff', flex: 1 }}>
+      {pdfUrl ? (
+        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0', display: 'flex', justifyContent: 'flex-end' }}>
+          <a
+            href={pdfUrl}
+            download
+            onClick={(e) => {
+              trackReportEvent(token, 'pdf_downloaded');
+              // In the Capacitor shell an <a download> dead-ends the webview —
+              // route through the native share sheet (same as ReportActionBar).
+              if (canSaveNative()) {
+                e.preventDefault();
+                saveUrlNative(pdfUrl, reportPdfDownloadName(data))
+                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
+              }
+            }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 44, padding: '0 16px',
+              borderRadius: 10, background: '#04395E', color: '#fff', fontWeight: 600, fontSize: 15, textDecoration: 'none',
+            }}
+          ><Download size={16} /> Download PDF</a>
+        </div>
+      ) : null}
+      {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
+      {data.recap?.ready ? (
+        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>
+          <RecapVideoCard recap={data.recap} token={token} />
+        </div>
+      ) : null}
+      <ServiceReportDocument data={data} token={token} web />
+    </div>
+  );
+}
+
 export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -10685,6 +10730,9 @@ export default function ReportViewPage() {
     // the post-service email attachment all serve this capture. The glass
     // web report (live) and the unused static mode are unchanged.
     if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
+    // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): the server set this key, so
+    // the report link shows the same work-order document as the PDF.
+    if (mode === 'live' && data.simpleWebReport === true && !data.internalOnly) return <SimpleWebReport data={data} token={token} />;
     // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
     return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }
