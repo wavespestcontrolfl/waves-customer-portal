@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { fmtMoney } from '../lib/money';
 import { RATE_REVIEW_TERMS_LINE, copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import {
@@ -39,6 +39,56 @@ const MUTED = '#3F4A65'; // DOC.muted
 const LINE = '#D8D0C0'; // DOC.borderStrong
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
+const WAVES_EMAIL = 'contact@wavespestcontrol.com';
+const WAVES_SITE_URL = 'https://www.wavespestcontrol.com';
+const HEADER_LINK = { color: 'inherit', textDecoration: 'none' };
+
+// Tappable actions (owner 2026-10-19: the emailed PDF must be clickable for a
+// customer who cannot open the estimate link). Plain anchors: Chromium's
+// page.pdf keeps each one as a PDF link annotation, so the buttons, phone and
+// email work inside a phone's PDF viewer as well as on screen.
+function mailtoHref(estimateNumber) {
+  const subject = estimateNumber ? `Estimate ${estimateNumber}` : 'My Waves estimate';
+  return `mailto:${WAVES_EMAIL}?subject=${encodeURIComponent(subject)}`;
+}
+
+function DocButton({ href, primary = false, children, testId }) {
+  return (
+    <a
+      href={href}
+      data-testid={testId}
+      style={{
+        display: 'inline-block',
+        padding: '7px 14px',
+        borderRadius: 8,
+        border: `1.5px solid ${NAVY}`,
+        background: primary ? NAVY : '#fff',
+        color: primary ? '#fff' : NAVY,
+        fontSize: 12,
+        fontWeight: 700,
+        textDecoration: 'none',
+        lineHeight: 1.3,
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+export function DocActions({ cta, authoredProposal, estimateUrl, estimateNumber }) {
+  const canSelfBook = !authoredProposal && cta.quoteRequired !== true && cta.reviewBeforeBooking !== true;
+  let primaryLabel = 'View estimate online';
+  if (cta.terminalState === 'accepted') primaryLabel = 'See your visit details';
+  else if (cta.terminalState === 'declined') primaryLabel = null;
+  else if (canSelfBook) primaryLabel = 'Accept & pick a start date';
+  return (
+    <div className="doc-keep" data-testid="doc-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+      {primaryLabel ? <DocButton href={estimateUrl} primary testId="doc-action-online">{primaryLabel}</DocButton> : null}
+      <DocButton href={WAVES_SUPPORT_PHONE_TEL} testId="doc-action-call">Call {WAVES_SUPPORT_PHONE_DISPLAY}</DocButton>
+      <DocButton href={mailtoHref(estimateNumber)} testId="doc-action-email">Email us</DocButton>
+    </div>
+  );
+}
 
 // Shared ET formatter (lib/timezone) — no parallel date utility here.
 function formatAcceptedAt(value) {
@@ -349,6 +399,7 @@ export default function EstimateProposalDocument({ data, token }) {
   const docTitle = authoredProposal
     ? (proposal.title || 'Commercial Service Proposal')
     : (isCommercial ? 'Commercial Service Estimate' : 'Service Estimate');
+  const validThroughText = fmtValidThrough(proposal.validThrough || estimate.expiresAt);
   const estimateNumber = estimate.slug
     || String(estimate.id || '').split('-')[0].toUpperCase()
     || '';
@@ -384,8 +435,12 @@ export default function EstimateProposalDocument({ data, token }) {
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
             <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
-            <div>{WAVES_SUPPORT_PHONE_DISPLAY} &middot; wavespestcontrol.com</div>
-            <div>contact@wavespestcontrol.com</div>
+            <div>
+              <a href={WAVES_SUPPORT_PHONE_TEL} style={HEADER_LINK}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
+              {' '}&middot;{' '}
+              <a href={WAVES_SITE_URL} style={HEADER_LINK}>wavespestcontrol.com</a>
+            </div>
+            <div><a href={`mailto:${WAVES_EMAIL}`} style={HEADER_LINK}>{WAVES_EMAIL}</a></div>
             <div>Licensed &amp; insured &middot; {WAVES_FL_LICENSE_LINE}</div>
           </div>
         </div>
@@ -413,11 +468,13 @@ export default function EstimateProposalDocument({ data, token }) {
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Estimate details</SectionHeader>
             <InfoRow label="Date">{fmtInstant(estimate.createdAt)}</InfoRow>
-            <InfoRow label="Valid through">{fmtValidThrough(proposal.validThrough || estimate.expiresAt) || '7 days after sending'}</InfoRow>
+            <InfoRow label="Valid through">{validThroughText || '7 days after sending'}</InfoRow>
             <InfoRow label="Prepared by">Waves Pest Control, LLC</InfoRow>
             {estimate.licenseNumber ? <InfoRow label="License">{estimate.licenseNumber}</InfoRow> : null}
           </div>
         </div>
+
+        <DocActions cta={cta} authoredProposal={authoredProposal} estimateUrl={estimateUrl} estimateNumber={estimateNumber} />
 
         {/* Property scope (slice 1A-i) — the estimator-captured facts the
             price was scoped against. Authored proposals only; absent →
@@ -701,11 +758,18 @@ export default function EstimateProposalDocument({ data, token }) {
             </p>
           ) : (
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              Open your live estimate at <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a> to
-              pick a start date and approve online — or call {WAVES_SUPPORT_PHONE_DISPLAY} and we&rsquo;ll
-              take care of it with you.
+              To go ahead, tap <strong>Accept &amp; pick a start date</strong> above, call{' '}
+              <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: NAVY }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>, or email{' '}
+              <a href={mailtoHref(estimateNumber)} style={{ color: NAVY }}>{WAVES_EMAIL}</a> &mdash; we&rsquo;ll
+              pick a start date with you. Your estimate is online at{' '}
+              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
             </p>
           )}
+          {!cta.terminalState && validThroughText ? (
+            <p data-testid="doc-valid-through-line" style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+              Price valid through {validThroughText}.
+            </p>
+          ) : null}
         </div>
 
         {/* Acceptance record (GATE_ESTIMATE_ACCEPTANCE_TERMS): only when the
