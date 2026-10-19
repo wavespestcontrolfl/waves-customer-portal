@@ -137,7 +137,13 @@ const NAME_PATTERNS = [/^public-/, /-public\.js$/, /webhook/i];
 // Auth applied to the whole router, the admin convention. A file with only
 // per-handler auth is a mixed router and stays in scope.
 const ROUTER_LEVEL_AUTH = /router\.use\(\s*[^)]*\b(?:adminAuthenticate|authenticate)\b/;
-const ROUTE_REGISTRATION = /router\.(?:get|post|put|patch|delete|all)\(/g;
+// `router.route('/x').get(…)` registers a handler as much as `router.get(…)`
+// does, and the ordering check below saw only the latter — so a mixed router
+// whose PUBLIC handler is registered that way before `router.use(authenticate)`
+// read as fully authenticated and left the scan (#6342 r23). No file under
+// `server/routes/` writes it today, so the scanned set does not move; it is the
+// classification that was wrong.
+const ROUTE_REGISTRATION = /router\.(?:route|get|post|put|patch|delete|all)\(/g;
 
 const stripComments = (source) => source
   .split('\n')
@@ -201,6 +207,53 @@ const DEFAULT_EXPORT = 'module.exports';
 // a timestamp-gated public route could ship undocumented (#6342 r17).
 const ENV_NAME_READERS = new Set(['gateEnvValue', 'gateEnvTimestamp']);
 const GATE_READERS_VIA = new Set(['call', 'apply']);
+// `['GATE_A', 'GATE_B'].every(gateEnvValue)` passes the reader as a CALLBACK and
+// puts the gate names in the receiver. Six live sites —
+// `scheduling/quality-alerts.js`, `scheduling/quality-after-change.js`,
+// `route-reorder.js` (twice), `geocoder-service-locations.js` — and the
+// identifier branch followed only mapped helpers, so every one of them read as
+// no gate at all (#6342 r23).
+const ITERATOR_CALLBACKS = new Set(['every', 'some', 'map', 'filter', 'forEach', 'find']);
+function readerAsCallback(node, readerAliases) {
+  const c = node.callee;
+  if (!c || (c.type !== 'MemberExpression' && c.type !== 'OptionalMemberExpression')) return null;
+  if (!ITERATOR_CALLBACKS.has(propertyName(c))) return null;
+  const args = node.arguments || [];
+  if (args.length !== 1 || args[0].type !== 'Identifier') return null;
+  const reader = readerAliases.get(args[0].name) || args[0].name;
+  return GATE_READERS.has(reader) ? { reader, receiver: c.object } : null;
+}
+
+// The receiver's elements as strings: an array literal, or a name bound to one
+// (`const repairGates = ['GATE_ROUTE_REORDER_REPAIR', …]` in
+// `route-reorder.js`). Returns null when any element is not statically known,
+// so the caller fails closed rather than reading a partial list as the whole.
+function callbackGateNames(receiver, arrayLookup) {
+  if (!receiver) return null;
+  if (receiver.type === 'ArrayExpression') {
+    const out = [];
+    for (const el of receiver.elements) {
+      const value = staticString(el);
+      if (value === null) return null;
+      out.push(value);
+    }
+    return out;
+  }
+  if (receiver.type === 'Identifier') return arrayLookup(receiver.name);
+  return null;
+}
+
+// NAME ⇒ the string elements of the array it is bound to, read textually like
+// the other local lookups in this file.
+function stringArrays(source) {
+  const map = new Map();
+  for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]/g)) {
+    const items = [...m[2].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)].map((q) => q[1] ?? q[2] ?? q[3]);
+    const bare = m[2].replace(/'[^']*'|"[^"]*"|`[^`]*`|[\s,]/g, '');
+    if (items.length && !bare && !map.has(m[1])) map.set(m[1], items);
+  }
+  return map;
+}
 
 // `isEnabled.call(null, 'someKey')` — the callee resolves to `call`, so the
 // reader branch never looked at the argument and the read counted as no gate
@@ -370,7 +423,17 @@ function gateBindings(source) {
   for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]*feature-gates)['"]\s*\)/g)) {
     moduleBindings.add(m[1]);
   }
-  for (const m of source.matchAll(/\{([^}]{0,400}?)\}\s*=\s*require\(/g)) {
+  // `const featureGates = require('../config/feature-gates')` and then
+  // `const { gateEnvValue } = featureGates` — live in `admin-protocols.js:38`
+  // and `admin-inventory.js:73`. Only a pattern assigned DIRECTLY from
+  // `require(…)` was collected, so those aliases were invisible to both
+  // walkers (#6342 r23). The right-hand side may be any module binding
+  // gathered above.
+  const MODULE_RE = moduleBindings.size ? [...moduleBindings].join('|') : null;
+  const destructured = MODULE_RE
+    ? new RegExp(`\\{([^}]{0,400}?)\\}\\s*=\\s*(?:require\\(|(?:${MODULE_RE})\\b)`, 'g')
+    : /\{([^}]{0,400}?)\}\s*=\s*require\(/g;
+  for (const m of source.matchAll(destructured)) {
     for (const binding of m[1].split(',')) {
       const [original, alias] = binding.split(':').map((x) => x.trim());
       const local = alias || original;
@@ -478,6 +541,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   // destructuring names, and consulting it eagerly for all 367 modules cost
   // 39 s for the one name in this codebase that needs it. Local declarations
   // are checked first, because a local binding shadows an import.
+  const helperArrays = stringArrays(source);
   let imported = null;
   const constValue = (name) => {
     if (consts.has(name)) return consts.get(name);
@@ -679,6 +743,24 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
           : ((c.type === 'MemberExpression' || c.type === 'OptionalMemberExpression')
             ? propertyName(c) : null));
       if (readerViaCallApply(c, readerAliases)) markUnreadableRead();
+      const asCallback = readerAsCallback(node, readerAliases);
+      if (asCallback) {
+        const names = callbackGateNames(asCallback.receiver, (n) => helperArrays.get(n));
+        if (!names) markUnreadableRead();
+        else {
+          const found = [];
+          let whole = true;
+          for (const value of names) {
+            const resolved = resolveGateArg(
+              { type: 'StringLiteral', value }, keys, constValue, asCallback.reader,
+            );
+            if (!resolved) { whole = false; break; }
+            for (const [gate] of resolved) found.push(gate);
+          }
+          if (whole) attribute(found);
+          else markUnreadableRead();
+        }
+      }
       const callee = readerAliases.get(rawCallee) || rawCallee;
       if (GATE_READERS.has(callee) && node.arguments.length) {
         const resolved = resolveGateArg(
@@ -900,12 +982,27 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   };
 
   const src = (node) => source.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 120);
+  const arrays = stringArrays(source);
 
   const visit = (node) => {
     if (!node || typeof node.type !== 'string') return;
     if (isCall(node)) {
       const viaCallApply = readerViaCallApply(node.callee, readerAliases);
       if (viaCallApply) unresolved.push(src(node));
+      const asCallback = readerAsCallback(node, readerAliases);
+      if (asCallback) {
+        const names = callbackGateNames(asCallback.receiver, (n) => arrays.get(n));
+        if (!names) unresolved.push(src(node));
+        else {
+          for (const value of names) {
+            const resolved = resolveGateArg(
+              { type: 'StringLiteral', value }, keys, (n) => idents.get(n), asCallback.reader,
+            );
+            if (resolved) for (const [gate, alias] of resolved) note(gate, alias);
+            else unresolved.push(src(node));
+          }
+        }
+      }
       const raw = calleeName(node.callee);
       const name = readerAliases.get(raw) || raw;
       // `techNotices.isEnabled()` is an unrelated method that happens to share
