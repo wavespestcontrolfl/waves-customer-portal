@@ -189,7 +189,8 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain(`${GLASS_COPY.ctaMicro} · ${RATE_REVIEW_TERMS_LINE}`);
     // Residential pest inclusions stack rides along.
     expect(text).toContain('Protected 4× a year — full perimeter, entry points, eaves & harborage zones, every visit');
-    expect(text).toContain('approve online');
+    expect(text).toContain('Accept & pick a start date');
+    expect(text).toContain('Price valid through');
     expect(text).not.toContain('What your commercial pest service includes');
   });
 
@@ -240,7 +241,30 @@ describe('EstimateProposalDocument', () => {
     const { container } = render(<EstimateProposalDocument data={accepted} token="tok-123" />);
     const text = container.textContent;
     expect(text).toContain('has been approved');
-    expect(text).not.toContain('approve online');
+    expect(text).not.toContain('Accept & pick a start date');
+    expect(text).not.toContain('Price valid through');
+    expect(container.querySelector('[data-testid="doc-action-online"]').textContent).toBe('See your visit details');
+  });
+
+  // Owner 2026-10-19: the emailed PDF must be clickable for a customer who
+  // cannot open the estimate link — every action is a real anchor, which
+  // Chromium's page.pdf keeps as a PDF link annotation.
+  it('renders tappable accept, call and email actions as real links', () => {
+    const { container } = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
+    const href = (id) => container.querySelector(`[data-testid="${id}"]`).getAttribute('href');
+    expect(href('doc-action-online')).toBe('https://portal.wavespestcontrol.com/estimate/tok-123');
+    expect(href('doc-action-call')).toBe('tel:+19412975749');
+    expect(href('doc-action-email')).toBe('mailto:contact@wavespestcontrol.com?subject=Estimate%20EST-2099-0001');
+  });
+
+  it('offers no accept button where the customer cannot self-book', () => {
+    const declined = { ...BASE_DATA, cta: { ...BASE_DATA.cta, terminalState: 'declined' } };
+    const { container: d } = render(<EstimateProposalDocument data={declined} token="tok-123" />);
+    expect(d.querySelector('[data-testid="doc-action-online"]')).toBeNull();
+    expect(d.querySelector('[data-testid="doc-action-call"]')).not.toBeNull();
+    const review = { ...BASE_DATA, cta: { ...BASE_DATA.cta, reviewBeforeBooking: true } };
+    const { container: r } = render(<EstimateProposalDocument data={review} token="tok-123" />);
+    expect(r.querySelector('[data-testid="doc-action-online"]').textContent).toBe('View estimate online');
   });
 
   it('resolves residential terms from the line services — lawn never claims pest callbacks', () => {
