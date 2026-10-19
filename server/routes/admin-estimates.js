@@ -289,7 +289,13 @@ function estimateSendableAmount(estimate = {}) {
 // is intentionally rejected for them. Use proposal-specific copy instead.
 const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement. Call (941) 297-5749 anytime.';
 
-function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false }) {
+// Both gates, read here so a gate-off send never loads the PDF module.
+function estimateEmailPdfOn() {
+  const featureGates = require('../config/feature-gates');
+  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
+}
+
+function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '' }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
     estimateData: estimate.estimate_data,
@@ -303,6 +309,9 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     next_step_summary: proposalMode
       ? PROPOSAL_NEXT_STEP_SUMMARY
       : 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
+    // Only present when the PDF copy rides along (GATE_ESTIMATE_EMAIL_PDF):
+    // an absent key renders no block, so a send without it is unchanged.
+    ...(pdfNote ? { estimate_pdf_note: pdfNote } : {}),
   };
 }
 
@@ -899,9 +908,15 @@ async function buildEstimateSendPreview(estimate) {
   let email = null;
   const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
   if (library?.activeVersion) {
+    // GATE_ESTIMATE_EMAIL_PDF: the reviewer sees the PDF line the customer
+    // gets when the copy is attached. The note is a payload variable, not
+    // template text, so the reviewed contentHash (a template-version hash)
+    // is unaffected; the messageVersion covers the previewed text, and the
+    // send re-runs this same builder, so a review and its send agree.
+    const pdfNote = !proposalMode && estimateEmailPdfOn() ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
     const rendered = EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
-      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
+      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote }),
     });
     email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion) };
   } else if (smtpFallbackAllowed()) {
@@ -928,7 +943,7 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdfNote = '', proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
@@ -942,7 +957,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         ...(versionId ? { versionId } : {}),
         ...(expectedContentHash ? { expectedContentHash } : {}),
         to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
@@ -3000,6 +3015,27 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             logger.error(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
           }
         }
+        // GATE_ESTIMATE_EMAIL_PDF: an ordinary estimate email carries the
+        // browser work-order document too, for customers who cannot open the
+        // link. The builder never throws and has no pdfkit fallback; a null
+        // sends the email exactly as before (no PDF, no note) and only adds a
+        // warning to the channel result. The same validThrough pin as the
+        // proposal path keeps the PDF's date equal to the link's.
+        let emailPdfAttachment = null;
+        let emailPdfExpected = false;
+        if (!proposalMode) {
+          emailPdfExpected = estimateEmailPdfOn();
+          if (emailPdfExpected) {
+            try {
+              emailPdfAttachment = await require('../services/pdf/estimate-doc-pdf')
+                .buildEstimateEmailPdfAttachment(freshEstimate, { validThrough: nextExpiresAt });
+            } catch (e) {
+              // The builder returns null on its own failures; this only guards
+              // a surprise so a PDF problem can never fail the email.
+              logger.warn(`[admin-estimates] estimate email PDF skipped for estimate ${estimate.id}: ${String(e?.message || e).slice(0, 200)}`);
+            }
+          }
+        }
         if (proposalPdfFailed) {
           // The proposal email + template promise an attached PDF, and the
           // public link doesn't expose it, so never send proposal copy with
@@ -3025,7 +3061,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
-            attachments: proposalAttachments,
+            attachments: emailPdfAttachment ? [emailPdfAttachment] : proposalAttachments,
+            ...(emailPdfAttachment ? { pdfNote: require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery } : {}),
             proposalMode,
             versionId: options.reviewedMessages?.email?.versionId || null,
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
@@ -3036,6 +3073,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           channels.email = result.ok
             ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
+          if (channels.email.ok && !proposalMode && emailPdfExpected) {
+            channels.email.pdfAttached = !!emailPdfAttachment;
+            if (!emailPdfAttachment) channels.email.warning = 'The PDF copy could not be attached; the email went out with the link only.';
+          }
           if (result.ok && result.providerAccepted) {
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);

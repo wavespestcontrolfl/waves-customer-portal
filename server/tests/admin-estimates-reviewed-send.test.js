@@ -73,6 +73,8 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../services/triage-auto-resolve', () => ({ deliveredEstimateScope: jest.fn(() => ({ lines: [] })) }));
 jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   buildEstimateProposalEmailAttachmentPreferred: jest.fn(async () => ({ filename: 'synthetic-proposal.pdf', content: 'c3ludGhldGlj', type: 'application/pdf' })),
+  buildEstimateEmailPdfAttachment: jest.fn(async () => null),
+  ESTIMATE_EMAIL_PDF_NOTES: { delivery: 'Synthetic delivery PDF note.', followUp: 'Synthetic follow-up PDF note.' },
 }));
 jest.mock('../routes/estimate-public', () => ({
   acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn(),
@@ -1792,5 +1794,127 @@ describe('impossible US phone is refused before any provider call', () => {
     row.customer_phone = '+12035550123';
     const ok = await invoke('/:id/send-preview', 'get');
     expect(ok.body.smsBlockReason).toBeNull();
+  });
+});
+
+
+describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', () => {
+  const featureGates = require('../config/feature-gates');
+  const docPdf = require('../services/pdf/estimate-doc-pdf');
+  const PDF = { filename: 'Waves-Estimate-EST-2026-0001.pdf', content: 'c3ludGhldGlj', type: 'application/pdf', disposition: 'attachment' };
+  const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && (name === 'estimateEmailPdf' || name === 'estimateDocPdf'));
+  let originalRender;
+  beforeEach(() => {
+    originalRender = email.renderTemplate.getMockImplementation();
+    // The preview text carries the note, like the real template does.
+    email.renderTemplate.mockImplementation(({ payload }) => ({
+      subject: 'Synthetic estimate message',
+      text: `${payload.price_summary}\n${payload.estimate_url}${payload.estimate_pdf_note ? `\n${payload.estimate_pdf_note}` : ''}`,
+      html: '<p>Synthetic estimate message</p>',
+    }));
+    docPdf.buildEstimateEmailPdfAttachment.mockReset();
+    docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(PDF);
+  });
+  afterEach(() => {
+    featureGates.isEnabled.mockImplementation(() => false);
+    email.renderTemplate.mockImplementation(originalRender);
+  });
+
+  test('gate on: the email carries the PDF and the note, and the channel says so', async () => {
+    setGates(true);
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+    expect(result.channels.email.warning).toBeUndefined();
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.templateKey).toBe('estimate.delivery');
+    expect(sent.attachments).toEqual([PDF]);
+    expect(sent.payload.estimate_pdf_note).toBe('Synthetic delivery PDF note.');
+    // The document advertises the same valid-through date as the link.
+    expect(docPdf.buildEstimateEmailPdfAttachment).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), { validThrough: expect.any(Date) });
+  });
+
+  test('gate off: nothing is built, no note, no attachment, and the channel result is unchanged', async () => {
+    setGates(false);
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.attachments).toEqual([]);
+    expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+    expect(result.channels.email).not.toHaveProperty('pdfAttached');
+    expect(result.channels.email.warning).toBeUndefined();
+  });
+
+  test('the PDF gate alone is not enough: the browser document gate must be on too', async () => {
+    featureGates.isEnabled.mockImplementation((name) => name === 'estimateEmailPdf');
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+    expect(email.sendTemplate.mock.calls[0][0].payload).not.toHaveProperty('estimate_pdf_note');
+  });
+
+  test.each([
+    ['returns nothing', () => docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(null)],
+    ['throws', () => docPdf.buildEstimateEmailPdfAttachment.mockRejectedValue(new Error('browser down'))],
+  ])('a render that %s still sends the email as today, with a warning', async (_label, arrange) => {
+    setGates(true);
+    arrange();
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: false, warning: expect.stringMatching(/PDF copy could not be attached/) });
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.attachments).toEqual([]);
+    expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+  });
+
+  test('a commercial proposal keeps its own PDF path and never gets the estimate copy', async () => {
+    setGates(true);
+    row.estimate_data = { proposal: { enabled: true, validThrough: '2099-12-21',
+      buildings: [{ name: 'Synthetic property', lineItems: [
+        { id: 'application', description: 'Synthetic application', quantity: 1, unit: 'acre', unitPrice: 100, frequency: 'one_time' },
+      ] }] } };
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(docPdf.buildEstimateProposalEmailAttachmentPreferred).toHaveBeenCalledTimes(1);
+    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+    expect(email.sendTemplate.mock.calls[0][0].payload).not.toHaveProperty('estimate_pdf_note');
+  });
+
+  test('reviewed send: the preview shows the note, the same review sends, and the reviewed template hash is untouched', async () => {
+    setGates(true);
+    row.status = 'draft';
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.email.text).toContain('Synthetic delivery PDF note.');
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.attachments).toEqual([PDF]);
+    expect(sent.expectedContentHash).toBe(preview.body.messages.email.contentHash);
+  });
+
+  test('reviewed send: the review of a message with no PDF line goes stale when the gate comes on', async () => {
+    setGates(false);
+    row.status = 'draft';
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.email.text).not.toContain('Synthetic delivery PDF note.');
+    setGates(true);
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.code).toBe('ESTIMATE_REVIEW_STALE');
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('reviewed send: a PDF that fails to render still sends the reviewed email without the file', async () => {
+    setGates(true);
+    row.status = 'draft';
+    const preview = await invoke('/:id/send-preview', 'get');
+    docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(null);
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(email.sendTemplate.mock.calls[0][0].attachments).toEqual([]);
+    expect(email.sendTemplate.mock.calls[0][0].expectedContentHash).toBe(preview.body.messages.email.contentHash);
   });
 });

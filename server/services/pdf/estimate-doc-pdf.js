@@ -186,6 +186,68 @@ async function buildEstimateDocEmailAttachment(estimate, { validThrough = null }
   };
 }
 
+// ── Estimate PDF on the customer email (owner ask 2026-10-19) ──────────────
+// "Attach a pdf version of the estimates to all outgoing emails for customers
+// who can't open the estimate", and no glass look. So this is the browser
+// work-order document ONLY: there is no pdfkit fallback (that is the
+// commercial "Proposal" look), and a failure returns null — the email then
+// goes out as it always did, without the PDF or the note about it.
+// The one line under the button when the PDF rides along. It is a template
+// variable (`estimate_pdf_note`) so a send with no PDF drops the block and
+// stays byte-identical to today.
+const ESTIMATE_EMAIL_PDF_NOTES = Object.freeze({
+  delivery: "Can't open the link? A PDF copy of this estimate is attached. To go ahead, reply to this email or call (941) 297-5749 and we'll set your first visit.",
+  followUp: "Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 to get started.",
+});
+const EMAIL_PDF_BUSY_ATTEMPTS = 3;
+const EMAIL_PDF_BUSY_DELAY_MS = 8000;
+
+function estimateEmailPdfEnabled() {
+  const featureGates = require('../../config/feature-gates');
+  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
+}
+
+// No customer name in the file name: the number the estimate page prints
+// (estimate_slug), else a short id.
+function estimateEmailPdfFilename(estimate) {
+  const slug = String(estimate?.estimate_slug || estimate?.slug || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+  const fallback = String(estimate?.id || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+  return `Waves-Estimate-${slug || fallback || 'copy'}.pdf`;
+}
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Returns a SendGrid attachment, or null. Never throws.
+async function buildEstimateEmailPdfAttachment(estimate, { validThrough = null, render = null, sleep = null, attempts = EMAIL_PDF_BUSY_ATTEMPTS, delayMs = EMAIL_PDF_BUSY_DELAY_MS } = {}) {
+  try {
+    if (!estimateEmailPdfEnabled()) return null;
+    const doRender = render || renderEstimateDocumentPdf;
+    const wait = sleep || defaultSleep;
+    let buffer = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        buffer = await doRender(estimate, { validThrough });
+        break;
+      } catch (e) {
+        if (e?.code !== 'estimate_doc_render_busy' || attempt >= attempts) throw e;
+        await wait(delayMs);
+      }
+    }
+    if (!buffer || !buffer.length) return null;
+    return {
+      filename: estimateEmailPdfFilename(estimate),
+      content: Buffer.from(buffer).toString('base64'),
+      type: 'application/pdf',
+      disposition: 'attachment',
+    };
+  } catch (e) {
+    try {
+      logger.warn(`[estimate-doc-pdf] email PDF skipped for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
+    } catch { /* logging must not turn a skipped PDF into a failed send */ }
+    return null;
+  }
+}
+
 // Preferred attachment entry point for the send path: browser document when
 // the gate is on, pdfkit otherwise or on ANY render failure. Throwing only
 // when BOTH generators fail preserves the send path's "no proposal email
@@ -213,5 +275,9 @@ module.exports = {
   renderEstimateDocumentPdf,
   buildEstimateDocEmailAttachment,
   buildEstimateProposalEmailAttachmentPreferred,
+  buildEstimateEmailPdfAttachment,
+  estimateEmailPdfEnabled,
+  ESTIMATE_EMAIL_PDF_NOTES,
+  estimateEmailPdfFilename,
   sanitizeRenderError,
 };

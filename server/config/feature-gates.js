@@ -2940,6 +2940,17 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
   estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
 
+  // Estimate PDF on the email (owner ask 2026-10-19: "attach a pdf version of
+  // the estimates to all outgoing emails for customers who can't open the
+  // estimate"). An open-estimate email (delivery, follow-ups, engagement,
+  // extension notices) carries the browser-rendered work-order document as
+  // a PDF attachment plus a one-line note under the button. Needs
+  // GATE_ESTIMATE_DOC_PDF too: the attachment is the browser document only,
+  // never the pdfkit proposal. A render failure sends the email as before.
+  // Off or unset in prod: every estimate email is byte-identical to today.
+  // Kill switch: unset GATE_ESTIMATE_EMAIL_PDF.
+  estimateEmailPdf: isProd ? process.env.GATE_ESTIMATE_EMAIL_PDF === 'true' : true,
+
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
   // renders a one-line authorization + inline "View terms" drawer directly
   // above Accept (same steps, no extra page) and the accept route records

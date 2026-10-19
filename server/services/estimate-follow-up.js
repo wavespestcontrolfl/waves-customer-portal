@@ -36,6 +36,7 @@ const {
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
+const { openEstimateEmailPdf } = require("./estimate-email-pdf");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -536,10 +537,15 @@ async function sendDualChannel(est, { sms, email }) {
     const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
       + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
+      // GATE_ESTIMATE_EMAIL_PDF: an allowlisted open-estimate email also
+      // carries the PDF copy plus its one-line note. Empty (gate off, other
+      // template, estimate no longer open, render failed) = sent as before.
+      const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey });
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         to: est.customer_email,
-        payload: await withFollowupPropertyRow(est, email.payload || {}),
+        payload: await withFollowupPropertyRow(est, { ...(email.payload || {}), ...pdfCopy.payload }),
+        ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,

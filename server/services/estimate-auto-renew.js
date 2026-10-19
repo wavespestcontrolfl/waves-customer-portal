@@ -201,10 +201,17 @@ const EstimateAutoRenew = {
                   }
 
                   if (!sentWithTemplateLibrary) {
+                    // GATE_ESTIMATE_EMAIL_PDF: the PDF copy rides along on this
+                    // direct send (the live automation executor path above
+                    // sends without it). Empty = as before.
+                    const pdfCopy = await require('./estimate-email-pdf').openEstimateEmailPdf({
+                      estimateId: est.id, templateKey: 'estimate.extension_notice', validThrough: newExpiry,
+                    });
                     const result = await EmailTemplateLibrary.sendTemplate({
                       templateKey: 'estimate.extension_notice',
                       to: est.customer_email,
-                      payload: extensionPayload,
+                      payload: { ...extensionPayload, ...pdfCopy.payload },
+                      ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
                       recipientType: est.customer_id ? 'customer' : 'lead',
                       recipientId: est.customer_id || null,
                       triggerEventId: `estimate_auto_renew:${est.id}`,
