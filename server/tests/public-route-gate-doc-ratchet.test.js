@@ -166,11 +166,21 @@ function propertyName(node) {
 
 // The string an argument IS, when that is statically knowable. Separates the
 // two outcomes `resolveGateArg` returns null for: an expression this resolver
-// cannot decode (opaque, and reported), and a plain string that decodes fine
-// and simply is not a gate key — `isEnabled('emailTemplateAutomations')` in
-// `admin-email-templates.js`, whose key the table does not define. Treating
-// the second as unreadable fails this test on code it has already judged
-// correctly (r10's `GATE_UUID_ARRAY`, r13's error codes: a name is not a gate).
+// cannot decode, and a plain string that decodes fine and simply is not a gate
+// key — `isEnabled('emailTemplateAutomations')` in `admin-email-templates.js`,
+// whose key the table does not define (its canonical reader there is
+// `emailTemplateAutomationsMode()`). Treating that as unreadable fails this
+// test on code it has already judged correctly (r10's `GATE_UUID_ARRAY`, r13's
+// error codes: a name is not a gate).
+//
+// Used by the HELPER walker only, which is where that live read is, and
+// deliberately NOT by the route walker. I generalised it to both in r16 for
+// symmetry; the demonstrated requirement was one half, and widening it opened
+// a hole — a key the table does not define because `keyToGate` reads the table
+// by regex (`key: SOME_CONSTANT` names no `GATE_*`) then read silently in a
+// public route (#6342 r17). A public route reading an unknown key is worth
+// failing on; a pre-existing helper read of one is not. Resolving the table
+// STRUCTURALLY is what removes the difference, and that is decision 2.
 function staticString(node) {
   if (!node) return null;
   if (node.type === 'StringLiteral') return node.value;
@@ -184,6 +194,13 @@ function staticString(node) {
 // whose body this resolver indexed, so a route calling the imported name
 // matched nothing and its gate read as NO gate (#6342 r16).
 const DEFAULT_EXPORT = 'module.exports';
+
+// The readers whose argument is the `GATE_*` env NAME rather than a feature
+// key. `gateEnvTimestamp` is exported beside `gateEnvValue` and read in eight
+// services for activation-time guards, and this test knew only two readers, so
+// a timestamp-gated public route could ship undocumented (#6342 r17).
+const ENV_NAME_READERS = new Set(['gateEnvValue', 'gateEnvTimestamp']);
+const GATE_READERS = new Set(['isEnabled', ...ENV_NAME_READERS]);
 
 // key ⇒ EVERY gate its line names, in any shape the table uses:
 // `key: process.env.GATE_X === 'true'`, `key: gateEnvValue('GATE_X')`, the
@@ -243,7 +260,7 @@ function resolveGateArg(node, keys, lookup, reader = 'isEnabled', propLookup = n
   // helper body (#6342 r14), which is the r10 consolidation applied to one of
   // its two call sites.
   const fromString = (value) => {
-    if (reader === 'gateEnvValue') {
+    if (ENV_NAME_READERS.has(reader)) {
       return /^GATE_[A-Z0-9_]+$/.test(value) ? [[value, value]] : null;
     }
     const gates = keys.get(value);
@@ -332,7 +349,7 @@ function importedGateBindings(source) {
       const [original, alias] = binding.split(':').map((x) => x.trim());
       const local = alias || original;
       if (!/^[A-Za-z_$][\w$]*$/.test(local || '')) continue;
-      if (original === 'isEnabled' || original === 'gateEnvValue') readerAliases.set(local, original);
+      if (GATE_READERS.has(original)) readerAliases.set(local, original);
       if (original === 'gates') gatesBindings.add(local);
     }
   }
@@ -510,6 +527,19 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   // is enough to be gated by it; a reference that is never invoked
   // over-attributes, which costs a baseline entry, and following calls only
   // loses the gate.
+  // A CALL at module scope has no enclosing function either, and `noteRef`
+  // dropped it, so a module whose require-time work is `initialize()` — the
+  // gate read one hop inside a named function invoked at top level —
+  // contributed nothing, the same fail-open r14 closed for a read written
+  // directly at module scope (#6342 r17). Folded into `moduleGates` after the
+  // fixed point, when the callee's own gates are known.
+  //
+  // CALLS only. Collecting every module-scope reference, as the first cut did,
+  // counts `const { gatedHelper } = require('./x')` as a require-time read and
+  // attributed 111 more gates across 49 files to files that merely IMPORT a
+  // gated helper — over-attribution on the scale that makes a baseline
+  // meaningless. Importing a gated function is not calling it.
+  const moduleRefs = new Set();
   const noteRef = (ref) => {
     if (!ref || !stack.length) return;
     for (const name of stack) {
@@ -561,6 +591,29 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
         if (gates) attribute(gates);
         else markUnreadableRead();
       }
+      // `process.env.GATE_X` and `process.env['GATE_X']` already reached the
+      // Identifier and StringLiteral branches above; `` process.env[`GATE_X`] ``
+      // reached neither, so a backtick read in a helper body was no gate at all
+      // (#6342 r17).
+      //
+      // The gate name only. A COMPUTED `process.env[expr]` is left alone here,
+      // against the suggestion that came with the finding, because in a helper
+      // body that shape is a generic env accessor whose name belongs to the
+      // caller — `const n = Number(process.env[name])`
+      // (`call-recording-processor.js`), and every reader inside
+      // `config/feature-gates.js` itself. Marking it unreadable made 27 helpers
+      // in the gates module opaque, plus `call-recording-processor.js` and
+      // `photo-text-triage.js`, and each one makes every route that calls it
+      // report a read this resolver had already resolved by name at the call
+      // site: r10's 273-line cascade again. The route walker still reports the
+      // computed form, where no such accessor lives.
+      const isProcessEnv = (obj && (obj.type === 'MemberExpression' || obj.type === 'OptionalMemberExpression')
+        && obj.object && obj.object.type === 'Identifier' && obj.object.name === 'process'
+        && propertyName(obj) === 'env');
+      if (isProcessEnv && prop !== null && /^GATE_[A-Z0-9_]+$/.test(prop)) attribute([prop]);
+    }
+    if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression') && !stack.length) {
+      if (node.callee && node.callee.type === 'Identifier') moduleRefs.add(node.callee.name);
     }
     if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
       // `featureGates.isEnabled('treatmentZoneMap')` is the same read as the
@@ -575,7 +628,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
           : ((c.type === 'MemberExpression' || c.type === 'OptionalMemberExpression')
             ? propertyName(c) : null));
       const callee = readerAliases.get(rawCallee) || rawCallee;
-      if ((callee === 'isEnabled' || callee === 'gateEnvValue') && node.arguments.length) {
+      if (GATE_READERS.has(callee) && node.arguments.length) {
         const resolved = resolveGateArg(
           node.arguments[0], keys, constValue, callee,
           (prop) => [...(propStrings.get(prop) || [])],
@@ -593,7 +646,15 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     // fixed point already there rather than a second lookup path (#6342 r16).
     if (node.type === 'AssignmentExpression' && node.left
       && (node.left.type === 'MemberExpression') && node.left.object) {
-      const target = node.left.object.type === 'Identifier' ? node.left.object.name : null;
+      // `module.exports.publicGuard = internalGate` is a nested member, so the
+      // object is not an Identifier and this branch skipped it — the live form
+      // in `estimate-recommendations.js` (`sealRecommendationsForSend =
+      // sealForSend`) and `invoices.js`, and half of r16's own fix (#6342 r17).
+      // `module.exports.<name>` is read as `exports.<name>`, which it is.
+      const obj = node.left.object;
+      const target = obj.type === 'Identifier' ? obj.name
+        : (obj.type === 'MemberExpression' && obj.object && obj.object.type === 'Identifier'
+          && obj.object.name === 'module' && propertyName(obj) === 'exports' ? 'exports' : null);
       const slot = propertyName(node.left);
       const right = node.right;
       if (target === 'module' && slot === 'exports') {
@@ -655,6 +716,36 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
         for (const g of gates) if (!prev.includes(g)) { prev.push(g); changed = true; }
       }
     }
+  }
+  // After the fixed point: the gates a module-scope call resolves to belong to
+  // any file that requires this module. A BARE call only — `initialize()`, not
+  // `obj.method()`: both produced the same 30 entries here, so the narrower
+  // rule is the one to keep, and it does not read `router.get(…)` as a call to
+  // a helper named `get`.
+  //
+  // "Module scope" is this walker's own sense of it: not inside a NAMED
+  // function. That includes a call inside an anonymous route handler, which is
+  // per-request, not require-time — an approximation inherited from r14, which
+  // attributes a direct read in the same position the same way. It is where all
+  // 30 of this round's new entries come from (`estimate-public.js` ⇒
+  // `public-quote.js` and the like), 642 ⇒ 672 gates over the same 47 files.
+  // Each is a gate genuinely read by code in that file's graph; the widening is
+  // 4.7%, against the 2.7x that made a second module hop unacceptable in r11.
+  //
+  // GATES, not opacity, and that is a measured limit rather than an oversight.
+  // `opaque` does not record WHY a name is in it, and r16 established that its
+  // two causes differ: an unreadable READ is a gate this resolver missed, while
+  // a gate-SHAPED name whose value it cannot read (`const GATE_RETIRE = {…}`)
+  // is usually not a gate at all. Propagating opacity through a top-level call
+  // reported `admin-neighborhood-access.js`, `admin-drafts.js` and
+  // `admin-pricing-config.js` on exactly the constants r16 measured and
+  // excluded. So the residual hole, stated rather than papered over: an
+  // unreadable read reached ONLY through a named function called at require
+  // time is still silent. A read written at module scope is reported (r16), and
+  // separating the two causes of opacity is the kind of thing one pass over the
+  // module graph gets for free — decision 2.
+  for (const ref of moduleRefs) {
+    for (const gate of map.get(ref) || []) moduleGates.add(gate);
   }
   return {
     gates: map, opaque, calls, moduleGates: [...moduleGates],
@@ -760,13 +851,11 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
       // judgement the helper half makes — otherwise one expression is a
       // failure here and silence there, which is how r10 and r15 happened.
       if (name === 'isEnabled' && node.arguments.length) {
-        if (!resolveArg(node.arguments[0]) && staticString(node.arguments[0]) === null) {
-          unresolved.push(src(node));
-        }
-      } else if (name === 'gateEnvValue') {
-        const resolved = resolveGateArg(node.arguments[0], keys, (n) => idents.get(n), 'gateEnvValue');
+        if (!resolveArg(node.arguments[0])) unresolved.push(src(node));
+      } else if (ENV_NAME_READERS.has(name)) {
+        const resolved = resolveGateArg(node.arguments[0], keys, (n) => idents.get(n), name);
         if (resolved) for (const [gate, alias] of resolved) note(gate, alias);
-        else if (staticString(node.arguments[0]) === null) unresolved.push(src(node));
+        else unresolved.push(src(node));
       } else if (name && (helpers.has(name) || opaqueHelpers.has(name))) {
         for (const g of helpers.get(name) || []) note(g, name);
         // The helper reads a gate this resolver could not decode, so whatever
