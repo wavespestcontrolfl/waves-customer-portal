@@ -325,31 +325,31 @@ execute the workflows they describe.
   the presenting pest (`applyRecurringIntentDefault`: ambiguous cadence →
   Quarterly, upgrade-only backstop, explicit "just one-time" keeps the
   single service, general-pest only); only `scheduling.status ===
-  'confirmed'` becomes an appointment or a card's "Book it"; extraction
-  schema changes are additive-only (both schema JSONs + normalizer +
-  persisted enum + `SCHEMA_VERSION` bump, never in `required`, new fields
-  join the replay `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
+  'confirmed'` becomes an appointment; extraction schema changes are
+  additive-only (both schema JSONs + normalizer + persisted enum +
+  `SCHEMA_VERSION` bump, never in `required`, new fields join the replay
+  `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
   `ai_extraction_prompt_version` hash, resetting the promotion cohort so
   older-contract shadow rows never count; downstream composers read v2 + raw
   transcript, never v1); AV counts only `hasReplacedComponents` as a
   correction, accepts only `inServiceArea === true`, holds when unreachable,
   treats a `PREMISE` missing only `subpremise` as a building without its
   unit (`avMissingUnitOnly` — hold `missing_unit_number`, never street
-  recovery); a card is suppressed only by `callMakesNoServiceAsk()` (a
-  `vendor_logged` label is not it and drops a real service ask) and binds to
-  the hold's `held_at`, not the call id; an owed ask auto-closes only on
-  evidence answering THAT ask, never every open card because one later event
-  was classified (`missing_unit_number` is human-verdict-only, in
-  `triage-auto-resolve.js`); auto-routing stays confidence-gated (address
-  validates AND service maps AND no HOA/commercial flag, else triage — the
-  ONE exception (owner 2026-09-24): the grounded agent commitment behind
-  `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`
-  (Waves personnel dictating the booking) demotes
-  `commercial_requires_quote` to advisory, an agreed price never does, and
-  confirmed lender/realtor/buyer WDO INSPECTION callers are authorized,
-  never treatment (2026-09-26)), inserts keep idempotency keys, TCPA consent
-  precedes any SMS; hard-bounced call-captured emails are re-verified
-  against the recording and surfaced for owner read-back, never
+  recovery); the address and authorization cards drop only on
+  `callMakesNoServiceAsk()`, never a call-nature label like `vendor_logged`;
+  a card binds to the hold's `held_at`, not the call id; an owed ask
+  auto-closes only on evidence answering THAT ask, never every open card
+  because one later event was classified (`missing_unit_number` is
+  human-verdict-only, in `triage-auto-resolve.js`); auto-routing stays
+  confidence-gated (address validates AND service maps AND no HOA/commercial
+  flag, else triage — the ONE exception (owner 2026-09-24): the grounded
+  agent commitment behind `GATE_CALL_AGENT_COMMIT_BOOKING` +
+  `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS` (Waves personnel dictating the
+  booking) demotes `commercial_requires_quote` to advisory, an agreed price
+  never does, and confirmed lender/realtor/buyer WDO INSPECTION callers are
+  authorized, never treatment (2026-09-26)), inserts keep idempotency keys,
+  TCPA consent precedes any SMS; hard-bounced call-captured emails are
+  re-verified against the recording and surfaced for owner read-back, never
   auto-corrected or resent.
 - **Estimator engine authority.** `generateEstimate` is the sole dollar
   authority — LLM output proposes intent only and never reaches

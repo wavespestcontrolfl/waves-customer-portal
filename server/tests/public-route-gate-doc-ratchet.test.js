@@ -10,12 +10,18 @@
  * rule is pinned here instead of restated in prose.
  *
  * A route rarely spells the env name: it calls `isEnabled('leadAlertCall')`,
- * `gateEnvValue('GATE_STOPS_AWAY')`, `cfg.gates.payPageFaq`, or a `…Live()`
- * helper, and the `GATE_*` literal appears only in a comment. All five forms are
- * resolved through `server/config/feature-gates.js` (its `key: process.env.GATE_*`
- * table and its single-expression helpers); miss one and an undocumented gate
- * reads as no gate at all, which is how `GATE_STOPS_AWAY` sat green here through
- * one round of review.
+ * `gateEnvValue('GATE_STOPS_AWAY')`, `cfg.gates.payPageFaq`, or a `…Live()` /
+ * `is…Enabled()` helper, and the `GATE_*` literal appears only in a comment. Miss
+ * one form and an undocumented gate reads as NO gate at all and this ratchet
+ * passes on the diff it exists to fail — which is how `GATE_STOPS_AWAY` sat green
+ * here through one round of review. So resolution is deliberately broad:
+ *   - the `feature-gates.js` key table takes any shape that names a gate on the
+ *     key's line, not just `key: process.env.GATE_X` — `gateEnvValue('GATE_X')`
+ *     and the env-default ternary (`askWaves: isProd ? … : true`) are most of it;
+ *   - helpers are parsed from `feature-gates.js` AND from the modules each route
+ *     requires, one level deep, so a wrapper that lives elsewhere still resolves
+ *     (`isVoiceLatePaymentEnabled` in `services/collections/outbound-voice/gates.js`,
+ *     read by `collections-voice-webhook.js`).
  *
  * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
  * in the contract, not in this route's own entry, so adding an
@@ -36,10 +42,13 @@
  * workers). Scanning a non-public file costs only a baseline entry.
  *
  * fixtures/public-route-undocumented-gates.json is an upper bound per file: a
- * file may not gain an undocumented gate, and a new file may not have one.
- * Documenting a gate lets its entry go, so a contract update in another branch
- * never has to touch the baseline. Comment lines are not reads. Deterministic,
- * filesystem only, no DB.
+ * file may not gain an undocumented gate, and a new file may not have one. Every
+ * entry must still be EARNED — the gate still read by that file and still absent
+ * from the contract — or the test fails asking for the entry to go. Without that,
+ * documenting a gate would leave a stale exemption behind that silently
+ * re-whitelists the same gate if its contract line is ever deleted. The cost is
+ * that documenting a gate also means deleting its baseline line, in the same PR.
+ * Comment lines are not reads. Deterministic, filesystem only, no DB.
  *
  * This covers the gate half only. A payload change (#6299) and a brand-new
  * public route stay the prose rule's: both are P0 whether or not this is green.
@@ -60,11 +69,14 @@ const stripComments = (source) => source
   .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
   .join('\n');
 
-// `key: process.env.GATE_X === 'true'` → key ⇒ GATE_X
+// key ⇒ the gate its line names, in any shape the table uses:
+// `key: process.env.GATE_X === 'true'`, `key: gateEnvValue('GATE_X')`, and the
+// env-default ternary `key: isProd ? process.env.GATE_X === 'true' : true`.
 function keyToGate(gatesSource) {
   const map = new Map();
-  for (const m of gatesSource.matchAll(/^\s*([a-zA-Z0-9_]+)\s*:\s*process\.env\.(GATE_[A-Z0-9_]+)/gm)) {
-    map.set(m[1], m[2]);
+  for (const m of gatesSource.matchAll(/^\s*([a-zA-Z0-9_]+)\s*:\s*(.*GATE_[A-Z0-9_]+.*)$/gm)) {
+    const gate = m[2].match(/GATE_[A-Z0-9_]+/);
+    if (gate && !map.has(m[1])) map.set(m[1], gate[0]);
   }
   return map;
 }
@@ -101,6 +113,22 @@ function gatesUsedBy(source, keys, helpers) {
   return used;
 }
 
+// The local modules a route requires, resolved to real paths under server/, so a
+// gate wrapper defined outside feature-gates.js still resolves.
+function requiredLocalModules(routeFile, code) {
+  const out = [];
+  for (const m of code.matchAll(/require\(\s*'(\.[^']+)'\s*\)/g)) {
+    const base = path.resolve(path.dirname(routeFile), m[1]);
+    for (const candidate of [base, `${base}.js`, path.join(base, 'index.js')]) {
+      if (candidate.startsWith(SERVER_ROOT) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        out.push(candidate);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 function publicRouteFiles() {
   return fs.readdirSync(ROUTES_DIR)
     .filter((f) => f.endsWith('.js') && !f.includes('.test.'))
@@ -133,9 +161,22 @@ test('no public route file gains a gate the public-route contract does not name'
   expect(helpers.size).toBeGreaterThan(100);
 
   const added = [];
+  const stale = [];
   for (const file of publicRouteFiles()) {
-    const used = gatesUsedBy(fs.readFileSync(path.join(ROUTES_DIR, file), 'utf8'), keys, helpers);
+    const routePath = path.join(ROUTES_DIR, file);
+    const source = fs.readFileSync(routePath, 'utf8');
+    const reachable = new Map(helpers);
+    for (const mod of requiredLocalModules(routePath, stripComments(source))) {
+      for (const [fn, gates] of helperToGates(stripComments(fs.readFileSync(mod, 'utf8')), keys)) {
+        if (!reachable.has(fn)) reachable.set(fn, gates);
+      }
+    }
+    const used = gatesUsedBy(source, keys, reachable);
     const allowed = new Set(baseline[file] || []);
+    for (const gate of allowed) {
+      if (!used.has(gate)) stale.push(`${file}: ${gate} is no longer read there — drop the baseline entry`);
+      else if (documentsGate(doc, gate, used.get(gate))) stale.push(`${file}: ${gate} is documented now — drop the baseline entry`);
+    }
     for (const [gate, alias] of used) {
       if (documentsGate(doc, gate, alias)) continue;
       if (allowed.has(gate)) continue;
@@ -145,5 +186,11 @@ test('no public route file gains a gate the public-route contract does not name'
 
   expect(added.length
     ? `Document the gate's on/off behavior in that route's entry in docs/public-route-contracts.md in the same PR (AGENTS.md "Public route surface" — undocumented is P0):\n  ${added.sort().join('\n  ')}`
+    : '').toBe('');
+
+  // A baseline entry that is no longer earned is a standing exemption; it goes
+  // in the PR that earned its removal, so the floor can only tighten.
+  expect(stale.length
+    ? `Stale entries in ${path.basename(BASELINE_PATH)} — remove them in this PR:\n  ${stale.sort().join('\n  ')}`
     : '').toBe('');
 });
