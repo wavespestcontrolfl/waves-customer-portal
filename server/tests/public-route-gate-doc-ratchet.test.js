@@ -112,9 +112,12 @@ function publicRouteFiles() {
     .sort();
 }
 
-// Named in the contract under either the env name or the alias the route wrote
-// — the looseness the header records.
-const documentsGate = (doc, gate, alias) => doc.includes(gate) || doc.includes(alias);
+// Named in the contract under the env name, or under the alias the route wrote
+// AS INLINE CODE — bare prose must not count, so a future single-word key could
+// not be satisfied by an unrelated sentence. Hardening, not a fix: every gate
+// counted as documented today matches on its `GATE_*` name, and no alias in
+// `feature-gates.js` is a bare prose word, so this flips nothing now (#6342).
+const documentsGate = (doc, gate, alias) => doc.includes(gate) || doc.includes(`\`${alias}\``);
 
 test('no public route file gains a gate the public-route contract does not name', () => {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
