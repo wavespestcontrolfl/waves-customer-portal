@@ -300,6 +300,9 @@
     "GATE_CANCEL_FLOW_V2",
     "GATE_PREPAY_MINT_PRICE_HOLD"
   ],
+  "badges.js": [
+    "GATE_APP_PROPERTY_SCOPE"
+  ],
   "booking.js": [
     "GATE_ADMIN_ARRIVAL_WINDOWS",
     "GATE_AUTO_WAVEGUARD_TIER",
@@ -325,6 +328,9 @@
   ],
   "collections-voice-webhook.js": [
     "GATE_DUNNING_SPACING_SHADOW"
+  ],
+  "documents.js": [
+    "GATE_APP_PROPERTY_SCOPE"
   ],
   "estimate-public.js": [
     "GATE_ADMIN_ARRIVAL_WINDOWS",

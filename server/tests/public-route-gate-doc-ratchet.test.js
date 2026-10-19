@@ -487,6 +487,19 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
 
   const src = (node) => source.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 120);
 
+  // `a.b`, `a['b']` and `` a[`b`] `` are the same read. Requiring an Identifier
+  // skipped `process.env['GATE_FOO']` silently — neither recorded nor reported
+  // (#6342 r12). Returns null for a property that is not statically known, so
+  // the caller can fail closed on it.
+  const propertyName = (node) => {
+    if (!node.property) return null;
+    if (!node.computed && node.property.type === 'Identifier') return node.property.name;
+    if (node.property.type === 'StringLiteral') return node.property.value;
+    if (node.property.type === 'TemplateLiteral' && node.property.expressions.length === 0
+      && node.property.quasis.length === 1) return node.property.quasis[0].value.cooked;
+    return null;
+  };
+
   const visit = (node) => {
     if (!node || typeof node.type !== 'string') return;
     if (isCall(node)) {
@@ -509,20 +522,34 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
         }
       }
     }
-    if (isMember(node) && node.property && node.property.type === 'Identifier') {
-      const objectIsGates = isMember(node.object)
-        && node.object.property && node.object.property.name === 'gates';
+    if (isMember(node)) {
+      const prop = propertyName(node);
+      const objectIsGates = isMember(node.object) && propertyName(node.object) === 'gates';
       if (objectIsGates) {
-        const gates = keys.get(node.property.name);
-        if (gates) for (const g of gates) note(g, node.property.name);
+        const gates = prop === null ? null : keys.get(prop);
+        if (gates) for (const g of gates) note(g, prop);
         else unresolved.push(src(node));
       }
-      if (isMember(node.object)
+      const isProcessEnv = isMember(node.object)
         && node.object.object && node.object.object.type === 'Identifier'
         && node.object.object.name === 'process'
-        && node.object.property && node.object.property.name === 'env'
-        && /^GATE_[A-Z0-9_]+$/.test(node.property.name)) {
-        note(node.property.name, node.property.name);
+        && propertyName(node.object) === 'env';
+      if (isProcessEnv) {
+        if (prop === null) unresolved.push(src(node));
+        else if (/^GATE_[A-Z0-9_]+$/.test(prop)) note(prop, prop);
+      }
+    }
+
+    // A helper used as middleware is passed BY REFERENCE, never called here:
+    // `router.use(codexGate)` is an Identifier, so a call-only check never
+    // consulted the helper map and the gate it reads counted as none (#6342
+    // r12). The definition side has followed references since r9; this half had
+    // not. Over-attributing an imported-but-uncalled helper costs a baseline
+    // entry; missing a registered one loses the gate.
+    if (node.type === 'Identifier' && (helpers.has(node.name) || opaqueHelpers.has(node.name))) {
+      for (const g of helpers.get(node.name) || []) note(g, node.name);
+      if (opaqueHelpers.has(node.name)) {
+        unresolved.push(`${node.name}() (its own isEnabled argument)`);
       }
     }
     for (const key of Object.keys(node)) {
