@@ -258,10 +258,14 @@ lead-reply path upserted `contact_preference` beside
 (#6337 P1). Extend the existing writer with your path instead of adding a
 second persistence mechanism.
 
-Lock ORDER is part of the same contract. Any writer that touches more than one
-of `call_log`, `call_commitments`, `outbox_messages` and `triage_items` in a
-single transaction MUST take the shared per-call advisory lock `lockTriageCall`
-(`server/utils/triage-locks.js`) FIRST, before locking any of them; the
+Lock ORDER is part of the same contract. Any writer that LOCKS OR WRITES rows in
+more than one of `call_log`, `call_commitments`, `outbox_messages` and
+`triage_items` in a single transaction MUST take the shared per-call advisory lock
+`lockTriageCall` (`server/utils/triage-locks.js`) FIRST, before locking any of
+them. A plain unlocked SELECT does not count, and the distinction is load-bearing:
+`renewPromiseOnOfficeVerdict` reads `outbox_messages` that way and locks only
+`call_commitments`, so it is a single-resource path and is excluded from the
+canonical table by construction. The
 relative order of the four afterwards is deliberately NOT load-bearing (the
 rule and why it is enough are in the `reschedule-link-promises.js` module doc).
 Skip it and two writers on the same call can still form a row-lock cycle —

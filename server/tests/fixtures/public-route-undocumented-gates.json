@@ -8,6 +8,9 @@
     "GATE_ESTIMATE_GLASS_CATEGORIES",
     "GATE_ESTIMATE_SECTION_DISCOUNT_SLICES"
   ],
+  "integrations-commitments-worker.js": [
+    "GATE_CALL_COMMITMENTS"
+  ],
   "lead-webhook.js": [
     "GATE_LEAD_ESTIMATE_AUTOMATION"
   ],
@@ -20,6 +23,9 @@
   "stripe-webhook.js": [
     "GATE_PORTAL_ACH_AUTOPAY",
     "GATE_TERMINAL_SURCHARGE"
+  ],
+  "track-public.js": [
+    "GATE_STOPS_AWAY"
   ],
   "twilio-messenger-webhook.js": [
     "GATE_SOCIAL_INBOX"

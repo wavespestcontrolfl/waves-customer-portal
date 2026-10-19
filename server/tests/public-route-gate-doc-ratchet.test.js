@@ -1,5 +1,5 @@
 /**
- * Ratchet: a public route file may not gain a gate that
+ * Ratchet: a public route file may not gain a gate that its entry in
  * `docs/public-route-contracts.md` does not name.
  *
  * AGENTS.md "Public route surface": a change to a listed route's auth, gate,
@@ -9,21 +9,40 @@
  * (#6268) each landed with no contract entry — so the mechanical half of that
  * rule is pinned here instead of restated in prose.
  *
- * A route rarely spells the env name: it calls `isEnabled('leadAlertCall')` or a
- * `…Live()` helper, and the `GATE_*` literal appears only in a comment. So gate
- * use is resolved through `server/config/feature-gates.js` (its `key:
- * process.env.GATE_*` table and its single-expression helpers), and a gate counts
- * as documented when the contract names EITHER the env name or the key/helper the
- * route used — which is how the reviewer searched for it.
+ * A route rarely spells the env name: it calls `isEnabled('leadAlertCall')`,
+ * `gateEnvValue('GATE_STOPS_AWAY')`, `cfg.gates.payPageFaq`, or a `…Live()`
+ * helper, and the `GATE_*` literal appears only in a comment. All five forms are
+ * resolved through `server/config/feature-gates.js` (its `key: process.env.GATE_*`
+ * table and its single-expression helpers); miss one and an undocumented gate
+ * reads as no gate at all, which is how `GATE_STOPS_AWAY` sat green here through
+ * one round of review.
  *
- * fixtures/public-route-undocumented-gates.json is an upper bound per file: a file
- * may not gain an undocumented gate, and a new file may not have one. Documenting
- * a gate lets the entry go, so a contract update in another branch never has to
- * touch the baseline. Comment lines are not reads. Deterministic, filesystem only,
- * no DB.
+ * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
+ * in the contract, not in this route's own entry, so adding an
+ * already-documented gate to a different public route passes here. Scoping it to
+ * the entry was tried and does not work on this document: it has no per-route
+ * delimiter, and splitting on blank lines yields blocks up to ~70 KB that span
+ * many routes, so a path-proximity test reads as "documented" for almost any
+ * pairing — tighter-looking and no tighter. Closing it needs a per-route gate
+ * list in the contract (or a structural split of that file), which is a bigger
+ * change than this ratchet; until then the baseline below is the real floor and
+ * the prose rule still makes an undocumented gate P0.
  *
- * This covers the gate half only. A payload change (#6299) and a brand-new public
- * route stay the prose rule's: both are P0 whether or not this test is green.
+ * The file set is deliberately over-inclusive: the `public-*` / `*-public.js` /
+ * `*webhook*` conventions UNION every route file that mounts neither
+ * `adminAuthenticate` nor the customer-JWT `authenticate` (which catches the
+ * public surfaces that predate the naming convention — `well-known.js`,
+ * `posthog-ingest.js`, `og-preview.js`, the HMAC-authenticated integration
+ * workers). Scanning a non-public file costs only a baseline entry.
+ *
+ * fixtures/public-route-undocumented-gates.json is an upper bound per file: a
+ * file may not gain an undocumented gate, and a new file may not have one.
+ * Documenting a gate lets its entry go, so a contract update in another branch
+ * never has to touch the baseline. Comment lines are not reads. Deterministic,
+ * filesystem only, no DB.
+ *
+ * This covers the gate half only. A payload change (#6299) and a brand-new
+ * public route stay the prose rule's: both are P0 whether or not this is green.
  */
 const fs = require('fs');
 const path = require('path');
@@ -34,11 +53,7 @@ const GATES_FILE = path.join(SERVER_ROOT, 'config', 'feature-gates.js');
 const CONTRACTS_DOC = path.join(SERVER_ROOT, '..', 'docs', 'public-route-contracts.md');
 const BASELINE_PATH = path.join(__dirname, 'fixtures', 'public-route-undocumented-gates.json');
 
-// Public surfaces by convention (`public-*`, `*-public.js`) plus the webhook
-// routers, whose payloads the provider owns, plus the public surfaces that
-// predate the naming convention.
 const NAME_PATTERNS = [/^public-/, /-public\.js$/, /webhook/i];
-const EXTRA_FILES = new Set(['booking.js', 'pay-v2.js', 'pay-v2-helpers.js', 'pay-statement.js']);
 
 const stripComments = (source) => source
   .split('\n')
@@ -77,12 +92,29 @@ function gatesUsedBy(source, keys, helpers) {
   const used = new Map();
   const note = (gate, alias) => { if (gate && !used.has(gate)) used.set(gate, alias); };
   for (const m of code.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)) note(keys.get(m[1]), m[1]);
+  for (const m of code.matchAll(/gateEnvValue\(\s*'(GATE_[A-Z0-9_]+)'/g)) note(m[1], m[1]);
+  for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) note(keys.get(m[1]), m[1]);
   for (const m of code.matchAll(/process\.env\.(GATE_[A-Z0-9_]+)/g)) note(m[1], m[1]);
   for (const [helper, gates] of helpers) {
     if (new RegExp(`\\b${helper}\\s*\\(`).test(code)) for (const g of gates) note(g, helper);
   }
   return used;
 }
+
+function publicRouteFiles() {
+  return fs.readdirSync(ROUTES_DIR)
+    .filter((f) => f.endsWith('.js') && !f.includes('.test.'))
+    .filter((f) => {
+      if (NAME_PATTERNS.some((r) => r.test(f))) return true;
+      const code = stripComments(fs.readFileSync(path.join(ROUTES_DIR, f), 'utf8'));
+      return !/adminAuthenticate/.test(code) && !/\bauthenticate\b/.test(code);
+    })
+    .sort();
+}
+
+// Named in the contract under either the env name or the alias the route wrote
+// — the looseness the header records.
+const documentsGate = (doc, gate, alias) => doc.includes(gate) || doc.includes(alias);
 
 test('no public route file gains a gate the public-route contract does not name', () => {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
@@ -91,21 +123,18 @@ test('no public route file gains a gate the public-route contract does not name'
   const helpers = helperToGates(gatesSource, keys);
   const doc = fs.readFileSync(CONTRACTS_DOC, 'utf8');
 
-  // The resolver is load-bearing: if feature-gates.js is restructured so the
-  // table stops parsing, every gate would silently read as "not used".
+  // Every resolver input is load-bearing: if one stops parsing, the gates it
+  // resolves silently read as "no gate used" and this ratchet passes on a diff
+  // it should fail. Floors, not exact counts, so ordinary growth is free.
   expect(keys.size).toBeGreaterThan(100);
-
-  const files = fs.readdirSync(ROUTES_DIR)
-    .filter((f) => f.endsWith('.js') && !f.includes('.test.'))
-    .filter((f) => EXTRA_FILES.has(f) || NAME_PATTERNS.some((r) => r.test(f)))
-    .sort();
+  expect(helpers.size).toBeGreaterThan(100);
 
   const added = [];
-  for (const file of files) {
+  for (const file of publicRouteFiles()) {
     const used = gatesUsedBy(fs.readFileSync(path.join(ROUTES_DIR, file), 'utf8'), keys, helpers);
     const allowed = new Set(baseline[file] || []);
     for (const [gate, alias] of used) {
-      if (doc.includes(gate) || doc.includes(alias)) continue;
+      if (documentsGate(doc, gate, alias)) continue;
       if (allowed.has(gate)) continue;
       added.push(`${file}: ${gate} (read as \`${alias}\`) is not named in docs/public-route-contracts.md`);
     }
