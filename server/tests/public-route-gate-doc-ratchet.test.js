@@ -45,11 +45,15 @@
  * the prose rule still makes an undocumented gate P0.
  *
  * The file set is deliberately over-inclusive: the `public-*` / `*-public.js` /
- * `*webhook*` conventions UNION every route file that mounts neither
- * `adminAuthenticate` nor the customer-JWT `authenticate` (which catches the
- * public surfaces that predate the naming convention — `well-known.js`,
- * `posthog-ingest.js`, `og-preview.js`, the HMAC-authenticated integration
- * workers). Scanning a non-public file costs only a baseline entry.
+ * `*webhook*` conventions UNION every route file that does not apply auth AT THE
+ * ROUTER LEVEL. That last test is AGENTS.md's own convention ("every
+ * `server/routes/admin-*.js` starts with `router.use(adminAuthenticate, …)`;
+ * per-handler on mixed public/staff routers like `badges.js`"), so a router
+ * whose auth is per-handler stays IN. Testing the file for any mention of
+ * `authenticate` instead dropped `auth.js`, whose `/send-code`, `/verify-code`,
+ * `/refresh` and `/logout` are unauthenticated, because later endpoints in the
+ * same file are not (#6342 r5 security). Scanning a non-public file costs only a
+ * baseline entry; dropping a public one costs the whole point of the test.
  *
  * fixtures/public-route-undocumented-gates.json is an upper bound per file: a
  * file may not gain an undocumented gate, and a new file may not have one. Every
@@ -73,6 +77,9 @@ const CONTRACTS_DOC = path.join(SERVER_ROOT, '..', 'docs', 'public-route-contrac
 const BASELINE_PATH = path.join(__dirname, 'fixtures', 'public-route-undocumented-gates.json');
 
 const NAME_PATTERNS = [/^public-/, /-public\.js$/, /webhook/i];
+// Auth applied to the whole router, the admin convention. A file with only
+// per-handler auth is a mixed router and stays in scope.
+const ROUTER_LEVEL_AUTH = /router\.use\(\s*[^)]*\b(?:adminAuthenticate|authenticate)\b/;
 
 const stripComments = (source) => source
   .split('\n')
@@ -242,7 +249,7 @@ function publicRouteFiles() {
     .filter((f) => {
       if (NAME_PATTERNS.some((r) => r.test(f))) return true;
       const code = stripComments(fs.readFileSync(path.join(ROUTES_DIR, f), 'utf8'));
-      return !/adminAuthenticate/.test(code) && !/\bauthenticate\b/.test(code);
+      return !ROUTER_LEVEL_AUTH.test(code);
     })
     .sort();
 }

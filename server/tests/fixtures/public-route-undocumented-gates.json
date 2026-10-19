@@ -1,4 +1,16 @@
 {
+  "admin-consultations.js": [
+    "GATE_ASSESSMENT_FAST_COMPLETE"
+  ],
+  "ai-assistant.js": [
+    "GATE_AI_CONTENT_REPORT",
+    "GATE_CALL_TRANSCRIPT_SYNC",
+    "GATE_PORTAL_CHAT_RESERVICE",
+    "GATE_RESERVICE_STREAMLINE"
+  ],
+  "auth.js": [
+    "GATE_APP_PROPERTY_SCOPE"
+  ],
   "booking.js": [
     "GATE_BOOKING_CUSTOMERS_ONLY",
     "GATE_BOOKING_PAY_AT_VISIT",
@@ -31,10 +43,16 @@
   "reports-public.js": [
     "GATE_REPORT_CLICK_TO_ESTIMATE"
   ],
+  "requests.js": [
+    "GATE_CUSTOMER_PHOTO_ID"
+  ],
   "reschedule-public.js": [
     "GATE_AUTO_DISPATCH",
     "GATE_CRON_JOBS",
     "GATE_RAINOUT_MOVE_BANNER"
+  ],
+  "stripe-terminal.js": [
+    "GATE_TERMINAL_SURCHARGE"
   ],
   "stripe-webhook.js": [
     "GATE_PORTAL_ACH_AUTOPAY",
