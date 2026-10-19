@@ -2367,7 +2367,7 @@ async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated 
 }
 
 async function resolveSendEstimate(ctx) {
-  const { conn, call, after, phone, customerId, associated } = ctx;
+  const { conn, call, commitment, after, phone, customerId, associated } = ctx;
   // Direct: the shared primitive above (estimator stamp; lead FK or
   // public-quote mirror on a lead this call minted).
   const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
@@ -2381,11 +2381,18 @@ async function resolveSendEstimate(ctx) {
   // conflict rejects an estimate, so an unknown line on either side keeps
   // today's behavior. A rejected estimate is skipped, not fatal: a later one
   // that matches still closes the promise.
+  // The ask is read only from the extraction that FILED this promise: a valid
+  // V2 result (a schema_failed / normalization_failed candidate is kept for
+  // audit only) on the same processing generation the row carries. A later
+  // reprocess rewrites the call row but never a staff-confirmed or edited
+  // promise (Codex #6344 r1), so a generation mismatch reads as unknown.
   let asked;
   const vet = async () => {
     if (asked === undefined) {
-      const row = await conn("call_log").where({ id: call.id }).first("ai_extraction_enriched", "ai_extraction");
-      asked = askedServiceLines(row?.ai_extraction_enriched || row?.ai_extraction);
+      const row = await conn("call_log").where({ id: call.id }).first("ai_extraction_enriched", "v2_extraction_status", "processing_generation");
+      const sameFiling = commitment?.processing_generation != null && row?.processing_generation != null
+        && String(commitment.processing_generation) === String(row.processing_generation);
+      asked = row?.v2_extraction_status === "valid" && sameFiling ? askedServiceLines(row.ai_extraction_enriched) : [];
     }
     return asked.length ? (row) => !serviceLinesConflict(asked, estimateServiceLines(row)) : null;
   };

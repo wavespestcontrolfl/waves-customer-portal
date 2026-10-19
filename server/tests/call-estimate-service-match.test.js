@@ -102,3 +102,19 @@ describe('askedServiceLines stored as a JSON string', () => {
     expect(askedServiceLines('{not json')).toEqual([]);
   });
 });
+
+describe('estimateServiceLines includes one-time lines beside a plan (Codex #6344 r1)', () => {
+  const { estimateServiceLines, serviceLinesConflict } = require('../services/call-estimate-service-match');
+  test('a pest plan that also prices termite matches a termite ask', () => {
+    const row = {
+      service_interest: 'Quarterly Pest Control',
+      estimate_data: {
+        recurring: { services: [{ key: 'pest', name: 'Quarterly Pest Control', monthly: 40 }] },
+        result: { oneTime: { items: [{ service: 'Termite treatment', price: 900 }] } },
+      },
+    };
+    const lines = estimateServiceLines(row);
+    expect(lines).toEqual(expect.arrayContaining(['termite']));
+    expect(serviceLinesConflict(['termite'], lines)).toBe(false);
+  });
+});

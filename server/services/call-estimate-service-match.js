@@ -21,7 +21,7 @@
 // through the same estimate-service-lines text patterns. Pure
 // module: no DB, no I/O.
 
-const { inferEstimateServiceLines, serviceKeysFromText } = require('./estimate-service-lines');
+const { inferEstimateServiceLines, serviceKeysFromText, parseEstimateData, oneTimeServicesFromData } = require('./estimate-service-lines');
 
 // Coarse service LINES. commercial_* collapse to their residential line;
 // palm injection is part of the tree & shrub line.
@@ -77,8 +77,14 @@ function askedServiceLines(stored) {
 // unclassifiable (we cannot prove it left the asked line out). Never throws.
 function estimateServiceLines(row) {
   try {
-    const keys = inferEstimateServiceLines({ estimate_data: row?.estimate_data, service_interest: row?.service_interest, pricing_authority: row?.pricing_authority })
-      .map((l) => l && l.key);
+    // inferEstimateServiceLines stops at a plan's recurring lines; fulfillment
+    // evidence also needs the one-time lines priced beside them (a pest plan
+    // that also prices termite matches a termite ask, Codex #6344 r1).
+    const data = parseEstimateData(row?.estimate_data);
+    const keys = [
+      ...inferEstimateServiceLines({ estimate_data: row?.estimate_data, service_interest: row?.service_interest, pricing_authority: row?.pricing_authority }),
+      ...(data ? oneTimeServicesFromData(data) : []),
+    ].map((l) => l && l.key);
     if (!keys.length || keys.some((k) => !LINE_BY_KEY[k])) return [];
     return [...new Set(linesOfKeys(keys))];
   } catch {
