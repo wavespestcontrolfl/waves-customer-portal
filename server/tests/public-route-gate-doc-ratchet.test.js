@@ -144,6 +144,47 @@ const stripComments = (source) => source
   .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
   .join('\n');
 
+// `a.b`, `a['b']` and `` a[`b`] `` are the same read. Requiring an Identifier
+// skipped `process.env['GATE_FOO']` silently — neither recorded nor reported
+// (#6342 r12). Returns null for a property that is not statically known — a
+// computed `a[name]` included — so the caller can fail closed on it instead of
+// reading a variable's NAME as the property it happens to hold.
+//
+// Module scope because it is the answer to "which property is this", and both
+// walkers ask: the route half had it and the helper half did not, which is why
+// `gates['someKey']` in a helper body and a bracketed CALLEE
+// (`require('../config/feature-gates')['portalActivityLive']()`) both read as
+// nothing at all (#6342 r16). Two copies is how r10 and r15 happened.
+function propertyName(node) {
+  if (!node || !node.property) return null;
+  if (!node.computed && node.property.type === 'Identifier') return node.property.name;
+  if (node.property.type === 'StringLiteral') return node.property.value;
+  if (node.property.type === 'TemplateLiteral' && node.property.expressions.length === 0
+    && node.property.quasis.length === 1) return node.property.quasis[0].value.cooked;
+  return null;
+}
+
+// The string an argument IS, when that is statically knowable. Separates the
+// two outcomes `resolveGateArg` returns null for: an expression this resolver
+// cannot decode (opaque, and reported), and a plain string that decodes fine
+// and simply is not a gate key — `isEnabled('emailTemplateAutomations')` in
+// `admin-email-templates.js`, whose key the table does not define. Treating
+// the second as unreadable fails this test on code it has already judged
+// correctly (r10's `GATE_UUID_ARRAY`, r13's error codes: a name is not a gate).
+function staticString(node) {
+  if (!node) return null;
+  if (node.type === 'StringLiteral') return node.value;
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0
+    && node.quasis.length === 1) return node.quasis[0].value.cooked;
+  return null;
+}
+
+// `module.exports = internalGate` ⇒ the implementation name. A CommonJS export
+// may rename a helper on the way out, and the helper map is keyed by the name
+// whose body this resolver indexed, so a route calling the imported name
+// matched nothing and its gate read as NO gate (#6342 r16).
+const DEFAULT_EXPORT = 'module.exports';
+
 // key ⇒ EVERY gate its line names, in any shape the table uses:
 // `key: process.env.GATE_X === 'true'`, `key: gateEnvValue('GATE_X')`, the
 // env-default ternary `key: isProd ? … : true`, and the compound guard
@@ -333,7 +374,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     // Only reached for a module that DOES mention a gate, so it is worth a
     // report rather than the regex's silent nothing.
     if (unresolved) unresolved.push(`${filename} defines gates but does not parse: ${err.message}`);
-    return { gates: map, opaque, calls: new Map(), moduleGates: [] };
+    return { gates: map, opaque, calls: new Map(), moduleGates: [], moduleOpaque: false, exports: new Map() };
   }
 
   // `const GATE = 'missedCallTextBack'` — the same indirection round 4 fixed on
@@ -358,6 +399,24 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   const declared = new Set();
   for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
   const { readerAliases, gatesBindings, moduleBindings } = importedGateBindings(source);
+  // A local name can also come from ANOTHER module:
+  // `gateEnvValue(TERMITE_BOND_GATE)` in `property.js` reads a constant
+  // destructured from `services/termite-bonds.js`, which exports it as the
+  // string `GATE_PORTAL_TERMITE_BOND`. The route half has resolved that since
+  // r4 through `identifierValues`; this half had only its own file, so the read
+  // decoded to nothing and — sitting in an anonymous handler, with no enclosing
+  // name to be opaque — was dropped by the module-scope path (#6342 r16). The
+  // SAME function, not a second lookup. Lazy and memoised: it reads the files a
+  // destructuring names, and consulting it eagerly for all 367 modules cost
+  // 39 s for the one name in this codebase that needs it. Local declarations
+  // are checked first, because a local binding shadows an import.
+  let imported = null;
+  const constValue = (name) => {
+    if (consts.has(name)) return consts.get(name);
+    if (!imported) imported = identifierValues(path.join(SERVER_ROOT, filename), stripComments(source));
+    return imported.get(name);
+  };
+
   // `prop: 'value'` — the values a property name takes anywhere in the module,
   // so a read through a data table resolves instead of reading as nothing.
   const propStrings = new Map();
@@ -406,6 +465,8 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   // pick which middleware a module exports, hid it entirely (#6342 r14). It
   // runs on require, so it belongs to any file that requires the module.
   const moduleGates = new Set();
+  let moduleOpaque = false;
+  const exportBindings = new Map();
   const attribute = (gates) => {
     if (!gates.length) return;
     if (!stack.length) { for (const g of gates) moduleGates.add(g); return; }
@@ -416,6 +477,30 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     }
   };
   const markOpaque = () => { for (const name of stack) opaque.add(name); };
+  // A gate READ this resolver cannot decode, which is not the same thing as a
+  // NAME that merely looks like a gate. Opacity needed the module-scope case
+  // `moduleGates` got in r14: with an empty stack `markOpaque` marks NOTHING,
+  // so a require-time `isEnabled(KEY)` whose `KEY` picks a key conditionally
+  // was discarded as no read at all — the fail-open the resolved half already
+  // closed (#6342 r16). A module whose require-time read is unreadable makes
+  // every file requiring it unreadable.
+  //
+  // Only the two READ branches report that way. The gate-shaped identifier
+  // branch below must not: at module scope its opaque case is a local whose
+  // value this resolver cannot read, which is dominated by constants that are
+  // not gates and never were — `const GATE_LOCK_WAIT_MS = 300` and `const
+  // GATE_WRITE_TRIES = 3` (`admin-neighborhood-access.js`), `const GATE_RETIRE
+  // = {…}` and `const GATE_HOLD_MESSAGES = {…}` (`admin-drafts.js`). Reporting
+  // it would fail this test on those two files over names it has already
+  // decided are not gates (r10, r13). Measured: reporting every branch named
+  // four files, and the other two were real reads this round fixes —
+  // `property.js` (a constant imported from another module, resolved by
+  // `constValue` below) and `admin-email-templates.js` (a literal key the
+  // table does not define, judged by `staticString`).
+  const markUnreadableRead = () => {
+    if (!stack.length) { moduleOpaque = true; return; }
+    markOpaque();
+  };
   // An edge is any REFERENCE to a name, not only a call of it. This codebase
   // injects dependencies by default parameter — `scheduleRecovery(cron, { sweep
   // = sweepAbandonedDeliveries } = {})` calls it as `sweep(...)`, so following
@@ -465,17 +550,16 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     // `featureGates.gates.someKey` and a destructured `gates.someKey` are gate
     // reads in a helper body exactly as they are in a route; this walker did
     // not look for them at all, which r15 would have found next.
-    if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
-      && !node.computed && node.property && node.property.type === 'Identifier') {
+    if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+      const prop = propertyName(node);
       const obj = node.object;
       const viaGates = (obj && (obj.type === 'MemberExpression' || obj.type === 'OptionalMemberExpression')
-          && obj.property && obj.property.type === 'Identifier' && obj.property.name === 'gates'
-          && isGatesModule(obj.object, moduleBindings))
+          && propertyName(obj) === 'gates' && isGatesModule(obj.object, moduleBindings))
         || (obj && obj.type === 'Identifier' && gatesBindings.has(obj.name));
       if (viaGates) {
-        const gates = keys.get(node.property.name);
+        const gates = prop === null ? null : keys.get(prop);
         if (gates) attribute(gates);
-        else markOpaque();
+        else markUnreadableRead();
       }
     }
     if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
@@ -489,18 +573,43 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
       const rawCallee = !c ? null
         : (c.type === 'Identifier' ? c.name
           : ((c.type === 'MemberExpression' || c.type === 'OptionalMemberExpression')
-            && c.property && c.property.type === 'Identifier' ? c.property.name : null));
+            ? propertyName(c) : null));
       const callee = readerAliases.get(rawCallee) || rawCallee;
       if ((callee === 'isEnabled' || callee === 'gateEnvValue') && node.arguments.length) {
         const resolved = resolveGateArg(
-          node.arguments[0], keys, (n) => consts.get(n), callee,
+          node.arguments[0], keys, constValue, callee,
           (prop) => [...(propStrings.get(prop) || [])],
         );
         if (resolved) attribute(resolved.map(([g]) => g));
-        else markOpaque();
+        else if (staticString(node.arguments[0]) === null) markUnreadableRead();
       }
     }
     if (node.type === 'Identifier') noteRef(node.name);
+
+    // `module.exports = internalGate`, `module.exports = { publicGuard:
+    // internalGate }` and `exports.publicGuard = internalGate` all rename a
+    // helper on the way out. Recorded as export name ⇒ indexed name, and wired
+    // up as an EDGE by the caller, so a rename reaches its gates through the
+    // fixed point already there rather than a second lookup path (#6342 r16).
+    if (node.type === 'AssignmentExpression' && node.left
+      && (node.left.type === 'MemberExpression') && node.left.object) {
+      const target = node.left.object.type === 'Identifier' ? node.left.object.name : null;
+      const slot = propertyName(node.left);
+      const right = node.right;
+      if (target === 'module' && slot === 'exports') {
+        if (right && right.type === 'Identifier') exportBindings.set(DEFAULT_EXPORT, right.name);
+        else if (right && right.type === 'ObjectExpression') {
+          for (const prop of right.properties) {
+            if (prop.type !== 'ObjectProperty' || !prop.key || !prop.value) continue;
+            const name = prop.key.type === 'Identifier' ? prop.key.name
+              : (prop.key.type === 'StringLiteral' ? prop.key.value : null);
+            if (name && prop.value.type === 'Identifier') exportBindings.set(name, prop.value.name);
+          }
+        }
+      } else if (target === 'exports' && slot && right && right.type === 'Identifier') {
+        exportBindings.set(slot, right.name);
+      }
+    }
 
     // `{ code: 'GATE_CODE_BELLS_FAILED' }` is an Error code, not a gate — the
     // exact exclusion `scripts/lib/gate-scan.js` already carries, which I did
@@ -547,7 +656,10 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
       }
     }
   }
-  return { gates: map, opaque, calls, moduleGates: [...moduleGates] };
+  return {
+    gates: map, opaque, calls, moduleGates: [...moduleGates],
+    moduleOpaque, exports: exportBindings,
+  };
 }
 
 // The same fixed point, run over maps UNIONED across every module a file
@@ -616,12 +728,14 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   // resolves or reports more reads.
   const { readerAliases, gatesBindings, moduleBindings } = importedGateBindings(source);
 
+  // The callee is resolved with the SAME static-property rule as a read, so
+  // `featureGates['portalActivityLive']()` cannot slip past a check that
+  // `featureGates.portalActivityLive()` fails (#6342 r16), and a computed
+  // `fns[name]()` no longer resolves to a helper called `name`.
   const calleeName = (node) => {
     if (!node) return null;
     if (node.type === 'Identifier') return node.name;
-    if (isMember(node) && node.property && node.property.type === 'Identifier') {
-      return node.property.name;
-    }
+    if (isMember(node)) return propertyName(node);
     return null;
   };
 
@@ -634,19 +748,6 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
 
   const src = (node) => source.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 120);
 
-  // `a.b`, `a['b']` and `` a[`b`] `` are the same read. Requiring an Identifier
-  // skipped `process.env['GATE_FOO']` silently — neither recorded nor reported
-  // (#6342 r12). Returns null for a property that is not statically known, so
-  // the caller can fail closed on it.
-  const propertyName = (node) => {
-    if (!node.property) return null;
-    if (!node.computed && node.property.type === 'Identifier') return node.property.name;
-    if (node.property.type === 'StringLiteral') return node.property.value;
-    if (node.property.type === 'TemplateLiteral' && node.property.expressions.length === 0
-      && node.property.quasis.length === 1) return node.property.quasis[0].value.cooked;
-    return null;
-  };
-
   const visit = (node) => {
     if (!node || typeof node.type !== 'string') return;
     if (isCall(node)) {
@@ -655,12 +756,17 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
       // `techNotices.isEnabled()` is an unrelated method that happens to share
       // the name; with no argument there is no gate to name, so it is neither a
       // read nor something to report.
+      // A statically known string that is not a key is not a gate, the same
+      // judgement the helper half makes — otherwise one expression is a
+      // failure here and silence there, which is how r10 and r15 happened.
       if (name === 'isEnabled' && node.arguments.length) {
-        if (!resolveArg(node.arguments[0])) unresolved.push(src(node));
+        if (!resolveArg(node.arguments[0]) && staticString(node.arguments[0]) === null) {
+          unresolved.push(src(node));
+        }
       } else if (name === 'gateEnvValue') {
         const resolved = resolveGateArg(node.arguments[0], keys, (n) => idents.get(n), 'gateEnvValue');
         if (resolved) for (const [gate, alias] of resolved) note(gate, alias);
-        else unresolved.push(src(node));
+        else if (staticString(node.arguments[0]) === null) unresolved.push(src(node));
       } else if (name && (helpers.has(name) || opaqueHelpers.has(name))) {
         for (const g of helpers.get(name) || []) note(g, name);
         // The helper reads a gate this resolver could not decode, so whatever
@@ -785,17 +891,50 @@ function requiredLocalModules(routeFile, code) {
   // matching only single quotes let a formatting choice hide a helper module
   // from this scan entirely (#6342 r13).
   for (const m of code.matchAll(/require\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
-    const base = path.resolve(path.dirname(routeFile), m[1]);
-    // `.js` only: `require('../config/protocols.json')` resolves to a real file
-    // and is data, not code with gates — feeding it to the JS parser is a parse
-    // error reported as an unreadable gate read. The GATE_MENTION prefilter used
-    // to hide that by accident.
-    for (const candidate of [base, `${base}.js`, path.join(base, 'index.js')]) {
-      if (!candidate.endsWith('.js')) continue;
-      if (candidate.startsWith(SERVER_ROOT) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-        out.push(candidate);
-        break;
-      }
+    const resolved = resolveLocalModule(routeFile, m[1]);
+    if (resolved) out.push(resolved);
+  }
+  return out;
+}
+
+// A relative specifier ⇒ the real file under `server/`, or null.
+// `.js` only: `require('../config/protocols.json')` resolves to a real file and
+// is data, not code with gates — feeding it to the JS parser is a parse error
+// reported as an unreadable gate read. The GATE_MENTION prefilter used to hide
+// that by accident.
+function resolveLocalModule(fromFile, spec) {
+  const base = path.resolve(path.dirname(fromFile), spec);
+  for (const candidate of [base, `${base}.js`, path.join(base, 'index.js')]) {
+    if (!candidate.endsWith('.js')) continue;
+    if (candidate.startsWith(SERVER_ROOT) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+// The LOCAL name a route gives each thing it imports, with the export it came
+// from: `const publicGuard = require('./guard')` is the module's default export
+// under a new name, `const { a: b } = require('./m')` is export `a` under the
+// name `b`. Needed because the helper map is keyed by the name whose body was
+// indexed, so an import rename has to be joined back to it (#6342 r16).
+function requireBindings(routeFile, code) {
+  const out = [];
+  const IDENT = /^[A-Za-z_$][\w$]*$/;
+  const add = (local, exported, spec) => {
+    const file = resolveLocalModule(routeFile, spec);
+    if (file) out.push({ local, exported, path: file });
+  };
+  for (const m of code.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
+    add(m[1], DEFAULT_EXPORT, m[2]);
+  }
+  // The same conservative destructuring list `identifierValues` uses: names,
+  // commas and renames only, so a stray brace cannot swallow a function body.
+  for (const m of code.matchAll(/\{\s*([A-Za-z_$][\w$,:\s]*?)\s*\}\s*=\s*require\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
+    for (const binding of m[1].split(',')) {
+      const [original, alias] = binding.split(':').map((x) => x.trim());
+      if (!IDENT.test(original || '') || (alias !== undefined && !IDENT.test(alias))) continue;
+      add(alias || original, original, m[2]);
     }
   }
   return out;
@@ -926,13 +1065,37 @@ test('no public route file gains a gate the public-route contract does not name'
     const opaqueHelpers = new Set(base.opaque);
     const edges = new Map([...base.calls].map(([fn, to]) => [fn, new Set(to)]));
     const moduleScopeGates = new Set();
+    const bindings = requireBindings(routePath, stripComments(source));
     for (const mod of requiredLocalModules(routePath, stripComments(source))) {
-      const { gates: modGates, opaque, calls, moduleGates } = helpersOf(mod, keys);
+      const {
+        gates: modGates, opaque, calls, moduleGates, moduleOpaque, exports: exportBindings,
+      } = helpersOf(mod, keys);
       // `config/feature-gates.js` is excluded on purpose: its module scope IS
       // the key table every file requires, read textually by `keyToGate`, not
       // a consumer's gate check.
       if (!mod.endsWith(path.join('config', 'feature-gates.js'))) {
         for (const g of moduleGates) moduleScopeGates.add(g);
+        // A require-time read that does not decode is reported against the file
+        // that requires it, which is the only place it can be acted on.
+        if (moduleOpaque) {
+          unreadable.push(`${file}: ${path.relative(SERVER_ROOT, mod)} reads a gate at module scope that does not resolve to a GATE_*`);
+        }
+      }
+      // An export rename becomes an edge, so the fixed point below carries both
+      // the gates and the opacity across it: the exported name for any importer
+      // (`m.publicGuard()`), and this route's own local name for a rename
+      // (`const pg = require('./guard')`, `{ publicGuard: pg }`).
+      for (const [exported, impl] of exportBindings) {
+        if (exported === DEFAULT_EXPORT || exported === impl) continue;
+        if (!edges.has(exported)) edges.set(exported, new Set());
+        edges.get(exported).add(impl);
+      }
+      for (const binding of bindings) {
+        if (binding.path !== mod) continue;
+        const impl = exportBindings.get(binding.exported);
+        if (!impl || impl === binding.local) continue;
+        if (!edges.has(binding.local)) edges.set(binding.local, new Set());
+        edges.get(binding.local).add(impl);
       }
       for (const [fn, gates] of modGates) {
         const prev = reachable.get(fn);
