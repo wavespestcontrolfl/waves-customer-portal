@@ -566,6 +566,27 @@ function helperCache(unresolved) {
 
 // The local modules a route requires, resolved to real paths under server/, so a
 // gate wrapper defined outside feature-gates.js still resolves.
+//
+// ONE hop, deliberately, and a KNOWN LIMIT rather than a conclusion: a gate
+// reached only through a direct import's OWN dependency is invisible here.
+// `estimate-public.js` imports `notification-service.js`, whose
+// `notifyCustomer()` calls `account-properties.js`'s
+// `appPropertyScopeEnabled()`, so `GATE_APP_PROPERTY_SCOPE` resolves for the
+// three routes importing `account-properties` directly and for no others
+// (#6342 r11).
+//
+// Two hops was measured, not assumed, and rejected on PRECISION before cost:
+// it produces 1,396 baselined gates over 56 files against 522 over 43, and
+// unbounded closure reaches 2,127 modules from one file. Every extra hop
+// attributes more of the codebase's gates to every public file, and a baseline
+// approaching "every gate under every file" cannot fail on a NEWLY added one,
+// which is the only thing this test exists to do. Cost agrees (two hops runs
+// for minutes, driven by the reference edges the fixed point rescans, which
+// scale with code volume rather than module count) but is the weaker argument.
+//
+// Closing it needs attribution that does not widen with depth — one module
+// parsed once into a global map, shared with `scripts/lib/gate-scan.js`, which
+// is decision 2 in the PR body and a design call, not a review fix.
 function requiredLocalModules(routeFile, code) {
   const out = [];
   for (const m of code.matchAll(/require\(\s*'(\.[^']+)'\s*\)/g)) {
