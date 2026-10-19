@@ -1,0 +1,37 @@
+{
+  "booking.js": [
+    "GATE_BOOKING_PAY_AT_VISIT",
+    "GATE_BOOKING_RAIN_CHIPS"
+  ],
+  "estimate-public.js": [
+    "GATE_COMMERCIAL_INTERIOR_OPTION",
+    "GATE_ESTIMATE_GLASS_CATEGORIES",
+    "GATE_ESTIMATE_SECTION_DISCOUNT_SLICES"
+  ],
+  "lead-webhook.js": [
+    "GATE_LEAD_ESTIMATE_AUTOMATION"
+  ],
+  "reports-public.js": [
+    "GATE_REPORT_CLICK_TO_ESTIMATE"
+  ],
+  "reschedule-public.js": [
+    "GATE_RAINOUT_MOVE_BANNER"
+  ],
+  "stripe-webhook.js": [
+    "GATE_PORTAL_ACH_AUTOPAY",
+    "GATE_TERMINAL_SURCHARGE"
+  ],
+  "twilio-messenger-webhook.js": [
+    "GATE_SOCIAL_INBOX"
+  ],
+  "twilio-voice-webhook.js": [
+    "GATE_CALL_COMMITMENTS",
+    "GATE_CALL_PRECONNECT_SCREEN",
+    "GATE_PROMISE_CHASER_BELL",
+    "GATE_VOICE_SPANISH_MENU"
+  ],
+  "twilio-webhook.js": [
+    "GATE_CONTACT_CORRECTION",
+    "GATE_SMS_COURTESY_AFTER_TEMPLATE"
+  ]
+}

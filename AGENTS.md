@@ -24,12 +24,10 @@ execute the workflows they describe.
 
 ## Codex local database policy
 
-- Never point a Codex session at production. Use a Railway dev/preview
-  Postgres `DATABASE_URL`. Managed `npm run dev` checks database readiness
-  without migrating; setup and explicit `dev:migrate` live in
-  `docs/development.md`. With no dev database, verify frontend-only work with
-  `npm run dev:client` or `npm run build` and say in the PR summary that
-  migrations were not run. Backend or migration work needs a real dev
+- Never point a Codex session at production: use a Railway dev/preview
+  `DATABASE_URL` and follow `docs/development.md` (setup,
+  `dev:migrate`, frontend-only verification). Say in the PR summary when
+  migrations were not run; backend or migration work needs a real dev
   `DATABASE_URL` before claiming end-to-end DB verification.
 
 ## Treat as P0
@@ -112,16 +110,16 @@ execute the workflows they describe.
   route served with no session auth (unauthenticated or token-only;
   customer-JWT `authenticate` routes are not public) and the guards each
   one carries. A new public route not added to that document in the same
-  PR is P0. Every token route keeps a token format gate before
-  any DB read, a generic 404 (unknown, malformed, dark-gated, and
-  ineligible rows indistinguishable), a rate limit, and privacy headers;
-  a dark `GATE_*` route skips its limiter so a probe never sees a
-  revealing 429. That baseline applies where a route's entry says nothing
-  else; where the entry records a different or narrower guard set, the
-  entry is authoritative — flag drift from the entry, never the entry
-  itself, and flag a NEW route or a widened payload that adopts less than
-  the baseline without its entry saying why. Writes on the
-  `/api/reports/:token/*` family gate on
+  PR is P0; `public-route-gate-doc-ratchet.test.js` pins the gate half.
+  Every token route keeps a token format gate before any DB read, a
+  generic 404 (unknown, malformed, dark-gated and ineligible rows
+  indistinguishable), a rate limit, and privacy headers; a dark `GATE_*`
+  route skips its limiter so a probe never sees a revealing 429. That
+  baseline applies where a route's entry says nothing else; where the entry
+  records a different or narrower set, it is authoritative — flag
+  drift from the entry, never the entry itself; flag a NEW route or
+  widened payload adopting less than the baseline unless its entry says
+  why. Writes on the `/api/reports/:token/*` family gate on
   `service_report_v1` + the token format check, use atomic conditional
   updates for one-shot guards (409 on 0 rows), mirror the read-side
   eligibility check, validate bodies before `Number()` coercion, and ride
@@ -322,34 +320,37 @@ execute the workflows they describe.
   ("Infestation extent" is legitimate FDACS wording on the WDO page.)
 - **Call pipeline do-not-regress** (`call-recording-processor.js` and the
   extraction/routing stack): call-created bookings resolve to a real
-  `services` row (`service_id` set) or book "Waves Assessment" — never an
+  `services` row (`service_id` set) or book "Waves Assessment", never an
   invented `service_type` with a null `service_id`; recurring intent beats
   the presenting pest (`applyRecurringIntentDefault`: ambiguous cadence →
   Quarterly, upgrade-only backstop, explicit "just one-time" keeps the
   single service, general-pest only); only `scheduling.status ===
-  'confirmed'` becomes an appointment; extraction schema changes are
-  additive-only (both schema JSONs + normalizer + persisted enum +
-  `SCHEMA_VERSION` bump, never added to `required`, new fields join the
-  replay `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
-  `ai_extraction_prompt_version` hash, which resets the promotion cohort
-  so shadow rows from an older contract never count as evidence;
-  downstream composers read v2 + raw transcript, never v1); address validation counts only `hasReplacedComponents` as a
-  correction, never accepts unless `inServiceArea === true`, holds for
-  review when AV is unreachable, and treats a `PREMISE` verdict missing
-  only `subpremise` as a resolved building without its unit
-  (`avMissingUnitOnly` — hold with `missing_unit_number`, never street
-  recovery); an owed ask auto-closes only on evidence answering THAT ask
-  (`missing_unit_number` has no auto-resolution — human verdict only, in
+  'confirmed'` becomes an appointment or a card's "Book it"; extraction
+  schema changes are additive-only (both schema JSONs + normalizer +
+  persisted enum + `SCHEMA_VERSION` bump, never in `required`, new fields
+  join the replay `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
+  `ai_extraction_prompt_version` hash, resetting the promotion cohort so
+  older-contract shadow rows never count; downstream composers read v2 + raw
+  transcript, never v1); AV counts only `hasReplacedComponents` as a
+  correction, accepts only `inServiceArea === true`, holds when unreachable,
+  treats a `PREMISE` missing only `subpremise` as a building without its
+  unit (`avMissingUnitOnly` — hold `missing_unit_number`, never street
+  recovery); a card is suppressed only by `callMakesNoServiceAsk()` (a
+  `vendor_logged` label is not it and drops a real service ask) and binds to
+  the hold's `held_at`, not the call id; an owed ask auto-closes only on
+  evidence answering THAT ask, never every open card because one later event
+  was classified (`missing_unit_number` is human-verdict-only, in
   `triage-auto-resolve.js`); auto-routing stays confidence-gated (address
   validates AND service maps AND no HOA/commercial flag, else triage — the
-  ONE exception, owner ruling 2026-09-24: Waves personnel dictating the
-  booking on the recording, i.e. the grounded agent commitment behind
-  `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`,
-  demotes `commercial_requires_quote` to advisory; an agreed price alone
-  never does; confirmed lender/realtor/buyer WDO INSPECTION callers are authorized, never treatment, 2026-09-26),
-  inserts keep idempotency keys, TCPA consent precedes any SMS; hard-
-  bounced call-captured emails are re-verified against the recording and
-  surfaced for owner read-back, never auto-corrected or resent.
+  ONE exception (owner 2026-09-24): the grounded agent commitment behind
+  `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`
+  (Waves personnel dictating the booking) demotes
+  `commercial_requires_quote` to advisory, an agreed price never does, and
+  confirmed lender/realtor/buyer WDO INSPECTION callers are authorized,
+  never treatment (2026-09-26)), inserts keep idempotency keys, TCPA consent
+  precedes any SMS; hard-bounced call-captured emails are re-verified
+  against the recording and surfaced for owner read-back, never
+  auto-corrected or resent.
 - **Estimator engine authority.** `generateEstimate` is the sole dollar
   authority — LLM output proposes intent only and never reaches
   proposal/price fields; engine drafts never auto-send; existing customers
@@ -433,10 +434,11 @@ severity noted.
   entry not called out in the PR body is P1.
 - **Extend the existing mechanism; don't build a parallel one.** Before
   adding a status writer, cron sweep, approval path, rate limiter, dedupe
-  stamp, or date util, find the existing one and extend it. A second
-  mechanism for a purpose an existing one serves is P1 unless the PR body
-  names the existing mechanism and why it can't be extended (instances
-  rated P0 above, e.g. a second Stripe webhook mount, keep P0).
+  stamp, date util, or service-area predicate, find the existing one and
+  extend it. A second mechanism for a purpose an existing one serves is P1
+  unless the PR body names the existing mechanism and why it can't be
+  extended (instances rated P0 above, e.g. a second Stripe webhook mount,
+  keep P0).
 
 ## Out of scope (do not flag)
 

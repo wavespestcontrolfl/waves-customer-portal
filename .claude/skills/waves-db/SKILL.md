@@ -245,6 +245,32 @@ changed balance, or a rotated recipient holds the message; the same
 AND a revalidated one at send. Never weaken a send-time recheck to make a
 stored row "replay".
 
+## 5f. A second writer beside the authoritative one loses its guards
+
+A field that already has an authoritative writer carries that writer's
+guards, not just its UPDATE. Writing the same column from a new path with a
+plain `insert`/`onConflict` upsert silently drops the newer-proposal check,
+the target-row lock/CAS, the stale-proposal retirement and the audit event:
+the value changes, review work that the retirement would have closed stays
+open, and the write is missing from the trail everyone reads. The deterministic
+lead-reply path upserted `contact_preference` beside
+`sms-operational-actions.js` (`AUTO_APPLY_FIELDS`) and lost exactly those four
+(#6337 P1). Extend the existing writer with your path instead of adding a
+second persistence mechanism.
+
+Lock ORDER is part of the same contract. Any writer that touches more than one
+of `call_log`, `call_commitments`, `outbox_messages` and `triage_items` in a
+single transaction MUST take the shared per-call advisory lock `lockTriageCall`
+(`server/utils/triage-locks.js`) FIRST, before locking any of them; the
+relative order of the four afterwards is deliberately NOT load-bearing (the
+rule and why it is enough are in the `reschedule-link-promises.js` module doc).
+Skip it and two writers on the same call can still form a row-lock cycle —
+and the deadlock abort lands in a fail-soft `catch`, so the operation reports
+success and is never retried. A settlement locked `call_log` and then updated
+`triage_items` without it (#6271 P1). Take the advisory lock first and close
+with the existing `syncCallReviewStatus` rather than recomputing
+`review_status` locally.
+
 ## 6. Schema truth traps (wrong-answer generators)
 
 - `customers.active` is TRUE for leads. A live customer = `active` AND
