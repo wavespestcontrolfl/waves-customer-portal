@@ -113,6 +113,21 @@ function gatesUsedBy(source, keys, helpers) {
   return used;
 }
 
+// Parsing a module is memoised by path: 75 routes reach 473 distinct modules
+// through 1,566 requires, so the naive loop re-read 180 MB (feature-gates.js 82
+// times) and regexed all of it. This test shares a jest worker pool with
+// timing-sensitive suites in the same shard — sms-label-facts.js asserts
+// sub-quadratic SCALING — so its own CPU burst is not free. Cached: 473 reads.
+function helperCache() {
+  const cache = new Map();
+  return (modPath, keys) => {
+    if (!cache.has(modPath)) {
+      cache.set(modPath, helperToGates(stripComments(fs.readFileSync(modPath, 'utf8')), keys));
+    }
+    return cache.get(modPath);
+  };
+}
+
 // The local modules a route requires, resolved to real paths under server/, so a
 // gate wrapper defined outside feature-gates.js still resolves.
 function requiredLocalModules(routeFile, code) {
@@ -160,6 +175,7 @@ test('no public route file gains a gate the public-route contract does not name'
   expect(keys.size).toBeGreaterThan(100);
   expect(helpers.size).toBeGreaterThan(100);
 
+  const helpersOf = helperCache();
   const added = [];
   const stale = [];
   for (const file of publicRouteFiles()) {
@@ -167,7 +183,7 @@ test('no public route file gains a gate the public-route contract does not name'
     const source = fs.readFileSync(routePath, 'utf8');
     const reachable = new Map(helpers);
     for (const mod of requiredLocalModules(routePath, stripComments(source))) {
-      for (const [fn, gates] of helperToGates(stripComments(fs.readFileSync(mod, 'utf8')), keys)) {
+      for (const [fn, gates] of helpersOf(mod, keys)) {
         if (!reachable.has(fn)) reachable.set(fn, gates);
       }
     }
