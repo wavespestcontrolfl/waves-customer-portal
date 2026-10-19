@@ -213,10 +213,18 @@ const GATE_READERS_VIA = new Set(['call', 'apply']);
 function readerViaCallApply(callee, readerAliases) {
   if (!callee || (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression')) return null;
   if (!GATE_READERS_VIA.has(propertyName(callee))) return null;
+  // The RECEIVER is a name or a member: `isEnabled.call(…)`,
+  // `featureGates.isEnabled.call(…)` and
+  // `require('../config/feature-gates').isEnabled.call(…)` are one form, and
+  // taking only the Identifier receiver left the other two through — the second
+  // half of r20's own fix, which the grep-every-other-place rule should have
+  // caught before pushing it (#6342 r21).
   const obj = callee.object;
-  if (!obj || obj.type !== 'Identifier') return null;
-  const reader = readerAliases.get(obj.name) || obj.name;
-  return GATE_READERS.has(reader) ? reader : null;
+  if (!obj) return null;
+  const reader = obj.type === 'Identifier' ? (readerAliases.get(obj.name) || obj.name)
+    : ((obj.type === 'MemberExpression' || obj.type === 'OptionalMemberExpression')
+      ? propertyName(obj) : null);
+  return reader && GATE_READERS.has(reader) ? reader : null;
 }
 const GATE_READERS = new Set(['isEnabled', ...ENV_NAME_READERS]);
 
