@@ -243,6 +243,61 @@ function resolveGateArg(node, keys, lookup, reader = 'isEnabled', propLookup = n
   return null;
 }
 
+// Imported bindings BOTH walkers need, built once from a source. Keeping these
+// per-walker is what made r13's alias fix apply to routes and not to helper
+// modules, and the `.gates` read resolvable on one side only — the third and
+// fourth times a fix landed on one half of this file (#6342 r15). One function,
+// two callers.
+//
+// `readerAliases`: `const { isEnabled: reviewGateOn } = require(…)` ⇒
+//   reviewGateOn ⇒ isEnabled. Any rename of either reader counts, from any
+//   module: the names are distinctive and over-accepting only resolves or
+//   reports more reads.
+// `gatesBindings`: `const { gates } = require('../config/feature-gates')` ⇒
+//   the local names holding the key table, so `gates.someKey` reads the same as
+//   `featureGates.gates.someKey`. Live in `admin-visits.js` and three services.
+// Is this node the feature-gates MODULE? A named binding, or the inline
+// `require('../config/feature-gates')` that most of this codebase uses. Needed
+// because `.gates.<key>` alone is not a gate read — `previsit-brief.js` has
+// `entry.gates.targetN` (lawn label limits) — but requiring a named binding
+// alone dropped three real reads written as an inline require (#6342 r15).
+function isGatesModule(node, moduleBindings) {
+  if (!node) return false;
+  if (node.type === 'Identifier') return moduleBindings.has(node.name);
+  if (node.type === 'CallExpression' && node.callee && node.callee.type === 'Identifier'
+    && node.callee.name === 'require' && node.arguments.length === 1) {
+    const arg = node.arguments[0];
+    return arg.type === 'StringLiteral' && /feature-gates$/.test(arg.value);
+  }
+  return false;
+}
+
+function importedGateBindings(source) {
+  const readerAliases = new Map();
+  const gatesBindings = new Set();
+  // `const featureGates = require('../config/feature-gates')` ⇒ featureGates.
+  // Required, because `.gates.<key>` alone is NOT a gate read: `previsit-brief.js`
+  // has `entry.gates.targetN` and `p.gates.trigger`, which are lawn product
+  // label limits on a data object that happens to carry a `gates` property.
+  // Counting those put non-gates through the resolver — the same mistake as
+  // `GATE_ENV` and `GATE_UUID_ARRAY`, found by this walker's own fail-closed
+  // report (#6342 r15). The object has to be the gates MODULE.
+  const moduleBindings = new Set();
+  for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]*feature-gates)['"]\s*\)/g)) {
+    moduleBindings.add(m[1]);
+  }
+  for (const m of source.matchAll(/\{([^}]{0,400}?)\}\s*=\s*require\(/g)) {
+    for (const binding of m[1].split(',')) {
+      const [original, alias] = binding.split(':').map((x) => x.trim());
+      const local = alias || original;
+      if (!/^[A-Za-z_$][\w$]*$/.test(local || '')) continue;
+      if (original === 'isEnabled' || original === 'gateEnvValue') readerAliases.set(local, original);
+      if (original === 'gates') gatesBindings.add(local);
+    }
+  }
+  return { readerAliases, gatesBindings, moduleBindings };
+}
+
 const GATE_MENTION = /GATE_[A-Z0-9_]+|isEnabled\s*\(|gateEnvValue\s*\(/;
 
 function helperToGates(source, keys, filename = 'module.js', unresolved = null) {
@@ -302,6 +357,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   // a gate can be told from a gate.
   const declared = new Set();
   for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+  const { readerAliases, gatesBindings, moduleBindings } = importedGateBindings(source);
   // `prop: 'value'` — the values a property name takes anywhere in the module,
   // so a read through a data table resolves instead of reading as nothing.
   const propStrings = new Map();
@@ -406,6 +462,22 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
         else if (/^GATE_[A-Z0-9_]+$/.test(value)) attribute([value]);
       }
     }
+    // `featureGates.gates.someKey` and a destructured `gates.someKey` are gate
+    // reads in a helper body exactly as they are in a route; this walker did
+    // not look for them at all, which r15 would have found next.
+    if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
+      && !node.computed && node.property && node.property.type === 'Identifier') {
+      const obj = node.object;
+      const viaGates = (obj && (obj.type === 'MemberExpression' || obj.type === 'OptionalMemberExpression')
+          && obj.property && obj.property.type === 'Identifier' && obj.property.name === 'gates'
+          && isGatesModule(obj.object, moduleBindings))
+        || (obj && obj.type === 'Identifier' && gatesBindings.has(obj.name));
+      if (viaGates) {
+        const gates = keys.get(node.property.name);
+        if (gates) attribute(gates);
+        else markOpaque();
+      }
+    }
     if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
       // `featureGates.isEnabled('treatmentZoneMap')` is the same read as the
       // bare call, and taking only Identifier callees meant
@@ -414,10 +486,11 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
       // `reports-public.js` (#6342 r10). The route-side walker already took
       // member callees; this half did not.
       const c = node.callee;
-      const callee = !c ? null
+      const rawCallee = !c ? null
         : (c.type === 'Identifier' ? c.name
           : ((c.type === 'MemberExpression' || c.type === 'OptionalMemberExpression')
             && c.property && c.property.type === 'Identifier' ? c.property.name : null));
+      const callee = readerAliases.get(rawCallee) || rawCallee;
       if ((callee === 'isEnabled' || callee === 'gateEnvValue') && node.arguments.length) {
         const resolved = resolveGateArg(
           node.arguments[0], keys, (n) => consts.get(n), callee,
@@ -541,14 +614,7 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   // (#6342 r13). Any destructured rename of a reader counts, whatever module it
   // is taken from, because the names are distinctive and over-accepting only
   // resolves or reports more reads.
-  const readerAliases = new Map();
-  for (const m of source.matchAll(/\{([^}]{0,400}?)\}\s*=\s*require\(/g)) {
-    for (const binding of m[1].split(',')) {
-      const [original, alias] = binding.split(':').map((x) => x.trim());
-      if (!alias || !/^[A-Za-z_$][\w$]*$/.test(alias)) continue;
-      if (original === 'isEnabled' || original === 'gateEnvValue') readerAliases.set(alias, original);
-    }
-  }
+  const { readerAliases, gatesBindings, moduleBindings } = importedGateBindings(source);
 
   const calleeName = (node) => {
     if (!node) return null;
@@ -606,7 +672,9 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
     }
     if (isMember(node)) {
       const prop = propertyName(node);
-      const objectIsGates = isMember(node.object) && propertyName(node.object) === 'gates';
+      const objectIsGates = (isMember(node.object) && propertyName(node.object) === 'gates'
+          && isGatesModule(node.object.object, moduleBindings))
+        || (node.object && node.object.type === 'Identifier' && gatesBindings.has(node.object.name));
       if (objectIsGates) {
         const gates = prop === null ? null : keys.get(prop);
         if (gates) for (const g of gates) note(g, prop);
