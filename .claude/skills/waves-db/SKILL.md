@@ -262,7 +262,14 @@ Lock ORDER is part of the same contract. Any NEW writer that LOCKS OR WRITES row
 in more than one of `call_log`, `call_commitments`, `outbox_messages` and
 `triage_items` in a single transaction takes the shared per-call advisory lock
 `lockTriageCall` (`server/utils/triage-locks.js`) FIRST, before locking any of
-them. A plain unlocked SELECT does not count, and the distinction is load-bearing:
+them. With MORE THAN ONE call in that transaction, first is not enough — two
+writers each holding one call's lock and waiting for the other still deadlock —
+so acquire every call id in ONE deterministic order: dedupe and sort, then lock
+in that order, before any protected row lock or write. Both live multi-call
+writers do exactly that (`customer-email-fanout.js`:
+`[...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))].sort()` then a
+lock per id; `admin-triage.js`: the same over `sortedCallIds`), and a later
+acquisition of a lock the transaction already holds is a no-op. A plain unlocked SELECT does not count, and the distinction is load-bearing:
 `renewPromiseOnOfficeVerdict` reads `outbox_messages` that way and locks only
 `call_commitments`, so it is a single-resource path and is excluded from the
 canonical table by construction. The
