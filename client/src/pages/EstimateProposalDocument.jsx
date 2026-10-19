@@ -430,11 +430,16 @@ export default function EstimateProposalDocument({ data, token }) {
       `}</style>
       <div className="doc-page">
 
-        {/* Letterhead */}
-        <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        {/* Letterhead — navy band (owner 2026-10-19 "navy header"), the same
+            brand band the invoice PDFs carry. White type on NAVY; the print
+            color-adjust rule above keeps the fill in the PDF. */}
+        <div className="doc-keep" data-testid="doc-letterhead" style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16,
+          background: NAVY, color: '#fff', borderRadius: 10, padding: '12px 18px',
+        }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
-          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
-            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
+          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: '#E6EEF5' }}>
+            <div style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
             <div>
               <a href={WAVES_SUPPORT_PHONE_TEL} style={HEADER_LINK}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
               {' '}&middot;{' '}
@@ -448,7 +453,7 @@ export default function EstimateProposalDocument({ data, token }) {
         {/* Title row */}
         <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8, gap: 12,
+          marginTop: 14, gap: 12,
         }}>
           <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
           <div className="doc-number" style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
