@@ -273,8 +273,19 @@ acquisition of a lock the transaction already holds is a no-op. A plain unlocked
 `renewPromiseOnOfficeVerdict` reads `outbox_messages` that way and locks only
 `call_commitments`, so it is a single-resource path and is excluded from the
 canonical table by construction. The
-relative order of the four afterwards is deliberately NOT load-bearing (the
-rule and why it is enough are in the `reschedule-link-promises.js` module doc).
+relative order of the four afterwards is not load-bearing BETWEEN WRITERS THAT
+ALL TAKE THE LOCK — that is what the advisory lock buys, and the reasoning is in
+the `reschedule-link-promises.js` module doc: two writers that both take it
+first can never hold a row lock at the same time, so they cannot form a cycle.
+
+It buys nothing against a writer that never queues on it, and two such writers
+exist (below). While they do, a new writer ALSO takes the rows in the order they
+do — `call_log` before `triage_items` — or it can hold the advisory lock and
+`triage_items` while waiting on `call_log` that a legacy transaction holds while
+waiting on `triage_items`: a genuine lock-order inversion the advisory lock
+cannot see. That failure mode is not hypothetical; it is the round-6 P1 recorded
+in that same module doc, where `upsertCommitments` sat outside the lock and
+deadlocked against `applyHumanUpdate`.
 
 It does NOT describe all existing code, and a review must not read it as
 licence to reject what is there: the two operator-initiated transactions in
@@ -284,7 +295,9 @@ lock, and they are established paths. Whether they migrate to the advisory lock
 or are documented as safe as they stand is an owner decision, not one to settle
 in a review of whatever file happens to touch them; until it is made, leave them
 as they are and raise the question rather than adding or removing a lock in
-passing.
+passing. Their row order is `call_log` first, then `triage_items` (relink at
+~553 and ~615, adoption at ~754 and ~843), which is the order a new writer has
+to stay compatible with until they migrate.
 Skip it and two writers on the same call can still form a row-lock cycle —
 and the deadlock abort lands in a fail-soft `catch`, so the operation reports
 success and is never retried. A settlement locked `call_log` and then updated
