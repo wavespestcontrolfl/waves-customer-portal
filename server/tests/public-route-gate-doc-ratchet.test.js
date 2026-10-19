@@ -9,6 +9,11 @@
  * (#6268) each landed with no contract entry — so the mechanical half of that
  * rule is pinned here instead of restated in prose.
  *
+ * An alias is only ever a gate KEY, never the name of the code that reads it:
+ * see `note()`. Attributing `GATE_STOPS_AWAY` to `computeStopsAhead`, which the
+ * contract mentions as inline code for its own reasons, made the round-1
+ * finding read as documented the moment helper bodies were parsed.
+ *
  * A route rarely spells the env name: it calls `isEnabled('leadAlertCall')`,
  * `gateEnvValue('GATE_STOPS_AWAY')`, `cfg.gates.payPageFaq`, or a `…Live()` /
  * `is…Enabled()` helper, and the `GATE_*` literal appears only in a comment. Miss
@@ -40,9 +45,12 @@
  * a no-op: a gate named in a trailing comment or inside a string literal is no
  * longer counted as a read of it.
  *
- * The definition side stays textual — the `feature-gates.js` table, helper
- * bodies, exported key constants. Every one of the six findings was on the read
- * side; if one lands on a definition, that half moves to the AST too.
+ * Helper DEFINITIONS are parsed for the same reason, one round later: a 400-
+ * character regex body could not see `linkWorkerAuth`, the factory through which
+ * all five `integrations-*-worker.js` routers read their only gate, so
+ * `GATE_HERMES_WORKER` was undocumented and invisible here (#6342 r7). What
+ * stays textual is only the `feature-gates.js` key table and the exported key
+ * constants — a line that names a gate, where there is no shape to miss.
  *
  * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
  * in the contract, not in this route's own entry, so adding an
@@ -113,26 +121,114 @@ function keyToGate(gatesSource) {
   return map;
 }
 
-// `function fooLive() { return process.env.GATE_X === 'true'; }` (or gateEnvValue /
-// isEnabled) → fooLive ⇒ [GATE_X]
-function helperToGates(gatesSource, keys) {
+// A helper is any named function whose body — at ANY depth, including a
+// middleware it returns — reads a gate. Parsed, for the same reason the read
+// side is: the regex this replaces capped bodies at 400 characters and ended
+// them at the first line-start `}`, so `linkWorkerAuth(endpoint)`
+// (`middleware/link-worker-auth.js`) resolved to nothing even though the
+// middleware it returns answers 403 unless `isEnabled('hermesWorker')`. All
+// five `integrations-*-worker.js` routers read their only gate through it, so
+// `GATE_HERMES_WORKER` was undocumented, unbaselined and invisible here
+// (#6342 r7). Attributing a nested read to the enclosing name is the point: a
+// route that calls the factory is gated by what the factory returns.
+const GATE_MENTION = /GATE_[A-Z0-9_]+|isEnabled\s*\(|gateEnvValue\s*\(/;
+
+function helperToGates(source, keys, filename = 'module.js', unresolved = null) {
   const map = new Map();
-  for (const m of gatesSource.matchAll(/function\s+([a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{([\s\S]{0,400}?)\n\}/g)) {
-    const body = m[2];
-    const direct = body.match(/GATE_[A-Z0-9_]+/g) || [];
-    const viaKey = [...body.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)]
-      .flatMap((k) => keys.get(k[1]) || []);
-    const gates = [...new Set([...direct, ...viaKey])];
-    if (gates.length) map.set(m[1], gates);
+  // Nothing to find, and 900-odd of the ~1120 reachable modules take this exit.
+  if (!GATE_MENTION.test(source)) return map;
+  let ast;
+  try {
+    ast = parse(source, {
+      sourceType: 'unambiguous',
+      sourceFilename: filename,
+      errorRecovery: true,
+      allowReturnOutsideFunction: true,
+      plugins: ['jsx'],
+    });
+  } catch (err) {
+    // Only reached for a module that DOES mention a gate, so it is worth a
+    // report rather than the regex's silent nothing.
+    if (unresolved) unresolved.push(`${filename} defines gates but does not parse: ${err.message}`);
+    return map;
   }
+
+  // ONE pass. `stack` is the named functions enclosing the current node, so a
+  // gate read is attributed to each of them — which is what makes the factory
+  // resolve — without re-walking a subtree per function. Walking each function
+  // separately is O(nodes x nesting depth) and cost 2.7 s over the 367 modules
+  // these routes reach; this is a single traversal.
+  const isFn = (n) => !!n && (n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression'
+    || n.type === 'FunctionDeclaration' || n.type === 'ObjectMethod' || n.type === 'ClassMethod');
+
+  // The name a function is bound to, from the node that binds it:
+  // `function f()`, `const f = () =>`, `exports.f = function`, `{ f() {} }`.
+  const boundName = (node) => {
+    if (node.type === 'FunctionDeclaration' && node.id) return node.id.name;
+    if (node.type === 'VariableDeclarator' && node.id && node.id.type === 'Identifier' && isFn(node.init)) {
+      return node.id.name;
+    }
+    if (node.type === 'AssignmentExpression' && isFn(node.right) && node.left) {
+      if (node.left.type === 'Identifier') return node.left.name;
+      if (node.left.type === 'MemberExpression' && node.left.property
+        && node.left.property.type === 'Identifier') return node.left.property.name;
+    }
+    if ((node.type === 'ObjectMethod' || node.type === 'ClassMethod')
+      && node.key && node.key.type === 'Identifier') return node.key.name;
+    if (node.type === 'ObjectProperty' && node.key && node.key.type === 'Identifier'
+      && isFn(node.value)) return node.key.name;
+    return null;
+  };
+
+  const stack = [];
+  const attribute = (gates) => {
+    if (!gates.length) return;
+    for (const name of stack) {
+      const prev = map.get(name);
+      if (!prev) map.set(name, [...new Set(gates)]);
+      else for (const g of gates) if (!prev.includes(g)) prev.push(g);
+    }
+  };
+
+  const walk = (node) => {
+    if (!node || typeof node.type !== 'string') return;
+    const name = boundName(node);
+    if (name) stack.push(name);
+
+    if (node.type === 'StringLiteral' && /^GATE_[A-Z0-9_]+$/.test(node.value)) attribute([node.value]);
+    if (node.type === 'Identifier' && /^GATE_[A-Z0-9_]+$/.test(node.name)) attribute([node.name]);
+    if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression')
+      && node.callee && node.callee.type === 'Identifier' && node.callee.name === 'isEnabled') {
+      const arg = node.arguments[0];
+      if (arg && arg.type === 'StringLiteral') attribute(keys.get(arg.value) || []);
+    }
+
+    for (const key of Object.keys(node)) {
+      if (key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue;
+      const child = node[key];
+      if (Array.isArray(child)) for (const item of child) walk(item);
+      else if (child && typeof child === 'object' && typeof child.type === 'string') walk(child);
+    }
+    if (name) stack.pop();
+  };
+  walk(ast.program);
   return map;
 }
-
 // GATE_* ⇒ the alias the route actually wrote, so "documented" can be checked
 // against the name a reader would search for. Reads are taken from the AST.
 function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [], filename = 'route.js') {
   const used = new Map();
-  const note = (gate, alias) => { if (gate && !used.has(gate)) used.set(gate, alias); };
+  // An alias is the name a CONTRACT ENTRY may legitimately use for the gate —
+  // its key (`payPageFaq`) or the `GATE_*` literal. It is never the name of the
+  // code that reads the gate: with helper bodies parsed, `GATE_STOPS_AWAY` in
+  // `track-public.js` resolved through `computeStopsAhead`, which the contract
+  // mentions as inline code for unrelated reasons, and `documentsGate` read
+  // that as documentation — silently reopening the round-1 finding this test
+  // was built for. So anything that is not a key documents itself only.
+  const note = (gate, alias) => {
+    if (!gate || used.has(gate)) return;
+    used.set(gate, keys.has(alias) ? alias : gate);
+  };
   let ast;
   try {
     ast = parse(source, {
@@ -236,16 +332,24 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   return used;
 }
 
-// Parsing a module is memoised by path: 75 routes reach 473 distinct modules
-// through 1,566 requires, so the naive loop re-read 180 MB (feature-gates.js 82
-// times) and regexed all of it. This test shares a jest worker pool with
+// Parsing a module is memoised by path: without it the loop re-read 180 MB
+// (feature-gates.js 82 times). This test shares a jest worker pool with
 // timing-sensitive suites in the same shard — sms-label-facts.js asserts
-// sub-quadratic SCALING — so its own CPU burst is not free. Cached: 473 reads.
-function helperCache() {
+// sub-quadratic SCALING — so its own CPU burst is not free, and the cost is
+// stated rather than discovered: the 89 files reach 771 distinct modules, 404
+// of which the GATE_MENTION prefilter drops unparsed; parsing the remaining
+// 367 (30 MB) is ~2.3 s of the test's ~7.6 s. That is up from ~2.2 s before
+// definitions were parsed, and it buys `GATE_HERMES_WORKER` on five routers.
+// The obvious further cut — parse a module only when the route calls a name it
+// defines — needs the parse to know the names, and every textual shortcut to
+// that is the kind of approximation six rounds here were spent removing.
+function helperCache(unresolved) {
   const cache = new Map();
   return (modPath, keys) => {
     if (!cache.has(modPath)) {
-      cache.set(modPath, helperToGates(stripComments(fs.readFileSync(modPath, 'utf8')), keys));
+      cache.set(modPath, helperToGates(
+        fs.readFileSync(modPath, 'utf8'), keys, path.relative(SERVER_ROOT, modPath), unresolved,
+      ));
     }
     return cache.get(modPath);
   };
@@ -299,15 +403,32 @@ function identifierValues(routeFile, code) {
   return values;
 }
 
+// [label, absolute path]. `index.js` is in the set because the gate that makes
+// a public prefix dark is often applied THERE, in pre-router middleware, and
+// never read by the router: `/api/public/careers` 404s unless
+// `isEnabled('jobApplications')` in `server/index.js`, while
+// `public-careers.js` never mentions that key, so deleting
+// `GATE_JOB_APPLICATIONS` from the contract left this green (#6342 r7).
+//
+// It goes in WHOLE, not filtered to its public mounts. Selecting mounts by path
+// was tried and is wrong twice over: `/api/pay/statement` is dark behind
+// `payerStatements` with no `public` in its path, and the `/estimate/:token`
+// embed guard that reads `websiteQuoteBooking` is mounted with no path at all.
+// A pattern that drops either is the same defect six rounds of this test were
+// spent closing. So its ~60 non-public reads (`cronJobs` and the agent gates)
+// each cost one baseline entry instead — the trade this file set makes
+// everywhere else, and each entry still has to stay earned.
 function publicRouteFiles() {
-  return fs.readdirSync(ROUTES_DIR)
+  const routes = fs.readdirSync(ROUTES_DIR)
     .filter((f) => f.endsWith('.js') && !f.includes('.test.'))
     .filter((f) => {
       if (NAME_PATTERNS.some((r) => r.test(f))) return true;
       const code = stripComments(fs.readFileSync(path.join(ROUTES_DIR, f), 'utf8'));
       return !ROUTER_LEVEL_AUTH.test(code);
     })
-    .sort();
+    .sort()
+    .map((f) => [f, path.join(ROUTES_DIR, f)]);
+  return [['index.js', path.join(SERVER_ROOT, 'index.js')], ...routes];
 }
 
 // Named in the contract as a WHOLE gate token, or under the alias the route
@@ -320,10 +441,17 @@ const documentsGate = (doc, gate, alias) => new RegExp(`(?<![A-Z0-9_])${gate}(?!
 
 test('no public route file gains a gate the public-route contract does not name', () => {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
-  const gatesSource = stripComments(fs.readFileSync(GATES_FILE, 'utf8'));
-  const keys = keyToGate(gatesSource);
-  const helpers = helperToGates(gatesSource, keys);
+  const gatesRaw = fs.readFileSync(GATES_FILE, 'utf8');
+  // The key TABLE is read textually (a line naming a gate); helper bodies are
+  // parsed, so they get the raw source, comments and all.
+  const keys = keyToGate(stripComments(gatesRaw));
   const doc = fs.readFileSync(CONTRACTS_DOC, 'utf8');
+
+  const added = [];
+  const stale = [];
+  const unreadable = [];
+  const helpers = helperToGates(gatesRaw, keys, 'config/feature-gates.js', unreadable);
+  const helpersOf = helperCache(unreadable);
 
   // Every resolver input is load-bearing: if one stops parsing, the gates it
   // resolves silently read as "no gate used" and this ratchet passes on a diff
@@ -331,12 +459,7 @@ test('no public route file gains a gate the public-route contract does not name'
   expect(keys.size).toBeGreaterThan(100);
   expect(helpers.size).toBeGreaterThan(100);
 
-  const helpersOf = helperCache();
-  const added = [];
-  const stale = [];
-  const unreadable = [];
-  for (const file of publicRouteFiles()) {
-    const routePath = path.join(ROUTES_DIR, file);
+  for (const [file, routePath] of publicRouteFiles()) {
     const source = fs.readFileSync(routePath, 'utf8');
     const reachable = new Map(helpers);
     for (const mod of requiredLocalModules(routePath, stripComments(source))) {

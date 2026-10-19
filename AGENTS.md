@@ -337,7 +337,7 @@ execute the workflows they describe.
   unit (`avMissingUnitOnly` — hold `missing_unit_number`, never street
   recovery); the `NO_ASK_ADDRESS_CARDS` drop only on
   `callMakesNoServiceAsk()`, never a call-nature label (`vendor_logged`); a
-  `text_number_differs` card binds by `(line_e164, held_at)`, not call id;
+  `text_number_differs` card binds per (line, arming) within ONE call;
   an owed ask auto-closes only on evidence answering THAT ask, never every
   open card because one later event was classified (`missing_unit_number` is
   human-verdict-only, in `triage-auto-resolve.js`); auto-routing stays
