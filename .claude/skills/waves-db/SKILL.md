@@ -258,9 +258,9 @@ lead-reply path upserted `contact_preference` beside
 (#6337 P1). Extend the existing writer with your path instead of adding a
 second persistence mechanism.
 
-Lock ORDER is part of the same contract. Any writer that LOCKS OR WRITES rows in
-more than one of `call_log`, `call_commitments`, `outbox_messages` and
-`triage_items` in a single transaction MUST take the shared per-call advisory lock
+Lock ORDER is part of the same contract. Any NEW writer that LOCKS OR WRITES rows
+in more than one of `call_log`, `call_commitments`, `outbox_messages` and
+`triage_items` in a single transaction takes the shared per-call advisory lock
 `lockTriageCall` (`server/utils/triage-locks.js`) FIRST, before locking any of
 them. A plain unlocked SELECT does not count, and the distinction is load-bearing:
 `renewPromiseOnOfficeVerdict` reads `outbox_messages` that way and locks only
@@ -268,6 +268,16 @@ them. A plain unlocked SELECT does not count, and the distinction is load-bearin
 canonical table by construction. The
 relative order of the four afterwards is deliberately NOT load-bearing (the
 rule and why it is enough are in the `reschedule-link-promises.js` module doc).
+
+It does NOT describe all existing code, and a review must not read it as
+licence to reject what is there: the two operator-initiated transactions in
+`admin-call-recordings.js` — customer relink (`call_log`, then `triage_items`)
+and recording adoption (the same two) — write two of the four without taking the
+lock, and they are established paths. Whether they migrate to the advisory lock
+or are documented as safe as they stand is an owner decision, not one to settle
+in a review of whatever file happens to touch them; until it is made, leave them
+as they are and raise the question rather than adding or removing a lock in
+passing.
 Skip it and two writers on the same call can still form a row-lock cycle —
 and the deadlock abort lands in a fail-soft `catch`, so the operation reports
 success and is never retried. A settlement locked `call_log` and then updated

@@ -656,7 +656,17 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
         : (obj.type === 'MemberExpression' && obj.object && obj.object.type === 'Identifier'
           && obj.object.name === 'module' && propertyName(obj) === 'exports' ? 'exports' : null);
       const slot = propertyName(node.left);
-      const right = node.right;
+      // `module.exports = Object.freeze({ … })` is the same export map with a
+      // wrapper around it, and the wrapper hid every rename inside it (#6342
+      // r18). `Object.freeze` ONLY: it is the one wrapper this codebase uses
+      // (`sms-offer-sources.js`), and "static wrappers such as" is the
+      // generalisation past a demonstrated requirement that cost r17 a hole.
+      const raw = node.right;
+      const right = (raw && raw.type === 'CallExpression' && raw.callee
+        && raw.callee.type === 'MemberExpression' && raw.callee.object
+        && raw.callee.object.type === 'Identifier' && raw.callee.object.name === 'Object'
+        && propertyName(raw.callee) === 'freeze' && raw.arguments.length === 1)
+        ? raw.arguments[0] : raw;
       if (target === 'module' && slot === 'exports') {
         if (right && right.type === 'Identifier') exportBindings.set(DEFAULT_EXPORT, right.name);
         else if (right && right.type === 'ObjectExpression') {
