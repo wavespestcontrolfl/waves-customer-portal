@@ -21,7 +21,17 @@
  *   - helpers are parsed from `feature-gates.js` AND from the modules each route
  *     requires, one level deep, so a wrapper that lives elsewhere still resolves
  *     (`isVoiceLatePaymentEnabled` in `services/collections/outbound-voice/gates.js`,
- *     read by `collections-voice-webhook.js`).
+ *     read by `collections-voice-webhook.js`);
+ *   - an identifier argument is resolved through its binding, local or imported
+ *     (`isEnabled(OUTBOUND_VOICEMAIL_SMS_GATE)` in `twilio-voice-webhook.js`,
+ *     where `GATE = 'outboundVoicemailSms'` lives in `outbound-voicemail-sms.js`).
+ *
+ * AND IT FAILS CLOSED. Four review rounds found four different reads this
+ * resolver silently treated as "no gate", each one a diff it should have failed
+ * (#6342). Widening the patterns again only waits for the fifth, so an
+ * `isEnabled` / `gateEnvValue` / `.gates` read that does NOT resolve to a gate is
+ * now a failure naming the expression, not a pass. A new access form announces
+ * itself here instead of quietly shrinking what this test covers.
  *
  * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
  * in the contract, not in this route's own entry, so adding an
@@ -101,14 +111,21 @@ function helperToGates(gatesSource, keys) {
 
 // GATE_* ⇒ the alias the route actually wrote, so "documented" can be checked
 // against the name a reader would search for.
-function gatesUsedBy(source, keys, helpers) {
+function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = []) {
   const code = stripComments(source);
   const used = new Map();
   const note = (gate, alias) => { if (gate && !used.has(gate)) used.set(gate, alias); };
-  const noteAll = (gates, alias) => { for (const g of gates || []) note(g, alias); };
-  for (const m of code.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)) noteAll(keys.get(m[1]), m[1]);
+  const noteAll = (gates, alias, expr) => {
+    if (!gates || !gates.length) { unresolved.push(expr); return; }
+    for (const g of gates) note(g, alias);
+  };
+  for (const m of code.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)) noteAll(keys.get(m[1]), m[1], `isEnabled('${m[1]}')`);
+  for (const m of code.matchAll(/isEnabled\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
+    const key = idents.get(m[1]);
+    noteAll(key ? keys.get(key) : null, key || m[1], `isEnabled(${m[1]})`);
+  }
   for (const m of code.matchAll(/gateEnvValue\(\s*'(GATE_[A-Z0-9_]+)'/g)) note(m[1], m[1]);
-  for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) noteAll(keys.get(m[1]), m[1]);
+  for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) noteAll(keys.get(m[1]), m[1], `.gates.${m[1]}`);
   for (const m of code.matchAll(/process\.env\.(GATE_[A-Z0-9_]+)/g)) note(m[1], m[1]);
   // `helper(` and the optional-call `helper?.(` — reports-public.js reads
   // `reportAskAiLive?.()`, which the plain form missed entirely (#6342 r3).
@@ -149,6 +166,38 @@ function requiredLocalModules(routeFile, code) {
   return out;
 }
 
+// IDENT ⇒ its string value, for `isEnabled(IDENT)`: a local `const IDENT = 'key'`,
+// or a destructured require (renamed or not) whose source module binds that name
+// to a string. One level, which is where these constants live.
+function identifierValues(routeFile, code) {
+  const values = new Map();
+  for (const m of code.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*'([^']+)'/g)) {
+    values.set(m[1], m[2]);
+  }
+  // Only a real destructuring list: identifiers, commas and renames, nothing
+  // with braces, calls or statement breaks. `[^}]*` spans newlines, so without
+  // this a far-away brace swallows a whole function body and "identifiers" come
+  // back as code — which then cannot be interpolated into a RegExp.
+  const IDENT = /^[A-Za-z_$][\w$]*$/;
+  const destructured = /\{\s*([A-Za-z_$][\w$,:\s]*?)\s*\}\s*=\s*require\(\s*'(\.[^']+)'\s*\)/g;
+  for (const m of code.matchAll(destructured)) {
+    const target = path.resolve(path.dirname(routeFile), m[2]);
+    const file = [target, `${target}.js`, path.join(target, 'index.js')]
+      .find((c) => c.startsWith(SERVER_ROOT) && fs.existsSync(c) && fs.statSync(c).isFile());
+    if (!file) continue;
+    const modSource = stripComments(fs.readFileSync(file, 'utf8'));
+    for (const binding of m[1].split(',')) {
+      const [original, alias] = binding.split(':').map((x) => x.trim());
+      if (!IDENT.test(original || '') || (alias !== undefined && !IDENT.test(alias))) continue;
+      const local = alias || original;
+      const direct = modSource.match(new RegExp(`(?:const|let|var)\\s+${original}\\s*=\\s*'([^']+)'`))
+        || modSource.match(new RegExp(`\\b${original}\\s*:\\s*'([^']+)'`));
+      if (direct && !values.has(local)) values.set(local, direct[1]);
+    }
+  }
+  return values;
+}
+
 function publicRouteFiles() {
   return fs.readdirSync(ROUTES_DIR)
     .filter((f) => f.endsWith('.js') && !f.includes('.test.'))
@@ -184,6 +233,7 @@ test('no public route file gains a gate the public-route contract does not name'
   const helpersOf = helperCache();
   const added = [];
   const stale = [];
+  const unreadable = [];
   for (const file of publicRouteFiles()) {
     const routePath = path.join(ROUTES_DIR, file);
     const source = fs.readFileSync(routePath, 'utf8');
@@ -193,7 +243,11 @@ test('no public route file gains a gate the public-route contract does not name'
         if (!reachable.has(fn)) reachable.set(fn, gates);
       }
     }
-    const used = gatesUsedBy(source, keys, reachable);
+    const unresolved = [];
+    const used = gatesUsedBy(source, keys, reachable, identifierValues(routePath, stripComments(source)), unresolved);
+    for (const expr of new Set(unresolved)) {
+      unreadable.push(`${file}: ${expr} does not resolve to a GATE_* — teach the resolver this form`);
+    }
     const allowed = new Set(baseline[file] || []);
     for (const gate of allowed) {
       if (!used.has(gate)) stale.push(`${file}: ${gate} is no longer read there — drop the baseline entry`);
@@ -208,6 +262,12 @@ test('no public route file gains a gate the public-route contract does not name'
 
   expect(added.length
     ? `Document the gate's on/off behavior in that route's entry in docs/public-route-contracts.md in the same PR (AGENTS.md "Public route surface" — undocumented is P0):\n  ${added.sort().join('\n  ')}`
+    : '').toBe('');
+
+  // A gate read this resolver cannot decode would otherwise read as no gate at
+  // all, which is how four rounds of blind spots stayed green.
+  expect(unreadable.length
+    ? `A gate read could not be resolved, so it would silently count as no gate:\n  ${unreadable.sort().join('\n  ')}`
     : '').toBe('');
 
   // A baseline entry that is no longer earned is a standing exemption; it goes

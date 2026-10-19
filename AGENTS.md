@@ -335,7 +335,7 @@ execute the workflows they describe.
   correction, accepts only `inServiceArea === true`, holds when unreachable,
   treats a `PREMISE` missing only `subpremise` as a building without its
   unit (`avMissingUnitOnly` — hold `missing_unit_number`, never street
-  recovery); the address and authorization cards drop only on
+  recovery); the `NO_ASK_ADDRESS_CARDS` drop only on
   `callMakesNoServiceAsk()`, never a call-nature label like `vendor_logged`;
   a card binds to the hold's `held_at`, not the call id; an owed ask
   auto-closes only on evidence answering THAT ask, never every open card
