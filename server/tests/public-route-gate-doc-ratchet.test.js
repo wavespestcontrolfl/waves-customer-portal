@@ -62,6 +62,11 @@
  * constants — a line that names a gate. Even there a shape was missed: the
  * table uses `get key() { … }` as well as `key: …`, and `visitCloseout` was
  * invisible until this test's own fail-closed report named it (#6342 r8).
+ * Helper bodies resolve `isEnabled(IDENT)` through their module's string
+ * constants too — the round-4 read-side fix, which the definition side did not
+ * get until r9 — and a helper whose argument still does not resolve is marked
+ * OPAQUE and reported when a scanned file calls it, rather than contributing
+ * nothing.
  *
  * KNOWN LIMIT: propagation is one module deep. A helper that delegates to a
  * helper IMPORTED from a third module is the next hop out, and would resolve to
@@ -173,8 +178,16 @@ const GATE_MENTION = /GATE_[A-Z0-9_]+|isEnabled\s*\(|gateEnvValue\s*\(/;
 
 function helperToGates(source, keys, filename = 'module.js', unresolved = null) {
   const map = new Map();
+  // Helper names whose `isEnabled(…)` argument this resolver could not decode.
+  // Tracked, not ignored: a helper body read `isEnabled(GATE)` with a module
+  // constant and contributed NOTHING, so `textBackIfMissed()` in
+  // `missed-call-text-back.js` hid both of its gates from
+  // `twilio-voice-webhook.js` and the ratchet passed (#6342 r9). Reported only
+  // when a scanned file actually calls the helper, so an undecodable read in a
+  // module nobody calls is not noise.
+  const opaque = new Set();
   // Nothing to find, and 900-odd of the ~1120 reachable modules take this exit.
-  if (!GATE_MENTION.test(source)) return map;
+  if (!GATE_MENTION.test(source)) return { gates: map, opaque };
   let ast;
   try {
     ast = parse(source, {
@@ -188,7 +201,16 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     // Only reached for a module that DOES mention a gate, so it is worth a
     // report rather than the regex's silent nothing.
     if (unresolved) unresolved.push(`${filename} defines gates but does not parse: ${err.message}`);
-    return map;
+    return { gates: map, opaque };
+  }
+
+  // `const GATE = 'missedCallTextBack'` — the same indirection round 4 fixed on
+  // the read side, which the definition side never got. Taken textually,
+  // exactly as `identifierValues` does for route files; over-collecting is
+  // harmless because only names used as an `isEnabled` argument are looked up.
+  const consts = new Map();
+  for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*'([^']+)'/g)) {
+    if (!consts.has(m[1])) consts.set(m[1], m[2]);
   }
 
   // ONE pass. `stack` is the named functions enclosing the current node, so a
@@ -228,12 +250,22 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
       else for (const g of gates) if (!prev.includes(g)) prev.push(g);
     }
   };
-  const noteCall = (callee) => {
-    if (!callee || !stack.length) return;
+  const markOpaque = () => { for (const name of stack) opaque.add(name); };
+  // An edge is any REFERENCE to a name, not only a call of it. This codebase
+  // injects dependencies by default parameter — `scheduleRecovery(cron, { sweep
+  // = sweepAbandonedDeliveries } = {})` calls it as `sweep(...)`, so following
+  // calls alone found no path from `scheduleRecovery` to the gate its sweep
+  // reads, and `index.js` (which calls only `scheduleRecovery`) resolved none
+  // of `GATE_LAWN_DELIVERY_RECOVERY` (#6342 r9). Referencing a gated function
+  // is enough to be gated by it; a reference that is never invoked
+  // over-attributes, which costs a baseline entry, and following calls only
+  // loses the gate.
+  const noteRef = (ref) => {
+    if (!ref || !stack.length) return;
     for (const name of stack) {
-      if (name === callee) continue;
+      if (name === ref) continue;
       if (!calls.has(name)) calls.set(name, new Set());
-      calls.get(name).add(callee);
+      calls.get(name).add(ref);
     }
   };
 
@@ -246,12 +278,16 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     if (node.type === 'Identifier' && /^GATE_[A-Z0-9_]+$/.test(node.name)) attribute([node.name]);
     if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
       const callee = node.callee && node.callee.type === 'Identifier' ? node.callee.name : null;
-      if (callee === 'isEnabled') {
+      if (callee === 'isEnabled' && node.arguments.length) {
         const arg = node.arguments[0];
-        if (arg && arg.type === 'StringLiteral') attribute(keys.get(arg.value) || []);
+        const key = arg && arg.type === 'StringLiteral' ? arg.value
+          : (arg && arg.type === 'Identifier' ? consts.get(arg.name) : undefined);
+        const gates = key === undefined ? null : keys.get(key);
+        if (gates) attribute(gates);
+        else markOpaque();
       }
-      noteCall(callee);
     }
+    if (node.type === 'Identifier') noteRef(node.name);
 
     for (const key of Object.keys(node)) {
       if (key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue;
@@ -277,6 +313,9 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     changed = false;
     for (const [fn, callees] of calls) {
       for (const callee of callees) {
+        // Opacity rides the same edges: calling something undecodable makes the
+        // caller undecodable too, or the fail-closed report stops one hop short.
+        if (opaque.has(callee) && !opaque.has(fn)) { opaque.add(fn); changed = true; }
         const gates = map.get(callee);
         if (!gates) continue;
         const prev = map.get(fn);
@@ -285,11 +324,11 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
       }
     }
   }
-  return map;
+  return { gates: map, opaque };
 }
 // GATE_* ⇒ the alias the route actually wrote, so "documented" can be checked
 // against the name a reader would search for. Reads are taken from the AST.
-function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [], filename = 'route.js') {
+function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [], filename = 'route.js', opaqueHelpers = new Set()) {
   const used = new Map();
   // An alias is the name a CONTRACT ENTRY may legitimately use for the gate —
   // its key (`payPageFaq`) or the `GATE_*` literal. It is never the name of the
@@ -377,8 +416,13 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
         const arg = node.arguments[0];
         if (arg && arg.type === 'StringLiteral' && /^GATE_[A-Z0-9_]+$/.test(arg.value)) note(arg.value, arg.value);
         else unresolved.push(src(node));
-      } else if (name && helpers.has(name)) {
-        for (const g of helpers.get(name)) note(g, name);
+      } else if (name && (helpers.has(name) || opaqueHelpers.has(name))) {
+        for (const g of helpers.get(name) || []) note(g, name);
+        // The helper reads a gate this resolver could not decode, so whatever
+        // it reads would otherwise count as nothing at all.
+        if (opaqueHelpers.has(name)) {
+          unresolved.push(`${name}() (its own isEnabled argument)`);
+        }
       }
     }
     if (isMember(node) && node.property && node.property.type === 'Identifier') {
@@ -412,13 +456,16 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
 // (feature-gates.js 82 times). This test shares a jest worker pool with
 // timing-sensitive suites in the same shard — sms-label-facts.js asserts
 // sub-quadratic SCALING — so its own CPU burst is not free, and the cost is
-// stated rather than discovered: the 89 files reach 771 distinct modules, 404
-// of which the GATE_MENTION prefilter drops unparsed; parsing the remaining
-// 367 (30 MB) is ~2.3 s of the test's ~7.6 s. That is up from ~2.2 s before
-// definitions were parsed, and it buys `GATE_HERMES_WORKER` on five routers.
-// The obvious further cut — parse a module only when the route calls a name it
-// defines — needs the parse to know the names, and every textual shortcut to
-// that is the kind of approximation six rounds here were spent removing.
+// stated rather than discovered: the 93 files reach ~770 distinct modules, more
+// than half of which the GATE_MENTION prefilter drops unparsed; parsing the
+// rest (~30 MB) is most of the test's ~9 s, up from ~2.2 s before definitions
+// were parsed. What that bought is five routers' `GATE_HERMES_WORKER`, two
+// `GATE_MISSED_CALL_TEXT_BACK*` on the voice webhook, and
+// `GATE_LAWN_DELIVERY_RECOVERY` on the mount file — each of them a live
+// undocumented public-route gate this test used to pass over. The obvious
+// further cut — parse a module only when the route calls a name it defines —
+// needs the parse to know the names, and every textual shortcut to that is the
+// kind of approximation these rounds were spent removing.
 function helperCache(unresolved) {
   const cache = new Map();
   return (modPath, keys) => {
@@ -546,25 +593,42 @@ test('no public route file gains a gate the public-route contract does not name'
   const added = [];
   const stale = [];
   const unreadable = [];
-  const helpers = helperToGates(gatesRaw, keys, 'config/feature-gates.js', unreadable);
+  const base = helperToGates(gatesRaw, keys, 'config/feature-gates.js', unreadable);
   const helpersOf = helperCache(unreadable);
 
   // Every resolver input is load-bearing: if one stops parsing, the gates it
   // resolves silently read as "no gate used" and this ratchet passes on a diff
   // it should fail. Floors, not exact counts, so ordinary growth is free.
   expect(keys.size).toBeGreaterThan(100);
-  expect(helpers.size).toBeGreaterThan(100);
+  expect(base.gates.size).toBeGreaterThan(100);
 
   for (const [file, routePath] of publicRouteFiles()) {
     const source = fs.readFileSync(routePath, 'utf8');
-    const reachable = new Map(helpers);
+    // UNION per name, never first-wins. Helper maps are keyed by bare function
+    // name across every module a route reaches, so two modules can define the
+    // same name — and keeping the first DISCARDED the other's gates outright:
+    // `gateOpen` resolved to `GATE_APPOINTMENT_PAGE` and threw away
+    // `GATE_LAWN_DELIVERY_RECOVERY` from `lawn-visit-delivery.js`, which
+    // `index.js` reaches, so that gate was in neither the contract nor the
+    // baseline and this test passed (#6342 r9). Three such collisions were
+    // live. A union over-attributes when two unrelated helpers share a name,
+    // which costs a baseline entry; dropping one loses the gate.
+    const reachable = new Map([...base.gates].map(([fn, gates]) => [fn, [...gates]]));
+    const opaqueHelpers = new Set(base.opaque);
     for (const mod of requiredLocalModules(routePath, stripComments(source))) {
-      for (const [fn, gates] of helpersOf(mod, keys)) {
-        if (!reachable.has(fn)) reachable.set(fn, gates);
+      const { gates: modGates, opaque } = helpersOf(mod, keys);
+      for (const [fn, gates] of modGates) {
+        const prev = reachable.get(fn);
+        if (!prev) reachable.set(fn, [...gates]);
+        else for (const g of gates) if (!prev.includes(g)) prev.push(g);
       }
+      for (const fn of opaque) opaqueHelpers.add(fn);
     }
     const unresolved = [];
-    const used = gatesUsedBy(source, keys, reachable, identifierValues(routePath, stripComments(source)), unresolved, file);
+    const used = gatesUsedBy(
+      source, keys, reachable, identifierValues(routePath, stripComments(source)),
+      unresolved, file, opaqueHelpers,
+    );
     for (const expr of new Set(unresolved)) {
       unreadable.push(`${file}: ${expr} does not resolve to a GATE_*`);
     }

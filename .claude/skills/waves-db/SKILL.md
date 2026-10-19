@@ -271,9 +271,13 @@ rule and why it is enough are in the `reschedule-link-promises.js` module doc).
 Skip it and two writers on the same call can still form a row-lock cycle —
 and the deadlock abort lands in a fail-soft `catch`, so the operation reports
 success and is never retried. A settlement locked `call_log` and then updated
-`triage_items` without it (#6271 P1). Take the advisory lock first and close
-with the existing `syncCallReviewStatus` rather than recomputing
-`review_status` locally.
+`triage_items` without it (#6271 P1). Take the advisory lock first. On the
+`lockTriageCall` paths, close with `syncCallReviewStatus`
+(`server/utils/triage-locks.js`) rather than writing a new local recompute —
+but it is not universal: `clearPromiseException`
+(`reschedule-link-promises.js`) and `admin-triage.js` still inline the same
+aggregate, so an existing inline recompute is authoritative, not a defect to
+reject.
 
 ## 6. Schema truth traps (wrong-answer generators)
 
