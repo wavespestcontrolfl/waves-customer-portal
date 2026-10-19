@@ -69,14 +69,17 @@ const stripComments = (source) => source
   .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
   .join('\n');
 
-// key ⇒ the gate its line names, in any shape the table uses:
-// `key: process.env.GATE_X === 'true'`, `key: gateEnvValue('GATE_X')`, and the
-// env-default ternary `key: isProd ? process.env.GATE_X === 'true' : true`.
+// key ⇒ EVERY gate its line names, in any shape the table uses:
+// `key: process.env.GATE_X === 'true'`, `key: gateEnvValue('GATE_X')`, the
+// env-default ternary `key: isProd ? … : true`, and the compound guard
+// `typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF')`.
+// Seven keys name more than one gate; keeping only the first let a compound
+// guard ship with just its already-documented master gate (#6342 r3).
 function keyToGate(gatesSource) {
   const map = new Map();
   for (const m of gatesSource.matchAll(/^\s*([a-zA-Z0-9_]+)\s*:\s*(.*GATE_[A-Z0-9_]+.*)$/gm)) {
-    const gate = m[2].match(/GATE_[A-Z0-9_]+/);
-    if (gate && !map.has(m[1])) map.set(m[1], gate[0]);
+    const gates = [...new Set(m[2].match(/GATE_[A-Z0-9_]+/g) || [])];
+    if (gates.length && !map.has(m[1])) map.set(m[1], gates);
   }
   return map;
 }
@@ -89,8 +92,7 @@ function helperToGates(gatesSource, keys) {
     const body = m[2];
     const direct = body.match(/GATE_[A-Z0-9_]+/g) || [];
     const viaKey = [...body.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)]
-      .map((k) => keys.get(k[1]))
-      .filter(Boolean);
+      .flatMap((k) => keys.get(k[1]) || []);
     const gates = [...new Set([...direct, ...viaKey])];
     if (gates.length) map.set(m[1], gates);
   }
@@ -103,12 +105,15 @@ function gatesUsedBy(source, keys, helpers) {
   const code = stripComments(source);
   const used = new Map();
   const note = (gate, alias) => { if (gate && !used.has(gate)) used.set(gate, alias); };
-  for (const m of code.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)) note(keys.get(m[1]), m[1]);
+  const noteAll = (gates, alias) => { for (const g of gates || []) note(g, alias); };
+  for (const m of code.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)) noteAll(keys.get(m[1]), m[1]);
   for (const m of code.matchAll(/gateEnvValue\(\s*'(GATE_[A-Z0-9_]+)'/g)) note(m[1], m[1]);
-  for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) note(keys.get(m[1]), m[1]);
+  for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) noteAll(keys.get(m[1]), m[1]);
   for (const m of code.matchAll(/process\.env\.(GATE_[A-Z0-9_]+)/g)) note(m[1], m[1]);
+  // `helper(` and the optional-call `helper?.(` — reports-public.js reads
+  // `reportAskAiLive?.()`, which the plain form missed entirely (#6342 r3).
   for (const [helper, gates] of helpers) {
-    if (new RegExp(`\\b${helper}\\s*\\(`).test(code)) for (const g of gates) note(g, helper);
+    if (new RegExp(`\\b${helper}\\s*(?:\\?\\.)?\\(`).test(code)) noteAll(gates, helper);
   }
   return used;
 }
@@ -155,12 +160,13 @@ function publicRouteFiles() {
     .sort();
 }
 
-// Named in the contract under the env name, or under the alias the route wrote
-// AS INLINE CODE — bare prose must not count, so a future single-word key could
-// not be satisfied by an unrelated sentence. Hardening, not a fix: every gate
-// counted as documented today matches on its `GATE_*` name, and no alias in
-// `feature-gates.js` is a bare prose word, so this flips nothing now (#6342).
-const documentsGate = (doc, gate, alias) => doc.includes(gate) || doc.includes(`\`${alias}\``);
+// Named in the contract as a WHOLE gate token, or under the alias the route
+// wrote as inline code. Both bounds matter: `doc.includes(gate)` let
+// `GATE_VOICE_LATE_PAYMENT_AUTODIAL` stand in as documentation for its own
+// prefix `GATE_VOICE_LATE_PAYMENT` (#6342 r3), and a bare-prose alias match
+// would let an unrelated sentence satisfy a future single-word key.
+const documentsGate = (doc, gate, alias) => new RegExp(`(?<![A-Z0-9_])${gate}(?![A-Z0-9_])`).test(doc)
+  || doc.includes(`\`${alias}\``);
 
 test('no public route file gains a gate the public-route contract does not name', () => {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
