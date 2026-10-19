@@ -68,11 +68,21 @@
  * OPAQUE and reported when a scanned file calls it, rather than contributing
  * nothing.
  *
- * KNOWN LIMIT: propagation is one module deep. A helper that delegates to a
- * helper IMPORTED from a third module is the next hop out, and would resolve to
- * nothing without being reported, because the delegating call looks like any
- * other call. Decision 2 in the PR body (one resolver shared with
- * `scripts/lib/gate-scan.js`) is where that belongs.
+ * Propagation runs TWICE: inside each module, and again over the maps unioned
+ * across every module a file reaches, which is the only level where a
+ * cross-module edge has both ends (`applyOutlinkTracking` in
+ * `outlink-tracking.js` delegates to `outlinkTrackingLive` in
+ * `feature-gates.js`, #6342 r10). Helper maps are keyed by bare function name
+ * and UNIONED, never first-wins: keeping the first discarded the other
+ * definition's gates outright (#6342 r9).
+ *
+ * A NAME IS NOT A GATE. A local shaped like one may hold the real gate
+ * (`const GATE_ENV = 'GATE_PHOTO_MARKS'`) or something unrelated
+ * (`GATE_UUID_ARRAY` is a SQL fragment that filters malformed uuids). Taking
+ * the identifier at face value put two gates that have never existed into this
+ * fixture, across four files, while hiding the real ones (#6342 r10) — so a
+ * declared name resolves to its string value, counts as no gate when that
+ * value is not a gate name, and is opaque only when unreadable.
  *
  * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
  * in the contract, not in this route's own entry, so adding an
@@ -174,6 +184,39 @@ function keyToGate(gatesSource) {
 // `GATE_HERMES_WORKER` was undocumented, unbaselined and invisible here
 // (#6342 r7). Attributing a nested read to the enclosing name is the point: a
 // route that calls the factory is gated by what the factory returns.
+// ONE argument resolver for both halves of this file. Keeping two meant every
+// shape had to be fixed twice and never was: the read side resolved ternaries
+// from r5 and identifiers from r4, while helper bodies took only string
+// literals — which is three separate r9/r10 findings
+// (`isEnabled(GATE)`, `featureGates.isEnabled(...)`,
+// `isEnabled(cond ? 'a' : 'b')`) with one cause. Returns [[gate, key], …], or
+// null when ANY value the expression can take does not resolve; the condition
+// of a ternary is not one of those values. `lookup` maps an identifier to a
+// gate key, and differs per half (route-local bindings vs module constants).
+function resolveGateArg(node, keys, lookup) {
+  if (!node) return null;
+  if (node.type === 'StringLiteral') {
+    const gates = keys.get(node.value);
+    return gates ? gates.map((g) => [g, node.value]) : null;
+  }
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0 && node.quasis.length === 1) {
+    return resolveGateArg({ type: 'StringLiteral', value: node.quasis[0].value.cooked }, keys, lookup);
+  }
+  if (node.type === 'Identifier') {
+    const key = lookup(node.name);
+    const gates = key ? keys.get(key) : null;
+    return gates ? gates.map((g) => [g, key]) : null;
+  }
+  if (node.type === 'ConditionalExpression' || node.type === 'LogicalExpression') {
+    const [a, b] = node.type === 'ConditionalExpression'
+      ? [node.consequent, node.alternate] : [node.left, node.right];
+    const left = resolveGateArg(a, keys, lookup);
+    const right = left && resolveGateArg(b, keys, lookup);
+    return left && right ? [...left, ...right] : null;
+  }
+  return null;
+}
+
 const GATE_MENTION = /GATE_[A-Z0-9_]+|isEnabled\s*\(|gateEnvValue\s*\(/;
 
 function helperToGates(source, keys, filename = 'module.js', unresolved = null) {
@@ -187,7 +230,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   // module nobody calls is not noise.
   const opaque = new Set();
   // Nothing to find, and 900-odd of the ~1120 reachable modules take this exit.
-  if (!GATE_MENTION.test(source)) return { gates: map, opaque };
+  if (!GATE_MENTION.test(source)) return { gates: map, opaque, calls: new Map() };
   let ast;
   try {
     ast = parse(source, {
@@ -201,17 +244,30 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     // Only reached for a module that DOES mention a gate, so it is worth a
     // report rather than the regex's silent nothing.
     if (unresolved) unresolved.push(`${filename} defines gates but does not parse: ${err.message}`);
-    return { gates: map, opaque };
+    return { gates: map, opaque, calls: new Map() };
   }
 
   // `const GATE = 'missedCallTextBack'` — the same indirection round 4 fixed on
   // the read side, which the definition side never got. Taken textually,
   // exactly as `identifierValues` does for route files; over-collecting is
   // harmless because only names used as an `isEnabled` argument are looked up.
+  // All three quote styles, each to its own closing delimiter so a string may
+  // contain the other quote characters. Single quotes alone was not enough —
+  // the SQL fragment that exposed this is double-quoted AND contains single
+  // quotes, so its value read as "no value" and the name alone decided the
+  // outcome.
   const consts = new Map();
-  for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*'([^']+)'/g)) {
-    if (!consts.has(m[1])) consts.set(m[1], m[2]);
+  for (const quote of ["'", '"', '`']) {
+    const pattern = new RegExp(
+      `(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*${quote}((?:[^${quote}\\\\]|\\\\.)*)${quote}`,
+      'g',
+    );
+    for (const m of source.matchAll(pattern)) if (!consts.has(m[1])) consts.set(m[1], m[2]);
   }
+  // Every local binding, string-valued or not, so a name that merely LOOKS like
+  // a gate can be told from a gate.
+  const declared = new Set();
+  for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
 
   // ONE pass. `stack` is the named functions enclosing the current node, so a
   // gate read is attributed to each of them — which is what makes the factory
@@ -275,15 +331,43 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     if (name) stack.push(name);
 
     if (node.type === 'StringLiteral' && /^GATE_[A-Z0-9_]+$/.test(node.value)) attribute([node.value]);
-    if (node.type === 'Identifier' && /^GATE_[A-Z0-9_]+$/.test(node.name)) attribute([node.name]);
+    if (node.type === 'Identifier' && /^GATE_[A-Z0-9_]+$/.test(node.name)) {
+      // A name shaped like a gate may be a local binding HOLDING the real one:
+      // `const GATE_ENV = 'GATE_PHOTO_MARKS'; process.env[GATE_ENV]`.
+      // Attributing the identifier itself put a gate that does not exist,
+      // `GATE_ENV`, into the baseline for two files and hid both real gates
+      // behind it (#6342 r10). An undeclared one is a property of
+      // `process.env`; a declared one resolves to its string value or is
+      // opaque (it can be an object, as in `voice-relay-replay.js`).
+      if (!declared.has(node.name)) attribute([node.name]);
+      else {
+        const value = consts.get(node.name);
+        // Three outcomes, and the middle one is the whole point: a local whose
+        // value is a string that is NOT a gate name is NOT A GATE, however it
+        // is spelled. `GATE_UUID_ARRAY` in `annual-prepay-renewals.js` holds a
+        // SQL fragment that filters malformed uuids; attributing the name put a
+        // gate that has never existed into `stripe-webhook.js`'s baseline, as
+        // `GATE_ENV` did for two more files (#6342 r10). Only an unreadable
+        // binding — an object, a call — is opaque.
+        if (value === undefined) markOpaque();
+        else if (/^GATE_[A-Z0-9_]+$/.test(value)) attribute([value]);
+      }
+    }
     if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
-      const callee = node.callee && node.callee.type === 'Identifier' ? node.callee.name : null;
+      // `featureGates.isEnabled('treatmentZoneMap')` is the same read as the
+      // bare call, and taking only Identifier callees meant
+      // `treatmentZonePdfSignature()` contributed nothing and was not even
+      // marked opaque, hiding `GATE_TREATMENT_ZONE_MAP` from
+      // `reports-public.js` (#6342 r10). The route-side walker already took
+      // member callees; this half did not.
+      const c = node.callee;
+      const callee = !c ? null
+        : (c.type === 'Identifier' ? c.name
+          : ((c.type === 'MemberExpression' || c.type === 'OptionalMemberExpression')
+            && c.property && c.property.type === 'Identifier' ? c.property.name : null));
       if (callee === 'isEnabled' && node.arguments.length) {
-        const arg = node.arguments[0];
-        const key = arg && arg.type === 'StringLiteral' ? arg.value
-          : (arg && arg.type === 'Identifier' ? consts.get(arg.name) : undefined);
-        const gates = key === undefined ? null : keys.get(key);
-        if (gates) attribute(gates);
+        const resolved = resolveGateArg(node.arguments[0], keys, (n) => consts.get(n));
+        if (resolved) attribute(resolved.map(([g]) => g));
         else markOpaque();
       }
     }
@@ -324,7 +408,29 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
       }
     }
   }
-  return { gates: map, opaque };
+  return { gates: map, opaque, calls };
+}
+
+// The same fixed point, run over maps UNIONED across every module a file
+// reaches, which is the only level where a cross-module edge has both ends.
+// `applyOutlinkTracking()` in `outlink-tracking.js` delegates to
+// `outlinkTrackingLive()`, which is defined in `feature-gates.js`, so
+// propagating inside each module found nothing and `GATE_OUTLINK_TRACKING`
+// vanished for `prep-public.js` (#6342 r10).
+function propagate(gatesByName, opaqueNames, edges) {
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [fn, callees] of edges) {
+      for (const callee of callees) {
+        if (opaqueNames.has(callee) && !opaqueNames.has(fn)) { opaqueNames.add(fn); changed = true; }
+        const gates = gatesByName.get(callee);
+        if (!gates) continue;
+        const prev = gatesByName.get(fn);
+        if (!prev) { gatesByName.set(fn, [...gates]); changed = true; continue; }
+        for (const g of gates) if (!prev.includes(g)) { prev.push(g); changed = true; }
+      }
+    }
+  }
 }
 // GATE_* ⇒ the alias the route actually wrote, so "documented" can be checked
 // against the name a reader would search for. Reads are taken from the AST.
@@ -372,33 +478,11 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
     return null;
   };
 
-  // Every value the expression can take must resolve to a gate; the condition of
-  // a ternary is not one of them. Returns false when any branch cannot resolve.
-  const resolveArg = (node, alias) => {
-    if (!node) return false;
-    if (node.type === 'StringLiteral') {
-      const gates = keys.get(node.value);
-      if (!gates) return false;
-      for (const g of gates) note(g, node.value);
-      return true;
-    }
-    if (node.type === 'TemplateLiteral' && node.expressions.length === 0 && node.quasis.length === 1) {
-      return resolveArg({ type: 'StringLiteral', value: node.quasis[0].value.cooked }, alias);
-    }
-    if (node.type === 'Identifier') {
-      const key = idents.get(node.name);
-      const gates = key ? keys.get(key) : null;
-      if (!gates) return false;
-      for (const g of gates) note(g, key);
-      return true;
-    }
-    if (node.type === 'ConditionalExpression') {
-      return resolveArg(node.consequent, alias) && resolveArg(node.alternate, alias);
-    }
-    if (node.type === 'LogicalExpression') {
-      return resolveArg(node.left, alias) && resolveArg(node.right, alias);
-    }
-    return false;
+  const resolveArg = (node) => {
+    const resolved = resolveGateArg(node, keys, (n) => idents.get(n));
+    if (!resolved) return false;
+    for (const [gate, key] of resolved) note(gate, key);
+    return true;
   };
 
   const src = (node) => source.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 120);
@@ -411,7 +495,7 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
       // the name; with no argument there is no gate to name, so it is neither a
       // read nor something to report.
       if (name === 'isEnabled' && node.arguments.length) {
-        if (!resolveArg(node.arguments[0], null)) unresolved.push(src(node));
+        if (!resolveArg(node.arguments[0])) unresolved.push(src(node));
       } else if (name === 'gateEnvValue') {
         const arg = node.arguments[0];
         if (arg && arg.type === 'StringLiteral' && /^GATE_[A-Z0-9_]+$/.test(arg.value)) note(arg.value, arg.value);
@@ -458,11 +542,13 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
 // sub-quadratic SCALING — so its own CPU burst is not free, and the cost is
 // stated rather than discovered: the 93 files reach ~770 distinct modules, more
 // than half of which the GATE_MENTION prefilter drops unparsed; parsing the
-// rest (~30 MB) is most of the test's ~9 s, up from ~2.2 s before definitions
+// rest (~30 MB) is most of the test's ~12 s, up from ~2.2 s before definitions
 // were parsed. What that bought is five routers' `GATE_HERMES_WORKER`, two
-// `GATE_MISSED_CALL_TEXT_BACK*` on the voice webhook, and
-// `GATE_LAWN_DELIVERY_RECOVERY` on the mount file — each of them a live
-// undocumented public-route gate this test used to pass over. The obvious
+// `GATE_MISSED_CALL_TEXT_BACK*` on the voice webhook,
+// `GATE_LAWN_DELIVERY_RECOVERY` on the mount file, `GATE_TREATMENT_ZONE_MAP`
+// and `GATE_PHOTO_MARKS` on the report routes, and the removal of two gates
+// that never existed — each of them a live defect in what this test reported.
+// The obvious
 // further cut — parse a module only when the route calls a name it defines —
 // needs the parse to know the names, and every textual shortcut to that is the
 // kind of approximation these rounds were spent removing.
@@ -615,15 +701,23 @@ test('no public route file gains a gate the public-route contract does not name'
     // which costs a baseline entry; dropping one loses the gate.
     const reachable = new Map([...base.gates].map(([fn, gates]) => [fn, [...gates]]));
     const opaqueHelpers = new Set(base.opaque);
+    const edges = new Map([...base.calls].map(([fn, to]) => [fn, new Set(to)]));
     for (const mod of requiredLocalModules(routePath, stripComments(source))) {
-      const { gates: modGates, opaque } = helpersOf(mod, keys);
+      const { gates: modGates, opaque, calls } = helpersOf(mod, keys);
       for (const [fn, gates] of modGates) {
         const prev = reachable.get(fn);
         if (!prev) reachable.set(fn, [...gates]);
         else for (const g of gates) if (!prev.includes(g)) prev.push(g);
       }
       for (const fn of opaque) opaqueHelpers.add(fn);
+      for (const [fn, to] of calls) {
+        if (!edges.has(fn)) edges.set(fn, new Set(to));
+        else for (const t of to) edges.get(fn).add(t);
+      }
     }
+    // Re-run the fixed point now that every module's names and edges sit in one
+    // place, so a delegation that crosses a module boundary resolves.
+    propagate(reachable, opaqueHelpers, edges);
     const unresolved = [];
     const used = gatesUsedBy(
       source, keys, reachable, identifierValues(routePath, stripComments(source)),
