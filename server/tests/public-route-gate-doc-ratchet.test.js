@@ -373,8 +373,18 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     }
     if (node.type === 'Identifier') noteRef(node.name);
 
+    // `{ code: 'GATE_CODE_BELLS_FAILED' }` is an Error code, not a gate — the
+    // exact exclusion `scripts/lib/gate-scan.js` already carries, which I did
+    // not mirror, so two error codes sat in this fixture as gates that have
+    // never existed (#6342 r13). Same class as r10's `GATE_ENV`: a name is not
+    // a gate.
+    const isErrorCode = node.type === 'ObjectProperty' && node.key
+      && ((node.key.type === 'Identifier' && node.key.name === 'code')
+        || (node.key.type === 'StringLiteral' && node.key.value === 'code'));
+
     for (const key of Object.keys(node)) {
       if (key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue;
+      if (isErrorCode && key === 'value') continue;
       const child = node[key];
       if (Array.isArray(child)) for (const item of child) walk(item);
       else if (child && typeof child === 'object' && typeof child.type === 'string') walk(child);
@@ -469,6 +479,21 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   const isCall = (node) => !!node
     && (node.type === 'CallExpression' || node.type === 'OptionalCallExpression');
 
+  // `const { isEnabled: reviewGateOn } = require('../config/feature-gates')` is
+  // a live form here (`appointment-reminders.js`, `complete-scheduled-service.js`),
+  // and matching the callee name literally treated the alias as unrelated code
+  // (#6342 r13). Any destructured rename of a reader counts, whatever module it
+  // is taken from, because the names are distinctive and over-accepting only
+  // resolves or reports more reads.
+  const readerAliases = new Map();
+  for (const m of source.matchAll(/\{([^}]{0,400}?)\}\s*=\s*require\(/g)) {
+    for (const binding of m[1].split(',')) {
+      const [original, alias] = binding.split(':').map((x) => x.trim());
+      if (!alias || !/^[A-Za-z_$][\w$]*$/.test(alias)) continue;
+      if (original === 'isEnabled' || original === 'gateEnvValue') readerAliases.set(alias, original);
+    }
+  }
+
   const calleeName = (node) => {
     if (!node) return null;
     if (node.type === 'Identifier') return node.name;
@@ -503,7 +528,8 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   const visit = (node) => {
     if (!node || typeof node.type !== 'string') return;
     if (isCall(node)) {
-      const name = calleeName(node.callee);
+      const raw = calleeName(node.callee);
+      const name = readerAliases.get(raw) || raw;
       // `techNotices.isEnabled()` is an unrelated method that happens to share
       // the name; with no argument there is no gate to name, so it is neither a
       // read nor something to report.
@@ -616,7 +642,10 @@ function helperCache(unresolved) {
 // is decision 2 in the PR body and a design call, not a review fix.
 function requiredLocalModules(routeFile, code) {
   const out = [];
-  for (const m of code.matchAll(/require\(\s*'(\.[^']+)'\s*\)/g)) {
+  // Both quote styles: 16 files under server/ write `require("./x")`, so
+  // matching only single quotes let a formatting choice hide a helper module
+  // from this scan entirely (#6342 r13).
+  for (const m of code.matchAll(/require\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
     const base = path.resolve(path.dirname(routeFile), m[1]);
     for (const candidate of [base, `${base}.js`, path.join(base, 'index.js')]) {
       if (candidate.startsWith(SERVER_ROOT) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
@@ -641,7 +670,7 @@ function identifierValues(routeFile, code) {
   // this a far-away brace swallows a whole function body and "identifiers" come
   // back as code — which then cannot be interpolated into a RegExp.
   const IDENT = /^[A-Za-z_$][\w$]*$/;
-  const destructured = /\{\s*([A-Za-z_$][\w$,:\s]*?)\s*\}\s*=\s*require\(\s*'(\.[^']+)'\s*\)/g;
+  const destructured = /\{\s*([A-Za-z_$][\w$,:\s]*?)\s*\}\s*=\s*require\(\s*['"](\.[^'"]+)['"]\s*\)/g;
   for (const m of code.matchAll(destructured)) {
     const target = path.resolve(path.dirname(routeFile), m[2]);
     const file = [target, `${target}.js`, path.join(target, 'index.js')]
@@ -736,7 +765,9 @@ test('no public route file gains a gate the public-route contract does not name'
   expect(keys.size).toBeGreaterThan(100);
   expect(base.gates.size).toBeGreaterThan(100);
 
+  const visited = new Set();
   for (const [file, routePath] of publicRouteFiles()) {
+    visited.add(file);
     const source = fs.readFileSync(routePath, 'utf8');
     // UNION per name, never first-wins. Helper maps are keyed by bare function
     // name across every module a route reaches, so two modules can define the
@@ -783,6 +814,18 @@ test('no public route file gains a gate the public-route contract does not name'
       if (documentsGate(doc, gate, alias)) continue;
       if (allowed.has(gate)) continue;
       added.push(`${file}: ${gate} (read as \`${alias}\`) is not named in docs/public-route-contracts.md`);
+    }
+  }
+
+  // A baseline key for a file this scan never visited is checked by nothing:
+  // the loop above only consults `baseline[file]` for files it visits, so an
+  // entry whose route was deleted, renamed, or newly classified as
+  // authenticated survives forever — and silently re-exempts that gate if the
+  // filename is ever reused (#6342 r13). Every key must be earned by a file in
+  // the set, the same rule the entries themselves already live under.
+  for (const file of Object.keys(baseline)) {
+    if (!visited.has(file)) {
+      stale.push(`${file}: not in the scanned set — the whole baseline entry is orphaned, remove it`);
     }
   }
 
