@@ -301,7 +301,7 @@ function resolveGateArg(node, keys, lookup, reader = 'isEnabled', propLookup = n
   return null;
 }
 
-// Imported bindings BOTH walkers need, built once from a source. Keeping these
+// The bindings BOTH walkers need, built once from a source. Keeping these
 // per-walker is what made r13's alias fix apply to routes and not to helper
 // modules, and the `.gates` read resolvable on one side only — the third and
 // fourth times a fix landed on one half of this file (#6342 r15). One function,
@@ -330,7 +330,7 @@ function isGatesModule(node, moduleBindings) {
   return false;
 }
 
-function importedGateBindings(source) {
+function gateBindings(source) {
   const readerAliases = new Map();
   const gatesBindings = new Set();
   // `const featureGates = require('../config/feature-gates')` ⇒ featureGates.
@@ -352,6 +352,31 @@ function importedGateBindings(source) {
       if (GATE_READERS.has(original)) readerAliases.set(local, original);
       if (original === 'gates') gatesBindings.add(local);
     }
+  }
+  // A LOCAL can hold a reader too, and this codebase injects them that way:
+  // `const enabled = gates.isEnabled || isEnabled` in three functions of
+  // `call-recording-processor.js`, and `function
+  // unclearServiceAssessmentActive(enabled = isEnabled)` beside them, each then
+  // called as `enabled('someKey')`. That hid a LIVE read of
+  // `GATE_CALL_OUTBOUND_BOOKING` — undocumented in
+  // `docs/public-route-contracts.md`, unbaselined, and reached from
+  // `twilio-voice-webhook.js` (#6342 r19), which is the defect class this test
+  // exists for rather than another spelling.
+  //
+  // The reader must be REFERENCED, not CALLED: `const on = isEnabled('x')`
+  // holds a boolean, and counting that would make every gated local a reader
+  // and every later `on(…)` a gate read. Hence the `(?!\()` — the same
+  // reference-vs-call distinction `noteRef` draws for helpers.
+  const READERS = [...GATE_READERS].join('|');
+  const held = new RegExp(`\\b(${READERS})\\b\\s*(?!\\()`);
+  for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)) {
+    const ref = held.exec(m[2]);
+    if (ref) readerAliases.set(m[1], ref[1]);
+  }
+  // `(enabled = isEnabled)` — a parameter default, which is how
+  // `unclearServiceAssessmentActive` takes its reader.
+  for (const m of source.matchAll(new RegExp(`([A-Za-z_$][\\w$]*)\\s*=\\s*(${READERS})\\s*[,)]`, 'g'))) {
+    readerAliases.set(m[1], m[2]);
   }
   return { readerAliases, gatesBindings, moduleBindings };
 }
@@ -415,7 +440,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   // a gate can be told from a gate.
   const declared = new Set();
   for (const m of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
-  const { readerAliases, gatesBindings, moduleBindings } = importedGateBindings(source);
+  const { readerAliases, gatesBindings, moduleBindings } = gateBindings(source);
   // A local name can also come from ANOTHER module:
   // `gateEnvValue(TERMITE_BOND_GATE)` in `property.js` reads a constant
   // destructured from `services/termite-bonds.js`, which exports it as the
@@ -827,7 +852,7 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   // (#6342 r13). Any destructured rename of a reader counts, whatever module it
   // is taken from, because the names are distinctive and over-accepting only
   // resolves or reports more reads.
-  const { readerAliases, gatesBindings, moduleBindings } = importedGateBindings(source);
+  const { readerAliases, gatesBindings, moduleBindings } = gateBindings(source);
 
   // The callee is resolved with the SAME static-property rule as a read, so
   // `featureGates['portalActivityLive']()` cannot slip past a check that
