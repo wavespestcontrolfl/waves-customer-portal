@@ -8,9 +8,12 @@
 //               time. It is NOT a confirmed visit; the row says "Day discussed"
 //               and staff decide whether to book it. "Book it" hands the row to the page, which opens the existing
 // New appointment modal. Renders nothing for an empty list.
+//   move_day_only - staff and an existing customer agreed to MOVE a visit to this day with no
+//               time (owner 2026-10-19). NOT CONFIRMED; the row says which day it moves from.
+//               It books nothing: the button opens the visit to move, and the office moves it.
 import React from 'react';
 import { Button, buttonStyles, cn } from '../../components/ui';
-import { formatETDate, formatETTime } from '../../lib/timezone';
+import { formatETDate, formatETDateOnly, formatETTime } from '../../lib/timezone';
 
 // Same deep link the notification triggers and the Follow-through cards use.
 export const callHref = (callLogId) => `/admin/communications#tab=calls&call=${encodeURIComponent(callLogId)}`;
@@ -19,15 +22,26 @@ export const callHref = (callLogId) => `/admin/communications#tab=calls&call=${e
 const KIND_TEXT = {
   confirmed: { lead: 'Promised on a call', tag: 'PROMISED · not booked' },
   day_only: { lead: 'Day discussed on a call', tag: 'NOT CONFIRMED · not booked' },
+  move_day_only: { lead: 'Move discussed on a call', tag: 'NOT CONFIRMED · not moved' },
 };
 export const kindText = (row) => KIND_TEXT[row.kind] || KIND_TEXT.day_only;
 
 // The time column: the agreed time, else "Time not set" with the part of the day asked for.
 export const heldWhen = (row) => row.time_label || (row.daypart ? `Time not set · asked for the ${row.daypart}` : 'Time not set');
 
+// "Fri Nov 6" for the old day of a move.
+const fromDayLabel = (row) => formatETDateOnly(row.from_date_et, { weekday: 'short', month: 'short', day: 'numeric' });
+
+// The existing visit a day-only move would move: the Schedule on its day, opened on that visit
+// (the same ?appointment= deep link the Auto-Dispatch audit uses). No new write.
+export const moveVisitHref = (row) => `/admin/dispatch?tab=schedule&date=${encodeURIComponent(row.from_date_et)}${row.from_visit_id ? `&appointment=${encodeURIComponent(row.from_visit_id)}` : ''}`;
+
 export function fromCall(row) {
   if (!row.call_at) return kindText(row).lead;
   const day = formatETDate(row.call_at, { weekday: 'long' });
+  if (row.kind === 'move_day_only' && row.from_date_et) {
+    return `${kindText(row).lead} \u2014 from ${fromDayLabel(row)}, time not set (call ${day}, ${formatETTime(row.call_at)})`;
+  }
   return `${kindText(row).lead} ${day}, ${formatETTime(row.call_at)}`;
 }
 
@@ -94,7 +108,16 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <Button density="comfortable" onClick={() => onBook?.(row)}>Book it</Button>
+                {row.kind === 'move_day_only' ? (
+                  <a
+                    href={moveVisitHref(row)}
+                    className={cn(buttonStyles({ variant: 'primary', density: 'comfortable' }), 'no-underline')}
+                  >
+                    {row.from_date_et ? `Open the ${fromDayLabel(row)} visit` : 'Open the visit'}
+                  </a>
+                ) : (
+                  <Button density="comfortable" onClick={() => onBook?.(row)}>Book it</Button>
+                )}
                 <a
                   href={callHref(row.call_log_id)}
                   className={cn(buttonStyles({ variant: 'secondary', density: 'comfortable' }), 'no-underline')}

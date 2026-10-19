@@ -77,6 +77,37 @@ describe('HeldVisitsStrip', () => {
   });
 });
 
+// Owner 2026-10-19: a move agreed for this day with no time. It books nothing; the button
+// opens the visit that would move.
+describe('a day-only move row', () => {
+  const move = {
+    ...timed, call_log_id: 'call-mv', kind: 'move_day_only', minutes: null, time_label: null, daypart: null,
+    from_date_et: '2026-11-06', from_visit_id: 'visit-old',
+  };
+
+  it('says the move, the day it moves from and that the time is not set, and is not confirmed', () => {
+    render(<HeldVisitsStrip heldVisits={[move]} onBook={() => {}} />);
+    expect(screen.getByText('Time not set')).toBeInTheDocument();
+    expect(screen.getByText('NOT CONFIRMED · not moved')).toBeInTheDocument();
+    expect(screen.getByText(/Move discussed on a call \u2014 from Fri, Nov 6, time not set \(call Monday, 10:30 AM\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/Promised/)).not.toBeInTheDocument();
+  });
+
+  it('opens the visit to move instead of booking, with no Book it button', () => {
+    const onBook = vi.fn();
+    render(<HeldVisitsStrip heldVisits={[move]} onBook={onBook} />);
+    expect(screen.queryByRole('button', { name: 'Book it' })).not.toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'Open the Fri, Nov 6 visit' });
+    expect(link).toHaveAttribute('href', '/admin/dispatch?tab=schedule&date=2026-11-06&appointment=visit-old');
+    expect(onBook).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the old day\'s schedule when the visit id is missing', () => {
+    render(<HeldVisitsStrip heldVisits={[{ ...move, from_visit_id: null }]} onBook={() => {}} />);
+    expect(screen.getByRole('link', { name: 'Open the Fri, Nov 6 visit' })).toHaveAttribute('href', '/admin/dispatch?tab=schedule&date=2026-11-06');
+  });
+});
+
 describe('heldVisitFormDefaults (what Book it opens the form on)', () => {
   it('a whole-hour confirmed slot: the time, the call marker and the stated address', () => {
     expect(heldVisitFormDefaults(timed)).toEqual({
