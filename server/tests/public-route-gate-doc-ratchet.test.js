@@ -26,12 +26,23 @@
  *     (`isEnabled(OUTBOUND_VOICEMAIL_SMS_GATE)` in `twilio-voice-webhook.js`,
  *     where `GATE = 'outboundVoicemailSms'` lives in `outbound-voicemail-sms.js`).
  *
- * AND IT FAILS CLOSED. Four review rounds found four different reads this
- * resolver silently treated as "no gate", each one a diff it should have failed
- * (#6342). Widening the patterns again only waits for the fifth, so an
- * `isEnabled` / `gateEnvValue` / `.gates` read that does NOT resolve to a gate is
- * now a failure naming the expression, not a pass. A new access form announces
- * itself here instead of quietly shrinking what this test covers.
+ * THE READ SIDE IS PARSED, NOT PATTERN-MATCHED. Six review rounds found six
+ * different reads that pattern matching silently treated as "no gate", each one
+ * a diff this test should have failed (#6342) — the last being
+ * `isEnabled(true ? 'askWaves' : UNKNOWN_KEY)`, where one resolving literal was
+ * taken for the whole expression. `scripts/lib/gate-scan.js` says why: parsed,
+ * "comments, regex literals and JSX text can never be mistaken for code". So
+ * gate reads come from the AST (`@babel/parser`, as `route-surface/scan.js`
+ * already does in this suite), and an argument resolves only when EVERY value it
+ * can take resolves: a conditional needs both branches, a logical both sides, and
+ * the condition is not a candidate. Anything else is reported, not ignored.
+ * Parsing also tightened the other direction, verified against this baseline as
+ * a no-op: a gate named in a trailing comment or inside a string literal is no
+ * longer counted as a read of it.
+ *
+ * The definition side stays textual — the `feature-gates.js` table, helper
+ * bodies, exported key constants. Every one of the six findings was on the read
+ * side; if one lands on a definition, that half moves to the AST too.
  *
  * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
  * in the contract, not in this route's own entry, so adding an
@@ -62,13 +73,14 @@
  * documenting a gate would leave a stale exemption behind that silently
  * re-whitelists the same gate if its contract line is ever deleted. The cost is
  * that documenting a gate also means deleting its baseline line, in the same PR.
- * Comment lines are not reads. Deterministic, filesystem only, no DB.
+ * Deterministic, filesystem only, no DB.
  *
  * This covers the gate half only. A payload change (#6299) and a brand-new
  * public route stay the prose rule's: both are P0 whether or not this is green.
  */
 const fs = require('fs');
 const path = require('path');
+const { parse } = require('@babel/parser');
 
 const SERVER_ROOT = path.join(__dirname, '..');
 const ROUTES_DIR = path.join(SERVER_ROOT, 'routes');
@@ -117,46 +129,110 @@ function helperToGates(gatesSource, keys) {
 }
 
 // GATE_* ⇒ the alias the route actually wrote, so "documented" can be checked
-// against the name a reader would search for.
-function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = []) {
-  const code = stripComments(source);
+// against the name a reader would search for. Reads are taken from the AST.
+function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [], filename = 'route.js') {
   const used = new Map();
   const note = (gate, alias) => { if (gate && !used.has(gate)) used.set(gate, alias); };
-  const noteAll = (gates, alias, expr) => {
-    if (!gates || !gates.length) { unresolved.push(expr); return; }
-    for (const g of gates) note(g, alias);
-  };
-  // EVERY isEnabled(...) call, argument taken by balanced parens rather than by
-  // a pattern per shape. Two call sites in estimate-public.js pass a ternary
-  // (`isEnabled(kind === 'callback' ? 'websiteQuoteBooking' : 'estimateSoftExit')`),
-  // which matched no argument pattern and so was neither resolved NOR reported
-  // — the fail-closed promise only held for shapes already thought of (#6342 r5).
-  // Now: resolve every string literal in the argument (a ternary yields both
-  // keys), else the whole argument as an identifier, else report it.
-  for (const arg of callArguments(code, 'isEnabled')) {
-    // Only the literals that ARE feature keys count: a ternary's condition can
-    // carry its own strings (`kind === 'callback' ? 'websiteQuoteBooking' : …`),
-    // and 'callback' is not a gate key. One resolving literal is enough to call
-    // the call site understood; none means report it.
-    const resolved = [...arg.matchAll(/'([a-zA-Z0-9_]+)'/g)]
-      .map((l) => l[1])
-      .filter((key) => keys.has(key));
-    if (resolved.length) {
-      for (const key of resolved) noteAll(keys.get(key), key, `isEnabled('${key}')`);
-      continue;
+  let ast;
+  try {
+    ast = parse(source, {
+      sourceType: 'unambiguous',
+      sourceFilename: filename,
+      errorRecovery: true,
+      allowReturnOutsideFunction: true,
+      plugins: ['jsx'],
+    });
+  } catch (err) {
+    // A file this test cannot parse is not a file it may silently skip.
+    unresolved.push(`${filename} does not parse: ${err.message}`);
+    return used;
+  }
+
+  // `?.` gives babel its own node types, so every shape below accepts both or a
+  // `helper?.()` read resolves to nothing (#6342 r4: `callMakesNoServiceAsk?.()`).
+  const isMember = (node) => !!node
+    && (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression');
+  const isCall = (node) => !!node
+    && (node.type === 'CallExpression' || node.type === 'OptionalCallExpression');
+
+  const calleeName = (node) => {
+    if (!node) return null;
+    if (node.type === 'Identifier') return node.name;
+    if (isMember(node) && node.property && node.property.type === 'Identifier') {
+      return node.property.name;
     }
-    const bare = /^[A-Za-z_$][\w$]*$/.test(arg) ? arg : null;
-    const key = bare ? idents.get(bare) : null;
-    noteAll(key ? keys.get(key) : null, key || arg, `isEnabled(${arg.replace(/\s+/g, ' ')})`);
-  }
-  for (const m of code.matchAll(/gateEnvValue\(\s*'(GATE_[A-Z0-9_]+)'/g)) note(m[1], m[1]);
-  for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) noteAll(keys.get(m[1]), m[1], `.gates.${m[1]}`);
-  for (const m of code.matchAll(/process\.env\.(GATE_[A-Z0-9_]+)/g)) note(m[1], m[1]);
-  // `helper(` and the optional-call `helper?.(` — reports-public.js reads
-  // `reportAskAiLive?.()`, which the plain form missed entirely (#6342 r3).
-  for (const [helper, gates] of helpers) {
-    if (new RegExp(`\\b${helper}\\s*(?:\\?\\.)?\\(`).test(code)) noteAll(gates, helper);
-  }
+    return null;
+  };
+
+  // Every value the expression can take must resolve to a gate; the condition of
+  // a ternary is not one of them. Returns false when any branch cannot resolve.
+  const resolveArg = (node, alias) => {
+    if (!node) return false;
+    if (node.type === 'StringLiteral') {
+      const gates = keys.get(node.value);
+      if (!gates) return false;
+      for (const g of gates) note(g, node.value);
+      return true;
+    }
+    if (node.type === 'TemplateLiteral' && node.expressions.length === 0 && node.quasis.length === 1) {
+      return resolveArg({ type: 'StringLiteral', value: node.quasis[0].value.cooked }, alias);
+    }
+    if (node.type === 'Identifier') {
+      const key = idents.get(node.name);
+      const gates = key ? keys.get(key) : null;
+      if (!gates) return false;
+      for (const g of gates) note(g, key);
+      return true;
+    }
+    if (node.type === 'ConditionalExpression') {
+      return resolveArg(node.consequent, alias) && resolveArg(node.alternate, alias);
+    }
+    if (node.type === 'LogicalExpression') {
+      return resolveArg(node.left, alias) && resolveArg(node.right, alias);
+    }
+    return false;
+  };
+
+  const src = (node) => source.slice(node.start, node.end).replace(/\s+/g, ' ').slice(0, 120);
+
+  const visit = (node) => {
+    if (!node || typeof node.type !== 'string') return;
+    if (isCall(node)) {
+      const name = calleeName(node.callee);
+      if (name === 'isEnabled') {
+        if (!resolveArg(node.arguments[0], null)) unresolved.push(src(node));
+      } else if (name === 'gateEnvValue') {
+        const arg = node.arguments[0];
+        if (arg && arg.type === 'StringLiteral' && /^GATE_[A-Z0-9_]+$/.test(arg.value)) note(arg.value, arg.value);
+        else unresolved.push(src(node));
+      } else if (name && helpers.has(name)) {
+        for (const g of helpers.get(name)) note(g, name);
+      }
+    }
+    if (isMember(node) && node.property && node.property.type === 'Identifier') {
+      const objectIsGates = isMember(node.object)
+        && node.object.property && node.object.property.name === 'gates';
+      if (objectIsGates) {
+        const gates = keys.get(node.property.name);
+        if (gates) for (const g of gates) note(g, node.property.name);
+        else unresolved.push(src(node));
+      }
+      if (isMember(node.object)
+        && node.object.object && node.object.object.type === 'Identifier'
+        && node.object.object.name === 'process'
+        && node.object.property && node.object.property.name === 'env'
+        && /^GATE_[A-Z0-9_]+$/.test(node.property.name)) {
+        note(node.property.name, node.property.name);
+      }
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue;
+      const child = node[key];
+      if (Array.isArray(child)) for (const item of child) visit(item);
+      else if (child && typeof child === 'object' && typeof child.type === 'string') visit(child);
+    }
+  };
+  visit(ast.program);
   return used;
 }
 
@@ -187,26 +263,6 @@ function requiredLocalModules(routeFile, code) {
         break;
       }
     }
-  }
-  return out;
-}
-
-// Every argument passed to `name(` in this source, taken by balanced parens so
-// the shape of the expression cannot hide a call from the resolver.
-function callArguments(code, name) {
-  const out = [];
-  const open = `${name}(`;
-  let i = 0;
-  while ((i = code.indexOf(open, i)) !== -1) {
-    let depth = 1;
-    let j = i + open.length;
-    while (j < code.length && depth > 0) {
-      if (code[j] === '(') depth += 1;
-      else if (code[j] === ')') depth -= 1;
-      j += 1;
-    }
-    out.push(code.slice(i + open.length, j - 1).trim());
-    i = j;
   }
   return out;
 }
@@ -289,9 +345,9 @@ test('no public route file gains a gate the public-route contract does not name'
       }
     }
     const unresolved = [];
-    const used = gatesUsedBy(source, keys, reachable, identifierValues(routePath, stripComments(source)), unresolved);
+    const used = gatesUsedBy(source, keys, reachable, identifierValues(routePath, stripComments(source)), unresolved, file);
     for (const expr of new Set(unresolved)) {
-      unreadable.push(`${file}: ${expr} does not resolve to a GATE_* — teach the resolver this form`);
+      unreadable.push(`${file}: ${expr} does not resolve to a GATE_*`);
     }
     const allowed = new Set(baseline[file] || []);
     for (const gate of allowed) {
