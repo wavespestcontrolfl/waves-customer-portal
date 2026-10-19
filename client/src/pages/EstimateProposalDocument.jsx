@@ -59,12 +59,13 @@ function DocButton({ href, primary = false, children, testId }) {
       data-testid={testId}
       style={{
         display: 'inline-block',
-        padding: '7px 14px',
+        padding: '8px 16px',
         borderRadius: 8,
         border: `1.5px solid ${NAVY}`,
         background: primary ? NAVY : '#fff',
         color: primary ? '#fff' : NAVY,
-        fontSize: 12,
+        // 14px: the repo's floor for customer-surface text (codex #6343 r1).
+        fontSize: 14,
         fontWeight: 700,
         textDecoration: 'none',
         lineHeight: 1.3,
@@ -79,7 +80,9 @@ export function DocActions({ cta, authoredProposal, estimateUrl, estimateNumber 
   const canSelfBook = !authoredProposal && cta.quoteRequired !== true && cta.reviewBeforeBooking !== true;
   let primaryLabel = 'View estimate online';
   if (cta.terminalState === 'accepted') primaryLabel = 'See your visit details';
-  else if (cta.terminalState === 'declined') primaryLabel = null;
+  // Declined and expired estimates refuse acceptance online — never advertise
+  // an action the accept route rejects (codex #6343 r1).
+  else if (cta.terminalState === 'declined' || cta.terminalState === 'expired') primaryLabel = null;
   else if (canSelfBook) primaryLabel = 'Accept & pick a start date';
   return (
     <div className="doc-keep" data-testid="doc-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
@@ -741,6 +744,12 @@ export default function EstimateProposalDocument({ data, token }) {
           ) : cta.terminalState === 'declined' ? (
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
               This estimate was declined. Changed your mind? Call {WAVES_SUPPORT_PHONE_DISPLAY} and
+              we&rsquo;ll refresh the numbers with you.
+            </p>
+          ) : cta.terminalState === 'expired' ? (
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+              This estimate has expired. Call{' '}
+              <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: NAVY }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a> and
               we&rsquo;ll refresh the numbers with you.
             </p>
           ) : authoredProposal ? (

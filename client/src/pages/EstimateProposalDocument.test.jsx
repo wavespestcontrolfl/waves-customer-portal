@@ -262,6 +262,12 @@ describe('EstimateProposalDocument', () => {
     const { container: d } = render(<EstimateProposalDocument data={declined} token="tok-123" />);
     expect(d.querySelector('[data-testid="doc-action-online"]')).toBeNull();
     expect(d.querySelector('[data-testid="doc-action-call"]')).not.toBeNull();
+    const expired = { ...BASE_DATA, cta: { ...BASE_DATA.cta, terminalState: 'expired' } };
+    const { container: e } = render(<EstimateProposalDocument data={expired} token="tok-123" />);
+    expect(e.querySelector('[data-testid="doc-action-online"]')).toBeNull();
+    expect(e.textContent).not.toContain('Price valid through');
+    expect(e.textContent).toContain('This estimate has expired');
+    expect(e.textContent).not.toContain('tap Accept');
     const review = { ...BASE_DATA, cta: { ...BASE_DATA.cta, reviewBeforeBooking: true } };
     const { container: r } = render(<EstimateProposalDocument data={review} token="tok-123" />);
     expect(r.querySelector('[data-testid="doc-action-online"]').textContent).toBe('View estimate online');
