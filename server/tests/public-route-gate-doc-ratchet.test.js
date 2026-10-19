@@ -45,12 +45,29 @@
  * a no-op: a gate named in a trailing comment or inside a string literal is no
  * longer counted as a read of it.
  *
+ * Gates also propagate along each module's own call graph to a fixed point,
+ * because a wrapper that only DELEGATES reads nothing itself:
+ * `pastCustomerLastStart()` is `customerLastStart16Enabled() && …`, and
+ * `booking.js` reaches `GATE_CUSTOMER_LAST_START_16` only through two such hops
+ * (#6342 r8). That makes a file's entry a sound OVER-approximation — "calling
+ * into this file's handlers can consult these gates" — not a precise read list,
+ * which is the right direction for a floor but worth knowing before reading the
+ * fixture as documentation.
+ *
  * Helper DEFINITIONS are parsed for the same reason, one round later: a 400-
  * character regex body could not see `linkWorkerAuth`, the factory through which
  * all five `integrations-*-worker.js` routers read their only gate, so
  * `GATE_HERMES_WORKER` was undocumented and invisible here (#6342 r7). What
  * stays textual is only the `feature-gates.js` key table and the exported key
- * constants — a line that names a gate, where there is no shape to miss.
+ * constants — a line that names a gate. Even there a shape was missed: the
+ * table uses `get key() { … }` as well as `key: …`, and `visitCloseout` was
+ * invisible until this test's own fail-closed report named it (#6342 r8).
+ *
+ * KNOWN LIMIT: propagation is one module deep. A helper that delegates to a
+ * helper IMPORTED from a third module is the next hop out, and would resolve to
+ * nothing without being reported, because the delegating call looks like any
+ * other call. Decision 2 in the PR body (one resolver shared with
+ * `scripts/lib/gate-scan.js`) is where that belongs.
  *
  * KNOWN LOOSENESS (#6342 review): "documented" means the gate is named ANYWHERE
  * in the contract, not in this route's own entry, so adding an
@@ -71,8 +88,13 @@
  * whose auth is per-handler stays IN. Testing the file for any mention of
  * `authenticate` instead dropped `auth.js`, whose `/send-code`, `/verify-code`,
  * `/refresh` and `/logout` are unauthenticated, because later endpoints in the
- * same file are not (#6342 r5 security). Scanning a non-public file costs only a
- * baseline entry; dropping a public one costs the whole point of the test.
+ * same file are not (#6342 r5 security). And router-level auth counts only when
+ * it PRECEDES every route registration in the file, because that is all Express
+ * applies it to: `admin-push.js` serves `/vapid-key` with no auth on purpose and
+ * applies router-level auth after it, so a file-wide test excluded a genuinely
+ * public endpoint (#6342 r8 — the same mistake as r5, one level further in).
+ * Scanning a non-public file costs only a baseline entry; dropping a public one
+ * costs the whole point of the test.
  *
  * fixtures/public-route-undocumented-gates.json is an upper bound per file: a
  * file may not gain an undocumented gate, and a new file may not have one. Every
@@ -100,6 +122,7 @@ const NAME_PATTERNS = [/^public-/, /-public\.js$/, /webhook/i];
 // Auth applied to the whole router, the admin convention. A file with only
 // per-handler auth is a mixed router and stays in scope.
 const ROUTER_LEVEL_AUTH = /router\.use\(\s*[^)]*\b(?:adminAuthenticate|authenticate)\b/;
+const ROUTE_REGISTRATION = /router\.(?:get|post|put|patch|delete|all)\(/g;
 
 const stripComments = (source) => source
   .split('\n')
@@ -114,9 +137,24 @@ const stripComments = (source) => source
 // guard ship with just its already-documented master gate (#6342 r3).
 function keyToGate(gatesSource) {
   const map = new Map();
-  for (const m of gatesSource.matchAll(/^\s*([a-zA-Z0-9_]+)\s*:\s*(.*GATE_[A-Z0-9_]+.*)$/gm)) {
-    const gates = [...new Set(m[2].match(/GATE_[A-Z0-9_]+/g) || [])];
-    if (gates.length && !map.has(m[1])) map.set(m[1], gates);
+  // `key: …` and `get key() { … }` — the table uses both, and only the first
+  // was matched, so `visitCloseout` (a getter) was not a key and
+  // `isEnabled('visitCloseout')` in `admin-schedule.js` resolved to nothing.
+  // Found by this test's own fail-closed report once that file came into scope
+  // (#6342 r8), which is the report doing its job. Two patterns, not one
+  // widened one: a pattern loose enough to catch both also catches
+  // `function name() {` and would register helper names as keys — and a key is
+  // what `note()` accepts as a documenting alias, so that would quietly
+  // re-open the hole round 7 closed.
+  const PATTERNS = [
+    /^\s*([a-zA-Z0-9_]+)\s*:\s*(.*GATE_[A-Z0-9_]+.*)$/gm,
+    /^\s*get\s+([a-zA-Z0-9_]+)\s*\(\s*\)\s*\{\s*(.*GATE_[A-Z0-9_]+.*)$/gm,
+  ];
+  for (const pattern of PATTERNS) {
+    for (const m of gatesSource.matchAll(pattern)) {
+      const gates = [...new Set(m[2].match(/GATE_[A-Z0-9_]+/g) || [])];
+      if (gates.length && !map.has(m[1])) map.set(m[1], gates);
+    }
   }
   return map;
 }
@@ -181,12 +219,21 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
   };
 
   const stack = [];
+  const calls = new Map();
   const attribute = (gates) => {
     if (!gates.length) return;
     for (const name of stack) {
       const prev = map.get(name);
       if (!prev) map.set(name, [...new Set(gates)]);
       else for (const g of gates) if (!prev.includes(g)) prev.push(g);
+    }
+  };
+  const noteCall = (callee) => {
+    if (!callee || !stack.length) return;
+    for (const name of stack) {
+      if (name === callee) continue;
+      if (!calls.has(name)) calls.set(name, new Set());
+      calls.get(name).add(callee);
     }
   };
 
@@ -197,10 +244,13 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
 
     if (node.type === 'StringLiteral' && /^GATE_[A-Z0-9_]+$/.test(node.value)) attribute([node.value]);
     if (node.type === 'Identifier' && /^GATE_[A-Z0-9_]+$/.test(node.name)) attribute([node.name]);
-    if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression')
-      && node.callee && node.callee.type === 'Identifier' && node.callee.name === 'isEnabled') {
-      const arg = node.arguments[0];
-      if (arg && arg.type === 'StringLiteral') attribute(keys.get(arg.value) || []);
+    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
+      const callee = node.callee && node.callee.type === 'Identifier' ? node.callee.name : null;
+      if (callee === 'isEnabled') {
+        const arg = node.arguments[0];
+        if (arg && arg.type === 'StringLiteral') attribute(keys.get(arg.value) || []);
+      }
+      noteCall(callee);
     }
 
     for (const key of Object.keys(node)) {
@@ -212,6 +262,29 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
     if (name) stack.pop();
   };
   walk(ast.program);
+
+  // A helper that only DELEGATES reads no gate itself, so the walk above leaves
+  // it empty: `pastCustomerLastStart()` is `customerLastStart16Enabled() &&
+  // startMin > …`, and the gate is read one function further on, in a sibling —
+  // which the enclosing-name stack never covers. `booking.js` calls both that
+  // and `customerWindowAdmits()` (two hops), so `GATE_CUSTOMER_LAST_START_16`
+  // resolved to nothing and deleting both its contract mentions left this green
+  // (#6342 r8). Propagate along the module's own call graph to a FIXED POINT,
+  // not one hop; cycles just stop changing anything. Still one module deep —
+  // a helper delegating to an IMPORTED helper is the next hop out, and the
+  // KNOWN LIMITS note above says so.
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [fn, callees] of calls) {
+      for (const callee of callees) {
+        const gates = map.get(callee);
+        if (!gates) continue;
+        const prev = map.get(fn);
+        if (!prev) { map.set(fn, [...gates]); changed = true; continue; }
+        for (const g of gates) if (!prev.includes(g)) { prev.push(g); changed = true; }
+      }
+    }
+  }
   return map;
 }
 // GATE_* ⇒ the alias the route actually wrote, so "documented" can be checked
@@ -295,7 +368,10 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
     if (!node || typeof node.type !== 'string') return;
     if (isCall(node)) {
       const name = calleeName(node.callee);
-      if (name === 'isEnabled') {
+      // `techNotices.isEnabled()` is an unrelated method that happens to share
+      // the name; with no argument there is no gate to name, so it is neither a
+      // read nor something to report.
+      if (name === 'isEnabled' && node.arguments.length) {
         if (!resolveArg(node.arguments[0], null)) unresolved.push(src(node));
       } else if (name === 'gateEnvValue') {
         const arg = node.arguments[0];
@@ -403,6 +479,26 @@ function identifierValues(routeFile, code) {
   return values;
 }
 
+// Express applies `router.use(authenticate)` only to what is registered AFTER
+// it, so WHERE it appears decides what it covers — presence alone does not.
+// `admin-push.js` registers `/vapid-key` with no auth at all (deliberately:
+// "an expired admin token can't silently break Enable push") and only then
+// applies router-level auth, so a file-wide test excluded a genuinely public
+// endpoint (#6342 r8). A file is covered only when its router-level auth
+// precedes EVERY route registration in it; anything earlier keeps the file in
+// scope, whether or not that handler carries its own auth. The three files
+// this pulls in whose early handlers do carry per-handler auth cost a baseline
+// entry at most, which is the trade this set makes everywhere else.
+function routerAuthCoversFile(code) {
+  const auth = code.search(ROUTER_LEVEL_AUTH);
+  if (auth === -1) return false;
+  ROUTE_REGISTRATION.lastIndex = 0;
+  for (let m = ROUTE_REGISTRATION.exec(code); m; m = ROUTE_REGISTRATION.exec(code)) {
+    if (m.index < auth) return false;
+  }
+  return true;
+}
+
 // [label, absolute path]. `index.js` is in the set because the gate that makes
 // a public prefix dark is often applied THERE, in pre-router middleware, and
 // never read by the router: `/api/public/careers` 404s unless
@@ -424,7 +520,7 @@ function publicRouteFiles() {
     .filter((f) => {
       if (NAME_PATTERNS.some((r) => r.test(f))) return true;
       const code = stripComments(fs.readFileSync(path.join(ROUTES_DIR, f), 'utf8'));
-      return !ROUTER_LEVEL_AUTH.test(code);
+      return !routerAuthCoversFile(code);
     })
     .sort()
     .map((f) => [f, path.join(ROUTES_DIR, f)]);
