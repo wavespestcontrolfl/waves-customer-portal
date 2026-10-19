@@ -859,7 +859,8 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
     expect(out.error).toBeUndefined();
     expect(out.seeds).toBe(1);
     expect(out.skipped).toBe('model_failed');
-    expect(out.modelError).toBe('provider timeout');
+    // Provider text never leaves the adapter; the reason codes of both legs do.
+    expect(out.modelError).toBe('all_providers_failed (anthropic:error, openai:no_key)');
     expect(raw).toHaveBeenCalled();
     // upsertCommitments now takes the shared per-call advisory lock (its own
     // trx.raw call) before the ownership-fence read, ahead of the INSERT —
@@ -1031,6 +1032,87 @@ describe('the model pass sends no sampling controls (current models reject them)
     expect(callEndedAt({ created_at: created, direction: 'inbound', duration_seconds: 90, bridged_at: '2026-09-02T14:00:20.000Z' }).toISOString()).toBe('2026-09-02T14:01:50.000Z');
     expect(callEndedAt({ created_at: created, direction: 'outbound-api', duration_seconds: 90 }).toISOString()).toBe(created);
     expect(callEndedAt({ created_at: 'nope' })).toBeNull();
+  });
+});
+
+describe('the model pass falls back to OpenAI when Anthropic cannot answer (call audit 2026-10-19)', () => {
+  const MODELS = require('../config/models');
+  const { extractCommitmentsWithModel } = require('../services/call-commitments');
+  const transcript = 'Agent: I will email you the WDO paperwork tonight, thank you for calling Waves today.';
+  const answer = JSON.stringify({ commitments: [{ party: 'waves', kind: 'send_paperwork', description: 'Email the WDO paperwork', channel: 'email', due_text: 'tonight', due_at: null, confidence: 0.9, evidence: [{ quote: 'I will email you the WDO paperwork tonight', speaker: 'agent' }] }] });
+  const anthropicOk = () => jest.fn(async () => ({ content: [{ type: 'text', text: answer }], model: MODELS.FLAGSHIP }));
+  const anthropic400 = () => jest.fn(async () => { throw Object.assign(new Error('You have reached your specified API usage limits.'), { status: 400 }); });
+  const openaiBody = (text) => ({ ok: true, status: 200, json: async () => ({ id: 'resp_1', status: 'completed', model: MODELS.OPENAI_REPORT_WRITER, output_text: text, usage: { input_tokens: 10, output_tokens: 10 } }) });
+  let savedKey; let savedFetch;
+  beforeEach(() => { savedKey = process.env.OPENAI_API_KEY; savedFetch = global.fetch; process.env.OPENAI_API_KEY = 'test-key'; global.fetch = jest.fn(async () => openaiBody(answer)); });
+  afterEach(() => { if (savedKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedKey; global.fetch = savedFetch; });
+
+  test('the policy is Anthropic FLAGSHIP first and the registry OpenAI model second', () => {
+    const policy = MODELS.TEXT_POLICIES.highStakes;
+    expect(policy.primary).toMatchObject({ provider: 'anthropic', model: MODELS.FLAGSHIP });
+    expect(policy.fallback).toMatchObject({ provider: 'openai', model: MODELS.OPENAI_REPORT_WRITER });
+  });
+
+  test('a healthy primary answers and the backup is never called', async () => {
+    const create = anthropicOk();
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(out.model).toBe(MODELS.FLAGSHIP);
+    expect(out.items.map((i) => i.kind)).toEqual(['send_paperwork']);
+  });
+
+  test('a primary 400 (usage limit) moves to the backup, which answers; model names the backup', async () => {
+    const create = anthropic400();
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).model).toBe(MODELS.OPENAI_REPORT_WRITER);
+    expect(out.skipped).toBeUndefined();
+    expect(out.model).toBe(MODELS.OPENAI_REPORT_WRITER);
+    expect(out.items.map((i) => i.kind)).toEqual(['send_paperwork']);
+    expect(typeof out.ms).toBe('number');
+  });
+
+  test('unparseable primary output also moves to the backup', async () => {
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: 'sorry, no JSON here' }] }));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(out.model).toBe(MODELS.OPENAI_REPORT_WRITER);
+    expect(out.items).toHaveLength(1);
+  });
+
+  test('both legs failing at the provider throws reason codes only (the caller reports model_failed)', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    await expect(extractCommitmentsWithModel(transcript, { client: { messages: { create: anthropic400() } } }))
+      .rejects.toThrow('all_providers_failed (anthropic:anthropic_400, openai:openai_503)');
+  });
+
+  test('both legs returning unusable output reports the same skipped outcomes as before', async () => {
+    const bad = JSON.stringify({ commitments: [{ party: 'waves', kind: 'callback', description: 'x', channel: 'call', due_text: null, due_at: null, confidence: 0.9, evidence: [] }] });
+    global.fetch = jest.fn(async () => openaiBody(bad));
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: bad }] }));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBe('schema_failed');
+    expect(out.items).toEqual([]);
+    expect(out.model).toBe(MODELS.OPENAI_REPORT_WRITER);
+    global.fetch = jest.fn(async () => openaiBody('not json at all'));
+    const out2 = await extractCommitmentsWithModel(transcript, { client: { messages: { create: jest.fn(async () => ({ content: [{ type: 'text', text: 'nope' }] })) } } });
+    expect(out2.skipped).toBe('parse_failed');
+    expect(out2.items).toEqual([]);
+  });
+
+  test('no Anthropic key, no client and no OpenAI key is the old no_provider skip', async () => {
+    delete process.env.OPENAI_API_KEY;
+    const savedAnthropic = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const out = await extractCommitmentsWithModel(transcript);
+      expect(out).toEqual({ items: [], skipped: 'no_provider' });
+    } finally {
+      if (savedAnthropic !== undefined) process.env.ANTHROPIC_API_KEY = savedAnthropic;
+    }
   });
 });
 
