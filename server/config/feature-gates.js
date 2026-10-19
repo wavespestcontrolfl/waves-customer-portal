@@ -2948,7 +2948,7 @@ const gates = {
   // GATE_ESTIMATE_DOC_PDF too: the attachment is the browser document only,
   // never the pdfkit proposal. A render failure sends the email as before.
   // Off or unset in prod: every estimate email is byte-identical to today.
-  // Kill switch: unset GATE_ESTIMATE_EMAIL_PDF.
+  // Kill switch: unset GATE_ESTIMATE_EMAIL_PDF (read at boot; the Railway restart applies it).
   estimateEmailPdf: isProd ? process.env.GATE_ESTIMATE_EMAIL_PDF === 'true' : true,
 
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
