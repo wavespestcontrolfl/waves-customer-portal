@@ -278,6 +278,9 @@ function recapServiceIdentity(svc, profile) {
     // ask), so that flow echoes it back and a visit the office changed to or
     // from a callback meanwhile is refused (recapVisitIdentityChanged).
     isCallback: svc.is_callback === true,
+    // A visit of a recurring series (a plan's booster or add-on is not): the one-tap report
+    // (GATE_ONE_TAP_REPORT) is the recurring pest sheet only.
+    isRecurring: svc.is_recurring === true,
   };
 }
 
@@ -571,6 +574,11 @@ const RECAP_COMPARED_IDENTITY_KEYS = Object.freeze([
 // catalog service, service type, calendar day); the address is
 // resolved the same way the context resolves it (stamped visit address
 // first, legacy primary fallback).
+// The visit's yes/no facts a client form depends on, as [the client's key, the locked row's column]: whether it is a
+// free callback (the pay link and the review ask the client sends) and whether it belongs to a recurring series (the
+// one-tap report, GATE_ONE_TAP_REPORT). A change to either is a changed visit.
+const VISIT_FLAG_IDENTITY = [['isCallback', 'is_callback'], ['isRecurring', 'is_recurring']];
+
 function recapVisitIdentityChanged(expected, locked, customerRow) {
   if (!expected || typeof expected !== 'object') return false;
   if ('propertyId' in expected && !sameIdentityKey(expected.propertyId, locked.property_id)) return true;
@@ -580,9 +588,7 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   // The assigned technician, sent only by the lawn Fast Complete sheet.
   if ('technicianId' in expected && !sameIdentityKey(expected.technicianId, locked.technician_id)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
-  // Whether it is a free callback decides the pay link and the review ask
-  // the client sends, so a change to it is a changed visit.
-  if ('isCallback' in expected && (expected.isCallback === true) !== (locked.is_callback === true)) return true;
+  if (VISIT_FLAG_IDENTITY.some(([key, column]) => key in expected && (expected[key] === true) !== (locked[column] === true))) return true;
   if (!('address' in expected)) return false;
   const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
   const want = expected.address || {};
