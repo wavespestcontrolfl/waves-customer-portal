@@ -119,10 +119,28 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [])
     if (!gates || !gates.length) { unresolved.push(expr); return; }
     for (const g of gates) note(g, alias);
   };
-  for (const m of code.matchAll(/isEnabled\(\s*'([a-zA-Z0-9_]+)'/g)) noteAll(keys.get(m[1]), m[1], `isEnabled('${m[1]}')`);
-  for (const m of code.matchAll(/isEnabled\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
-    const key = idents.get(m[1]);
-    noteAll(key ? keys.get(key) : null, key || m[1], `isEnabled(${m[1]})`);
+  // EVERY isEnabled(...) call, argument taken by balanced parens rather than by
+  // a pattern per shape. Two call sites in estimate-public.js pass a ternary
+  // (`isEnabled(kind === 'callback' ? 'websiteQuoteBooking' : 'estimateSoftExit')`),
+  // which matched no argument pattern and so was neither resolved NOR reported
+  // — the fail-closed promise only held for shapes already thought of (#6342 r5).
+  // Now: resolve every string literal in the argument (a ternary yields both
+  // keys), else the whole argument as an identifier, else report it.
+  for (const arg of callArguments(code, 'isEnabled')) {
+    // Only the literals that ARE feature keys count: a ternary's condition can
+    // carry its own strings (`kind === 'callback' ? 'websiteQuoteBooking' : …`),
+    // and 'callback' is not a gate key. One resolving literal is enough to call
+    // the call site understood; none means report it.
+    const resolved = [...arg.matchAll(/'([a-zA-Z0-9_]+)'/g)]
+      .map((l) => l[1])
+      .filter((key) => keys.has(key));
+    if (resolved.length) {
+      for (const key of resolved) noteAll(keys.get(key), key, `isEnabled('${key}')`);
+      continue;
+    }
+    const bare = /^[A-Za-z_$][\w$]*$/.test(arg) ? arg : null;
+    const key = bare ? idents.get(bare) : null;
+    noteAll(key ? keys.get(key) : null, key || arg, `isEnabled(${arg.replace(/\s+/g, ' ')})`);
   }
   for (const m of code.matchAll(/gateEnvValue\(\s*'(GATE_[A-Z0-9_]+)'/g)) note(m[1], m[1]);
   for (const m of code.matchAll(/\.gates\.([a-zA-Z0-9_]+)/g)) noteAll(keys.get(m[1]), m[1], `.gates.${m[1]}`);
@@ -162,6 +180,26 @@ function requiredLocalModules(routeFile, code) {
         break;
       }
     }
+  }
+  return out;
+}
+
+// Every argument passed to `name(` in this source, taken by balanced parens so
+// the shape of the expression cannot hide a call from the resolver.
+function callArguments(code, name) {
+  const out = [];
+  const open = `${name}(`;
+  let i = 0;
+  while ((i = code.indexOf(open, i)) !== -1) {
+    let depth = 1;
+    let j = i + open.length;
+    while (j < code.length && depth > 0) {
+      if (code[j] === '(') depth += 1;
+      else if (code[j] === ')') depth -= 1;
+      j += 1;
+    }
+    out.push(code.slice(i + open.length, j - 1).trim());
+    i = j;
   }
   return out;
 }
