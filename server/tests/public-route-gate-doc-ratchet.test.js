@@ -200,6 +200,24 @@ const DEFAULT_EXPORT = 'module.exports';
 // services for activation-time guards, and this test knew only two readers, so
 // a timestamp-gated public route could ship undocumented (#6342 r17).
 const ENV_NAME_READERS = new Set(['gateEnvValue', 'gateEnvTimestamp']);
+const GATE_READERS_VIA = new Set(['call', 'apply']);
+
+// `isEnabled.call(null, 'someKey')` — the callee resolves to `call`, so the
+// reader branch never looked at the argument and the read counted as no gate
+// (#6342 r20). Reported rather than DECODED: `.call` shifts the argument by one
+// and `.apply` hides it in an array, which is argument-index branching in the
+// hottest part of both walkers for a form this codebase does not contain (the
+// only `.call(` sites under `server/` are knex mocks in test files). Fail
+// closed, so the bypass is impossible without the machinery — the alternative
+// the finding itself offers.
+function readerViaCallApply(callee, readerAliases) {
+  if (!callee || (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression')) return null;
+  if (!GATE_READERS_VIA.has(propertyName(callee))) return null;
+  const obj = callee.object;
+  if (!obj || obj.type !== 'Identifier') return null;
+  const reader = readerAliases.get(obj.name) || obj.name;
+  return GATE_READERS.has(reader) ? reader : null;
+}
 const GATE_READERS = new Set(['isEnabled', ...ENV_NAME_READERS]);
 
 // key ⇒ EVERY gate its line names, in any shape the table uses:
@@ -652,6 +670,7 @@ function helperToGates(source, keys, filename = 'module.js', unresolved = null) 
         : (c.type === 'Identifier' ? c.name
           : ((c.type === 'MemberExpression' || c.type === 'OptionalMemberExpression')
             ? propertyName(c) : null));
+      if (readerViaCallApply(c, readerAliases)) markUnreadableRead();
       const callee = readerAliases.get(rawCallee) || rawCallee;
       if (GATE_READERS.has(callee) && node.arguments.length) {
         const resolved = resolveGateArg(
@@ -877,6 +896,8 @@ function gatesUsedBy(source, keys, helpers, idents = new Map(), unresolved = [],
   const visit = (node) => {
     if (!node || typeof node.type !== 'string') return;
     if (isCall(node)) {
+      const viaCallApply = readerViaCallApply(node.callee, readerAliases);
+      if (viaCallApply) unresolved.push(src(node));
       const raw = calleeName(node.callee);
       const name = readerAliases.get(raw) || raw;
       // `techNotices.isEnabled()` is an unrelated method that happens to share
