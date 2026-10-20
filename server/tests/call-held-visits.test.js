@@ -4,9 +4,11 @@
 // exclusions) and the gate-off no-op. All identities are synthetic.
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('db must not be touched'); }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
 const db = require('../models/db');
+const { isEnabled } = require('../config/feature-gates');
 const { computeHeldVisits, listHeldVisits } = require('../services/call-held-visits');
 
 const NOW = new Date('2026-10-12T16:00:00Z');
@@ -362,5 +364,198 @@ describe('the stated unit', () => {
   it('rides on the row address', () => {
     const [row] = run([call({ ai_extraction_enriched: dayOnly({ property: { service_address: { street_line_1: '40 Sample Rd', street_line_2: 'Unit 4', city: 'Bradenton', postal_code: '34205' } } }) })]);
     expect(row.address).toEqual({ line1: '40 Sample Rd', line2: 'Unit 4', city: 'Bradenton', zip: '34205' });
+  });
+});
+
+// Owner 2026-10-19, call audit 2026-10-19: staff and an existing customer agreed to MOVE a visit
+// to a new day with no time. The visit stays put; the strip shows a display-only row on the TARGET
+// day. The shape below is the stored extraction of that call (synthetic identities).
+describe('a move to a day with no time (move_day_only)', () => {
+  const FROM = '2026-11-06';
+  const moveSched = (sched = {}) => ({
+    status: 'reschedule_requested', moved_appointment_date: FROM,
+    requested_date_range_start: DAY, requested_date_range_end: DAY, preferred_time_of_day: 'unspecified',
+    agent_committed_booking: true, caller_accepted_slot: true, ...sched,
+  });
+  const moveCall = (over = {}, sched = {}, ext = {}) => call({
+    id: 'call-mv', twilio_call_sid: 'CAmove001', customer_id: 'cust-1', ai_extraction_enriched: extraction({ scheduling: moveSched(sched), ...ext }), ...over,
+  });
+  const oldVisit = (over = {}) => visit({ id: 'visit-old', sched_date: FROM, window_start: '09:00:00', ...over });
+
+  it('holds the move on the target day, linked to the visit on the old day, with no time', () => {
+    const [row] = run([moveCall()], [oldVisit()], [], { customerNames: new Map([['cust-1', 'Pat Sample']]) });
+    expect(row).toMatchObject({
+      call_log_id: 'call-mv', kind: 'move_day_only', date_et: DAY, minutes: null, time_label: null, daypart: null,
+      customer_id: 'cust-1', caller_name: 'Pat Sample', from_date_et: FROM, from_visit_id: 'visit-old',
+    });
+  });
+
+  it('a timed reschedule with unset commitment flags is never a "time not set" move (Codex #6345 r1)', () => {
+    const sched = { agent_committed_booking: null, caller_accepted_slot: null };
+    expect(run([moveCall({}, { ...sched, confirmed_start_at: '2026-10-14T14:00:00Z' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { ...sched, proposed_start_at: '2026-10-14T14:00:00Z' })], [oldVisit()])).toEqual([]);
+  });
+
+  it('a completed or on-site old-day visit clears the move (Codex #6345 r1)', () => {
+    expect(run([moveCall()], [oldVisit({ status: 'completed' })])).toEqual([]);
+    expect(run([moveCall()], [oldVisit({ status: 'on_site' })])).toEqual([]);
+  });
+
+  it('two movable visits on the old day keep the row but link to the day, not a visit (Codex #6345 r1)', () => {
+    const [row] = run([moveCall()], [oldVisit(), oldVisit({ id: 'visit-old-2', window_start: '13:00:00' })]);
+    expect(row).toMatchObject({ kind: 'move_day_only', from_date_et: FROM, from_visit_id: null });
+  });
+
+  it('is not held on the old day or any other day', () => {
+    expect(run([moveCall()], [oldVisit()], [], { dateET: FROM })).toEqual([]);
+    expect(run([moveCall()], [oldVisit()], [], { dateET: '2026-10-15' })).toEqual([]);
+  });
+
+  it('needs a linked customer, and no explicit refusal: unset commitment fields pass, a stated "no" does not', () => {
+    expect(run([moveCall({ customer_id: null })], [oldVisit()])).toEqual([]);
+    // The call-195c40dd shape: the extractor left all three commitment fields null (no time slot).
+    const nulls = { agent_committed_booking: null, definite_commitment: null, caller_accepted_slot: null };
+    expect(run([moveCall({}, nulls)], [oldVisit()])).toHaveLength(1);
+    const missing = { agent_committed_booking: undefined, definite_commitment: undefined, caller_accepted_slot: undefined };
+    expect(run([moveCall({}, missing)], [oldVisit()])).toHaveLength(1);
+    expect(run([moveCall({}, { ...nulls, agent_committed_booking: false })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { ...nulls, caller_accepted_slot: false })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { agent_committed_booking: false, definite_commitment: true })], [oldVisit()])).toEqual([]);
+  });
+
+  it('leaves the timed move on the strict rule: a null commitment is still no confirmed row', () => {
+    const timed = extraction({ scheduling: { status: 'reschedule_requested', confirmed_start_at: `${DAY}T12:00:00-04:00` } });
+    expect(run([call({ customer_id: 'cust-1', ai_extraction_enriched: timed })])).toEqual([]);
+  });
+
+  it('needs a reschedule_requested status, a one-day range on the target day and a valid old day', () => {
+    expect(run([moveCall({}, { status: 'none' })], [oldVisit()])).toEqual([]);
+    // A plain request is the existing day_only row, never a move.
+    expect(run([moveCall({}, { status: 'requested' })], [oldVisit()]).map((r) => r.kind)).toEqual(['day_only']);
+    expect(run([moveCall({}, { requested_date_range_end: '2026-10-16' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { moved_appointment_date: null })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { moved_appointment_date: 'next Friday' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { moved_appointment_date: DAY })], [oldVisit({ sched_date: DAY })])).toEqual([]);
+  });
+
+  it('never holds a voicemail, spam, an unprocessed call or a dropped disposition', () => {
+    expect(run([moveCall({ processing_status: 'voicemail' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({ answered_by: 'voicemail' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, {}, { spam_verdict: { spam_kind: 'robocall' } })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, {}, { meta: { is_voicemail: true } })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({ processing_status: 'received' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, {}, { recommended_disposition: 'spam_discarded' })], [oldVisit()])).toEqual([]);
+  });
+
+  it('does not hold a move onto a day that has passed', () => {
+    const later = new Date('2026-10-15T16:00:00Z');
+    expect(run([moveCall()], [oldVisit()], [], { now: later })).toEqual([]);
+    // Today (ET) is still held.
+    expect(run([moveCall()], [oldVisit()], [], { now: new Date('2026-10-14T20:00:00Z') })).toHaveLength(1);
+  });
+
+  it('is not held when the call also carries a timed slot (that is a confirmed row, or a reschedule card)', () => {
+    const timedToo = moveCall({}, { confirmed_start_at: `${DAY}T12:00:00-04:00` });
+    const rows = run([timedToo], [oldVisit()]);
+    expect(rows).toEqual([]);
+  });
+
+  describe('clears', () => {
+    it('when the visit on the old day is gone: moved, cancelled, rescheduled or missing', () => {
+      expect(run([moveCall()], [])).toEqual([]);
+      expect(run([moveCall()], [oldVisit({ status: 'cancelled' })])).toEqual([]);
+      expect(run([moveCall()], [oldVisit({ status: 'rescheduled' })])).toEqual([]);
+      expect(run([moveCall()], [oldVisit({ status: 'skipped' })])).toEqual([]);
+      expect(run([moveCall()], [oldVisit({ sched_date: '2026-11-13' })])).toEqual([]);
+    });
+
+    it('does not count another customer\'s visit on the old day as the visit to move', () => {
+      expect(run([moveCall()], [oldVisit({ customer_id: 'cust-2' })])).toEqual([]);
+    });
+
+    it('a legacy no-status visit does not hold the move; several visits on the old day link to the day', () => {
+      // A legacy no-status row is not movable (Dispatch hides it), so it does not hold the row.
+      expect(run([moveCall()], [oldVisit({ status: null })])).toEqual([]);
+      const [row] = run([moveCall()], [oldVisit({ id: 'visit-pm', window_start: '14:00:00' }), oldVisit({ id: 'visit-am', window_start: '08:00:00' })]);
+      expect(row.from_visit_id).toBeNull(); // ambiguous: the row links to the old day
+    });
+
+    it('when the customer has a live visit on the target day, at any time', () => {
+      expect(run([moveCall()], [oldVisit(), visit({ id: 'visit-new', sched_date: DAY, window_start: '15:00:00' })])).toEqual([]);
+      expect(run([moveCall()], [oldVisit(), visit({ id: 'visit-new', sched_date: DAY, status: 'confirmed' })])).toEqual([]);
+    });
+
+    it('keeps the row when the target-day visit is cancelled, rescheduled or another customer\'s', () => {
+      expect(run([moveCall()], [oldVisit(), visit({ sched_date: DAY, status: 'cancelled' })])).toHaveLength(1);
+      expect(run([moveCall()], [oldVisit(), visit({ sched_date: DAY, status: 'rescheduled' })])).toHaveLength(1);
+      expect(run([moveCall()], [oldVisit(), visit({ sched_date: DAY, customer_id: 'cust-2' })])).toHaveLength(1);
+    });
+
+    it('when the office closed the call, not while a card is open or closed by the system', () => {
+      const closed = [{ call_log_id: 'call-mv', status: 'dismissed', resolution_source: 'human' }];
+      expect(run([moveCall()], [oldVisit()], closed)).toEqual([]);
+      expect(run([moveCall()], [oldVisit()], [...closed, { call_log_id: 'call-mv', status: 'open', resolution_source: null }])).toHaveLength(1);
+      expect(run([moveCall()], [oldVisit()], [{ call_log_id: 'call-mv', status: 'resolved', resolution_source: 'auto' }])).toHaveLength(1);
+    });
+
+    it('when a visit carries the call', () => {
+      expect(run([moveCall()], [oldVisit(), visit({ customer_id: 'cust-9', sched_date: '2026-10-20', internal_notes: 'Call ID: call-mv.' })])).toEqual([]);
+    });
+  });
+
+  it('reads an extraction stored as a JSON string', () => {
+    const stored = JSON.stringify(extraction({ scheduling: moveSched() }));
+    expect(run([moveCall({ ai_extraction_enriched: stored })], [oldVisit()])).toHaveLength(1);
+  });
+});
+
+// The database read behind a day-only move: the customer's old-day visit has to be fetched
+// (with its id) beside the target-day visits, or the row could never find its visit to move.
+describe('listHeldVisits reads the old day of a move', () => {
+  afterEach(() => { isEnabled.mockReturnValue(false); db.mockReset(); });
+
+  function builder(rows, log) {
+    const qb = {};
+    ['where', 'whereRaw', 'whereNotNull', 'select', 'whereIn', 'orWhere', 'orWhereRaw'].forEach((m) => {
+      qb[m] = jest.fn((...args) => {
+        log.push([m, ...args.filter((a) => typeof a !== 'function')]);
+        // Run a grouped where / orWhere callback against the same recorder.
+        args.filter((a) => typeof a === 'function').forEach((fn) => fn.call(qb));
+        return qb;
+      });
+    });
+    qb.modify = jest.fn((fn) => { fn(qb); return qb; });
+    qb.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+    return qb;
+  }
+
+  it('selects the visit id and asks for the customer\'s visits on the old day', async () => {
+    isEnabled.mockReturnValue(true);
+    const FROM = '2026-11-06';
+    const moveCall = call({
+      id: 'call-mv', customer_id: 'cust-1',
+      ai_extraction_enriched: extraction({ scheduling: {
+        status: 'reschedule_requested', moved_appointment_date: FROM, requested_date_range_start: DAY, requested_date_range_end: DAY,
+        agent_committed_booking: true, caller_accepted_slot: true,
+      } }),
+    });
+    const logs = { call_log: [], scheduled_services: [] };
+    const tables = {
+      call_log: [moveCall],
+      scheduled_services: [visit({ id: 'visit-old', sched_date: FROM })],
+      triage_items: [],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Sample' }],
+    };
+    db.mockImplementation((table) => builder(tables[table], logs[table] || []));
+    db.raw = jest.fn((sql) => sql);
+
+    const rows = await listHeldVisits(DAY, { now: NOW });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'move_day_only', from_date_et: FROM, from_visit_id: 'visit-old', caller_name: 'Pat Sample' });
+    // The sandbox-call filter stays on the call read.
+    expect(logs.call_log.some(([m, sql]) => m === 'whereRaw' && /<> \?/.test(sql) && /COALESCE/.test(sql))).toBe(true);
+    const sched = logs.scheduled_services;
+    expect(sched.find(([m, col]) => m === 'select' && col === 'id')).toBeTruthy();
+    expect(sched.some(([m, sql, binds]) => m === 'whereRaw' && /= ANY\(\?\)/.test(sql) && JSON.stringify(binds) === JSON.stringify([[FROM]]))).toBe(true);
   });
 });
