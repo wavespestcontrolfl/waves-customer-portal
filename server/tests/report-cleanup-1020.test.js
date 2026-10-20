@@ -353,6 +353,20 @@ describe('item 4: the trouble-spot note', () => {
     }
   });
 
+  test('catalogFormulations reads only rows without a formulation, only while live, and fails soft', async () => {
+    const select = jest.fn().mockResolvedValue([{ id: 'p1', formulation: 'granular' }]);
+    const whereIn = jest.fn(() => ({ select }));
+    const knex = jest.fn(() => ({ whereIn }));
+    const rows = [{ product_id: 'p1' }, { product_id: 'p2', catalog_formulation: 'liquid' }];
+    expect((await cleanup.catalogFormulations(knex, rows)).size).toBe(0);
+    gateOn();
+    const map = await cleanup.catalogFormulations(knex, rows);
+    expect(whereIn).toHaveBeenCalledWith('id', ['p1']);
+    expect(map.get('p1')).toBe('granular');
+    select.mockRejectedValueOnce(new Error('down'));
+    expect((await cleanup.catalogFormulations(knex, rows)).size).toBe(0);
+  });
+
   test('the photo strip (no shot list) is read for a Trouble spot label too', () => {
     gateOn();
     const data = cleanup.attachCleanupFields({ serviceLine: 'lawn', reportV2: { photos: [{ url: 'https://example/a.jpg', label: 'Front yard' }, { url: 'https://example/b.jpg', label: 'Trouble spot' }], followUp: null }, findings: [] });

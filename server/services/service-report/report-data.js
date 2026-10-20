@@ -4902,9 +4902,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const frozenUseTexts = reportFacts.frozenUseTextsFor(serviceLine, service.structured_notes);
   // GATE_LAWN_REPORT_POLISH: the one-label-line decision frozen at completion ({} when the record carries none).
   const frozenLabelDrops = reportFacts.frozenLabelDropsFor(serviceLine, service.structured_notes);
+  // GATE_REPORT_CLEANUP_1020: the formulation a frozen row lacks, for the granular method check below.
+  const formulationById = await reportCleanup1020.catalogFormulations(knex, products);
   const applications = products.map((product, index) => {
     // GATE_REPORT_CLEANUP_1020: a granular product never prints a broadcast spray method (a record made before the fix).
-    const method = reportCleanup1020.correctedMethod(methodFromProduct(product, serviceLine), { name: product.product_name, formulation: product.catalog_formulation });
+    const method = reportCleanup1020.correctedMethod(methodFromProduct(product, serviceLine), { name: product.product_name, formulation: product.catalog_formulation || formulationById.get(String(product.product_id)) });
     return {
       id: product.id || `product-${index + 1}`,
       product: {

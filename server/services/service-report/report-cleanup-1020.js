@@ -99,6 +99,21 @@ function isGranularProduct(row) {
   return GRANULAR_FORMULATION.test(formulation) || GRANULAR_NAME.test(name) || GRANULAR_G_WORD.test(name);
 }
 
+// The catalog formulation of each product row that does not already carry one (a frozen completion snapshot holds no
+// formulation): one read, only while the gate is live, fail-soft (a failed read leaves the name-only check).
+async function catalogFormulations(knex, products) {
+  const ids = [...new Set((Array.isArray(products) ? products : [])
+    .filter((p) => p && p.product_id && !p.catalog_formulation)
+    .map((p) => String(p.product_id)))];
+  if (!live() || !ids.length) return new Map();
+  try {
+    const rows = await knex('products_catalog').whereIn('id', ids).select('id', 'formulation');
+    return new Map(rows.map((row) => [String(row.id), row.formulation || null]));
+  } catch {
+    return new Map();
+  }
+}
+
 // A method of broadcast_spray beside a granular product becomes granular_broadcast. Any other method (bait
 // placement, spot treatment, a perimeter band) is the technician's record and stays.
 function correctedMethod(method, row) {
@@ -172,6 +187,7 @@ function reportCleanup1020PdfSignature() {
 }
 
 module.exports = {
+  catalogFormulations,
   waterInRuleOf,
   waterInAftercare,
   neutralWatering,
