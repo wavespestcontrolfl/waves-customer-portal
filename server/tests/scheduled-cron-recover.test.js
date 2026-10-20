@@ -1,52 +1,109 @@
-// Real node-cron, real timers: a busy event loop that spans a task's whole
-// matching second. Without recoverMissedExecutions node-cron 3 drops that
-// tick silently (the 2026-10-18 4:00 AM ET geo-grid scan); the
-// scheduled-cron wrapper turns recovery on, so the tick fires late, once.
+// node-cron 3 drops a tick when a busy event loop covers its whole matching
+// second (the 2026-10-18 4:00 AM ET geo-grid scan). The scheduled-cron
+// wrapper turns recovery on, and skips a replay that is too late or that
+// crossed its calendar day, so a date-scoped body never runs for the wrong
+// period.
 const nodeCron = jest.requireActual('node-cron');
 const scheduledCron = require('../utils/scheduled-cron');
 
-function blockUntil(ms) {
-  while (Date.now() < ms) { /* hold the event loop, like a top-of-hour herd */ }
+// The matched time node-cron passes for a task in `timeZone`: that zone's
+// wall clock re-read as a server-local Date (TimeMatcher.apply).
+function zoneWallClock(instant, timeZone) {
+  return new Date(new Intl.DateTimeFormat('en-US', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23', fractionalSecondDigits: 3, timeZone,
+  }).format(instant));
 }
 
-const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+describe('scheduled-cron replay guard', () => {
+  const TZ = 'America/New_York';
+  let spy;
+  let body;
+  let tick;
 
-describe('scheduled-cron missed-tick recovery', () => {
-  jest.setTimeout(15000);
-
-  async function firesAcrossBlockedSecond(scheduleFn) {
-    // Let the task take its first once-a-second checks before the block.
-    const targetSecond = Math.floor(Date.now() / 1000) + 3;
-    let fired = 0;
-    const task = scheduleFn(`${targetSecond % 60} * * * * *`, () => { fired += 1; }, { timezone: 'UTC' });
-    try {
-      await settle(targetSecond * 1000 - Date.now() - 600);
-      // A slow runner that wakes inside the matching second cannot prove
-      // anything either way: fail loudly instead of passing by accident.
-      expect(Date.now()).toBeLessThan(targetSecond * 1000 - 50);
-      blockUntil(targetSecond * 1000 + 1400); // the whole matching second passes blocked
-      await settle(2500);
-      return fired;
-    } finally {
-      task.stop();
-    }
-  }
-
-  test('plain node-cron drops the tick when the loop is blocked through its second', async () => {
-    expect(await firesAcrossBlockedSecond(nodeCron.schedule)).toBe(0);
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    spy = jest.spyOn(nodeCron, 'schedule').mockReturnValue({ stop() {} });
+    body = jest.fn();
+    scheduledCron.schedule('50 23 * * *', body, { timezone: TZ });
+    tick = spy.mock.calls.at(-1)[1];
   });
 
-  test('the scheduled-cron wrapper fires that tick late, exactly once', async () => {
-    expect(await firesAcrossBlockedSecond(scheduledCron.schedule)).toBe(1);
+  afterEach(() => {
+    spy.mockRestore();
+    jest.useRealTimers();
+  });
+
+  test('registers with recovery on by default', () => {
+    expect(spy.mock.calls.at(-1)[2]).toEqual({ recoverMissedExecutions: true, timezone: TZ });
+  });
+
+  test('an on-time tick and a replay a few seconds late both run', () => {
+    const matched = new Date('2026-10-31T03:50:00.000Z'); // 23:50 ET
+    jest.setSystemTime(new Date(matched.getTime() + 300));
+    tick(zoneWallClock(matched, TZ));
+    jest.setSystemTime(new Date(matched.getTime() + 8000));
+    tick(zoneWallClock(matched, TZ));
+    expect(body).toHaveBeenCalledTimes(2);
+  });
+
+  test('a replay over the age limit is skipped', () => {
+    const matched = new Date('2026-10-31T03:50:00.000Z');
+    jest.setSystemTime(new Date(matched.getTime() + scheduledCron.REPLAY_MAX_LATE_MS + 1000));
+    tick(zoneWallClock(matched, TZ));
+    expect(body).not.toHaveBeenCalled();
+  });
+
+  test('a replay that crossed midnight in the task timezone is skipped', () => {
+    const matched = new Date('2026-11-01T03:59:50.000Z'); // 23:59:50 ET Oct 31
+    jest.setSystemTime(new Date(matched.getTime() + 20 * 1000)); // 00:00:10 ET Nov 1
+    tick(zoneWallClock(matched, TZ));
+    expect(body).not.toHaveBeenCalled();
+  });
+
+  test('a manual run (no matched time) still runs', () => {
+    tick('manual');
+    expect(body).toHaveBeenCalledTimes(1);
   });
 
   test('a caller option still wins over the recovery default', () => {
-    const spy = jest.spyOn(nodeCron, 'schedule').mockReturnValue({ stop() {} });
-    try {
-      scheduledCron.schedule('0 4 * * *', () => {}, { timezone: 'America/New_York', recoverMissedExecutions: false });
-      expect(spy.mock.calls[0][2]).toEqual({ recoverMissedExecutions: false, timezone: 'America/New_York' });
-    } finally {
-      spy.mockRestore();
+    scheduledCron.schedule('0 4 * * *', () => {}, { timezone: TZ, recoverMissedExecutions: false });
+    expect(spy.mock.calls.at(-1)[2]).toEqual({ recoverMissedExecutions: false, timezone: TZ });
+  });
+});
+
+// Real node-cron, real timers: block the event loop through one matching
+// second. A runner that wakes too late to set up the block retries with a
+// fresh second instead of failing.
+describe('scheduled-cron recovery with real node-cron', () => {
+  jest.setTimeout(40000);
+
+  const settle = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+  async function firesAcrossBlockedSecond(scheduleFn) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const targetSecond = Math.floor(Date.now() / 1000) + 3;
+      let fired = 0;
+      const task = scheduleFn(`${targetSecond % 60} * * * * *`, () => { fired += 1; }, { timezone: 'UTC' });
+      try {
+        await settle(targetSecond * 1000 - Date.now() - 600);
+        if (Date.now() >= targetSecond * 1000 - 50) continue; // woke too late: fresh target
+        while (Date.now() < targetSecond * 1000 + 1400) { /* hold the event loop */ }
+        await settle(2500);
+        return fired;
+      } finally {
+        task.stop();
+      }
     }
+    throw new Error('runner never woke early enough to block a whole second');
+  }
+
+  test('plain node-cron drops the tick', async () => {
+    expect(await firesAcrossBlockedSecond(nodeCron.schedule)).toBe(0);
+  });
+
+  test('the wrapper fires that tick late, exactly once', async () => {
+    expect(await firesAcrossBlockedSecond(scheduledCron.schedule)).toBe(1);
   });
 });
