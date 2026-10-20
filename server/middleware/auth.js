@@ -143,6 +143,12 @@ const CONTACT_SESSION_ROUTES = [
   ['GET', '/api/tracking/active'],
   ['GET', '/api/tracking/today'],
   ['GET', '/api/tracking/maps-key'],
+  // Token-scoped release of THIS device's native push registration: a
+  // device a holder signed out of (release failed) that a contact now signs
+  // into must stop receiving the holder's pushes (codex #6363 r4 P1). The
+  // route deactivates only the token presented; subscribe stays holder-only
+  // here (contact app devices are the follow-up PR).
+  ['POST', '/api/push/native-unsubscribe'],
   ['GET', '/api/notifications/contact-preferences'],
   ['PUT', '/api/notifications/contact-preferences'],
   ['POST', '/api/customer/activity/page-view'],

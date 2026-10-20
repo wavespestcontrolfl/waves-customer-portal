@@ -197,6 +197,26 @@ async function filterReportEmailRecipientsByContactPrefs(recipients = [], custom
   });
 }
 
+// Does this resolved recipient — a service-contact-role contact — decline
+// `channel` through their own master switch? Review outreach (review-
+// request.js) resolves ONE recipient rather than a list, so it asks here
+// instead of filterContactsByOwnPrefs. Primary / billing recipients never
+// decline here; gate off = never. Fail CLOSED on an unreadable table: a
+// contact whose choices cannot be read is treated as declining.
+async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db } = {}) {
+  if (!contactPrefsLive() || !contact || !contact.phone) return false;
+  if (!require('./customer-contact').isServiceContactRole(contact.role)) return false;
+  let row;
+  try {
+    row = await getContactPrefRow(customerId, contact.phone, { dbh });
+  } catch (err) {
+    if (dbh && dbh.isTransaction) throw err;
+    logger.warn(`[contact-prefs] read failed (${err.message}) — holding the service contact's ${channel}`);
+    return true;
+  }
+  return !contactAllows(row, null, channel);
+}
+
 // The holder's contact save rewrote the slots: drop the rows of phones that
 // no longer occupy one. Inside the save's transaction; a missing table is
 // the absent state.
@@ -239,6 +259,7 @@ module.exports = {
   textPathsOpened,
   declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
+  contactDeclinesChannel,
   pruneContactNotificationPrefs,
   upsertContactNotificationPrefs,
 };

@@ -155,6 +155,28 @@ describe('filterReportEmailRecipientsByContactPrefs (service-report email)', () 
   });
 });
 
+describe('contactDeclinesChannel (single-recipient resolvers: review outreach)', () => {
+  test('a service contact whose master switch is off declines that channel; the other channel and the holder never do', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', sms_enabled: false, email_enabled: true }];
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms')).toBe(true);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email')).toBe(false);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', PRIMARY, 'sms')).toBe(false);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', TERRY, 'sms')).toBe(false);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', null, 'sms')).toBe(false);
+  });
+
+  test('gate off never declines; an unreadable table declines (fail closed) except on a transaction, which rethrows', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', sms_enabled: false }];
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms')).toBe(false);
+    process.env.GATE_CONTACT_LOGIN = 'true';
+    failWith = new Error('boom');
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms')).toBe(true);
+    const trx = Object.assign(() => builder(), { isTransaction: true });
+    await expect(ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', { dbh: trx })).rejects.toThrow('boom');
+  });
+});
+
 describe('pruneContactNotificationPrefs (holder contact save)', () => {
   test('deletes the rows of phones no longer in a slot and keeps the survivors', async () => {
     rows = [

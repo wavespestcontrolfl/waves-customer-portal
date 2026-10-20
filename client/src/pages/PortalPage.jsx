@@ -4462,52 +4462,58 @@ const contactPatchEnablesTexts = (patch) => Object.entries(patch).some(([k, v]) 
 function useContactNotificationPrefs() {
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
-  const [locked, setLocked] = useState({});
+  // ONE save at a time (codex #6363 r4 P2): every response is a full
+  // snapshot, so two in-flight saves would let the slower one overwrite the
+  // newer choices, and a failure's rollback could undo the other's success.
+  // Every control is disabled while a save is in flight.
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [consentChecked, setConsentChecked] = useState(false);
   const load = useCallback(() => api.getContactNotificationPrefs()
     .then((d) => { setData(d); setFailed(false); })
     .catch(() => setFailed(true)), []);
   useEffect(() => { void load(); }, [load]);
   const attested = !!data?.consentAttestedAt;
-  const save = async (lockKey, patch) => {
-    if (locked[lockKey]) return;
+  const run = async (fn) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try { await fn(); } finally { busyRef.current = false; setBusy(false); }
+  };
+  const save = (patch) => {
     const needsConsent = !attested && contactPatchEnablesTexts(patch);
     if (needsConsent && !consentChecked) {
       showCustomerAlert('Please confirm the text-message consent statement first.');
-      return;
+      return undefined;
     }
-    setLocked((prev) => ({ ...prev, [lockKey]: true }));
+    return run(async () => saveNow(patch, needsConsent));
+  };
+  const saveNow = async (patch, needsConsent) => {
     const before = data;
     setData((prev) => (prev ? { ...prev, preferences: { ...prev.preferences, ...patch } } : prev));
     try {
-      const next = await api.updateContactNotificationPrefs(needsConsent ? { ...patch, consentAttested: true } : patch);
-      setData(next);
+      setData(await api.updateContactNotificationPrefs(needsConsent ? { ...patch, consentAttested: true } : patch));
     } catch (err) {
       setData(before);
       showCustomerAlert(err?.message || 'Could not update your notifications. Please try again.');
       console.error(err);
-    } finally {
-      setLocked((prev) => ({ ...prev, [lockKey]: false }));
     }
   };
   // Ticking the statement IS the attestation (codex #6363 r2 P2): it is
   // recorded at once — and confirms a pending opt-in ask — rather than riding
   // on a later preference change that the already-on defaults may never make.
-  const attest = async (checked) => {
+  const attest = (checked) => run(async () => {
     setConsentChecked(checked);
-    if (!checked || locked.consent) return;
-    setLocked((prev) => ({ ...prev, consent: true }));
+    if (!checked) return;
     try {
       setData(await api.updateContactNotificationPrefs({ consentAttested: true }));
     } catch (err) {
       setConsentChecked(false);
       showCustomerAlert(err?.message || 'Could not record your consent. Please try again.');
       console.error(err);
-    } finally {
-      setLocked((prev) => ({ ...prev, consent: false }));
     }
-  };
-  return { data, failed, locked, consentChecked, attested, load, save, attest };
+  });
+  return { data, failed, busy, consentChecked, attested, load, save, attest };
 }
 
 // One master switch row of the contact card (texts, email).
@@ -4540,7 +4546,7 @@ function ContactConsentStatement({ phone, smsOptin, checked, disabled, onChange 
 }
 
 export function ContactNotificationCard({ customer, card, sectionTitle, muted, subtle }) {
-  const { data, failed, locked, consentChecked, attested, load, save, attest } = useContactNotificationPrefs();
+  const { data, failed, busy, consentChecked, attested, load, save, attest } = useContactNotificationPrefs();
 
   if (failed && !data) {
     return (
@@ -4582,12 +4588,12 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
       <div style={{ padding: '4px 18px 12px' }}>
         <ContactMasterSwitch
           icon="smartphone" label="Text messages" description="Off stops every text to your number; email updates are unaffected."
-          on={prefs.smsEnabled !== false} disabled={!!locked.smsEnabled} onChange={() => save('smsEnabled', { smsEnabled: prefs.smsEnabled === false })}
+          on={prefs.smsEnabled !== false} disabled={busy} onChange={() => save({ smsEnabled: prefs.smsEnabled === false })}
         />
         {data.emailAvailable && (
           <ContactMasterSwitch
             icon="mail" label="Email messages" description="Off stops every email to your address, including notices with no setting of their own; texts are unaffected."
-            on={prefs.emailEnabled !== false} disabled={!!locked.emailEnabled} onChange={() => save('emailEnabled', { emailEnabled: prefs.emailEnabled === false })}
+            on={prefs.emailEnabled !== false} disabled={busy} onChange={() => save({ emailEnabled: prefs.emailEnabled === false })}
           />
         )}
         {rows.map((p, i) => {
@@ -4609,19 +4615,19 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 'auto', flex: '0 0 auto', justifyContent: 'flex-end' }}>
                 <CustomerSelect
                   value={prefs[p.channelKey] || 'both'}
-                  onChange={(e) => save(p.channelKey, { [p.channelKey]: e.target.value })}
-                  disabled={holderOff || !isOn || !!locked[p.channelKey]}
+                  onChange={(e) => save({ [p.channelKey]: e.target.value })}
+                  disabled={holderOff || !isOn || busy}
                   aria-label={`Delivery method for ${p.label}`}
                 >
                   {channelOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </CustomerSelect>
-                <GoldSwitch on={isOn} disabled={holderOff || !!locked[p.key]} onChange={() => save(p.key, { [p.key]: !isOn })} label={p.label} />
+                <GoldSwitch on={isOn} disabled={holderOff || busy} onChange={() => save({ [p.key]: !isOn })} label={p.label} />
               </div>
             </div>
           );
         })}
         {!attested && (
-          <ContactConsentStatement phone={phone} smsOptin={data.smsOptin} checked={consentChecked} disabled={!!locked.consent} onChange={attest} />
+          <ContactConsentStatement phone={phone} smsOptin={data.smsOptin} checked={consentChecked} disabled={busy} onChange={attest} />
         )}
       </div>
     </section>
@@ -14491,7 +14497,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
         subtle={subtle}
       />
 
-      <section data-glass="card" style={{
+      {/* Billing is the holder's: a contact session has no Billing tab to open (codex #6363 r4 P2). */}
+      {!contactSession && <section data-glass="card" style={{
         ...card,
         padding: 20,
         display: 'flex',
@@ -14508,7 +14515,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         <button type="button" onClick={() => onSwitchTab?.('billing')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative', width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
           Open Billing
         </button>
-      </section>
+      </section>}
 
       {/* Bottom note */}
       <section data-glass="card" style={{
@@ -17034,6 +17041,10 @@ export default function PortalPage() {
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
   const switchTab = (id) => {
+    // A narrowed session (cancelled, contact) never mounts a tab it cannot
+    // read, even for one render: the blocked tab's reads would 403 before
+    // the redirect effect below moves it home (codex #6363 r4 P2).
+    if (tabBlocked(['schedule', 'services'].includes(id) ? 'visits' : id)) return;
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);

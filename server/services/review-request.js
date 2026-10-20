@@ -2998,6 +2998,8 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     const contact = getServiceContact(customer);
     if (!contact.email) return { reason: "no_email" };
+    // The contact's OWN email master switch (contact login) holds the leg.
+    if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email")) return { reason: "email_off" };
     let prefs;
     try {
       prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
@@ -4601,7 +4603,11 @@ const ReviewService = {
     }
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
-    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    // The email identity is the service contact as themselves; their OWN
+    // email master switch (contact login) blocks the leg like the holder's
+    // (the SMS identity already fell back to the holder in the resolver).
+    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false)
+      || await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, emailContact, "email");
     // Hard suppression (DNC / wrong-number) on the phone — if the SMS block is
     // suppression-only, the cadence should fall back to email rather than stall.
     // sendCustomerMessage would also block it, but checking here lets the channel

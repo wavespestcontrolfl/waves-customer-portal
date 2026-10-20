@@ -281,8 +281,11 @@ export function AuthProvider({ children }) {
       // Now authenticated — flush any APNs token captured before login (native
       // app only; no-op on web). See native/nativePush.js. Never for a
       // contact session: push rows are keyed by customer, so the device
-      // would receive the holder's billing pushes (the route 403s anyway).
-      if (data?.actor?.kind !== 'contact') flushNativePushToken();
+      // would receive the holder's billing pushes. A device that still holds
+      // a holder's registration (a logout whose release failed) is released
+      // instead, token-scoped (codex #6363 r4 P1).
+      if (data?.actor?.kind === 'contact') void deactivateNativePushToken();
+      else flushNativePushToken();
     } catch (err) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
       // token that has since been replaced would clear the NEW session's

@@ -103,6 +103,18 @@ describe('resolveServiceContactSmsRecipient', () => {
     expect(recipient).toMatchObject({ phone: '(941) 555-0123', name: 'Riley Tenant', role: 'service_contact' });
   });
 
+  test('a contact who switched their own texts off (contact login) is held like an unconfirmed opt-in: the holder is the recipient (codex #6363 r4)', async () => {
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    const spy = jest.spyOn(ContactPrefs, 'contactDeclinesChannel').mockResolvedValue(true);
+    try {
+      const recipient = await resolveServiceContactSmsRecipient(CONTACT, { dbh: optinReader([]) });
+      expect(recipient).toMatchObject({ phone: '+19415550100', role: 'primary' });
+      expect(spy).toHaveBeenCalledWith('cust-1', expect.objectContaining({ role: 'service_contact' }), 'sms', expect.any(Object));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('another phone held on the account does not hold slot 1', async () => {
     const dbh = optinReader([{ customer_id: 'cust-1', phone_key: '9415550777' }]);
     expect((await resolveServiceContactSmsRecipient(CONTACT, { dbh })).phone).toBe('(941) 555-0123');

@@ -205,6 +205,8 @@ const CONTACT_READS = [
   ['GET', '/api/tracking/active'], ['GET', '/api/tracking/today'], ['GET', '/api/tracking/maps-key'],
   ['GET', '/api/notifications/contact-preferences'], ['PUT', '/api/notifications/contact-preferences'],
   ['POST', '/api/customer/activity/page-view'], ['POST', '/api/customer/activity/heartbeat'], ['POST', '/api/customer/activity/push-open'],
+  // Token-scoped release of this device's holder registration on contact login (codex r4).
+  ['POST', '/api/push/native-unsubscribe'],
 ];
 const HOLDER_ONLY = [
   ['GET', '/api/billing'], ['GET', '/api/billing/balance'], ['GET', '/api/billing/cards'], ['POST', '/api/billing/cards'],
@@ -219,7 +221,7 @@ const HOLDER_ONLY = [
   ['GET', '/api/notifications/property-preferences'], ['PUT', '/api/notifications/property-preferences/cust-holder'],
   ['POST', '/api/requests/restart-plan'], ['GET', '/api/requests'], ['POST', '/api/requests'],
   ['GET', '/api/referrals'],
-  ['POST', '/api/push/native-subscribe'], ['POST', '/api/push/native-unsubscribe'], ['GET', '/api/push/status'],
+  ['POST', '/api/push/native-subscribe'], ['GET', '/api/push/status'],
   ['GET', '/api/customer-notifications/unread-count'],
   ['POST', '/api/ai/chat'],
   ['POST', '/api/auth/select-property'], ['PUT', '/api/auth/credit-preference'], ['DELETE', '/api/auth/account'],

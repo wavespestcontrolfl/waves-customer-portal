@@ -804,14 +804,6 @@ router.put('/contact-preferences', async (req, res, next) => {
     // contact) needs the attestation; email-only choices and purposes the
     // holder turned off never do.
     const ContactPrefs = require('../services/contact-notification-prefs');
-    const [existing, accountRow] = await Promise.all([
-      ContactPrefs.getContactPrefRow(req.customerId, contact.phone),
-      db('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null),
-    ]);
-    const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
-    if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) {
-      return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });
-    }
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
     const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
@@ -821,6 +813,15 @@ router.put('/contact-preferences', async (req, res, next) => {
       // the old phone's pending ask confirmed (codex #6363 r3 P2).
       const live = await trx('customers').where({ id: req.customerId }).forUpdate().first();
       if (!require('../services/customer-contact').findServiceContactSlotByPhoneKey(live, contact.phoneKey)) return 'removed';
+      // The consent decision reads its inputs under the same lock (codex r4
+      // P2): a holder enabling a purpose between an unlocked read and this
+      // write must not let a text path open without the attestation.
+      const [existing, accountRow] = await Promise.all([
+        ContactPrefs.getContactPrefRow(req.customerId, contact.phone, { dbh: trx }),
+        trx('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null),
+      ]);
+      const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
+      if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) return 'consent_required';
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
       if (updates.consentAttested !== true) return 'saved';
       // The in-app attestation confirms THIS customer's pending or
@@ -843,6 +844,9 @@ router.put('/contact-preferences', async (req, res, next) => {
     });
     if (outcome === 'removed') {
       return res.status(401).json({ error: 'This number is no longer a contact on this account.', code: 'CONTACT_REMOVED' });
+    }
+    if (outcome === 'consent_required') {
+      return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });
     }
 
     logger.info(`Contact notification prefs updated for ${req.customerId} (slot ${contact.slot}): ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
