@@ -167,8 +167,8 @@ afterAll(() => { delete process.env.GATE_IB_DELETE_CUSTOMER; });
 describe('gate', () => {
   test.each([undefined, 'false', '1', 'on', 'TRUE'])('GATE_IB_DELETE_CUSTOMER=%s: refuses before any read, preview and commit alike', async (value) => {
     if (value === undefined) delete process.env.GATE_IB_DELETE_CUSTOMER; else process.env.GATE_IB_DELETE_CUSTOMER = value;
-    expect(await preview()).toMatchObject({ code: 'gate_off', error: expect.stringMatching(/GATE_IB_DELETE_CUSTOMER/) });
-    expect(await commit()).toMatchObject({ code: 'gate_off' });
+    expect(await preview()).toMatchObject({ code: 'by_owner_rule', rule: 'delete_customer', error: expect.stringMatching(/GATE_IB_DELETE_CUSTOMER/) });
+    expect(await commit()).toMatchObject({ code: 'by_owner_rule' });
     expect(db).not.toHaveBeenCalled();
     expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
   });

@@ -314,7 +314,7 @@ describe('refusals added in Codex round 1 on #6118', () => {
     mockState.customer = { ...BASE };
     mockState.visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: null, payer_id: 9 }];
     const r = await propose({ per_application_fee: 147 });
-    expect(r).toMatchObject({ code: 'bill_to_payer', error: expect.stringContaining('This customer has a Bill-To payer — change billing on the customer page') });
+    expect(r).toMatchObject({ code: 'bill_to_payer', error: expect.stringContaining('This customer has a Bill-To payer, and the bar can\'t change billing for those from here yet') });
   });
 
   test('monthly membership with Auto Pay off or paused', async () => {
@@ -331,7 +331,7 @@ describe('refusals added in Codex round 1 on #6118', () => {
     mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
     mockState.armed = MONTHLY_ARMED;
     const r = await propose({ billing_mode: 'per_application', per_application_fee: 147 });
-    expect(r).toMatchObject({ code: 'dues_retry_armed', error: expect.stringContaining('This customer has a dues retry scheduled — resolve it on the billing page first') });
+    expect(r).toMatchObject({ code: 'dues_retry_armed', error: expect.stringContaining('This customer has a dues retry scheduled, and the bar can\'t change the billing type from here until that is resolved') });
     // Not leaving the monthly lane: no retry check.
     mockState.customer = { ...BASE, billing_mode: 'per_application', per_application_fee: '91.00' };
     expect((await propose({ per_application_fee: 147 })).error).toBeUndefined();
@@ -777,7 +777,7 @@ describe('Codex round 6 on #6118: no cut on the visits the card and the pin cove
     mockState.visits = many(2001);
     expect(await propose(LEAVE)).toMatchObject({
       code: 'too_many_visits',
-      error: expect.stringContaining('too many upcoming visits to confirm from the bar; change it on the customer page'),
+      error: expect.stringContaining('too many upcoming visits to confirm from the bar, so the bar can\'t change the billing type from here'),
     });
     mockState.visits = many(2000);
     expect((await propose(LEAVE)).error).toBeUndefined();
@@ -866,7 +866,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
   const gateFlags = () => require('../config/feature-gates').gates;
   const refusedWith = (count) => ({
     code: 'billing_visits_priced',
-    error: `This customer has ${count === 1 ? '1 upcoming visit' : `${count} upcoming visits`} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`,
+    error: `This customer has ${count === 1 ? '1 upcoming visit' : `${count} upcoming visits`} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one, so it can't do this from here. Nothing was changed.`,
   });
   afterEach(() => { gateFlags().completionAutopayCharge = false; require('../config/feature-gates').gates.stampedZeroFree = false; });
 
@@ -1528,7 +1528,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.voidedCombined = { s1: { id: 'inv-void', status: 'void' } };
       expect(await propose(PER_APP)).toEqual({
         code: 'billing_visits_held',
-        error: 'Pest Control on 2099-09-01 has a voided first-application invoice with no replacement; completion will park it for manual billing. Resolve it on the invoice page first. Nothing was changed.',
+        error: 'Pest Control on 2099-09-01 has a voided first-application invoice with no replacement; completion will park it for manual billing, so the bar can\'t change the billing type from here until that is resolved. Nothing was changed.',
       });
       expect(combinedInvoiceVoidedWithoutLiveReplacement).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', customer_id: CUSTOMER_ID, source_estimate_id: 'est-1' }), expect.anything(), {});
     });
@@ -1747,7 +1747,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.roots = [rootRow(7)];
       expect(await propose(LEAVE)).toMatchObject({
         code: 'billing_visits_payer_owned',
-        error: 'This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.',
+        error: 'This customer has an ongoing recurring plan billed to a Bill-To payer, and the bar can\'t change billing for those from here yet. Nothing was proposed.',
       });
       // The top-up's own selector decides which roots count.
       expect(require('../services/recurring-series-topup').eligibleSeriesParentIds).toHaveBeenCalledWith(expect.anything(), { customerId: CUSTOMER_ID });

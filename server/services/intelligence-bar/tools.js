@@ -3093,7 +3093,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
   // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
   if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
-    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate, so the bar does not book it by name. Booking it from an estimate stays on the Schedule screen by the owner's rule. Nothing was booked.`, code: 'by_owner_rule', rule: 'area_addon_from_estimate' };
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate, so the bar can't book it by name from here yet. Nothing was booked.`, code: 'addon_by_name_unsupported' };
   }
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(bookedType)) {
@@ -4142,6 +4142,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
     return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
+  let thrownRefusal = null;
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -4234,7 +4235,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+  }).catch((err) => {
+    // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
+    thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
+    if (!thrownRefusal) throw err;
   });
+  if (thrownRefusal) return thrownRefusal;
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }
@@ -4342,7 +4348,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so the bar does not cancel it. That cancellation stays on the Dispatch screen by the owner\'s rule. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so the bar can\'t cancel this visit from here yet (a visit with an invoice, credit or linked visit). Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -4472,7 +4478,7 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     // Owner ruling 2026-09-28: the bar cancels bare visits only.
     if ((freshImpact?.card_cancel_refusals || []).length) {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'by_owner_rule', rule: 'bare_visits_only' };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
     }
   }
 
@@ -4676,7 +4682,7 @@ async function cancelAppointment(input, actionContext = {}) {
       return { error: 'Appointment not found — nothing was changed.' };
     }
     if (err && err.message === '__cancel_card_refused__') {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'by_owner_rule', rule: 'bare_visits_only' };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
     }
     // The visit went cancelled / no_show / skipped between the initial read
     // and the lock chain, which refuses a never-ran visit (Codex round-10

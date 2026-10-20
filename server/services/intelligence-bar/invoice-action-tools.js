@@ -231,7 +231,7 @@ async function sendRefusal(invoice, dueCents) {
     return refusal(`Linked visit is ${terminal}; delivery not attempted. The bar can\'t void or keep this invoice from here yet.`, 'visit_terminal', at);
   }
   if (await messagingHold(invoice.customer_id)) {
-    return refusal('This customer has a collections hold on billing messages. Overriding a hold stays on the Invoices page by the owner\'s rule.', 'by_owner_rule', { ...at, rule: 'collection_hold' });
+    return refusal('This customer has a collections hold on billing messages. The bar can\'t override a collections hold from here yet.', 'collection_hold', at);
   }
   return null;
 }

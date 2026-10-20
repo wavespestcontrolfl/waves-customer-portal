@@ -306,7 +306,7 @@ describe('W0B cancel_appointment is not card-confirmable', () => {
       expect(body.pendingActions).toEqual([]);
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
-      expect(toolResult.error).toMatch(/Dispatch screen/);
+      expect(toolResult.error).toMatch(/can't cancel this visit from here yet/);
       expect(toolResult.error).toMatch(/Nothing was changed/);
     });
   });
@@ -471,9 +471,9 @@ describe('W0B cancel_appointment card-confirm (GATE_IB_CANCEL_APPOINTMENT)', () 
       });
       const body = await res.json();
       expect(res.status).toBe(409);
-      expect(body.error).toMatch(/Dispatch screen/);
+      expect(body.error).toMatch(/can't cancel this visit from here yet/);
       expect(mockExecuteTool).not.toHaveBeenCalled();
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ error: expect.stringMatching(/Dispatch screen/) }));
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ error: expect.stringMatching(/can't cancel this visit from here yet/) }));
     });
   });
 
@@ -489,7 +489,7 @@ describe('W0B cancel_appointment card-confirm (GATE_IB_CANCEL_APPOINTMENT)', () 
       });
       const body = await res.json();
       expect(res.status).toBe(409);
-      expect(body.error).toMatch(/Dispatch screen/);
+      expect(body.error).toMatch(/can't cancel this visit from here yet/);
       expect(mockExecuteTool).not.toHaveBeenCalled();
     });
   });
@@ -723,7 +723,7 @@ describe('W0B booking is card-confirmable only when credit-free', () => {
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
       expect(toolResult.error).toMatch(/\$49\.00 of open inspection-credit offer/);
-      expect(toolResult.error).toMatch(/Schedule screen/);
+      expect(toolResult.error).toMatch(/can't book this visit from here yet/);
     });
   });
 

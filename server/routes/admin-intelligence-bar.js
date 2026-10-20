@@ -588,12 +588,12 @@ function withCacheBreakpoint(messages) {
 // proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
 // and cancels happen from the Dispatch screen, which owns the waiver and
 // review controls.
-const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
+const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly, so the bar can\'t cancel this visit from here yet. Nothing was changed.';
 
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
 }
-const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
+const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work, but the bar can\'t make changes from here until writes are switched back on.';
 
 // tool_health_events.error_message is a separate telemetry sink from
 // intelligence_bar_queries (the redacted prompt/response above) — a PII or
@@ -1380,12 +1380,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           // The redemption is claimed post-commit by the executor (and the
           // hourly sweep) — not pinnable to this card. Credit-bearing
           // bookings are made where that money flow is visible.
-          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) (redemption may be gate-paused) that the confirmation card cannot pin exactly. Book it from the Schedule screen. Nothing was changed.` } };
+          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) (redemption may be gate-paused) that the confirmation card cannot pin exactly, so the bar can't book this visit from here yet. Nothing was changed.`, code: 'booking_with_credit_unsupported' } };
         }
         params._inspection_credit_amount = 0;
         preview = { ...preview, inspection_credit: { amount: 0 } };
       } catch (err) {
-        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
+        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit, so nothing was booked. Try again in a moment.' } };
       }
     }
     if ((toolUse.name === 'update_customer' || toolUse.name === 'bulk_update_customers')
@@ -1661,17 +1661,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (pin.is_recurring
         && params.new_date && String(params.new_date) !== String(pin.scheduled_date)
         && require('../services/rebooker').collectiveMoveGateOn()) {
-        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was proposed.', code: 'COLLECTIVE_MOVE_REQUIRED' } };
+        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'COLLECTIVE_MOVE_REQUIRED' } };
       }
       if (pin.visit_id) {
         const VisitGroups = require('../services/visit-groups');
         const members = await VisitGroups.openMembers(db, pin.visit_id);
         if (members.length >= 2) {
-          return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first. Nothing was proposed.' } };
+          return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop, and the bar can\'t move one of them alone from here yet. Nothing was proposed.', code: 'grouped_visit_move_unsupported' } };
         }
         const verdict = await VisitGroups.frozenVisitVerdict(db, pin.visit_id);
         if (verdict.frozen) {
-          return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was proposed.' } };
+          return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — the bar can\'t move it from here. Nothing was proposed.', code: 'frozen_visit_move_unsupported' } };
         }
       }
       params._appointment_fingerprint = appointmentPinFingerprint(pin);
@@ -1807,7 +1807,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
     if (toolUse.name === 'cancel_appointment') {
       if (!ibCancelAppointmentLive()) {
-        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_with_effects_unsupported' } };
       }
       // Gate on: compute the SAME deterministic pre-commit impact the
       // commit path (tools.js cancelAppointment) recomputes and compares
@@ -1848,7 +1848,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
       // commit-side refusal (tools.js) rather than a second copy.
       if ((impact.card_cancel_refusals || []).length) {
-        return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE } };
+        return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' } };
       }
       params._frozen_cancellation_impact = impact;
       preview = { ...preview, cancellation: impact };
@@ -4537,7 +4537,7 @@ async function commitPendingAction(req, { id, contractHash }) {
     // pin against a fresh impact read and refuses on drift.
     if (action.tool_name === 'cancel_appointment'
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
-      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
+      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_with_effects_unsupported' };
       await PendingActions.recordResult(action.id, result);
       return reply(409, result);
     }

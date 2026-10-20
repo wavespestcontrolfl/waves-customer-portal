@@ -145,7 +145,7 @@ async function loadMergeEligibility(winnerId, loserId) {
       return {
         ok: false,
         code: 'address_conflict',
-        error: 'The two records have different service addresses — merge this pair from the admin duplicates queue using "Merge + keep address" instead (the Intelligence Bar does not support keeping a second address).',
+        error: 'The two records have different service addresses — the bar can\'t keep a second address from here yet, so it can\'t merge this pair.',
       };
     }
     return { ok: false, error: eligibility.reason, code: eligibility.code };
@@ -354,7 +354,7 @@ async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVe
 
 async function mergeCustomers(input, actionContext = {}) {
   if (!mergeCustomersEnabled()) {
-    return { error: 'Merging customers from the Intelligence Bar is not enabled (GATE_IB_MERGE_CUSTOMERS) — use the duplicates queue in the admin portal.', code: 'gate_off' };
+    return { error: 'Merging customers from the bar is not enabled (GATE_IB_MERGE_CUSTOMERS), so the bar can\'t merge customers from here yet.', code: 'gate_off' };
   }
   // Postgres accepts an uppercase UUID and returns the row's canonical
   // lowercase id; the pair is matched by string, so normalize at the boundary.
@@ -392,7 +392,7 @@ function deleteDuplicateCustomerEnabled() {
 
 async function deleteDuplicateCustomer(input, actionContext = {}) {
   if (!deleteDuplicateCustomerEnabled()) {
-    return { error: 'Deleting a duplicate customer from the Intelligence Bar is not enabled (GATE_IB_DELETE_CUSTOMER) — use merge_customers or the customer page.', code: 'gate_off' };
+    return { error: 'Deleting a duplicate customer is not enabled in the bar (GATE_IB_DELETE_CUSTOMER). By the owner\'s rule, deleting a customer stays on the customer screen; merge_customers can fold the duplicate in.', code: 'by_owner_rule', rule: 'delete_customer' };
   }
   const customerId = input.customer_id == null ? null : String(input.customer_id).trim().toLowerCase();
   if (!customerId) return { error: 'customer_id is required' };

@@ -697,11 +697,11 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
     expect(links.bearerLinkSendCheck).toHaveBeenCalledWith('Running 15 minutes late, sorry!', '9415550123', { trustedCustomerId: CUSTOMER_ID, usDestination: true });
   });
 
-  test('an Auto Pay setup link is refused toward the Customers page button / the composer', async () => {
+  test('an Auto Pay setup link is refused: the bar cannot send it, the composer verifies it', async () => {
     links.autopayLinkSendCheck.mockResolvedValue({ present: true, ok: true, tokens: ['tok'] });
     const refusal = await customerLinkSendRefusal('Set up Auto Pay here: portal.wavespestcontrol.com/secure/tok', '+19415550123', CUSTOMER_ID);
     expect(refusal).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
-    expect(refusal.error).toMatch(/Customers page Auto Pay button/);
+    expect(refusal.error).toMatch(/can't send it from here; the Auto Pay link is verified at send time/);
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
   });
 

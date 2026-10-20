@@ -25,7 +25,16 @@ const FILES = [
   'tools.js',
   'estimate-accept-tools.js',
   'customer-link-tools.js',
+  'comms-tools.js',
+  'billing-mode-change.js',
+  'customer-lifecycle-tools.js',
+  'review-tools.js',
+  'billing-reader-tools.js',
+  'ops-tools.js',
+  'outcomes.js',
+  'routes/admin-intelligence-bar.js',
 ];
+const fullPath = (file) => (file.startsWith('routes/') ? path.join(__dirname, '..', file) : path.join(DIR, file));
 
 // A string that sends the reader to another place to do the work: the gap
 // reporter's own "other screen" classifier, plus the named screens that had no
@@ -33,6 +42,7 @@ const FILES = [
 const OTHER_SCREEN_RE = /\b(?:use|on|from|in|via|at) (?:the )?[\w' -]{0,40}?\b(?:screen|page|queue)\b/i;
 const NAMED_SCREEN_RE = /\bfrom (?:Dispatch|Billing Recovery|Communications|the project)\b/i;
 const BY_OWNER_RULE_TEXT = "by the owner's rule";
+const REFUSAL_CONTEXT_ONLY = new Set(['routes/admin-intelligence-bar.js', 'customer-lifecycle-tools.js', 'billing-mode-change.js', 'comms-tools.js', 'review-tools.js', 'billing-reader-tools.js', 'ops-tools.js']);
 
 // Facts about a page the customer sees or a card, not a place the operator is
 // sent to. Each is matched as a substring of the string.
@@ -42,22 +52,30 @@ const NOT_A_REFUSAL = [
 ];
 
 function stringsOf(file) {
-  const source = fs.readFileSync(path.join(DIR, file), 'utf8');
+  const source = fs.readFileSync(fullPath(file), 'utf8');
   const ast = acorn.parse(source, { ecmaVersion: 2022, locations: true, allowHashBang: true });
   const found = [];
-  const walk = (node, parent) => {
+  // The route and the large tool files also hold prompts and card text, so for
+  // them only a string inside a refusal counts: an `error` / `refused` property,
+  // the argument of refuse() / refusal(), or a *_REFUSAL / *_MESSAGE constant.
+  const refusalOnly = REFUSAL_CONTEXT_ONLY.has(file);
+  const walk = (node, parent, inRefusal = false) => {
     if (!node || typeof node.type !== 'string') return;
+    let here = inRefusal;
+    if (node.type === 'Property' && node.key && ['error', 'refused'].includes(node.key.name || node.key.value)) here = true;
+    if (node.type === 'CallExpression' && node.callee && ['refuse', 'refusal'].includes(node.callee.name)) here = true;
+    if (node.type === 'VariableDeclarator' && node.id && /(REFUSAL|MESSAGE)$/.test(node.id.name || '')) here = true;
     let text = null;
     if (node.type === 'Literal' && typeof node.value === 'string') text = node.value;
     if (node.type === 'TemplateLiteral') text = node.quasis.map((q) => q.value.cooked).join('${}');
     const isDescription = parent && parent.type === 'Property' && parent.key
       && (parent.key.name === 'description' || parent.key.value === 'description');
-    if (text !== null && !isDescription) found.push({ text, line: node.loc.start.line });
+    if (text !== null && !isDescription && (here || !refusalOnly)) found.push({ text, line: node.loc.start.line });
     for (const key of Object.keys(node)) {
       if (key === 'loc') continue;
       const value = node[key];
-      if (Array.isArray(value)) value.forEach((child) => walk(child, node));
-      else if (value && typeof value.type === 'string') walk(value, node);
+      if (Array.isArray(value)) value.forEach((child) => walk(child, node, here));
+      else if (value && typeof value.type === 'string') walk(value, node, here);
     }
   };
   walk(ast, null);
@@ -69,17 +87,23 @@ describe('refusal wording: no tool refusal sends the operator to another screen 
     const offenders = stringsOf(file)
       .filter(({ text }) => OTHER_SCREEN_RE.test(text) || NAMED_SCREEN_RE.test(text))
       .filter(({ text }) => !NOT_A_REFUSAL.some((fact) => text.includes(fact)))
-      .filter(({ text }) => !BAR_DECLINE_RE.test(text) && !text.includes(BY_OWNER_RULE_TEXT))
+      .filter(({ text }) => !BAR_DECLINE_RE.test(text) && !text.toLowerCase().includes(BY_OWNER_RULE_TEXT))
       .map(({ text, line }) => `${file}:${line} ${text.slice(0, 120)}`);
     expect(offenders).toEqual([]);
   });
 
-  test('a string that cites the owner rule is a refusal with code by_owner_rule that the gap list skips', () => {
+  test('a refusal the owner ruled stays on its screen carries by_owner_rule, which the gap list skips', () => {
     expect(BY_DESIGN_REFUSAL_CODES.has('by_owner_rule')).toBe(true);
-    const { CARD_CANCEL_REFUSED_MESSAGE } = require('../services/intelligence-bar/tools');
-    expect(CARD_CANCEL_REFUSED_MESSAGE).toContain(BY_OWNER_RULE_TEXT);
-    const ruled = { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'by_owner_rule', rule: 'bare_visits_only' };
+    const ruled = { error: "A billing change that stays on the Customers page by the owner's rule.", code: 'by_owner_rule', rule: 'saved_method_available' };
     expect(recordableRefusalCode(ruled)).toBeNull();
+  });
+
+  test('cancelling a visit with an invoice, credit or linked visit is a capability gap, not an owner rule', () => {
+    const { CARD_CANCEL_REFUSED_MESSAGE } = require('../services/intelligence-bar/tools');
+    expect(BAR_DECLINE_RE.test(CARD_CANCEL_REFUSED_MESSAGE)).toBe(true);
+    expect(CARD_CANCEL_REFUSED_MESSAGE).not.toContain(BY_OWNER_RULE_TEXT);
+    const refused = { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
+    expect(recordableRefusalCode(refused)).toBe('cancel_with_effects_unsupported');
   });
 });
 
@@ -105,22 +129,47 @@ describe('refusal wording: the gap reporter records a "the bar cannot" refusal',
   });
 
   test('codes that were never gap rows stay unrecorded after the text rule', () => {
-    const result = { error: "It cannot be flipped from here — change it in the Railway dashboard.", code: 'not_a_boolean_gate' };
+    const result = { error: "The bar can't rerun these from here.", code: 'no_rerunnable_checks' };
     expect(recordableRefusalCode(result)).toBeNull();
   });
 });
 
 describe('refusal wording: rewritten refusals carry a stable snake_case code', () => {
-  const sources = Object.fromEntries(FILES.map((file) => [file, fs.readFileSync(path.join(DIR, file), 'utf8')]));
+  const sources = Object.fromEntries(FILES.map((file) => [file, fs.readFileSync(fullPath(file), 'utf8')]));
 
   test.each([
-    ['schedule-tools.js', "code: 'package_visit_two_linked'", 2],
+    ['schedule-tools.js', "code: 'package_visit_two_linked'", 3],
     ['tools.js', "code: 'package_visit_two_linked'", 1],
-    ['tools.js', "code: 'by_owner_rule'", 3],
+    ['tools.js', "code: 'cancel_with_effects_unsupported'", 2],
+    ['tools.js', "code: 'addon_by_name_unsupported'", 1],
+    ['routes/admin-intelligence-bar.js', "code: 'cancel_with_effects_unsupported'", 3],
     ['reprice-visits-tools.js', "code: 'free_visit_unsupported'", 1],
-    ['invoice-action-tools.js', "'by_owner_rule'", 1],
     ['customer-link-tools.js', "code: 'by_owner_rule'", 2],
-  ])('%s has %s x%i', (file, needle, count) => {
+    ['customer-lifecycle-tools.js', "code: 'by_owner_rule'", 1],
+    ['ops-tools.js', "code: 'by_owner_rule'", 1],
+    ['outcomes.js', "code: 'package_visit_two_linked'", 1],
+])('%s has %s x%i', (file, needle, count) => {
     expect(sources[file].split(needle).length - 1).toBe(count);
+  });
+});
+
+describe('refusal wording: a thrown move refusal is mapped at the bar side to a lowercase refusal', () => {
+  const { moveRefusalFromThrown, isPolicyRefusal } = require('../services/intelligence-bar/outcomes');
+
+  test.each([
+    ['PACKAGE_CHILD_PRESENT', 'package_visit_two_linked'],
+    ['VISIT_EDIT_SCHEDULE_UNSUPPORTED', 'grouped_visit_move_unsupported'],
+    ['VISIT_FROZEN_MOVE_UNSUPPORTED', 'frozen_visit_move_unsupported'],
+  ])('%s becomes %s, a refusal Tool Health does not count as a fault', (thrown, code) => {
+    const refusal = moveRefusalFromThrown(Object.assign(new Error('The bar can\'t move it from here yet.'), { code: thrown }));
+    expect(refusal.code).toBe(code);
+    expect(isPolicyRefusal(refusal)).toBe(true);
+    expect(refusal.error).toMatch(BAR_DECLINE_RE);
+    expect(OTHER_SCREEN_RE.test(refusal.error)).toBe(false);
+  });
+
+  test('any other thrown error is not mapped', () => {
+    expect(moveRefusalFromThrown(Object.assign(new Error('boom'), { code: 'ECONNRESET' }))).toBeNull();
+    expect(moveRefusalFromThrown(null)).toBeNull();
   });
 });

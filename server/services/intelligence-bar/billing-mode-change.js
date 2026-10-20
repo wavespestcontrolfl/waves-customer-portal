@@ -114,7 +114,7 @@ function parseFee(value) {
 
 const MODE_REFUSALS = {
   annual_prepay: ['Annual prepay is set by the paid annual invoice and its term, not from the bar. Nothing was proposed.', 'annual_prepay_lane'],
-  '': ['Clearing the billing type ("Not set") is done on the customer page. Pick per_application, per_visit, one_time or monthly_membership. Nothing was proposed.', 'billing_mode_clear'],
+  '': ['The bar can\'t clear the billing type ("Not set") from here yet. Pick per_application, per_visit, one_time or monthly_membership. Nothing was proposed.', 'billing_mode_clear'],
 };
 
 /**
@@ -452,9 +452,9 @@ const SIDE_FLOW_CHECKS = [
   // An ongoing recurring root stamped with a payer counts too: the top-up copies it to
   // every visit it mints, so the new lane would meet a payer-owned visit.
   ({ row, visits, facts }) => {
-    if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer');
+    if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer, and the bar can\'t change billing for those from here yet. Nothing was proposed.', 'bill_to_payer');
     return facts.roots.some((r) => r.payer_id)
-      ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'billing_visits_payer_owned') : null;
+      ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer, and the bar can\'t change billing for those from here yet. Nothing was proposed.', 'billing_visits_payer_owned') : null;
   },
   // A move INTO monthly membership needs a customer the dues run would really
   // charge: the cron's own cohort and guards plus a chargeable saved method
@@ -507,7 +507,7 @@ const SIDE_FLOW_CHECKS = [
     const { armedRetryQuery, isMonthlyObligationRow, hasUnresolvedSiblingStripeOutcome } = require('../retry-collectibility');
     const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');
     if ((armed || []).some(isMonthlyObligationRow)) {
-      return refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed');
+      return refuse('This customer has a dues retry scheduled, and the bar can\'t change the billing type from here until that is resolved. Nothing was proposed.', 'dues_retry_armed');
     }
     // Both months the processing-dues predicate covers, each through the cron's own verdict.
     for (const { monthKey } of duesMonths()) {
@@ -554,7 +554,7 @@ function ongoingRootRefusal(roots) {
         ? `a ${addon.name} add-on of ${money(addon.gross)} that a discount takes to $0.00 on each visit it adds`
         : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
     }
-    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
+    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing, so the bar can\'t change the billing type from here. Nothing was changed.`, 'billing_visits_priced');
   }
   const pricedRoot = roots.find((r) => r.unverified || r.price > 0);
   if (pricedRoot) {
@@ -563,7 +563,7 @@ function ongoingRootRefusal(roots) {
     let what = `a price of ${money(pricedRoot.price)} on each visit it adds`;
     if (host) what = `a price of ${money(host.price)} on the visit it adds on ${host.date}`;
     if (pricedRoot.unverified) what = 'a schedule too long to check';
-    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price, so it can\'t do this from here. Nothing was changed.`, 'billing_visits_priced');
   }
   return null;
 }
@@ -574,7 +574,7 @@ function ongoingRootRefusal(roots) {
  * `visits` is upcomingVisits() read on the same handle.
  */
 async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = NO_FACTS) {
-  if (visits.length > VISIT_HARD_LIMIT) return refuse('This customer has too many upcoming visits to confirm from the bar; change it on the customer page. Nothing was proposed.', 'too_many_visits');
+  if (visits.length > VISIT_HARD_LIMIT) return refuse('This customer has too many upcoming visits to confirm from the bar, so the bar can\'t change the billing type from here. Nothing was proposed.', 'too_many_visits');
   if (row.billing_mode === 'annual_prepay') return refuse('This customer is on annual prepay; that lane follows the annual invoice and its term, so it is not changed from the bar. Nothing was proposed.', 'annual_prepay_lane');
   if (unchangedEdit(row, fields)) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
   if (await BillingModeRules.liveAnnualPrepayTerm(dbh, customerId)) {
@@ -600,12 +600,12 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   if (rootRefusal) return rootRefusal;
   const priced = pricedVisitCount(visits);
   if (priced > 0) {
-    return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+    return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one, so it can\'t do this from here. Nothing was changed.`, 'billing_visits_priced');
   }
   const voidHeld = visits.find((v) => v.void_hold_invoice_id);
   if (voidHeld) {
     const label = `${voidHeld.service_type || 'An upcoming visit'}${voidHeld.scheduled_date ? ` on ${String(voidHeld.scheduled_date instanceof Date ? voidHeld.scheduled_date.toISOString() : voidHeld.scheduled_date).slice(0, 10)}` : ''}`;
-    return refuse(`${label} has a voided first-application invoice with no replacement; completion will park it for manual billing. Resolve it on the invoice page first. Nothing was changed.`, 'billing_visits_held');
+    return refuse(`${label} has a voided first-application invoice with no replacement; completion will park it for manual billing, so the bar can\'t change the billing type from here until that is resolved. Nothing was changed.`, 'billing_visits_held');
   }
   const pageRefusal = await customerPageRefusal(dbh, customerId, row, fields);
   if (pageRefusal) return pageRefusal;

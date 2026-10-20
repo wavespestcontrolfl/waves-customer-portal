@@ -1479,9 +1479,9 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
 // bearer to — Gmail answers the sender's address, which attribution does not
 // prove is the customer's — so it refuses EVERY owned portal link (the
 // verify-only bearers, unknown short codes, all of it) and runs no seam check.
-const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it. Text it from the composer. Nothing was sent.';
+const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it, so the bar can\'t send this text from here. Nothing was sent.';
 const EMAIL_BEARER_REFUSAL = 'An email reply cannot carry a portal link (appointment page, report, receipt, pay, estimate, card request, contract, prep guide, statement, project report, consultation, or a short link) — the reply goes to the sender\'s address, which may not be the customer\'s. Text it to the customer\'s own number instead (send_sms, or the Communications composer). Nothing was sent.';
-const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — send it from the Customers page Auto Pay button or the Communications composer, which verifies the link at send time. Nothing was sent.';
+const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — the bar can\'t send it from here; the Auto Pay link is verified at send time by the Communications composer. Nothing was sent.';
 const links = () => require('../composer-customer-links');
 // The checks, in order; the first refusal wins. Each is read-only except the
 // seam's own verification, which only the 'commit' phase runs.

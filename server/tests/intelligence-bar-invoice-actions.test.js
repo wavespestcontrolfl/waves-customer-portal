@@ -269,7 +269,7 @@ describe('send_invoice card', () => {
 
   test('refuses a dispute hold, no recipient, an unknown invoice and a double target', async () => {
     CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValueOnce(true);
-    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'by_owner_rule', rule: 'collection_hold' });
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'collection_hold' });
     Invoices.getInvoiceDeliveryRecipients.mockResolvedValueOnce(recipients({ primaryContact: { phone: '' } }));
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_no_channel', error: expect.stringMatching(/No usable phone/) });
     await expect(preview('send_invoice', { invoice_number: 'WPC-0000-0000' })).resolves.toMatchObject({ error: 'Invoice not found' });

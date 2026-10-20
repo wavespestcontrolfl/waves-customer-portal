@@ -394,10 +394,8 @@ describe('merge_customers', () => {
     expect(result.code).toBe('address_conflict');
     // Refusals carry no PII: the route runs the preview before validateRecordTarget (Codex r3 P1).
     expect(result.error).not.toMatch(/Real|Unknown|Customer/);
-    expect(result.error).toMatch(/Merge \+ keep address/);
-    expect(result.error).toMatch(/admin duplicates queue/);
-    expect(result.error).toMatch(/Merge \+ keep address/);
-    expect(result.error).toMatch(/does not support/i);
+    expect(result.error).toMatch(/different service addresses/);
+    expect(result.error).toMatch(/can't keep a second address from here yet/);
   });
 
   test('refuses when the winner or loser does not resolve to a live customer', async () => {

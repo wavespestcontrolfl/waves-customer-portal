@@ -68,4 +68,29 @@ function executionOutcome(result) {
   return 'outcome_unknown';
 }
 
-module.exports = { isToolFailure, isPolicyRefusal, recordToolOutcome, executionOutcome };
+// A move that a locked recheck refuses by throwing (package visit 2 present, a
+// grouped or frozen visit) is a refusal, not a fault. The services throw an
+// UPPER_SNAKE code other callers rely on, which isPolicyRefusal reads as a fault
+// (it wants lowercase), with a message that sends the reader to another screen.
+// The bar maps the thrown error here into its own lowercase refusal and wording;
+// the service's code and text stay as they are.
+const THROWN_MOVE_REFUSALS = {
+  PACKAGE_CHILD_PRESENT: { code: 'package_visit_two_linked' },
+  VISIT_EDIT_SCHEDULE_UNSUPPORTED: {
+    code: 'grouped_visit_move_unsupported',
+    error: "This appointment is grouped with another service at the same stop, and the bar can't move one of them alone from here yet. Nothing was changed.",
+  },
+  VISIT_FROZEN_MOVE_UNSUPPORTED: {
+    code: 'frozen_visit_move_unsupported',
+    error: "This visit already has an issued link, records or a payment in progress, so the bar can't move it from here. Nothing was changed.",
+  },
+};
+
+// The bar refusal for a thrown move error, or null when it is not one of them.
+function moveRefusalFromThrown(err) {
+  const mapped = err && THROWN_MOVE_REFUSALS[err.code];
+  if (!mapped) return null;
+  return { error: mapped.error || err.message, code: mapped.code };
+}
+
+module.exports = { isToolFailure, isPolicyRefusal, recordToolOutcome, executionOutcome, moveRefusalFromThrown };

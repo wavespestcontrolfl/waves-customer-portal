@@ -619,9 +619,10 @@ function gateNotFlippable(entry) {
   if (!entry.boolean) {
     return {
       error: entry.kind === 'mode'
-        ? `${entry.name} takes a mode or timestamp, not just on/off — change it in the Railway dashboard.`
-        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so it cannot be flipped from here — change it in the Railway dashboard.`,
-      code: 'not_a_boolean_gate',
+        ? `${entry.name} takes a mode or timestamp, not just on/off. By the owner\'s rule, settings like this stay in the Railway dashboard.`
+        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so the bar cannot flip it from here. By the owner\'s rule, settings like this stay in the Railway dashboard.`,
+      code: 'by_owner_rule',
+      rule: 'not_a_boolean_gate',
     };
   }
   if (!entry.description) {

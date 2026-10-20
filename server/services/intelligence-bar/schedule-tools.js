@@ -1440,11 +1440,12 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
     }
   } catch (err) {
-    if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message };
+    if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message, code: 'package_visit_two_linked' };
     if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
       return {
         error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',
         preview_changed: true,
+        code: 'preview_changed',
       };
     }
     throw err;

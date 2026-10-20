@@ -664,7 +664,7 @@ async function accountSummary(InvoiceService, customer, today, database) {
   const fresh = (invoice) => fenced.get(String(invoice.id)).row || invoice;
   const rowsWhere = (test) => (fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).collectible && test(fresh(invoice))).map(fresh) : null);
   const sum = (rows) => (rows ? fromCents(rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)) : null);
-  if (reconcileCount > 0) unknowns.push(`${reconcileCount} invoice(s) (unpaid or processing) need reconciliation and are NOT in total_due: check them on the Invoices page; do not collect or retry.`);
+  if (reconcileCount > 0) unknowns.push(`${reconcileCount} invoice(s) (unpaid or processing) need reconciliation and are NOT in total_due: the bar can\'t settle them from here, so do not collect or retry.`);
   if (otherNotCollectible > 0) unknowns.push(`${otherNotCollectible} unpaid invoice(s) are not collectible from this customer (for example billed to a third party, or nothing due after credit) and are not in total_due.`);
   if (unavailableCount > 0) unknowns.push(`${unavailableCount} invoice(s) changed hands during the read and are left out of every figure here: ask again.`);
   // Presented to the customer = the canonical alreadyDeliveredForFirstSend (delivery stamps OR a delivered status), not status alone.
