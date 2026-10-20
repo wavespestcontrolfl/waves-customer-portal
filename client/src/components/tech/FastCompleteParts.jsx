@@ -395,13 +395,21 @@ export const COMMON_LAWN_METHODS = [
   { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
 ];
 
-// A granular product, by what the catalog says: its formulation or category names granular, or its
-// name carries the label's granular mark ("Arena 0.25G", "Headway G", a name with "Granular").
-// A wet-mix mark such as WG, WDG or SC is not one.
-const GRANULAR_NAME = /granul|(?:\d|\s)G(?:\s|$)/;
-export const isGranularProduct = (product) => /^(?:g|gr|granul\w*)$/i.test(String(product?.formulation || '').trim())
-  || /granul/i.test(String(product?.category || product?.product_category || ''))
-  || GRANULAR_NAME.test(String(product?.name || ''));
+// A granular product, by what the catalog says: its formulation or category names granular ("Granule (G)",
+// "Granular pre-emergent on fertilizer"), or its name carries the label's granular mark ("Arena 0.25G",
+// "Headway G", a name with "Granular"). A water-dispersible mark (WG, WDG, WSG, WP, SP, DF) is not one. Same rule as
+// the server's isGranularProduct (server/services/service-report/report-cleanup-1020.js).
+const DISPERSIBLE = /water[- ]?(?:dispersible|soluble)|\b(?:WDG|WG|WSG|WP|SP|DF)\b/i;
+const GRANULAR_FORMULATION = /granul|\(G\)|\bT?GR?\b/i;
+// The G marks are case-sensitive so a gram amount ("16.6 g") never reads as granular.
+const GRANULAR_G_WORD = /\b\d+(?:\.\d+)?\s?G\b|(?:^|\s)G(?=$|\s)/;
+export const isGranularProduct = (product) => {
+  const formulation = String(product?.formulation || '');
+  const name = String(product?.name || '');
+  if (DISPERSIBLE.test(formulation) || DISPERSIBLE.test(name)) return false;
+  return GRANULAR_FORMULATION.test(formulation) || /granul/i.test(`${product?.category || product?.product_category || ''} ${name}`)
+    || GRANULAR_G_WORD.test(name);
+};
 
 const SPRAY_METHODS = new Set(['broadcast_spray', 'foliar_spray', 'perimeter_spray']);
 

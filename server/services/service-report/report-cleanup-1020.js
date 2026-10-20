@@ -85,7 +85,7 @@ function methodCorrectionKey() {
 
 // ── Item 2: a granular product never keeps a spray method ──────────────────
 const DISPERSIBLE = /water[- ]?(?:dispersible|soluble)|\b(?:WDG|WG|WSG|WP|SP|DF)\b/i;
-const GRANULAR_FORMULATION = /granul|\(G\)|\bT?G\b/i;
+const GRANULAR_FORMULATION = /granul|\(G\)|\bT?GR?\b/i;
 const GRANULAR_NAME = /\bgranul\w*/i;
 // "Arena 0.25G" or a standalone G word ("Headway G"), case-sensitive so a gram amount ("16.6 g") never reads as granular.
 const GRANULAR_G_WORD = /\b\d+(?:\.\d+)?\s?G\b|(?:^|\s)G(?=$|\s)/;
