@@ -2636,6 +2636,8 @@ async function loadSlotNoteVisitEvidence(conn, items, flag, now) {
     // tags (an out-of-hours note, an in-transaction fallback row) is about the
     // primary only.
     const tags = new Set([].concat(payload.conflicting_visits || []).map((v) => v?.overlaps_visit || 'primary'));
+    // Time-sanity warnings are about the primary's slot, beside any clash tags.
+    if ([].concat(payload.time_sanity_flags || []).length) tags.add('primary');
     wanted.set(item.id, { primary, followUp: idOf(payload.follow_up?.scheduled_service_id), tags: tags.size ? tags : new Set(['primary']) });
   }
   if (!wanted.size) return;

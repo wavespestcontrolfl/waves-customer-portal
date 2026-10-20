@@ -2184,6 +2184,10 @@ describe('visit_passed (booking_time_conflict / booking_out_of_hours on a done v
     const both = slotCard('booking_time_conflict', { ...fu, conflicting_visits: [{ overlaps_visit: 'primary' }, { overlaps_visit: 'follow_up' }] });
     expect(await evidenceOf(both, [visit(), followUp()])).toBeUndefined();
     expect(await evidenceOf(slotCard('booking_time_conflict', { conflicting_visits: [{ overlaps_visit: 'follow_up' }] }), [visit()])).toBeUndefined();
+    // A follow-up-only clash beside primary time-sanity warnings needs the primary done too.
+    const mixed = slotCard('booking_time_conflict', { ...fu, conflicting_visits: [{ overlaps_visit: 'follow_up' }], time_sanity_flags: ['after_hours_start'] });
+    expect(await evidenceOf(mixed, [visit({ status: 'confirmed', scheduled_date: '2026-08-01' }), followUp({ scheduled_date: '2026-07-28' })])).toBeUndefined();
+    expect((await evidenceOf(mixed, [visit(), followUp({ scheduled_date: '2026-07-28' })]))?.slot_note_visit_done).toBe(true);
     // Untagged (an out-of-hours note) is about the primary only.
     expect((await evidenceOf(slotCard('booking_out_of_hours', fu), [visit(), followUp()]))?.slot_note_visit_done).toBe(true);
   });
