@@ -150,6 +150,7 @@ const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/o
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
 const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
+const { reportCleanup1020PdfSignature } = require('../services/service-report/report-cleanup-1020');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -2202,7 +2203,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature() + reportCleanup1020PdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2351,7 +2352,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature() + reportCleanup1020PdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

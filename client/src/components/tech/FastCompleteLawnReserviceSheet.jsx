@@ -53,7 +53,7 @@ import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, startMethodFor, submissionHolds, ProductTileButton, SavedView,
   SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import {
@@ -152,7 +152,9 @@ function productRow(product, { last = null, added = false, ctx }) {
     seeded = seededAmount(lastAmount, measureUnit(last.amountUnit, lastDimension));
   }
   // The recorded method, only when the server offers it; otherwise none.
-  const method = ctx.methods.some((choice) => choice.value === last?.method) ? last.method : '';
+  // GATE_REPORT_CLEANUP_1020 (methodCorrection): a granular product last recorded on a spray method starts on Granular broadcast.
+  const lastMethod = startMethodFor(product, last?.method, ctx.methodCorrection === true);
+  const method = ctx.methods.some((choice) => choice.value === lastMethod) ? lastMethod : '';
   // The area that product recorded last time, in square feet only.
   const areaLast = last?.areaUnit === 'sqft' && Number(last.areaValue) > 0 ? Number(last.areaValue) : null;
   return withAreaSeed({
@@ -246,7 +248,7 @@ function lastVisitRows(products, lastVisit, ctx) {
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, stockAdvisory: false, oneTap: false, lastVisit: null, customerRequest: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, stockAdvisory: false, methodCorrection: false, oneTap: false, lastVisit: null, customerRequest: null,
   visitIdentity: null, visit: null, wrapUp: false,
 };
 
@@ -259,6 +261,7 @@ function methodContext(data) {
     // WaveGuard lawn callbacks: the server records a 0-stock shortfall as an
     // advisory and completes, so the sheet shows the flag but never holds.
     stockAdvisory: data?.stockAdvisory === true,
+    methodCorrection: data?.methodCorrection === true,
     // GATE_ONE_TAP_REPORT: no note read for products (the server says so with `oneTap: true`).
     oneTap: data?.oneTap === true,
   };

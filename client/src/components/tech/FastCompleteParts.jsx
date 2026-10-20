@@ -14,6 +14,7 @@ import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-t
 import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { elapsedSince } from '../../lib/on-site-time';
 import { isMlUnit } from '../../lib/measure-units';
+import { normalizeApplicationMethod } from '../../lib/product-rate-prefill';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
@@ -393,6 +394,35 @@ export const COMMON_LAWN_METHODS = [
   { value: 'broadcast_spray', label: 'Broadcast spray', common: true },
   { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
 ];
+
+// A granular product, by what the catalog says: its formulation or category names granular ("Granule (G)",
+// "Granular pre-emergent on fertilizer"), or its name carries the label's granular mark ("Arena 0.25G",
+// "Headway G", a name with "Granular"). A water-dispersible mark (WG, WDG, WSG, WP, SP, DF) is not one. Same rule as
+// the server's isGranularProduct (server/services/service-report/report-cleanup-1020.js).
+const DISPERSIBLE = /water[- ]?(?:dispersible|soluble)|\b(?:WDG|WG|WSG|WP|SP|DF)\b/i;
+const GRANULAR_FORMULATION = /granul|\(G\)|\bT?GR?\b/i;
+// The G marks are case-sensitive so a gram amount ("16.6 g") never reads as granular.
+const GRANULAR_G_WORD = /\b\d+(?:\.\d+)?\s?G\b|(?:^|\s)G(?=$|\s)/;
+export const isGranularProduct = (product) => {
+  const formulation = String(product?.formulation || '');
+  const name = String(product?.name || '');
+  if (DISPERSIBLE.test(formulation) || DISPERSIBLE.test(name)) return false;
+  return GRANULAR_FORMULATION.test(formulation) || /granul/i.test(`${product?.category || product?.product_category || ''} ${name}`)
+    || GRANULAR_G_WORD.test(name);
+};
+
+const SPRAY_METHODS = new Set(['broadcast_spray', 'foliar_spray', 'perimeter_spray']);
+
+/**
+ * The method a lawn row starts on: a granular product never starts on a spray method (the plan's,
+ * the last visit's, or the visit's own default), it starts on Granular broadcast. Any other method
+ * (spot treatment, soil drench) and every other product keep the method they had, and so does
+ * every product while `enabled` is false (the sheets pass the context's methodCorrection). A tech who then
+ * picks another method is changing it, not taking a default.
+ */
+export function startMethodFor(product, method, enabled = true) {
+  return enabled && isGranularProduct(product) && SPRAY_METHODS.has(normalizeApplicationMethod(method)) ? 'granular_broadcast' : method;
+}
 
 /** The context's method list, or the common three when it has none. */
 export function methodChoicesOf(data) {

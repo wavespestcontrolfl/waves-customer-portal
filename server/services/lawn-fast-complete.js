@@ -959,6 +959,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
     // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. The key exists only while the gate is live, so gate off is byte-identical.
     ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
+    // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. The key exists only while the gate is live.
+    ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
     // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
     ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed

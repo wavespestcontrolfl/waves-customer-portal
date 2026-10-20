@@ -25,6 +25,7 @@ const { waterPolishFields, snapshotForCard } = require('./lawn-report-polish');
 const { withCappedRain, rainCardAllowed, applyRainCard, waterStatusFor, deficitRootCause } = require('./lawn-water-rain');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
+const cleanup1020 = require('./report-cleanup-1020');
 const {
   LEGACY_WATER_IN_COPY,
   aftercareCustomerTask,
@@ -562,6 +563,10 @@ function buildAftercare(applications, opts = {}) {
       watering: NEUTRAL_AFTERCARE, reentry, waterInRequired: false, neutral: true, ruleSource: instruction.ruleSource || null,
     };
   }
+  // GATE_REPORT_CLEANUP_1020: a water-in product beside one with no stored rule left the instruction with no claim, and
+  // the legacy reading below then printed "No special watering". The products' own frozen rules give one clear line.
+  const waterInAftercare = cleanup1020.waterInAftercare(opts.waterInRule, reentry);
+  if (waterInAftercare) return normalizeLawnAftercare(waterInAftercare);
   // Retain the legacy shape until the product-note classifier lands. The
   // normalizer below prevents this requirement boolean from becoming a made-up
   // amount/timing and keeps every recorded note beside confirmation guidance.
@@ -574,8 +579,9 @@ function buildAftercare(applications, opts = {}) {
   } else {
     // Non-label fallback — the report rewrites it to defer to the weekly
     // plan when one is on the card (see buildLawnReportV2).
-    watering = NEUTRAL_AFTERCARE;
-    neutral = true;
+    // GATE_REPORT_CLEANUP_1020: a hold on the visit prints no neutral line (an empty line is not neutral copy).
+    watering = cleanup1020.neutralWatering(opts.waterInRule, NEUTRAL_AFTERCARE);
+    neutral = watering !== '';
   }
   return normalizeLawnAftercare(
     { watering, reentry, waterInRequired, neutral },
@@ -594,8 +600,8 @@ const ISSUE_TOPIC = {
 // GATE_LAWN_WATER_RAIN: the aftercare (computed once, first), whether the rain card may change this card, and the
 // assessment whose water context counts the rain with the per-day cap. No frozen permission, a withheld schedule or a
 // hold / water-in instruction = the assessment itself, unchanged.
-function prepareRainCard(assessment, { applications, wateringInstruction, reentryText, rainAdvice }) {
-  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: assessment.waterContext?.weekPlan || null, reentryText });
+function prepareRainCard(assessment, { applications, wateringInstruction, reentryText, rainAdvice, waterInRule }) {
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: assessment.waterContext?.weekPlan || null, reentryText, waterInRule });
   const rainAllowed = rainCardAllowed({ rainAdvice, waterContext: assessment.waterContext, instruction: wateringInstruction, aftercare });
   return { lawnAssessment: rainAllowed ? withCappedRain(assessment) : assessment, aftercare, rainAllowed };
 }
@@ -627,11 +633,11 @@ function applyRainCardToWater(water, waterSnapshot, rainAdvice, rainAllowed) {
  *   (GATE_LAWN_REPORT_FACTS); null = the product label's re-entry line, as before
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot: storedWaterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText, rainAdvice } = {}) {
+function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot: storedWaterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText, rainAdvice, waterInRule } = {}) {
   if (!assessmentIn) return null;
   // GATE_LAWN_WATER_RAIN: the aftercare comes first (the rain card stands down for a post-treatment watering instruction),
   // then the water context with the capped rain. Without the frozen permission this is the very same assessment.
-  const { lawnAssessment, aftercare, rainAllowed } = prepareRainCard(assessmentIn, { applications, wateringInstruction, reentryText, rainAdvice });
+  const { lawnAssessment, aftercare, rainAllowed } = prepareRainCard(assessmentIn, { applications, wateringInstruction, reentryText, rainAdvice, waterInRule });
   // GATE_LAWN_REPORT_POLISH: the card, the diagnosis and the insights all read the SAME snapshot, or none.
   const waterSnapshot = snapshotForCard(lawnAssessment.waterContext, storedWaterSnapshot);
   const scores = lawnAssessment.scores || {};

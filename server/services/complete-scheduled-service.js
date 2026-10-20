@@ -114,6 +114,7 @@ const {
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
+const { correctedMethod: correctedGranularMethod } = require('./service-report/report-cleanup-1020');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
@@ -254,12 +255,14 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   const explicit = normalizeServiceReportApplicationMethod(
     productInput.applicationMethod || productInput.method || product.application_method || product.method,
   );
-  if (explicit) return explicit;
+  // GATE_REPORT_CLEANUP_1020: a granular product is never stored with a broadcast spray method, whatever the sheet sent.
+  if (explicit) return correctedGranularMethod(explicit, product);
   const category = String(product.category || product.product_category || '').toLowerCase();
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';
   if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
   if (serviceLine === 'mosquito') return 'fog_ulv';
-  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : 'broadcast_spray';
+  // The lawn fallback is corrected too, so the stored method and the report label agree.
+  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : correctedGranularMethod('broadcast_spray', product);
   if (serviceLine === 'palm' || serviceLine === 'tree_shrub') return 'foliar_spray';
   if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
   return 'perimeter_spray';
