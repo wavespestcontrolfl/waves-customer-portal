@@ -37,21 +37,43 @@ const OPT_OUT_PATTERNS = [
   /\bnot\s+(my|the)\s+number\b/i,
 ];
 
-// A bare "no text(s)" / "no messages" is a stop request only as its own sentence or line
-// ("No texts please", "Ok. No messages."). Inside a longer sentence it usually reports a text that
-// never came: a complaint like "I got the confirmation but no text that day" unsubscribed a
-// customer on 2026-10-19. A question ("No text?") is never a request. "No more texts" stays a
-// request anywhere (OPT_OUT_PATTERNS above).
-const NO_TEXTS_SENTENCE = /^(?:(?:ok|okay|and|so|just|please)\s+)*no\s+(?:texts?|text\s+messages?|messages?|sms)(?:\s+(?:please|pls|plz|thanks|thank\s+you|anymore|any\s+more|from\s+now\s+on|to\s+this\s+number))*$/i;
+// A bare "no text(s)" / "no messages" stays a stop request almost everywhere ("No texts please",
+// "Please no texts or calls", "Call me anytime but no texts"). It is NOT one when the sentence
+// reports a text that never came, as a complaint did on 2026-10-19 ("I got the confirmation but no
+// text that day" unsubscribed the customer twice): the sentence is a question, a receiving word
+// comes earlier in it ("got", "received", "saw"), a reporting word sits just before it ("still",
+// "was", "had"), or a time or arrival word follows it ("yet", "that day", "came"). A strong request
+// word in the same sentence ("please", "anymore", "from now on") keeps it a stop request.
+// "No more texts" stays a stop request anywhere (OPT_OUT_PATTERNS above).
+const NO_TEXTS = /\bno\s+(?:texts?|text\s+messages?|messages?|sms)\b/gi;
+const RECEIVED_EARLIER = /\b(?:got|get|gets|getting|gotten|received|receive|receiving|saw|see|seen|heard|hear)\b/i;
+const REPORTED_JUST_BEFORE = /\b(?:still|was|were|is|are|there'?s|been|had|have|has)\s+$/i;
+const MISSED_AFTER = /^\s+(?:yet|today|tonight|yesterday|that\s+day|(?:this|last)\s+(?:morning|afternoon|evening|night|week|time)|came|come|arrived|arrive|showed\s+up|went\s+out|(?:was|were|got)\s+sent|sent)\b/i;
+const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 
 function sentencesOf(body) {
-  const pieces = String(body || '').replace(/[‘’]/g, "'").match(/[^.!?;,\n\r]+[.!?;,\n\r]*/g) || [];
+  const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;,\n\r]+[.!?;,\n\r]*/g) || [];
   return pieces
     .map((piece) => ({
       text: piece.replace(/[.!?;,\n\r]+$/, '').replace(/\s+/g, ' ').trim(),
       question: piece.includes('?'),
     }))
     .filter((sentence) => sentence.text);
+}
+
+function asksForNoTexts(body) {
+  return sentencesOf(body).some(({ text, question }) => {
+    if (question) return false;
+    const strong = STRONG_REQUEST.test(text);
+    for (const match of text.matchAll(NO_TEXTS)) {
+      if (strong) return true;
+      const before = text.slice(0, match.index);
+      const after = text.slice(match.index + match[0].length);
+      const reportsMissingText = RECEIVED_EARLIER.test(before) || REPORTED_JUST_BEFORE.test(before) || MISSED_AFTER.test(after);
+      if (!reportsMissingText) return true;
+    }
+    return false;
+  });
 }
 
 const WRONG_NUMBER_PATTERNS = [
@@ -153,11 +175,11 @@ function detectSmsOptCommand(body) {
     };
   }
 
-  if (sentencesOf(body).some((sentence) => !sentence.question && NO_TEXTS_SENTENCE.test(sentence.text))) {
+  if (asksForNoTexts(body)) {
     return {
       action: 'opt_out',
       reason: 'opt_out_natural_language',
-      sourceKeyword: NO_TEXTS_SENTENCE.source,
+      sourceKeyword: NO_TEXTS.source,
       detectionMethod: 'natural_language',
     };
   }

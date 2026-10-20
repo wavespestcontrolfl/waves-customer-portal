@@ -44,9 +44,8 @@ describe('SMS opt-out detector', () => {
     expect(detectSmsOptCommand(body).action).toBe('opt_out');
   });
 
-  // "No text(s)" is a stop request as its own sentence or line, and "no more texts" anywhere. Inside
-  // a longer sentence a bare "no text" reports a text that never came; that wording unsubscribed a
-  // customer on 2026-10-19.
+  // A bare "no text(s)" stays a stop request unless the sentence reports a text that never came; that
+  // complaint wording unsubscribed a customer on 2026-10-19. "No more texts" is a request anywhere.
   test.each([
     'No texts please',
     'NO TEXTS!',
@@ -56,24 +55,32 @@ describe('SMS opt-out detector', () => {
     'Please no texts from now on',
     'No text messages please',
     'Hi Adam\nNo texts please',
+    'Please no texts or calls',
+    'No text messages to me please',
+    'No texts please \u{1F64F}',
+    'Call me anytime but no texts',
+    'No messages from you',
     'no more texts',
     'Please, no more messages.',
     'No more text messages',
     'We went with another company, no more texts please',
-  ])('"no texts" as its own request is opt_out: %s', (body) => {
+  ])('"no texts" as a request is opt_out: %s', (body) => {
     expect(detectSmsOptCommand(body)).toMatchObject({ action: 'opt_out', reason: 'opt_out_natural_language' });
   });
 
   test.each([
     'Hi, we had a lawn visit set for Thursday. I got the confirmation two days before but no text that day.',
     'I got the confirmation but no text that day',
+    'I got a confirmation but no text',
     'No text?',
     'Still no text?',
     'no text yet',
+    'No text today',
     'I got no text reminder this time',
     'There was no message from the tech',
     'Still no texts about my appointment',
-  ])('"no text" inside a sentence or a question is not opt_out: %s', (body) => {
+    'We have had no texts since Monday',
+  ])('"no text" that reports a missing text is not opt_out: %s', (body) => {
     expect(detectSmsOptCommand(body)).toEqual({ action: null });
   });
 
