@@ -35,7 +35,7 @@
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
  */
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, ibTargetRulesV2Live } = require('../../config/feature-gates');
 const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
@@ -107,10 +107,69 @@ function ownerDirectLive(req) {
 
 const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().replace(/\s+/g, ' ') === String(b).trim().toLowerCase().replace(/\s+/g, ' ');
 
+// TARGET RULES (GATE_IB_TARGET_RULES_V2; owner ruling 2026-10-12 decision 3). A
+// card-free edit on a customer keeps its card when the message did not name that
+// customer and that customer is not the one on screen. "Named" is decided from
+// server facts only, never from the model's input: the customers the task
+// context resolved from a name, phone or email typed in THIS message
+// (typedCustomerIds, targets) and the customer the page shows (pageIds). A
+// customer the model found itself (a call log, a search) is in neither set.
+// Not subject to it: lead tools (a lead is not a customer), create_customer
+// (the customer is the message's own content), create_restock_request and
+// toggle_estimate_v2_view (no customer is edited).
+const CUSTOMER_ID_EDIT_TOOLS = new Set(['update_customer', 'update_customer_property', 'set_primary_property', 'update_property_access']);
+const normalizedName = value => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// Built once per request from the finished task context. null while the gate
+// is off. With the gate on and no grounding passed, every subject edit is carded.
+function targetGrounding(taskContext) {
+  if (!ibTargetRulesV2Live()) return null;
+  const ids = new Set();
+  const names = new Set();
+  const addTarget = (target) => {
+    if (target?.customer_id) ids.add(String(target.customer_id).toLowerCase());
+    if (target?.label) names.add(normalizedName(target.label));
+  };
+  for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) addTarget(target);
+  addTarget(taskContext?.target);
+  for (const id of Array.isArray(taskContext?.typedCustomerIds) ? taskContext.typedCustomerIds : []) ids.add(String(id).toLowerCase());
+  // The customer on screen: the page context's own customer, or the customer
+  // record the page showed (pageIds, already validated by the task context).
+  const page = taskContext?.page || {};
+  addTarget(page.customer);
+  if (page.ids?.customer_id) ids.add(String(page.ids.customer_id).toLowerCase());
+  return { ids, names };
+}
+
+const groundedCustomerId = (id, grounding) => Boolean(id) && Boolean(grounding?.ids?.has(String(id).toLowerCase()));
+
+// Preview-free half: only the tools that carry the customer id in their input.
+function customerNamedOrOnScreenPossible(toolName, input, grounding) {
+  return !ibTargetRulesV2Live() || !CUSTOMER_ID_EDIT_TOOLS.has(toolName) || groundedCustomerId(input?.customer_id, grounding);
+}
+
+// Full half, on the finished preview: reschedule_appointment pins its
+// appointment's customer id; assign_technician lists the stop's customer by
+// name, matched against the names the task resolved.
+function customerNamedOrOnScreen(toolName, input, preview, grounding) {
+  if (!ibTargetRulesV2Live()) return true;
+  if (CUSTOMER_ID_EDIT_TOOLS.has(toolName)) return groundedCustomerId(input?.customer_id, grounding);
+  if (toolName === 'reschedule_appointment') return groundedCustomerId(preview?.pinned_appointment?.customer_id, grounding);
+  if (toolName === 'assign_technician') {
+    const name = normalizedName(preview?.stops?.[0]?.customer);
+    return Boolean(name) && Boolean(grounding?.names?.has(name));
+  }
+  return true;
+}
+
 // `preview` is the mutation-free preview the proposal just ran (two-step
 // tools); the decision reads it where the input alone cannot tell a single
-// record from a group.
-function directEditAllowed(toolName, input = {}, preview = null) {
+// record from a group. `grounding` is targetGrounding(taskContext).
+function directEditAllowed(toolName, input = {}, preview = null, grounding = null) {
+  return directEditAllowedBase(toolName, input, preview) && customerNamedOrOnScreen(toolName, input, preview, grounding);
+}
+
+function directEditAllowedBase(toolName, input = {}, preview = null) {
   // A change to any part of a street address always keeps its card, so the
   // operator sees the exact address before it is saved (#6297).
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
@@ -261,11 +320,21 @@ async function loadRequestTaint({ history, threadId, actorId, needed = true, ful
 // stop) still reaches its card (Codex r2). A preview-dependent call counts
 // in the message plan, so the cap errs toward the bulk card.
 const DIRECT_CAP = 3;
+// GATE_IB_TARGET_RULES_V2: one request may make 5 direct edits with the same
+// tool; the 6th (and a message that plans a 6th) gets the bulk card. Off, the
+// cap above holds: the 3rd is the first refused.
+const DIRECT_EDITS_V2 = 5;
+const directCapThreshold = () => (ibTargetRulesV2Live() ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
 const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
 // The preview-free half of directEditAllowed: could this call run direct?
-function directEditPossible(toolName, input = {}) {
+// A call on a customer the message did not name and the page does not show gets a card anyway, so it never counts either.
+function directEditPossible(toolName, input = {}, grounding = null) {
+  return directEditPossibleBase(toolName, input) && customerNamedOrOnScreenPossible(toolName, input, grounding);
+}
+
+function directEditPossibleBase(toolName, input = {}) {
   // A call that carries address text gets a card anyway (directEditAllowed), so it never counts toward the direct cap.
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
   if (toolName === 'assign_technician') return Array.isArray(input?.service_ids) && input.service_ids.length === 1;
@@ -282,12 +351,12 @@ function directEditPossible(toolName, input = {}) {
 
 // The two decisions the route asks, each checking the per-request flag first
 // (UNTRUSTED READS above): after a general read returned data, never direct.
-function executesWithoutCard(toolName, input = {}, preview = null, taint = null) {
-  return taint?.untrustedRead ? false : directEditAllowed(toolName, input, preview);
+function executesWithoutCard(toolName, input = {}, preview = null, taint = null, grounding = null) {
+  return taint?.untrustedRead ? false : directEditAllowed(toolName, input, preview, grounding);
 }
 
-function mayExecuteWithoutCard(toolName, input = {}, taint = null) {
-  return taint?.untrustedRead ? false : directEditPossible(toolName, input);
+function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = null) {
+  return taint?.untrustedRead ? false : directEditPossible(toolName, input, grounding);
 }
 
 // Direct commits already made for this task, by tool (proposePendingWrite
@@ -317,10 +386,10 @@ async function seedDirectCounts(task, dbh = null) {
   return counts;
 }
 
-function messageDirectPlan(toolUses, isValid = () => true, taint = null) {
+function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
   for (const toolUse of toolUses || []) {
-    if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
+    if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint, grounding) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
   return plan;
 }
@@ -329,8 +398,9 @@ function messageDirectPlan(toolUses, isValid = () => true, taint = null) {
 // message's own commits must not count against the rest of the message.
 function cappedTools(committed, plan) {
   const capped = new Set();
+  const threshold = directCapThreshold();
   for (const [toolName, n] of plan) {
-    if (committed.has(SEED_FAILED) || (committed.get(toolName) || 0) + n >= DIRECT_CAP) capped.add(toolName);
+    if (committed.has(SEED_FAILED) || (committed.get(toolName) || 0) + n >= threshold) capped.add(toolName);
   }
   return capped;
 }
@@ -344,6 +414,12 @@ const BULK_LIMIT_RESULT = Object.freeze({
   code: 'owner_direct_bulk_limit',
   note: 'Use the bulk tool so the owner gets ONE card: bulk_update_customers, bulk_update_leads, move_stops_to_day, or one assign_technician call listing every stop. If no bulk tool fits, list the records still to change in one line and do them in a follow-up request.',
 });
+
+const BULK_LIMIT_RESULT_V2 = Object.freeze({
+  ...BULK_LIMIT_RESULT,
+  error: `More than ${DIRECT_EDITS_V2} edits with the same tool in one request need one bulk confirmation card. This call changed nothing.`,
+});
+const bulkLimitResult = () => (ibTargetRulesV2Live() ? BULK_LIMIT_RESULT_V2 : BULK_LIMIT_RESULT);
 
 // The proposal-to-receipt step for one direct edit, kept out of the query
 // loop (Codex r2 P2 on runQuery's size). `commit` runs the one commit path;
@@ -401,6 +477,13 @@ function directModelResult(committed) {
     note: 'This did NOT complete and nothing is awaiting approval. Say what happened in one short line; do not claim it is done.' };
 }
 
+// Appended after OWNER_DIRECT_PROMPT while GATE_IB_TARGET_RULES_V2 is on.
+const OWNER_DIRECT_TARGET_RULES_PROMPT = `
+
+CUSTOMER NAMED OR ON SCREEN:
+- An edit on a customer executes directly only when the owner named that customer in this message (a name, phone or email they typed) or that customer is the one on screen. A customer you found yourself, for example from a call log or a search, shows a one-tap card: prepare it and say "tap Confirm".
+- Up to ${DIRECT_EDITS_V2} edits with the same tool in one request execute directly. More than that needs the bulk tool.`;
+
 const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
@@ -427,4 +510,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

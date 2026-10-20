@@ -27,6 +27,7 @@
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
+ *   GATE_IB_TARGET_RULES_V2=true (Intelligence Bar target rules, owner rulings 2026-10-12 decision 3 and 2026-10-20: for the owner login in owner-direct mode, (1) an internal edit that skips the card for a named customer keeps its confirm card when the message did not name the customer and that customer is not the one on screen (the customer a name, phone or email typed in THIS message resolves to counts as named; a customer the model found itself does not); (2) the same-name customer lookup lists up to 25 rows (it stopped at 10) and returns each row's name, city and last visit date so the model can offer buttons instead of asking for a phone; (3) one request may make 5 direct edits with the same tool (it was 2) before the bulk card. Read at call time via ibTargetRulesV2Live(), strict 'true', dark by default; off = today's behavior byte for byte.)
  *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
@@ -3808,6 +3809,9 @@ const gates = {
   // CALL time (owner-direct.js ownerDirectLive) so a flip needs no redeploy;
   // this map entry is for logGateStatus only.
   ibOwnerDirect: gateEnvValue('GATE_IB_OWNER_DIRECT'),
+  // Intelligence Bar target rules v2 (owner 2026-10-20). Ships DARK. This entry is for logGateStatus only: the bar reads
+  // GATE_IB_TARGET_RULES_V2 at call time via ibTargetRulesV2Live().
+  ibTargetRulesV2: process.env.GATE_IB_TARGET_RULES_V2 === 'true',
   // Audio-synced call transcript (admin call log). When on, calls whose
   // call_log.transcript_structured carries diarized segments render them as
   // a clickable list that follows recording playback; click a line to seek.
@@ -6846,3 +6850,13 @@ function reportCleanup1020Live() {
 }
 // GATE_REPORT_CLEANUP_1020 reader, on its own line so gate PRs never conflict.
 module.exports.reportCleanup1020Live = reportCleanup1020Live;
+
+// GATE_IB_TARGET_RULES_V2 read at CALL time, strict `=== 'true'`, dark in every environment. The one reader for the
+// Intelligence Bar target rules (owner rulings 2026-10-12 decision 3 and 2026-10-20): a card for an unnamed, off-screen
+// customer in owner-direct mode, a 25-row same-name lookup with rows the model can offer as buttons, and 5 direct edits
+// per tool per request. Off = today's behavior, byte for byte.
+function ibTargetRulesV2Live() {
+  return process.env.GATE_IB_TARGET_RULES_V2 === 'true';
+}
+// GATE_IB_TARGET_RULES_V2 reader, on its own line so gate PRs never conflict.
+module.exports.ibTargetRulesV2Live = ibTargetRulesV2Live;

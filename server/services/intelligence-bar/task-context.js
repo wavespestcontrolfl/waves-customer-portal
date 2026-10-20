@@ -3,6 +3,7 @@
  */
 const db = require('../../models/db');
 const { normalizeEmail } = require('../../utils/contact-normalize');
+const { ibTargetRulesV2Live } = require('../../config/feature-gates');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'phone', 'updated_at', 'deleted_at'];
@@ -92,6 +93,11 @@ const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
 const setQuantified = prompt => SET_QUANTIFIER_RE.test(normalizeName(withoutContacts(targetClause(prompt))));
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|stop|visit|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
+// GATE_IB_TARGET_RULES_V2 (owner 2026-10-20): a same-name lookup lists up to 25
+// rows. The fetch asks for one more than it lists, so exactly 25 rows are
+// complete and a 26th marks the lookup as capped. Read at call time; off = 10.
+const CUSTOMER_LOOKUP_LISTED_V2 = 25;
+const customerLookupLimit = () => (ibTargetRulesV2Live() ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
 
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
@@ -223,6 +229,7 @@ function namesTargetCustomer(clause, customer) {
 }
 
 async function namedCustomers(prompt) {
+  const lookupLimit = customerLookupLimit();
   const normalized = normalizeName(withoutContacts(targetClause(prompt)));
   const words = normalized.split(' ').slice(0, 300);
   const phrases = [];
@@ -238,13 +245,13 @@ async function namedCustomers(prompt) {
   // against the same row before task scope narrows it (Codex r5 P2).
   const columns = ['id', 'first_name', 'last_name', 'phone', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
-    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
+    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(lookupLimit).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
-  const capped = matches.length === CUSTOMER_LOOKUP_LIMIT;
+  const capped = matches.length === lookupLimit;
   const singleLookup = !fullNames.length && singleNames.length && !capped;
   const singles = singleLookup ? await db('customers').whereNull('deleted_at').where(function () {
     this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
-  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
+  }).limit(lookupLimit).select(columns) : [];
   const accepted = singleLookup ? singles : fullNames;
   // Name evidence that only partly resolved — a customer accepted while some
   // person reference in the request matches nobody, as in "update Jhon Smith
@@ -294,7 +301,7 @@ async function namedCustomers(prompt) {
     ? new Set(singles.flatMap(customer => singleNames.filter(name => [normalizeName(customer.first_name), normalizeName(customer.last_name)].includes(name))))
     : new Set(fullNames.map(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`)));
   // Either shape is evidence that can never yield one target: refuse it whole.
-  return { matches: accepted, complete: !capped && singles.length < CUSTOMER_LOOKUP_LIMIT, multiple: partial || stated.size > 1 };
+  return { matches: accepted, complete: !capped && singles.length < lookupLimit, multiple: partial || stated.size > 1 };
 }
 
 // Callers supply only the fixed customer/lead/estimate column expressions below.
@@ -389,6 +396,64 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
+// GATE_IB_TARGET_RULES_V2 (owner 2026-10-20). The last visit date of each
+// listed customer, so the model can tell same-name rows apart and offer them as
+// buttons. One grouped read; a failed read leaves the date blank, never fails
+// the request.
+async function withLastVisit(candidates) {
+  if (!candidates.length) return candidates;
+  let dates = new Map();
+  try {
+    const rows = await db('service_records').whereIn('customer_id', candidates.map(c => c.customer_id)).groupBy('customer_id')
+      .select('customer_id', db.raw('MAX(service_date) AS last_visit'));
+    dates = new Map(rows.map(row => [String(row.customer_id), row.last_visit]));
+  } catch {
+    // blank dates
+  }
+  const day = value => (value instanceof Date ? value.toISOString().slice(0, 10) : value ? String(value).slice(0, 10) : null);
+  return candidates.map(c => ({ ...c, last_visit: day(dates.get(String(c.customer_id))) }));
+}
+
+// The customers THIS message names: a name the operator typed, or a phone or
+// email they typed. GATE_IB_TARGET_RULES_V2 asks it of an owner-direct edit:
+// the customer the model found by itself (a call log, a search) is not in this
+// list, so that edit keeps its card. A name shared by several customers names
+// none of them, unless a city or phone/email in the message narrows it to one.
+async function typedCustomerIds(prompt, namedResult) {
+  const clause = targetClause(prompt);
+  const normalized = normalizeName(withoutContacts(clause));
+  const ids = new Set();
+  const groups = new Map();
+  for (const customer of namedResult.matches || []) {
+    const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+    // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
+    const full = `${first} ${last}`.trim();
+    const key = full.includes(' ') && ` ${normalized} `.includes(` ${full} `) ? full : '*bare name';
+    groups.set(key, [...(groups.get(key) || []), customer]);
+  }
+  for (const group of groups.values()) {
+    const inCity = group.filter(customer => customer.city && ` ${normalized} `.includes(` ${normalizeName(customer.city)} `));
+    if (group.length === 1) ids.add(String(group[0].id));
+    else if (inCity.length === 1) ids.add(String(inCity[0].id));
+  }
+  const literals = [...clause.matchAll(CONTACT_LITERAL_RE)].map(match => match[0]);
+  const phones = [...new Set(literals.filter(value => !value.includes('@')).map(value => value.replace(/\D/g, '').slice(-10)).filter(value => value.length === 10))];
+  const emails = [...new Set(literals.filter(value => value.includes('@')).map(value => normalizeEmail(value)).filter(Boolean))];
+  if (phones.length || emails.length) {
+    // One customer per literal: a phone or email shared by two accounts names neither.
+    const rows = await db('customers').whereNull('deleted_at').where(function () {
+      if (phones.length) this.orWhereRaw(`right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) IN (${phones.map(() => '?').join(',')})`, phones);
+      if (emails.length) this.orWhereRaw(`lower(coalesce(email, '')) IN (${emails.map(() => '?').join(',')})`, emails);
+    }).limit(10).select('id', 'phone', 'email');
+    const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
+    for (const literal of [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))]) {
+      const owners = rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
+      if (owners.length === 1) ids.add(String(owners[0].id));
+    }
+  }
+  return [...ids];
+}
+
 async function resolve({ prompt, pageData, selectedTarget }) {
   // Object(null) is {} — an absent or null selection reads as no customer id.
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
@@ -399,7 +464,12 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
   if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
-  const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
+  let candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
+  const v2 = ibTargetRulesV2Live();
+  if (v2 && candidates.length > 1) candidates = await withLastVisit(candidates);
+  // Whom this message names (GATE_IB_TARGET_RULES_V2): carried on the context so
+  // an owner-direct edit can tell a named customer from one the model found.
+  const typed = v2 ? { typedCustomerIds: await typedCustomerIds(prompt, namedResult) } : {};
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
   const cohort = setQuantified(prompt) || namedResult.multiple;
@@ -427,7 +497,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   if (!namedResult.complete && !cohort && !selectedId) {
     return { page, candidates: [], target: null, targets: [], ambiguous: false,
       error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
-      code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint };
+      code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint, ...typed };
   }
   // Only the leading recipient expression establishes a raw contact. A later
   // "text <number>" inside a note or an unresolved person's message is data.
@@ -453,7 +523,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   for (const [kind, ids] of Object.entries(explicitRecords)) {
     requestedRecords[kind] = ids.filter(id => !Object.hasOwn(requestedRecords, kind) || id === requestedRecords[kind]);
   }
-  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
+  return { page, candidates, ...selection, ...typed, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
     namesRequested: nameHint,
@@ -977,7 +1047,21 @@ function ownerDirectContext(context = {}) {
   const targets = Array.isArray(rest.targets) ? rest.targets : [];
   return { ...rest, page: rest.page || { ids: {}, records: {} }, candidates: rest.candidates || [],
     target: rest.target || null, targets, requestedRecords: rest.requestedRecords || {},
-    ambiguous: false, ownerDirect: true };
+    ambiguous: false, ownerDirect: true,
+    ...(ibTargetRulesV2Live() ? sameNameNote(context) : {}) };
+}
+
+// GATE_IB_TARGET_RULES_V2: what the model is told about customers that share
+// the name the owner typed. The rows (name, city, last visit) are already in
+// `candidates`; the note says what to do with them. offer_choices shows 4
+// buttons at most, so a longer list is offered by the most recent visits.
+function sameNameNote(context) {
+  const rows = Array.isArray(context.candidates) ? context.candidates : [];
+  if (context.code === 'target_clarification_required') {
+    return { sameNameNote: `More than ${CUSTOMER_LOOKUP_LISTED_V2} customers share the name the owner typed. Ask for one short detail: a phone number, an email or a city.` };
+  }
+  if (rows.length < 2 || context.target) return {};
+  return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the ${Math.min(rows.length, 4)} best matches, most recent last_visit first, each as "Full Name, City" (add the last visit date when two share a city), and ask which one in one short line.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
 }
 
 // A sender block inside a customer-scoped task may only target the task
@@ -996,4 +1080,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

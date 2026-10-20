@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibTargetRulesV2Live } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -3588,6 +3588,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // stay card-aware (Codex r2 P1 on #5563).
     if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
+    if (ownerDirectCommits && ibTargetRulesV2Live()) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
     // the system prompt made the prefix unique per request and defeated
@@ -3671,6 +3672,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Owner-direct bulk cap: direct commits this task already made, by tool
     // (seeded so a resumed task keeps its count; Codex r1 on #5675).
     const directCommitsByTool = ownerDirectCommits ? await OwnerDirect.seedDirectCounts(activeTask) : new Map();
+    // Whom the message names and what the page shows (GATE_IB_TARGET_RULES_V2); null while the gate is off.
+    const directGrounding = ownerDirectCommits ? OwnerDirect.targetGrounding(taskContext) : null;
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
@@ -3737,7 +3740,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
         ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
-          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint))
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint, directGrounding))
         : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
@@ -3866,15 +3869,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // its card (Codex r2), and before the approval is stored, so
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
-                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint)) return null;
-                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint, directGrounding)) return null;
+                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult() } } : { direct: true };
               } : null,
             });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint, directGrounding)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
