@@ -62,6 +62,13 @@ describe('scheduled-cron replay guard', () => {
     expect(body).not.toHaveBeenCalled();
   });
 
+  test('a late replay across the November DST fallback is skipped', () => {
+    const matched = new Date('2026-11-01T05:50:00.000Z'); // 01:50 EDT
+    jest.setSystemTime(new Date('2026-11-01T06:05:00.000Z')); // 01:05 EST, 15 min later
+    tick(zoneWallClock(matched, TZ));
+    expect(body).not.toHaveBeenCalled();
+  });
+
   test('a manual run (no matched time) still runs', () => {
     tick('manual');
     expect(body).toHaveBeenCalledTimes(1);

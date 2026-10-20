@@ -47,7 +47,12 @@ function wallClock(timezone) {
 
 function staleReplay(matchedAt, now) {
   if (!(matchedAt instanceof Date) || Number.isNaN(matchedAt.getTime())) return null; // manual / init run
-  if (now - matchedAt > REPLAY_MAX_LATE_MS) return `${Math.round((now - matchedAt) / 1000)}s late`;
+  // Both times are offset-free wall clocks, so a stall across a DST change
+  // shifts the gap by an hour either way (01:50 EDT handled at 01:05 EST
+  // reads -45 min). Any gap past the limit, either sign, is skipped: a tick
+  // near a DST change may be dropped, never run late.
+  const gapMs = now - matchedAt;
+  if (Math.abs(gapMs) > REPLAY_MAX_LATE_MS) return `wall-clock gap ${Math.round(gapMs / 1000)}s`;
   if (now.toDateString() !== matchedAt.toDateString()) return 'crossed its calendar day';
   return null;
 }
