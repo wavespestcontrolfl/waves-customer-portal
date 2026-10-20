@@ -18,6 +18,7 @@ process.env.ANTHROPIC_API_KEY = 'test-key';
 const mockMessagesCreate = jest.fn();
 const mockWriteGapRows = jest.fn();
 const mockNotifyAdmin = jest.fn();
+const mockMarkAdminDone = jest.fn();
 const mockForTask = jest.fn();
 const mockTaskCheckpoint = jest.fn();
 
@@ -84,6 +85,7 @@ jest.mock('../services/agent-gap-reports', () => ({
 jest.mock('../services/notification-service', () => ({
   ...jest.requireActual('../services/notification-service'),
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
+  markAdminDone: (...args) => mockMarkAdminDone(...args),
 }));
 jest.mock('../services/inspection-credit', () => ({ projectRedeemableOfferAmount: jest.fn(async () => ({ amount: 0 })) }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -334,5 +336,63 @@ describe('gate on, saved task (GATE_IB_PLATFORM)', () => {
       expect(body.response).not.toMatch(/Nothing was changed/);
       expect(body.taskState).toBe('outcome_unknown');
     });
+  });
+});
+
+describe('review round 1 fixes (#6368)', () => {
+  beforeEach(() => { process.env.GATE_IB_PLATFORM = 'true'; });
+
+  test('a snapshot that throws after the checkpoint still answers the plain payload', async () => {
+    IbTasks.snapshot.mockRejectedValueOnce(new Error('malformed receipt json'));
+    mockMessagesCreate.mockRejectedValueOnce(limitError());
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { ...PLATFORM_BODY, request_key: 'request-key-0101' });
+      expect(status).toBe(200);
+      expect(body.response).toMatch(/^The AI model did not answer this request/);
+      expect(body.taskId).toBe('task-1');
+      expect(body.taskState).toBe('failed');
+    });
+  });
+
+  test('unreadable receipts answer the cautious payload without a second receipt read', async () => {
+    mockForTask.mockRejectedValue(new Error('db down'));
+    mockMessagesCreate.mockRejectedValueOnce(limitError());
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { ...PLATFORM_BODY, request_key: 'request-key-0102' });
+      expect(status).toBe(200);
+      expect(body.response).toContain('I could not check whether any change was saved.');
+      expect(body.taskState).toBe('outcome_unknown');
+    });
+    expect(IbTasks.snapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe('the standing bell closes when the model answers again', () => {
+  test('closeFailureBellOnRecovery marks open ib:model-failure rows done once, then is a no-op', async () => {
+    const db = require('../models/db');
+    const select = jest.fn(async () => [{ id: 11 }, { id: 12 }]);
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select };
+    db.mockImplementation(() => chain);
+    mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    try {
+      await expect(ModelFailure.closeFailureBellOnRecovery()).resolves.toBe(2);
+      expect(chain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['ib:model-failure']);
+      expect(mockMarkAdminDone).toHaveBeenCalledWith([11, 12], expect.objectContaining({ by: 'ib-model-recovered' }));
+      await expect(ModelFailure.closeFailureBellOnRecovery()).resolves.toBe(0);
+      expect(select).toHaveBeenCalledTimes(1);
+    } finally {
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
+  });
+});
+
+describe('gap reader classifies ib-model rows as system faults', () => {
+  test('an ib-model row is system_fault, never quoted_words', () => {
+    const tools = jest.requireActual('../services/intelligence-bar/gap-report-tools');
+    const { toGap } = tools._private;
+    const gap = toGap({ id: 1, source: 'ib-model', kind: 'blocked', domain: null, summary: 's', attempted: 'a', closest_tool: null, occurrences: 2, status: 'open', first_seen_at: new Date(), last_seen_at: new Date() });
+    expect(gap.system_fault).toBe(true);
+    expect(gap.quoted_words).toBeUndefined();
   });
 });

@@ -199,11 +199,37 @@ async function handleModelFailure({ err, activeTask, actorId }) {
   const status = classifyReceipts(receipts);
   const gap = await recordFailureGap(code);
   await ringFailureBell({ code, gap });
+  bellMayBeOpen = true;
   return {
     code,
     answer: buildAnswer({ code, status }),
     taskState: activeTask ? taskStateFor(status) : null,
+    receiptsKnown: status.known,
   };
+}
+
+// The standing bell says "done when the model answers". The first successful
+// model call after a failure (or after a restart, when this process cannot know)
+// marks any open ib:model-failure row done. One query per failure, not per call.
+let bellMayBeOpen = true;
+async function closeFailureBellOnRecovery() {
+  if (!bellMayBeOpen) return 0;
+  bellMayBeOpen = false;
+  try {
+    const db = require('../../models/db');
+    const rows = await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' = ?", [BELL_DEDUPE_KEY]).select('id');
+    if (!rows.length) return 0;
+    const NotificationService = require('../notification-service');
+    return await NotificationService.markAdminDone(rows.map((r) => r.id), {
+      by: 'ib-model-recovered',
+      resolution: 'The AI model answered again.',
+    });
+  } catch (err) {
+    bellMayBeOpen = true;
+    logger.warn(`[intelligence-bar] model failure bell not closed (code=${err?.code || err?.name || 'error'})`);
+    return 0;
+  }
 }
 
 module.exports = {
@@ -214,6 +240,7 @@ module.exports = {
   taskStateFor,
   buildAnswer,
   handleModelFailure,
+  closeFailureBellOnRecovery,
   GAP_SOURCE,
   BELL_DEDUPE_KEY,
 };

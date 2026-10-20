@@ -3408,6 +3408,7 @@ async function runQuery(req, res, next) {
   // A resumed task keeps its original start, so a late card is not ordered as the newest.
   const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
   let activeTask = null;
+  let requestPendingProposals = []; // the catch keeps cards minted before a model failure
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
     const priorThread = UUID_RE.test(String(req.body.thread_id || ''))
@@ -3668,6 +3669,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       }
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
+    requestPendingProposals = pendingProposals;
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
     // Owner-direct bulk cap: direct commits this task already made, by tool
     // (seeded so a resumed task keeps its count; Codex r1 on #5675).
@@ -3723,6 +3725,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
         // Tagged here so the catch below can tell a failed MODEL call from any other error.
         .catch(err => { throw ModelFailure.tagModelCallError(err); });
+      // A model answer clears a standing "model not answering" bell (no-op unless one may be open).
+      if (ibModelFailureNoticeLive()) ModelFailure.closeFailureBellOnRecovery().catch(() => {});
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
@@ -4228,7 +4232,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // tag is set only around messages.create) is answered plainly, recorded as a
     // gap and rung once an hour. Anything else, or gate off, is today's path.
     if (ibModelFailureNoticeLive() && ModelFailure.isModelCallError(err) && !res.headersSent
-        && await answerModelFailure(req, res, { err, activeTask })) return;
+        && await answerModelFailure(req, res, { err, activeTask, pendingProposals: requestPendingProposals })) return;
     if (activeTask) {
       try { await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'outcome_unknown' }); }
       catch { /* Existing action receipts remain authoritative. */ }
@@ -4243,7 +4247,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 // waits, outcome_unknown when a change was saved or may have run (its receipts
 // stay the authority). Returns false, having answered nothing, when it could
 // not finish; the caller then takes the ordinary error path.
-async function answerModelFailure(req, res, { err, activeTask }) {
+async function answerModelFailure(req, res, { err, activeTask, pendingProposals = [] }) {
   try {
     const actorId = getAdminActorId(req);
     const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId });
@@ -4254,7 +4258,8 @@ async function answerModelFailure(req, res, { err, activeTask }) {
       response: handled.answer,
       toolCalls: [],
       structuredData: null,
-      pendingActions: [],
+      // Cards minted in an earlier round of this request stay confirmable.
+      pendingActions: activeTask ? [] : pendingProposals,
       modelFailure: { code: handled.code },
     };
     if (!activeTask) {
@@ -4262,8 +4267,20 @@ async function answerModelFailure(req, res, { err, activeTask }) {
       return true;
     }
     await IbTasks.checkpoint(activeTask.id, actorId, { runnerToken: activeTask.runner_token, state: handled.taskState, response: payload });
-    const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
-    res.json(await IbTasks.snapshot(savedTask, actorId));
+    // Unreadable receipts would fail the snapshot the same way: answer the
+    // cautious payload already built ("I could not check ...").
+    if (!handled.receiptsKnown) {
+      res.json({ ...payload, taskId: activeTask.id, taskState: handled.taskState });
+      return true;
+    }
+    let snapshot = null;
+    try {
+      const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
+      snapshot = await IbTasks.snapshot(savedTask, actorId);
+    } catch (snapshotErr) {
+      logger.warn(`[intelligence-bar] model failure snapshot unavailable (code=${snapshotErr?.code || snapshotErr?.name || 'error'})`);
+    }
+    res.json(snapshot || { ...payload, taskId: activeTask.id, taskState: handled.taskState });
     return true;
   } catch (failure) {
     logger.warn(`[intelligence-bar] model failure notice not delivered (code=${failure?.code || failure?.name || 'error'})`);
