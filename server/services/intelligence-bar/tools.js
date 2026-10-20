@@ -649,6 +649,9 @@ const NAME_MATCH_CONTEXT_DAYS = 7;
 // days. One read each, one column. These sets only ever re-rank rows the
 // scoped customer query already returned, so they cannot widen what a
 // scoped task (or a technician) can see. A failed read just means no bonus.
+// Visits that will still happen; skipped, no-show, rescheduled, completed and
+// cancelled rows earn no "visit soon" bonus (Codex #6367 r1).
+const NAME_MATCH_LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 async function nameMatchContext(pageCustomerId) {
   const context = { onScreenCustomerId: pageCustomerId || null, visitTodayIds: new Set(), recentContactIds: new Set() };
   try {
@@ -657,7 +660,7 @@ async function nameMatchContext(pageCustomerId) {
     const [visits, texts, calls] = await Promise.all([
       db('scheduled_services').distinct('customer_id').whereNotNull('customer_id')
         .whereBetween('scheduled_date', [etDateString(now), etDateString(addETDays(now, 1))])
-        .whereNot('status', 'cancelled'),
+        .whereIn('status', NAME_MATCH_LIVE_VISIT_STATUSES),
       db('sms_log').distinct('customer_id').whereNotNull('customer_id').where('created_at', '>=', since),
       db('call_log').distinct('customer_id').whereNotNull('customer_id').where('created_at', '>=', since),
     ]);
