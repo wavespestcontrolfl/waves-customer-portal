@@ -134,6 +134,8 @@ const LANE_RUNTIME = {
   // One FLAGSHIP pass per processed call, after finalization (dark behind GATE_CALL_COMMITMENTS);
   // no cross-provider answer — a miss records no commitment rows.
   call_commitments: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
+  // Shadow only (GATE_DAY_AGREEMENT_SHADOW): one model call per call or quiet text thread that agreed a day; writes day_agreement_decisions rows, no visit, no text.
+  day_agreement: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0', workflow_id: 'day-agreement-shadow', ...LONG_BATCH },
   // The hourly cron only verifies follow-ups (no model call); the model runs
   // per scored call and for the weekly recommendation — candidate-driven.
   // call (2026-09-26): csr_coach, signal_detector, retention_drafts, ads_advisor and wiki_qa had moved onto the adapter

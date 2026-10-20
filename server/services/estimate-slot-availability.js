@@ -1550,6 +1550,9 @@ async function filterCollidingSlots(slots, {
   // (zero padding, legacy drive+buffer gap). Computed once by the caller
   // from its resolved service profile; independent of `coords`.
   candidateExpectedMinutes = null,
+  // Visits that are being MOVED by the caller: their own rows are not
+  // collisions for the slot they are moving to (day-agreement shadow).
+  excludeServiceIds = [],
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
@@ -1573,6 +1576,7 @@ async function filterCollidingSlots(slots, {
     .andWhere((q) => {
       q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
     });
+  if (excludeServiceIds.length) collisionQuery = collisionQuery.whereNotIn('scheduled_services.id', excludeServiceIds);
   if (ownEstimateId) {
     // This estimate's own UNCOMMITTED hold is not a collision for itself
     // (codex r8 P1). Narrow on purpose: a COMMITTED visit of this estimate
@@ -2535,6 +2539,8 @@ module.exports = {
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
   resolveCatalogSlotProfile,
+  // The offer/commit collision guard, shared with the day-agreement shadow sweep.
+  filterCollidingSlots,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.
   resolveEstimateCoords,
   seasonalSelectionProfile,

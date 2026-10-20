@@ -2238,6 +2238,14 @@ const gates = {
   // Reads call_log, scheduled_services, triage_items; writes nothing.
   // Off -> the route returns an empty list and the strip never renders.
   callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
+  // Day-only agreement shadow (owner 2026-10-20, PR 1 of 2): every 10 minutes a
+  // sweep reads recent two-party calls and quiet text threads where only a DAY
+  // was agreed for a visit (or a move of one), asks the model what the office
+  // should do, and records what the agent WOULD do in day_agreement_decisions
+  // so a week of shadow can be scored against what staff did. Books nothing,
+  // moves nothing, texts no one. The act step is a later PR.
+  // Off -> the cron tick returns before it reads anything.
+  dayAgreementShadow: process.env.GATE_DAY_AGREEMENT_SHADOW === 'true',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
