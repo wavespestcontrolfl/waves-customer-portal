@@ -137,6 +137,20 @@ describe('sendToCustomer — contact devices', () => {
   });
 });
 
+describe('sendToCustomer — a contact device belongs to ONE profile', () => {
+  test('a push addressed to this profile never reaches a contact device registered on a sibling profile; the holder\'s sibling device still gets it (codex r1)', async () => {
+    // The account-wide lookup returned a sibling profile's rows too.
+    subs = [
+      HOLDER_DEVICE,
+      CONTACT_DEVICE,
+      { ...HOLDER_DEVICE, id: 'sub-h2', customer_id: 'cust-sibling', device_token: 'tok-h2' },
+      { ...CONTACT_DEVICE, id: 'sub-c2', customer_id: 'cust-sibling', device_token: 'tok-c2', contact_phone_key: '9415550999' },
+    ];
+    await send('tech_en_route');
+    expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h', 'tok-h2']);
+  });
+});
+
 describe('customerStatus — per person', () => {
   test('the holder\'s status never counts a contact device; a contact\'s counts only theirs', async () => {
     subs = [CONTACT_DEVICE];

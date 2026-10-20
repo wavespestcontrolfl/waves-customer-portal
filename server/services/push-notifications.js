@@ -121,10 +121,15 @@ async function sendSubscription(sub, notification, options) {
 // the key still occupies a contact slot on the row's customer and that
 // contact's own choices allow it. Fail closed: an unreadable choices table
 // or customer row drops the contact device, never the holder's.
-async function contactDevicesAllowed(subs, purpose, database = db) {
-  const contactSubs = subs.filter((s) => s.contact_phone_key);
-  if (!contactSubs.length) return subs;
+async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
+  // A contact's device belongs to ONE profile's contact list: only a push
+  // addressed to that profile may reach it (codex r1 on #6364: the
+  // account-wide fan-out under GATE_CUSTOMER_APP_NOTIFICATIONS would have
+  // sent a sibling profile's visits to a contact listed on another house).
+  // Holder devices keep the account-wide fan-out.
+  const contactSubs = subs.filter((s) => s.contact_phone_key && String(s.customer_id) === String(customerId));
   const holderSubs = subs.filter((s) => !s.contact_phone_key);
+  if (!contactSubs.length) return holderSubs;
   const ContactPrefs = require('./contact-notification-prefs');
   if (!purpose.allowed || !ContactPrefs.contactPrefsLive()) return holderSubs;
   const { findServiceContactSlotByPhoneKey, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
@@ -236,7 +241,7 @@ class PushNotificationService {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      subs = await contactDevicesAllowed(await query, contactPurpose);
+      subs = await contactDevicesAllowed(await query, contactPurpose, customerId);
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };

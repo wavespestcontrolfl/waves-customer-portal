@@ -4854,8 +4854,13 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
     if (!slot.email && Object.values(patch).includes('email')) {
       return res.status(400).json({ error: 'This contact has no email address on file, so email-only delivery cannot be chosen.' });
     }
-    const existing = await ContactPrefs.getContactPrefRow(req.params.id, slot.phone);
-    if (ContactPrefs.bodyEnablesTexts(updates) && !existing?.consent_attested_at) {
+    const [existing, accountRow] = await Promise.all([
+      ContactPrefs.getContactPrefRow(req.params.id, slot.phone),
+      db('notification_prefs').where({ customer_id: req.params.id }).first().catch(() => null),
+    ]);
+    // Same rule as the contact's own save: only a change that OPENS a text
+    // path needs the contact's attestation.
+    if (ContactPrefs.textPathsOpened(accountRow, existing, patch) && !existing?.consent_attested_at) {
       return res.status(400).json({
         error: 'This contact has not agreed to texts in the app yet. Staff can turn their notifications off, but only the contact can turn them on.',
         code: 'CONSENT_REQUIRED',

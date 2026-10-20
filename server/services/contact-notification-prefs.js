@@ -155,14 +155,6 @@ function contactPushPurpose(messageType) {
   return { allowed: true, column: CONTACT_PUSH_COLUMN[type] };
 }
 
-// Does this body turn texts ON (a master switch, a purpose, or a
-// text-capable delivery choice)? That needs the contact's attestation.
-function bodyEnablesTexts(updates = {}) {
-  return updates.smsEnabled === true
-    || Object.values(CONTACT_PREF_KEY_BY_COLUMN).some((key) => updates[key] === true)
-    || Object.values(CONTACT_CHANNEL_KEY_BY_COLUMN).some((key) => ['sms', 'both'].includes(updates[key]));
-}
-
 function contactPrefsLive() {
   try {
     return require('../config/feature-gates').contactLoginLive();
@@ -715,7 +707,6 @@ module.exports = {
   CONTACT_CHANNEL_VALUES,
   effectiveContactPreferences,
   contactPrefPatchFromBody,
-  bodyEnablesTexts,
   contactPushPurpose,
   contactPrefsLive,
   columnForEmailEvent,
