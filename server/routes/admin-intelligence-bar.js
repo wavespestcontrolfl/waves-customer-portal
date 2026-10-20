@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, nameMatchV2Live } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -3925,6 +3925,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // an owner-direct fallback read is unscoped.
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
+              // Name matcher v2 ranks the customer on screen first. Route-derived
+              // (the page the operator is viewing), never model input; absent when dark.
+              ...(nameMatchV2Live() ? { pageCustomerId: TaskContext.pageIds(pageData || {}).customer_id || null } : {}),
               // General admin read (owner ruling 2026-10-12): the request's own
               // login and bearer token, set here from the authenticated request,
               // never from model input; read_admin_data forwards the token on

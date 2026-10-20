@@ -18,11 +18,11 @@ const { applyAssignable, assertAssignableTechnician } = require('../technician-e
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
-const { MAX_RESULTS: MAX_NAME_MATCHES, isNameLikeSearch, rankNameMatches } = require('./name-match');
+const { MAX_RESULTS: MAX_NAME_MATCHES, MAX_RESULTS_V2: MAX_NAME_MATCHES_V2, isNameLikeSearch, rankNameMatches } = require('./name-match');
 const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
-const { discountStackingLive } = require('../../config/feature-gates');
+const { discountStackingLive, nameMatchV2Live } = require('../../config/feature-gates');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
@@ -413,7 +413,7 @@ async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'search_field_intelligence': return await searchFieldIntelligence(input);
-      case 'query_customers': return await queryCustomers(input, actionContext.readCustomerIds);
+      case 'query_customers': return await queryCustomers(input, actionContext.readCustomerIds, actionContext.pageCustomerId);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
       case 'get_schedule_view': return await getScheduleView(input, actionContext.readCustomerIds);
@@ -446,7 +446,7 @@ async function executeTool(toolName, input, actionContext = {}) {
 
 // ─── READ IMPLEMENTATIONS ───────────────────────────────────────
 
-async function queryCustomers(input, readCustomerIds = []) {
+async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null) {
   const { filters = {}, search, sort_by, sort_dir, limit: rawLimit = 50 } = input;
   const limit = Math.max(1, Math.min(Math.trunc(rawLimit), 200));
   const offset = Math.max(0, Math.trunc(input.offset || 0));
@@ -502,7 +502,11 @@ async function queryCustomers(input, readCustomerIds = []) {
     next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
     total_customers: parseInt(total.count),
   };
-  return Number(matched.count) === 0 ? await withApproximateCustomers(result, unsearched, { search, limit, offset }) : result;
+  const exactCount = Number(matched.count);
+  if (exactCount === 0) return await withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId });
+  // Name matcher v2: one exact hit can still be the wrong person.
+  if (exactCount === 1 && nameMatchV2Live()) return await withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId });
+  return result;
 }
 
 // Every non-search filter of query_customers, in one place.
@@ -592,29 +596,102 @@ const APPROXIMATE_CANDIDATE_CAP = 20000;
 
 // Rescue path for a dictated, misspelled name. `unsearched` is the main query
 // with its filters and customer scope but no text search. Contract: only the
-// first page (offset 0) gets a fallback, capped at min(limit, 5) rows, so
+// first page (offset 0) gets a fallback, capped at min(limit, 5) rows (8 with
+// GATE_NAME_MATCH_V2), so
 // has_more is false and there is no page 2 of guesses. Ranks the candidates by
 // sound and spelling in Node, then reads the best few with the main query's
 // columns. Returns `result` unchanged when nothing is close.
-async function withApproximateCustomers(result, unsearched, { search, limit, offset }) {
+async function withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId = null }) {
   if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
-  const candidates = await unsearched.clone().clearSelect().clearOrder()
-    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
-    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
-  const ranked = rankNameMatches(search, candidates, { limit: Math.min(limit, MAX_NAME_MATCHES) });
+  const v2 = nameMatchV2Live();
+  const ranked = v2
+    ? await rankScopedCustomerNames(unsearched, search, Math.min(limit, MAX_NAME_MATCHES_V2), pageCustomerId)
+    : rankNameMatches(search, await nameCandidates(unsearched), { limit: Math.min(limit, MAX_NAME_MATCHES) });
   if (!ranked.length) return result;
-  const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
-  const rank = new Map(ranked.map((r, i) => [r.id, i]));
-  const customers = rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
+  const customers = await rankedCustomerRows(unsearched, ranked, v2);
   return {
     ...result,
     approximate: true,
-    note: APPROXIMATE_CUSTOMER_NOTE,
+    note: v2 ? APPROXIMATE_CUSTOMER_NOTE_V2 : APPROXIMATE_CUSTOMER_NOTE,
     customers,
     total_matching: customers.length,
     returned_count: customers.length,
     has_more: false,
     next_offset: null,
+  };
+}
+
+// Name columns of every customer the main query's filters and scope allow.
+function nameCandidates(unsearched) {
+  return unsearched.clone().clearSelect().clearOrder()
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
+    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+}
+
+// Customer rows (main query columns) in ranked order. v2 rows carry `match`.
+async function rankedCustomerRows(unsearched, ranked, v2) {
+  const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
+  const rank = new Map(ranked.map((r, i) => [r.id, i]));
+  return rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map((row) => {
+    const listed = customerListRow(row);
+    if (!v2) return listed;
+    const entry = ranked[rank.get(row.id)];
+    return { ...listed, match: { score: entry.score, reasons: entry.reasons || [] } };
+  });
+}
+
+const APPROXIMATE_CUSTOMER_NOTE_V2 = `${APPROXIMATE_CUSTOMER_NOTE} Each row's match.reasons says if that person is on the operator's screen, has a visit today or tomorrow, or was texted or called in the last 7 days.`;
+const ALTERNATIVE_CUSTOMER_NOTE = 'The exact search found one customer, but a dictated name can be the wrong person. `alternatives` are sound-alike / close-spelling matches, best first (match.score, and match.reasons: on_screen, visit_soon, recent_contact). exact_hit_match.rank is where the exact hit ranks among them. When the top two scores are close, or the exact hit is not the best context match, show the exact hit and the alternatives with offer_choices and get a confirmed pick before any write or send.';
+const NAME_MATCH_CONTEXT_DAYS = 7;
+
+// Who the operator is probably talking about: the customer on screen, anyone
+// with a visit today or tomorrow (ET), anyone texted or called in the last 7
+// days. One read each, one column. These sets only ever re-rank rows the
+// scoped customer query already returned, so they cannot widen what a
+// scoped task (or a technician) can see. A failed read just means no bonus.
+async function nameMatchContext(pageCustomerId) {
+  const context = { onScreenCustomerId: pageCustomerId || null, visitTodayIds: new Set(), recentContactIds: new Set() };
+  try {
+    const now = new Date();
+    const since = new Date(now.getTime() - NAME_MATCH_CONTEXT_DAYS * 86400000);
+    const [visits, texts, calls] = await Promise.all([
+      db('scheduled_services').distinct('customer_id').whereNotNull('customer_id')
+        .whereBetween('scheduled_date', [etDateString(now), etDateString(addETDays(now, 1))])
+        .whereNot('status', 'cancelled'),
+      db('sms_log').distinct('customer_id').whereNotNull('customer_id').where('created_at', '>=', since),
+      db('call_log').distinct('customer_id').whereNotNull('customer_id').where('created_at', '>=', since),
+    ]);
+    for (const row of visits) context.visitTodayIds.add(row.customer_id);
+    for (const row of [...texts, ...calls]) context.recentContactIds.add(row.customer_id);
+  } catch (err) {
+    logger.warn(`[intelligence-bar] name match context unavailable: ${err.message}`);
+  }
+  return context;
+}
+
+// v2 ranking over the scoped candidates, with the context bonuses.
+async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId) {
+  const candidates = await nameCandidates(unsearched);
+  const context = await nameMatchContext(pageCustomerId);
+  return rankNameMatches(search, candidates, { v2: true, limit, context });
+}
+
+// v2: the exact search found one customer. Rank the whole scoped book anyway
+// and return the sound-alikes beside the hit (offset 0 only). Unchanged when
+// nothing else is close.
+async function withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId }) {
+  if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
+  const exactId = result.customers[0] && result.customers[0].id;
+  // One extra slot: the exact hit may rank among them.
+  const ranked = await rankScopedCustomerNames(unsearched, search, MAX_NAME_MATCHES_V2 + 1, pageCustomerId);
+  const exactAt = ranked.findIndex(r => r.id === exactId);
+  const others = ranked.filter(r => r.id !== exactId).slice(0, Math.min(limit, MAX_NAME_MATCHES_V2));
+  if (!others.length) return result;
+  return {
+    ...result,
+    alternatives: await rankedCustomerRows(unsearched, others, true),
+    exact_hit_match: exactAt < 0 ? null : { rank: exactAt + 1, score: ranked[exactAt].score, reasons: ranked[exactAt].reasons || [] },
+    note: ALTERNATIVE_CUSTOMER_NOTE,
   };
 }
 
