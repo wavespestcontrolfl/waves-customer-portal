@@ -21,7 +21,8 @@
 //    the render and not invalidated / call-side blocked. A failed fence skips
 //    the send, as the manual sender does (estimateInvalidatedJustBeforeHandoff).
 //  - A failed PDF-bearing send is retried by the provider-retry rail, which
-//    rebuilds the PDF (or drops the note) through prepareRetryPdf below.
+//    never rebuilds a PDF: it resends the stored body without the PDF note
+//    (prepareRetryBody below).
 // ============================================================
 
 const crypto = require('crypto');
@@ -46,7 +47,8 @@ const ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS = Object.freeze([
 ]);
 const KEY_SET = new Set(ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS);
 // The delivery email builds its own PDF (admin-estimates.js) but its row is
-// retried by the same rail, so the rail's allowlist adds it.
+// retried by the same rail (as a body without the note), so the rail's
+// allowlist adds it.
 const RETRY_KEY_SET = new Set([...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS, 'estimate.delivery']);
 
 const NONE = Object.freeze({ attachments: [], payload: {} });
@@ -198,9 +200,9 @@ function openForPdf(row, effectiveExpiry, now) {
 // `recipient`: the address the email is going to. When given, the PDF is built
 // only if it is still the estimate's current customer_email, and the handoff
 // fence repeats that check right before the request.
-async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = null, now = new Date(), forRetry = false, recipient = null }) {
+async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = null, now = new Date(), recipient = null }) {
   try {
-    if (!(forRetry ? RETRY_KEY_SET : KEY_SET).has(templateKey) || !pdfGatesOn()) return NONE;
+    if (!KEY_SET.has(templateKey) || !pdfGatesOn()) return NONE;
     const fresh = await db('estimates').where({ id: estimateId }).first();
     if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return NONE;
     if (recipient && !sameRecipient(fresh.customer_email, recipient)) return NONE;
@@ -227,8 +229,8 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
 // lost. Decide on a fresh read: an estimate that is closed, expired,
 // archived or invalidated is skipped on purpose (its link serves nothing and
 // the offer is gone); an estimate still sendable, or one whose read fails, is
-// put on the provider-retry rail, which rebuilds the PDF behind the same
-// fence or sends the body without the PDF note. Returns 'scheduled',
+// put on the provider-retry rail, which sends the stored body without the PDF
+// note. Returns 'scheduled',
 // 'skipped' or 'none'. Never throws.
 async function recoverFenceAbort({ estimateId, result }) {
   if (!result?.aborted || !(result.boundaryBlocked || result.boundaryCheckFailed)) return 'none';
@@ -250,14 +252,19 @@ async function recoverFenceAbort({ estimateId, result }) {
 }
 
 // ---- Provider-retry rail --------------------------------------------------
-// A PDF-bearing row keeps has_attachments = true and the attachment is not
-// stored, so the rail cannot replay the stored copy alone. It rebuilds the
-// PDF from the live row; with none to give (estimate no longer open, render
-// failed, gate off) it sends the body only with the note line removed, so the
-// copy never promises a file that is missing. Returns:
-//   { attachments, boundaryCheck }            PDF rebuilt (fence included)
-//   { attachments: [], html, text }           body only, note stripped
-//   { unsendable: true }                      note could not be removed
+// The rail NEVER rebuilds a PDF. A PDF-copy row (has_attachments = true; the
+// attachment itself is not stored) is retried as its stored body with no
+// attachment, so the PDF can never disagree with the body's prices and the
+// rail never renders a permanent copy. Before that body-only resend the
+// estimate must still be the one the row was written for: same recipient,
+// still open, not expired, not invalidated or call-blocked. Then:
+//   note in both bodies, removable   the stored body with the note removed
+//   note in neither body             the stored body unchanged (a template
+//                                    that never got the note block carried
+//                                    no attachment claim)
+//   note in only one body            stopped (cannot be removed cleanly)
+// prepareRetryBody returns { stopped: reason } | { unsendable: true } |
+// { attachments: [], html, text }.
 const ESTIMATE_PDF_RETRY_TEMPLATE_KEYS = Object.freeze([...RETRY_KEY_SET]);
 
 function isRetryTemplate(templateKey) {
@@ -280,32 +287,15 @@ function stripPdfNote(html, text) {
     const nextText = text.includes(`${note}\n\n`) ? text.replace(`${note}\n\n`, '')
       : text.includes(`\n\n${note}`) ? text.replace(`\n\n${note}`, '')
         : text.replace(note, '');
-    return { html: nextHtml, text: nextText };
+    return { html: nextHtml, text: nextText, removed: true };
   }
-  return null;
+  return { html, text, removed: false };
 }
 
-// Whether the row's actual destination is still the estimate's recipient:
-// null, or the reason the retry must stop (it never reaches the old address,
-// with or without the PDF).
-async function retryRecipientBlock(message) {
-  if (!message.estimate_id) return 'estimate_missing';
-  const row = await db('estimates').where({ id: message.estimate_id }).first('customer_email');
-  if (!row) return 'estimate_missing';
-  return sameRecipient(row.customer_email, message.recipient_email_snapshot) ? null : 'recipient_changed';
-}
-
-async function prepareRetryPdf(message) {
-  const blocked = await retryRecipientBlock(message);
+async function prepareRetryBody(message) {
+  if (!message.estimate_id) return { stopped: 'estimate_missing' };
+  const blocked = await handoffBlockReason(message.estimate_id, null, { recipient: message.recipient_email_snapshot });
   if (blocked) return { stopped: blocked };
-  const copy = await openEstimateEmailPdf({
-    estimateId: message.estimate_id, templateKey: message.template_key, forRetry: true,
-    recipient: message.recipient_email_snapshot,
-  });
-  if (copy.attachments.length) return { attachments: copy.attachments, boundaryCheck: copy.boundaryCheck };
-  // Nothing to attach: re-read the recipient before the body-only send.
-  const again = await retryRecipientBlock(message);
-  if (again) return { stopped: again };
   const stripped = stripPdfNote(message.html_snapshot, message.text_snapshot);
   if (!stripped) return { unsendable: true };
   return { attachments: [], html: stripped.html, text: stripped.text };
@@ -317,7 +307,7 @@ module.exports = {
   ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS,
   ESTIMATE_PDF_RETRY_TEMPLATE_KEYS,
   isRetryTemplate,
-  prepareRetryPdf,
+  prepareRetryBody,
   stripPdfNote,
   rowFingerprint,
   handoffBlockReason,
