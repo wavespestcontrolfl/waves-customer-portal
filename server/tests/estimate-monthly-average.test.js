@@ -97,6 +97,22 @@ describe('buildMonthlyAverage', () => {
 });
 
 describe('emailParts', () => {
+  test('single service with a plan credit: the email average is the plan monthly, not the pre-credit line', () => {
+    // $94 x 4 = $31.33 a month before a $10 credit; the plan pays $21.33.
+    const model = buildMonthlyAverage({
+      services: [{ key: 'pest', label: 'Pest Control', perApplication: 94, visits: 4 }],
+      planMonthly: 21.33,
+      credit: { label: 'Referral Credit', monthly: 10 },
+    });
+    expect(model.showPlan).toBe(true);
+    expect(model.services[0].monthly).toBe(31.33);
+    expect(model.planMonthly).toBe(21.33);
+    const parts = emailParts(model);
+    expect(parts.priceLine).toBe('$94.00 per application · about $21.33 a month');
+    expect(parts.note).toContain('referral credit included');
+    expect(parts.priceLine).not.toContain('31.33');
+  });
+
   test('single service keeps the per-application price first', () => {
     const model = buildMonthlyAverage({ services: [{ key: 'pest', label: 'Pest Control', perApplication: 94, visits: 4 }], planMonthly: 31.33 });
     expect(emailParts(model)).toEqual({

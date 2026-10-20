@@ -1025,6 +1025,18 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     expect(text).toContain('about $62.30 a month');
   });
 
+  it('single service with a plan credit: the credit and plan lines make the arithmetic visible', () => {
+    const data = docData({
+      lines: single.lines,
+      monthlyAverage: { planMonthly: 21.33, credit: { label: 'Referral Credit', monthly: 10 }, bundleDiscountPct: 0, oneTime: null },
+    });
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const text = container.textContent;
+    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('about $31.33 a month');
+    expect(text).toContain('−$10.00 a month');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $21.33 a month');
+  });
+
   it('gate off (no monthlyAverage from the server): the document is exactly as before', () => {
     for (const fixture of [{ ...single, monthlyAverage: null }, { ...bundle, monthlyAverage: null }]) {
       const text = render1(docData(fixture));

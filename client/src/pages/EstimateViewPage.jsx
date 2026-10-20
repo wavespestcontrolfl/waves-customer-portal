@@ -2379,7 +2379,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // its per-service lines add up to the plan line to the cent; a credit prints as
 // its own negative line.
 export function MonthlyAverageSummary({ model, hasOneTime = false }) {
-  if (!model || !model.multi) return null;
+  if (!model || !(model.showPlan ?? model.multi)) return null;
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline', fontSize: 16, color: ESTIMATE_TEXT };
   const num = { fontVariantNumeric: 'tabular-nums', textAlign: 'right' };
   return (
@@ -9172,7 +9172,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
                 monthlyAverageLine={monthlyAverage && monthlyAverage.byKey[section.key] != null ? aboutMonth(monthlyAverage.byKey[section.key]) : null}
-                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.multi ? MONTHLY_AVERAGE_CONTEXT : null}
+                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.showPlan ? MONTHLY_AVERAGE_CONTEXT : null}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
@@ -9414,7 +9414,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               code in prod (glass active for all categories) and contradicted
               the standing dedupe ruling. */}
 
-          {monthlyAverage?.model.multi && mode === 'recurring' ? (
+          {(monthlyAverage?.model.showPlan) && mode === 'recurring' ? (
             <MonthlyAverageSummary
               model={monthlyAverage.model}
               hasOneTime={feeList.some((fee) => Number(fee?.amount) > 0)}

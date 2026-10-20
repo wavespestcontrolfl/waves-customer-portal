@@ -110,6 +110,9 @@ function buildMonthlyAverage({ services, planMonthly, credit = null, bundleDisco
     // bundle discount applies to.
     bundlePct: services.length > 1 && pct > 0 ? Math.round(pct * 100) : 0,
     multi: services.length > 1,
+    // A plan line is needed whenever the service lines alone do not equal the
+    // plan: several services, or one service with a plan credit.
+    showPlan: services.length > 1 || creditOut !== null,
   };
 }
 
@@ -149,7 +152,7 @@ function emailParts(model, oneTime = null) {
     priceLine = `${lead} · ${aboutMonth(model.planMonthly)}`;
   } else {
     const only = model.services[0];
-    priceLine = `${money(only.perApplication)} per application · ${aboutMonth(only.monthly)}`;
+    priceLine = `${money(only.perApplication)} per application · ${aboutMonth(model.planMonthly)}`;
   }
   const included = [];
   if (model.bundlePct > 0) included.push('bundle savings');

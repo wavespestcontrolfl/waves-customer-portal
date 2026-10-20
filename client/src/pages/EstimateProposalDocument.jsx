@@ -645,7 +645,7 @@ export default function EstimateProposalDocument({ data, token }) {
                       </span>
                     </div>
                   ) : null}
-                  {monthlyAverage.model.multi ? (
+                  {monthlyAverage.model.showPlan ? (
                     <div data-monthly-average-plan="" style={{ display: 'flex', justifyContent: 'space-between', gap: 14, padding: '3px 0' }}>
                       <span style={{ color: INK, fontWeight: 700 }}>{monthlyAveragePlanLabel(monthlyAverage.model)}</span>
                       <span style={{ fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
