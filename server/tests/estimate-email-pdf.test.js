@@ -177,7 +177,7 @@ describe('openEstimateEmailPdf', () => {
 
   test('the money and accepted templates are not on the allowlist', async () => {
     readsRow(freshRow());
-    for (const key of ['estimate.deposit_abandoned', 'estimate.payment_step_abandoned', 'estimate.accepted_confirmation', 'estimate.accepted_internal', 'estimate.proposal_delivery', 'estimate.delivery']) {
+    for (const key of ['estimate.deposit_abandoned', 'estimate.payment_step_abandoned', 'estimate.accepted_confirmation', 'estimate.accepted_internal', 'estimate.proposal_delivery', 'estimate.delivery', 'estimate.extension_notice']) {
       expect(ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS).not.toContain(key);
       expect(await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: key })).toEqual({ attachments: [], payload: {} });
     }
@@ -185,11 +185,11 @@ describe('openEstimateEmailPdf', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('the allowlist is exactly the follow-up, engagement and extension templates', () => {
+  test('the allowlist is exactly the follow-up, engagement and extension-email templates (the auto-renew notice carries no PDF)', () => {
     expect([...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS].sort()).toEqual([
       'estimate.engage_expiring', 'estimate.engage_expiring_unseen', 'estimate.engage_gone_quiet', 'estimate.engage_high_intent',
       'estimate.engage_return_after_dark', 'estimate.engage_return_visit', 'estimate.engage_unopened',
-      'estimate.expiring_notice', 'estimate.extended', 'estimate.extension_notice',
+      'estimate.expiring_notice', 'estimate.extended',
       'estimate.followup_final', 'estimate.unviewed_followup', 'estimate.viewed_followup',
     ]);
   });
@@ -231,7 +231,7 @@ describe('sendDualChannel with the PDF copy', () => {
   });
   afterEach(() => build.mockRestore());
 
-  test.each([...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS.filter((k) => k.startsWith('estimate.') && !['estimate.extended', 'estimate.extension_notice'].includes(k))])(
+  test.each([...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS.filter((k) => k.startsWith('estimate.') && k !== 'estimate.extended')])(
     '%s on an open estimate carries the PDF and the note',
     async (templateKey) => {
       await _private.sendDualChannel(est, { email: leg(templateKey) });

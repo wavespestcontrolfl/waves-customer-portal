@@ -1917,4 +1917,80 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
     expect(email.sendTemplate.mock.calls[0][0].attachments).toEqual([]);
     expect(email.sendTemplate.mock.calls[0][0].expectedContentHash).toBe(preview.body.messages.email.contentHash);
   });
+
+  // codex #6343 r4 P1: the PDF is rendered from the fresh row but mailed to
+  // estimate.customer_email; the handoff fence ties the two together.
+  describe('recipient and content fence on the delivery PDF', () => {
+    // Stand-in for sendTemplate's provider handoff: runs the caller's fence the
+    // way sendOne does, and reports a veto the way sendTemplate does.
+    const runFenceLikeSendTemplate = () => email.sendTemplate.mockImplementation(async ({ onQueued, withProviderHandoff }) => {
+      await onQueued?.();
+      if (withProviderHandoff) {
+        try {
+          await withProviderHandoff(async (_database, boundaryCheck) => { await boundaryCheck({}); });
+        } catch (err) {
+          return { sent: false, aborted: true, providerAttempted: false, boundaryBlocked: !!err.providerBoundaryBlocked, boundaryCheckFailed: !!err.providerBoundaryCheckFailed };
+        }
+      }
+      return { sent: true, providerAttempted: true, providerAccepted: true, message: { provider_message_id: 'synthetic-email-accepted' } };
+    });
+    beforeEach(() => { setGates(true); runFenceLikeSendTemplate(); });
+
+    test('nothing changed: the fence passes and the PDF goes out', async () => {
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+      expect(email.sendTemplate.mock.calls[0][0].withProviderHandoff).toEqual(expect.any(Function));
+    });
+
+    test('an address corrected before the render: no PDF is built and the PDF line is not sent', async () => {
+      const stale = structuredClone(row);
+      row.customer_email = 'corrected@example.invalid';
+      const result = await router.sendEstimateNow(stale, 'email', { callerPreClaimed: true });
+      expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+      const sent = email.sendTemplate.mock.calls[0][0];
+      expect(sent.attachments).toEqual([]);
+      expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+      expect(sent).not.toHaveProperty('withProviderHandoff');
+      expect(result.channels.email).toMatchObject({ pdfAttached: false, warning: expect.stringMatching(/PDF copy could not be attached/) });
+    });
+
+    test('the same address in another case or with spaces still gets the PDF', async () => {
+      const stale = structuredClone(row);
+      stale.customer_email = ' Recipient@Example.Invalid ';
+      const result = await router.sendEstimateNow(stale, 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+    });
+
+    test('an address corrected while the PDF renders vetoes the email: the channel fails with a clear error', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.customer_email = 'corrected@example.invalid'; return PDF; });
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email.ok).toBe(false);
+      expect(result.channels.email.error).toMatch(/changed .* while the PDF copy was being prepared; the email was not sent/);
+      expect(result.channels.email.uncertain).toBeFalsy();
+      expect(result.sent).toBe(false);
+    });
+
+    test('a price edit while the PDF renders vetoes the email too', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.monthly_total = '150'; return PDF; });
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
+    });
+
+    test('a fence that cannot read fails the channel and says to try again', async () => {
+      const failing = jest.fn(async ({ onQueued }) => {
+        await onQueued?.();
+        return { sent: false, aborted: true, providerAttempted: false, boundaryCheckFailed: true };
+      });
+      email.sendTemplate.mockImplementation(failing);
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/could not be re-checked .* Try sending again/) });
+    });
+
+    test('a send without a PDF has no fence and is untouched by an edit', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(null);
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(email.sendTemplate.mock.calls[0][0]).not.toHaveProperty('withProviderHandoff');
+      expect(result.channels.email.ok).toBe(true);
+    });
+  });
 });

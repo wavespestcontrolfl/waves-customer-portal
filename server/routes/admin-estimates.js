@@ -943,7 +943,15 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdfNote = '', proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
+// Why a delivery email that carried the PDF copy was stopped at the provider
+// handoff (estimate-email-pdf deliveryPdfFence), in words for the operator.
+function pdfFenceVetoError(boundaryCheckFailed) {
+  return boundaryCheckFailed
+    ? 'The estimate could not be re-checked before the PDF copy was attached; the email was not sent. Try sending again.'
+    : 'The estimate changed (for example its email address or contents) while the PDF copy was being prepared; the email was not sent. Review the estimate and send again.';
+}
+
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdfNote = '', pdfFence = null, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
@@ -964,12 +972,17 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
         categories: ['estimate_delivery'],
         attachments: Array.isArray(attachments) ? attachments : [],
+        // The PDF copy is a permanent file: the final fence runs at the provider boundary.
+        ...(pdfFence && attachments.length ? { withProviderHandoff: pdfFence.withProviderHandoff } : {}),
         onQueued: onDispatch,
         estimateId: estimate.id,
         ...(estimateIds ? { estimateIds } : {}),
       });
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      }
+      if (result.aborted && (result.boundaryBlocked || result.boundaryCheckFailed)) {
+        return { ok: false, providerAttempted: false, vetoedAtHandoff: true, error: pdfFenceVetoError(!!result.boundaryCheckFailed), template: 'estimate.delivery' };
       }
       return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
     } catch (err) {
@@ -1030,6 +1043,14 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     }
   } catch (err) {
     return { ok: false, providerAttempted: false, error: err.message, provider: 'smtp_fallback' };
+  }
+  // The same final fence for the attached PDF copy on the SMTP path.
+  if (pdfFence && smtpAttachments.length) {
+    try {
+      await pdfFence.boundaryCheck();
+    } catch (err) {
+      return { ok: false, providerAttempted: false, vetoedAtHandoff: true, error: pdfFenceVetoError(!!err.providerBoundaryCheckFailed), provider: 'smtp_fallback' };
+    }
   }
   onDispatch?.();
   await transporter.sendMail({
@@ -3021,11 +3042,21 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         // sends the email exactly as before (no PDF, no note) and only adds a
         // warning to the channel result. The same validThrough pin as the
         // proposal path keeps the PDF's date equal to the link's.
+        // The PDF is rendered from freshEstimate but the email goes to
+        // estimate.customer_email: a correction that landed in between (the
+        // email fan-out updates `sending` rows) must not mail a PDF of the
+        // corrected row to the old address. So it is built only when both are
+        // the same address, and the handoff fence repeats that, and the row
+        // fingerprint, at the provider boundary (emailPdfFence).
         let emailPdfAttachment = null;
+        let emailPdfFence = null;
         let emailPdfExpected = false;
         if (!proposalMode) {
           emailPdfExpected = estimateEmailPdfOn();
-          if (emailPdfExpected) {
+          emailPdfFence = emailPdfExpected
+            ? require('../services/estimate-email-pdf').deliveryPdfFence(freshEstimate, { recipient: estimate.customer_email, validThrough: nextExpiresAt })
+            : null;
+          if (emailPdfExpected && emailPdfFence) {
             try {
               emailPdfAttachment = await require('../services/pdf/estimate-doc-pdf')
                 .buildEstimateEmailPdfAttachment(freshEstimate, { validThrough: nextExpiresAt });
@@ -3062,7 +3093,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             priceLine: proposalMode ? freshPriceLine : priceLine,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: emailPdfAttachment ? [emailPdfAttachment] : proposalAttachments,
-            ...(emailPdfAttachment ? { pdfNote: require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery } : {}),
+            ...(emailPdfAttachment ? { pdfNote: require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery, pdfFence: emailPdfFence } : {}),
             proposalMode,
             versionId: options.reviewedMessages?.email?.versionId || null,
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,

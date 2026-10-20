@@ -43,7 +43,6 @@ const ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS = Object.freeze([
   'estimate.engage_return_visit',
   'estimate.engage_return_after_dark',
   'estimate.extended',
-  'estimate.extension_notice',
 ]);
 const KEY_SET = new Set(ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS);
 const NONE = Object.freeze({ attachments: [], payload: {} });
@@ -98,9 +97,12 @@ function contentProjection(data) {
   return out;
 }
 
-function rowFingerprint(row) {
+// `omitExpiry`: the manual delivery send persists expires_at later in its own
+// flow and pins the printed date, so its fence leaves the column out.
+function rowFingerprint(row, { omitExpiry = false } = {}) {
   const pick = {};
   for (const c of FENCE_COLUMNS) {
+    if (omitExpiry && c === 'expires_at') continue;
     const v = row?.[c];
     pick[c] = v instanceof Date ? v.toISOString() : (v === undefined ? null : v);
   }
@@ -120,39 +122,54 @@ function pastExpiry(expiry, now) {
   return !!expiry && new Date(expiry).getTime() <= now.getTime();
 }
 
-// Why the row may no longer go out with a PDF, or null. Same verdicts the
-// manual sender repeats right before its handoff.
-// `expectedFingerprint` null = skip the unchanged-since-render comparison (a
-// plain "is it still sendable" read). `validThrough` is the date the document
-// advertises when it is newer than the stored row (an extension in flight);
-// `now` is the clock at the handoff.
-async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date(), recipient = null } = {}) {
-  const row = await db('estimates').where({ id: estimateId }).first();
-  if (!row) return 'estimate_missing';
-  if (recipient && !sameRecipient(row.customer_email, recipient)) return 'recipient_changed';
-  if (row.archived_at || !['sent', 'viewed'].includes(row.status)) return 'estimate_not_open';
-  if (pastExpiry(validThrough || row.expires_at, now)) return 'estimate_expired';
-  if (expectedFingerprint && rowFingerprint(row) !== expectedFingerprint) return 'estimate_changed_since_render';
-  const data = parseData(row);
-  if (data === null) return 'estimate_data_unreadable';
+// The row-state half of the fence. A first-send follow-up needs an open
+// estimate (sent / viewed) inside its expiry; the manual delivery send is
+// judged on a draft in flight, so `delivery` skips both (its own claim and
+// estimateInvalidatedJustBeforeHandoff cover state) and keeps archived.
+function rowStateBlock(row, { validThrough, now, delivery }) {
+  if (row.archived_at) return 'estimate_not_open';
+  if (delivery) return null;
+  if (!['sent', 'viewed'].includes(row.status)) return 'estimate_not_open';
+  return pastExpiry(validThrough || row.expires_at, now) ? 'estimate_expired' : null;
+}
+
+// The call-side half: invalidation markers and the call's verdict/linkage.
+async function callSideBlock(row, data) {
   const { estimateOffCustomerSurface, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
   if (estimateOffCustomerSurface({ estimate_data: data })) return 'estimate_invalidated';
   const callBlock = await callSideBlockForEstimateData(db, data, { estimateStatus: row.status });
   if (callBlock) return `call_side_${callBlock}`;
   const { staleCallLinkageReason } = require('./admin-estimate-persistence');
   const stale = await staleCallLinkageReason(db, data, { estimateStatus: row.status });
-  if (stale) return `call_linkage_${stale}`;
-  return null;
+  return stale ? `call_linkage_${stale}` : null;
+}
+
+// Why the row may no longer go out with a PDF, or null. Same verdicts the
+// manual sender repeats right before its handoff.
+// `expectedFingerprint` null = skip the unchanged-since-render comparison (a
+// plain "is it still sendable" read). `validThrough` is the date the document
+// advertises when it is newer than the stored row (an extension in flight);
+// `now` is the clock at the handoff. `delivery`: the manual delivery send.
+async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date(), recipient = null, delivery = false } = {}) {
+  const row = await db('estimates').where({ id: estimateId }).first();
+  if (!row) return 'estimate_missing';
+  if (recipient && !sameRecipient(row.customer_email, recipient)) return 'recipient_changed';
+  const stateBlock = rowStateBlock(row, { validThrough, now, delivery });
+  if (stateBlock) return stateBlock;
+  if (expectedFingerprint && rowFingerprint(row, { omitExpiry: delivery }) !== expectedFingerprint) return 'estimate_changed_since_render';
+  const data = parseData(row);
+  if (data === null) return 'estimate_data_unreadable';
+  return callSideBlock(row, data);
 }
 
 // sendOne awaits this after its own preparation, right before the request.
 // A veto is a definite non-send (providerBoundaryBlocked); a failed read is a
 // definite non-send too, tagged so the library settles it retryable.
-function pdfBoundaryCheck(estimateId, expectedFingerprint, { validThrough = null, recipient = null, clock = () => new Date() } = {}) {
+function pdfBoundaryCheck(estimateId, expectedFingerprint, { validThrough = null, recipient = null, delivery = false, clock = () => new Date() } = {}) {
   return async () => {
     let reason;
     try {
-      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, recipient, now: clock() });
+      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, recipient, delivery, now: clock() });
     } catch (err) {
       const unavailable = new Error(`estimate ${estimateId} PDF fence unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;
@@ -218,8 +235,26 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
   }
 }
 
+// The manual delivery send builds its own PDF from `freshEstimate` (the row it
+// just read). This hands it the same final fence the follow-ups have, bound to
+// that read and to the address being sent to: a correction or content change
+// between the render and the provider request vetoes the send. Returns null
+// when the address being sent to is not the row's current one (no PDF should
+// be built at all).
+function deliveryPdfFence(freshEstimate, { recipient, validThrough = null } = {}) {
+  if (!freshEstimate?.id || !sameRecipient(freshEstimate.customer_email, recipient)) return null;
+  const fingerprint = rowFingerprint(freshEstimate, { omitExpiry: true });
+  const opts = { validThrough, recipient, delivery: true };
+  return {
+    withProviderHandoff: pdfProviderHandoff(freshEstimate.id, fingerprint, opts),
+    boundaryCheck: pdfBoundaryCheck(freshEstimate.id, fingerprint, opts),
+  };
+}
+
 module.exports = {
   openEstimateEmailPdf,
+  deliveryPdfFence,
+  sameRecipient,
   ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS,
   rowFingerprint,
   handoffBlockReason,

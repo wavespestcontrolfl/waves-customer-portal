@@ -93,10 +93,14 @@ postgres('estimate email PDF note migration (PostgreSQL)', () => {
     for (const key of KEYS()) {
       const template = await admin('email_templates').where({ template_key: key }).first();
       if (!template) throw new Error(`Template ${key} is not in the migrated public schema`);
+      // Later data migrations (20261019210000 retypes the note to a paragraph)
+      // publish on top of this one, so find this migration's own version
+      // anywhere in the template's history, not only as the active one.
       let version = await admin('email_template_versions').where({ id: template.active_version_id }).first();
-      const supersedes = version.validation_snapshot?.source === MARKER ? version.validation_snapshot.supersedes_version : null;
-      if (supersedes != null) {
-        version = await admin('email_template_versions').where({ template_id: template.id, version_number: supersedes }).first();
+      const published = (await admin('email_template_versions').where({ template_id: template.id }))
+        .find((v) => v.validation_snapshot?.source === MARKER);
+      if (published) {
+        version = await admin('email_template_versions').where({ template_id: template.id, version_number: published.validation_snapshot.supersedes_version }).first();
       }
       pre[key] = { template, version };
     }

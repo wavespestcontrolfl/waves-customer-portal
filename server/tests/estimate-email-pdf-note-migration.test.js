@@ -20,9 +20,11 @@ describe('estimate email PDF note migration plan', () => {
     expect(migration._private.insertPdfNote([{ type: 'paragraph', content: 'z' }]).at(-1)).toEqual(NOTE);
   });
 
-  test('plans cover the delivery template and every sender allowlist key, and widen only the new variable', () => {
+  test('plans cover the delivery template, the auto-renew notice and every sender allowlist key, and widen only the new variable', () => {
     const planKeys = migration._private.PLANS.map((p) => p.key).sort();
-    expect(planKeys).toEqual(['estimate.delivery', ...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS].sort());
+    // The frozen migration also covers estimate.extension_notice, which the senders no
+    // longer attach a PDF to (auto-renew carries none); its note block renders blank.
+    expect(planKeys).toEqual(['estimate.delivery', 'estimate.extension_notice', ...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS].sort());
     for (const plan of migration._private.PLANS) {
       expect(plan.variables).toEqual(['estimate_pdf_note']);
       expect(Object.keys(plan.fixture)).toEqual(['estimate_pdf_note']);

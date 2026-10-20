@@ -142,12 +142,14 @@ describe('the provider-boundary fence on a PDF-bearing send', () => {
     await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
   });
 
-  test('every caller that attaches the PDF passes the handoff to sendTemplate', () => {
+  test('every caller that attaches the PDF passes the handoff to sendTemplate; auto-renew carries no PDF at all', () => {
     const root = path.join(__dirname, '..', 'services');
-    for (const file of ['estimate-follow-up.js', 'estimate-extension.js', 'estimate-auto-renew.js']) {
+    for (const file of ['estimate-follow-up.js', 'estimate-extension.js']) {
       const src = fs.readFileSync(path.join(root, file), 'utf8');
       expect(src).toMatch(/attachments: pdfCopy\.attachments, withProviderHandoff: pdfCopy\.withProviderHandoff/);
     }
+    const renew = fs.readFileSync(path.join(root, 'estimate-auto-renew.js'), 'utf8');
+    expect(renew).not.toMatch(/estimate-email-pdf|pdfCopy|attachments/);
   });
 });
 
@@ -242,6 +244,57 @@ describe('the expiry check at the fence (codex #6343 r2)', () => {
     const check = await fence({ validThrough: new Date('2026-10-26T12:00:00Z') }, [stored, stored]);
     jest.setSystemTime(new Date('2026-10-19T12:05:00Z'));
     await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+});
+
+describe('deliveryPdfFence: the manual delivery send (codex #6343 r4)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+  });
+  const draft = (extra = {}) => row({ status: 'sending', expires_at: new Date('2020-01-01T00:00:00Z'), ...extra });
+  const fenceFor = (fresh, recipient = 'lead@example.com') => emailPdf.deliveryPdfFence(fresh, { recipient });
+  const run = async (fence) => { let c; await fence.withProviderHandoff(async (_d, b) => { c = b; }); return c({ database: db }); };
+
+  test('no fence (so no PDF) when the address being sent to is not the row\'s current one', () => {
+    expect(fenceFor(draft(), 'old@example.com')).toBeNull();
+    expect(fenceFor(draft({ customer_email: null }))).toBeNull();
+    expect(fenceFor(null)).toBeNull();
+    expect(fenceFor(draft(), ' LEAD@example.com ')).not.toBeNull();
+  });
+
+  test('a draft in flight passes: status and the persisted expiry are not part of this fence', async () => {
+    const fresh = draft();
+    readsRow(draft({ status: 'sending', expires_at: new Date('2099-01-01T00:00:00Z') }));
+    await expect(run(fenceFor(fresh))).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['an address correction', { customer_email: 'corrected@example.com' }, 'recipient_changed'],
+    ['a price edit', { monthly_total: 99 }, 'estimate_changed_since_render'],
+    ['a content edit', { estimate_data: { proposal: { terms: 'new' }, lead_id: 'lead-1', lead_linkage: 'sid', estimatorEngine: { callLogId: 'call-1' } } }, 'estimate_changed_since_render'],
+    ['an archive', { archived_at: new Date() }, 'estimate_not_open'],
+  ])('%s vetoes the handoff', async (_label, change, reason) => {
+    readsRow(draft(change));
+    await expect(run(fenceFor(draft()))).rejects.toMatchObject({ providerBoundaryBlocked: true, reason });
+  });
+
+  test('an invalidation or call-side block vetoes it', async () => {
+    readsRow(draft());
+    claimSql.estimateOffCustomerSurface.mockReturnValue(true);
+    await expect(run(fenceFor(draft()))).rejects.toMatchObject({ reason: 'estimate_invalidated' });
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue('call_draft_block');
+    await expect(run(fenceFor(draft()))).rejects.toMatchObject({ reason: 'call_side_call_draft_block' });
+  });
+
+  test('a read failure is tagged retryable, not a pass', async () => {
+    const fence = fenceFor(draft());
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(run(fence)).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
   });
 });
 
