@@ -242,7 +242,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       const customerId = await customer();
       const from = dayPlus(4);
       const target = dayPlus(2);
-      const moving = await visit(customerId, from, { estimated_duration_minutes: 90, service_type: 'Lawn Care' });
+      const moving = await visit(customerId, from, { estimated_duration_minutes: null, window_start: '09:00', window_end: '10:30', service_type: 'Lawn Care' }); // length from the stored window (Codex #6350 r12)
       await call(customerId);
       const dispatch = answering(agreement({ kind: 'move', from_day: from, daypart: 'morning' }));
       const findSlots = jest.fn(async () => ({ slots: [slot(target, '09:00')] }));

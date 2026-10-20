@@ -45,10 +45,10 @@ const { loadBookableCallServices, isGenericCallCatalogRow } = require('./call-bo
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { scrubPans } = require('../utils/pan-scrub');
-const { etDateString, etParts, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays, parseETDateTime, windowDurationMinutes } = require('../utils/datetime-et');
 const prompts = require('./prompts/day-agreement-v1');
 const rules = require('./day-agreement-rules');
-const { refreshCustomerBookingWindowConfig, currentDayEndMinutes } = require('./scheduling/customer-windows');
+const { refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown } = require('./scheduling/customer-windows');
 
 const HOUR_MS = 3600 * 1000;
 const RECENT_MS = 3 * HOUR_MS;
@@ -344,7 +344,7 @@ async function visitFacts(conn, customerId, days) {
   return conn('scheduled_services')
     .where('customer_id', customerId)
     .whereIn('scheduled_date', wanted)
-    .select('id', 'status', 'created_at', 'updated_at', 'estimated_duration_minutes', 'service_type', 'lat', 'lng',
+    .select('id', 'status', 'created_at', 'updated_at', 'estimated_duration_minutes', 'window_start', 'window_end', 'service_type', 'lat', 'lng',
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS d"));
 }
 
@@ -416,7 +416,8 @@ function resolveNewVisitService(catalog, serviceText) {
 // Name and length of the visit the picker is asked about: the moved visit's own
 // service and length, or the resolved catalog service and its default length.
 function visitIdentity({ fromVisit, service }) {
-  if (fromVisit) return { name: fromVisit.service_type || null, minutes: Number(fromVisit.estimated_duration_minutes) || 60 };
+  // A move keeps its stored window length, as the reschedule path derives it (Codex #6350 r12).
+  if (fromVisit) return { name: fromVisit.service_type || null, minutes: windowDurationMinutes(fromVisit.window_start, fromVisit.window_end, fromVisit.estimated_duration_minutes) || 60 };
   return { name: service?.name || null, minutes: Number(service?.default_duration_minutes) || 60 };
 }
 
@@ -436,7 +437,9 @@ async function pickSlot(conn, {
   // The customer day end (booking_config.day_end, 18:00 unless reconfigured), as
   // /book and the estimate picker pass it: find-time's own default close is 17:00,
   // which would drop every 17:00 start in legacy mode.
+  // An unread booking_config is no close to guess: the source is retried (Codex #6350 r12).
   await refreshCustomerBookingWindowConfig(conn);
+  if (!bookingWindowConfigKnown()) throw Object.assign(new Error('booking_config_unknown'), { code: 'booking_config_unknown' });
   const result = await findSlots({
     lat: where.lat, lng: where.lng,
     durationMinutes: identity.minutes,
@@ -447,6 +450,8 @@ async function pickSlot(conn, {
     // applies it in capacity mode); the agent will confirm the window to the customer.
     customerFacing: true,
     dayEndHour: currentDayEndMinutes() / 60,
+    // An unreadable closure calendar throws (retryable) instead of failing open (Codex #6350 r12).
+    strictBlackout: true,
     excludeServiceIds: fromVisit ? [fromVisit.id] : [],
   });
   const offered = result && !result.error && Array.isArray(result.slots) ? result.slots : [];
@@ -648,6 +653,7 @@ module.exports = {
     validateAnswer,
     judge,
     pickSlot,
+    visitIdentity,
     resolveNewVisitService,
     hasSeveralProperties,
     dropCollidingSlots,

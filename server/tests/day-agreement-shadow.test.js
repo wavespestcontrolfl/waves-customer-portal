@@ -11,6 +11,12 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+// The unit fakes cannot load booking_config; treat it as read (the unread case is its own test).
+jest.mock('../services/scheduling/customer-windows', () => ({
+  ...jest.requireActual('../services/scheduling/customer-windows'),
+  refreshCustomerBookingWindowConfig: jest.fn(async () => {}),
+  bookingWindowConfigKnown: jest.fn(() => true),
+}));
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockAnthropicCreate(...args) },
@@ -389,6 +395,21 @@ describe('the collision guard on offered slots', () => {
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
     await internals.pickSlot(conn, { ...args, fromVisit: null, service: SERVICE }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
+  });
+
+  test('an unread booking_config throws (retryable), and strict closure reads are asked for (Codex #6350 r12)', async () => {
+    const windows = require('../services/scheduling/customer-windows');
+    const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
+    const findSlots = jest.fn(async () => ({ slots: [] }));
+    windows.bookingWindowConfigKnown.mockReturnValueOnce(false);
+    await expect(internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: SERVICE }, { findSlots })).rejects.toMatchObject({ code: 'booking_config_unknown' });
+    expect(findSlots).not.toHaveBeenCalled();
+    await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: SERVICE }, { findSlots });
+    expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ strictBlackout: true }));
+  });
+
+  test('a move keeps its stored window length when no duration is set (Codex #6350 r12)', () => {
+    expect(internals.visitIdentity({ fromVisit: { service_type: 'Lawn Care', window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: null } }).minutes).toBe(90);
   });
 
   test('pickSlot passes the configured customer day end (18:00 by default), so a 17:00 start is possible in legacy mode', async () => {
