@@ -202,6 +202,29 @@ describe('PUT /contact-preferences', () => {
     expect(tables.recipient_optin[0].status).toBe('confirmed');
   });
 
+  test('only a save that OPENS a text path needs the attestation: email-only delivery, a holder-off purpose, and a no-op re-enable do not (codex r1)', async () => {
+    // Email-only delivery for a purpose the contact had off: no text path opens.
+    tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', tech_en_route: false, en_route_channel: 'email' });
+    expect((await put({ techEnRoute: true })).status).toBe(200);
+    expect(tables.service_contact_notification_prefs[0].tech_en_route).toBe(true);
+    // A purpose the holder turned off account-wide (serviceReminder72h): never a text path.
+    tables.service_contact_notification_prefs[0].service_reminder_72h = false;
+    expect((await put({ serviceReminder72h: true })).status).toBe(200);
+    // Texts switched off on the row: turning a purpose on opens nothing yet…
+    tables.service_contact_notification_prefs[0].sms_enabled = false;
+    tables.service_contact_notification_prefs[0].tech_arrived = false;
+    expect((await put({ techArrived: true })).status).toBe(200);
+    // …but switching texts back on, with a purpose now live, does.
+    const opened = await put({ smsEnabled: true });
+    expect(opened.status).toBe(400);
+    expect(opened.body.code).toBe('CONSENT_REQUIRED');
+    // Moving a live purpose from email-only to Text opens a path too.
+    tables.service_contact_notification_prefs[0].sms_enabled = true;
+    const toText = await put({ enRouteChannel: 'sms' });
+    expect(toText.status).toBe(400);
+    expect(toText.body.code).toBe('CONSENT_REQUIRED');
+  });
+
   test('a later enable needs no second attestation once one is on file', async () => {
     tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', tech_en_route: false, consent_attested_at: new Date('2026-10-19') });
     const res = await put({ techEnRoute: true });

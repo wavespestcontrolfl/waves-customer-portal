@@ -157,6 +157,21 @@ async function declinedEmailSlotRoles(customer, eventType, { dbh = db } = {}) {
   return declined;
 }
 
+// Does `patch` OPEN a text path for this contact that was closed before —
+// a purpose that will now text them (holder has it on, contact has it on,
+// delivery is text-capable, texts not switched off)? That, and only that,
+// needs the contact's own text consent. An email-only delivery, a purpose
+// the holder turned off account-wide, or a change that leaves every text
+// path as it was never does (codex round 1 on #6363).
+function textPathsOpened(accountRow, existingRow, patch = {}) {
+  const account = accountRow || {};
+  const before = existingRow || {};
+  const after = { ...before, ...patch };
+  const textPath = (row, col) => account[col] !== false && row[col] !== false && row.sms_enabled !== false
+    && [null, undefined, 'both', 'sms'].includes(row[CHANNEL_COLUMN_FOR[col]]);
+  return CONTACT_PREF_TOGGLES.some((col) => textPath(after, col) && !textPath(before, col));
+}
+
 // Service-report EMAIL recipients (customer-contact.js
 // getServiceReportEmailRecipients) carry the SLOT role, and a slot's email
 // may travel without its phone — so the row is found through the slot's
@@ -221,6 +236,7 @@ module.exports = {
   loadContactPrefRows,
   getContactPrefRow,
   filterContactsByOwnPrefs,
+  textPathsOpened,
   declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
   pruneContactNotificationPrefs,

@@ -801,11 +801,15 @@ router.put('/contact-preferences', async (req, res, next) => {
     }
     // Turning texts on (any text-capable choice) requires the attestation
     // when none is on file yet — the same consent rail as the holder's save.
-    const enablesTexts = updates.smsEnabled === true
-      || Object.values(CONTACT_PREF_KEY_BY_COLUMN).some((key) => updates[key] === true)
-      || Object.values(CONTACT_CHANNEL_KEY_BY_COLUMN).some((key) => ['sms', 'both'].includes(updates[key]));
+    // Only a save that OPENS a text path (a purpose that will now text this
+    // contact) needs the attestation; email-only choices and purposes the
+    // holder turned off never do.
     const ContactPrefs = require('../services/contact-notification-prefs');
-    const existing = await ContactPrefs.getContactPrefRow(req.customerId, contact.phone);
+    const [existing, accountRow] = await Promise.all([
+      ContactPrefs.getContactPrefRow(req.customerId, contact.phone),
+      db('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null),
+    ]);
+    const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
     if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) {
       return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });
     }
