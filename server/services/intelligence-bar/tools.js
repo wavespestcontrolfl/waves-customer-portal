@@ -369,7 +369,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
+    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason (the bar can\'t cancel a visit with an invoice, credit or linked visit yet) and do not send the operator to another screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -3329,7 +3329,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
-  if (booking.error) return { error: booking.error };
+  if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
@@ -3522,7 +3522,7 @@ async function createAppointment(input, actionContext = {}) {
   // never carries a price the operator did not approve. A call with no pins
   // (never proposed through a card) may only book unpriced.
   const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
-  if (booking.error) return { error: booking.error };
+  if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   // A close or colloquial name books as the exact catalog name it resolved to.
   service_type = bookedServiceTypeFor(booking, service_type);
   // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
@@ -4021,7 +4021,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
     if (collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr) {
       return {
         error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move, and the bar can\'t move a series from here yet. Nothing was changed.',
-        code: 'COLLECTIVE_MOVE_REQUIRED',
+        code: 'collective_move_unsupported',
       };
     }
   }

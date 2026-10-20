@@ -22,7 +22,7 @@ const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-r
 const SCHEDULE_TOOLS = [
   {
     name: 'switch_appointment_property',
-    description: 'Change only this scheduled visit (including its grouped service lines) to an active saved property on the same customer. Use get_customer_detail to resolve the property ID first. Preserves the primary customer address and future recurring visits. En-route visits are allowed; external navigation may need manual refresh. Call once to prepare the confirmation card; never ask permission to prepare it. Recurrence templates require the Dispatch editor.',
+    description: 'Change only this scheduled visit (including its grouped service lines) to an active saved property on the same customer. Use get_customer_detail to resolve the property ID first. Preserves the primary customer address and future recurring visits. En-route visits are allowed; external navigation may need manual refresh. Call once to prepare the confirmation card; never ask permission to prepare it. The bar can\'t change recurrence templates from here yet.',
     _sideEffects: true,
     input_schema: {
       type: 'object',

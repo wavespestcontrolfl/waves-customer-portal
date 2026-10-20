@@ -1661,7 +1661,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (pin.is_recurring
         && params.new_date && String(params.new_date) !== String(pin.scheduled_date)
         && require('../services/rebooker').collectiveMoveGateOn()) {
-        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'COLLECTIVE_MOVE_REQUIRED' } };
+        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'collective_move_unsupported' } };
       }
       if (pin.visit_id) {
         const VisitGroups = require('../services/visit-groups');

@@ -44,6 +44,13 @@ const NAMED_SCREEN_RE = /\bfrom (?:Dispatch|Billing Recovery|Communications|the 
 const BY_OWNER_RULE_TEXT = "by the owner's rule";
 const REFUSAL_CONTEXT_ONLY = new Set(['routes/admin-intelligence-bar.js', 'customer-lifecycle-tools.js', 'billing-mode-change.js', 'comms-tools.js', 'review-tools.js', 'billing-reader-tools.js', 'ops-tools.js']);
 
+const PLACE = String.raw`(?:screen|page|Dispatch|queue|modal|editor|dashboard|composer)`;
+const DESCRIPTION_REDIRECT_RE = new RegExp(
+  String.raw`\b(?:send|do|book|move|cancel|change|accept|mark|resolve|bill|post|text|fix|handle|finish|open|use|go|point|refer|direct|require)\b[^.;]{0,50}?\b(?:from|on|in|at|to|via|through|requires?) (?:the |another |a )?[\w'" -]{0,30}?\b${PLACE}\b`
+  + String.raw`|\brequires? (?:the )?[\w' -]{0,20}?\b${PLACE}\b|\bcheck (?:it |them )?(?:on |in )?the [\w' -]{0,30}?\b(?:page|screen)\b`, 'i');
+// "do not send the operator to the Invoices page" names a screen to forbid it.
+const NEGATED_REDIRECT = /\b(?:do not|don't|never|not)\b[^.;]{0,30}\b(?:send|point|tell|direct|refer)\b[^.;]{0,60}/gi;
+
 // Facts about a page the customer sees or a card, not a place the operator is
 // sent to. Each is matched as a substring of the string.
 const NOT_A_REFUSAL = [
@@ -59,23 +66,22 @@ function stringsOf(file) {
   // them only a string inside a refusal counts: an `error` / `refused` property,
   // the argument of refuse() / refusal(), or a *_REFUSAL / *_MESSAGE constant.
   const refusalOnly = REFUSAL_CONTEXT_ONLY.has(file);
-  const walk = (node, parent, inRefusal = false) => {
+  const walk = (node, parent, inRefusal = false, inDescription = false) => {
     if (!node || typeof node.type !== 'string') return;
     let here = inRefusal;
+    const describing = inDescription || (node.type === 'Property' && node.key && (node.key.name === 'description' || node.key.value === 'description'));
     if (node.type === 'Property' && node.key && ['error', 'refused'].includes(node.key.name || node.key.value)) here = true;
     if (node.type === 'CallExpression' && node.callee && ['refuse', 'refusal'].includes(node.callee.name)) here = true;
     if (node.type === 'VariableDeclarator' && node.id && /(REFUSAL|MESSAGE)$/.test(node.id.name || '')) here = true;
     let text = null;
     if (node.type === 'Literal' && typeof node.value === 'string') text = node.value;
     if (node.type === 'TemplateLiteral') text = node.quasis.map((q) => q.value.cooked).join('${}');
-    const isDescription = parent && parent.type === 'Property' && parent.key
-      && (parent.key.name === 'description' || parent.key.value === 'description');
-    if (text !== null && !isDescription && (here || !refusalOnly)) found.push({ text, line: node.loc.start.line });
+    if (text !== null && (describing || here || !refusalOnly)) found.push({ text, line: node.loc.start.line, description: describing });
     for (const key of Object.keys(node)) {
       if (key === 'loc') continue;
       const value = node[key];
-      if (Array.isArray(value)) value.forEach((child) => walk(child, node, here));
-      else if (value && typeof value.type === 'string') walk(value, node, here);
+      if (Array.isArray(value)) value.forEach((child) => walk(child, node, here, describing));
+      else if (value && typeof value.type === 'string') walk(value, node, here, describing);
     }
   };
   walk(ast, null);
@@ -85,11 +91,37 @@ function stringsOf(file) {
 describe('refusal wording: no tool refusal sends the operator to another screen as the answer', () => {
   test.each(FILES)('%s: every string that points to a screen says the bar cannot, or cites the owner rule', (file) => {
     const offenders = stringsOf(file)
+      .filter(({ description }) => !description)
       .filter(({ text }) => OTHER_SCREEN_RE.test(text) || NAMED_SCREEN_RE.test(text))
       .filter(({ text }) => !NOT_A_REFUSAL.some((fact) => text.includes(fact)))
       .filter(({ text }) => !BAR_DECLINE_RE.test(text) && !text.toLowerCase().includes(BY_OWNER_RULE_TEXT))
       .map(({ text, line }) => `${file}:${line} ${text.slice(0, 120)}`);
     expect(offenders).toEqual([]);
+  });
+
+  // A tool description is model-visible. It may NAME a screen as a fact ("as the
+  // Invoices page Send does"), but it must not tell the model to send the
+  // operator there: say what the bar cannot do yet, or cite the owner's rule.
+  test.each(FILES)('%s: no tool description tells the model to send the operator to a screen', (file) => {
+    const offenders = stringsOf(file)
+      .filter(({ description }) => description)
+      .flatMap(({ text, line }) => text.replace(NEGATED_REDIRECT, ' ').split(/(?<=[.;])\s+/)
+        .filter((sentence) => DESCRIPTION_REDIRECT_RE.test(sentence) && !sentence.toLowerCase().includes(BY_OWNER_RULE_TEXT))
+        .map((sentence) => `${file}:${line} ${sentence.slice(0, 140)}`));
+    expect(offenders).toEqual([]);
+  });
+
+  test('the description check catches the old redirect wording', () => {
+    for (const old of [
+      'When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say',
+      'no usable phone (send it from the Invoices page), a customer whose invoices',
+      'a billing change the bar never makes — do that from the Customers page.',
+      'and "needs reconciliation — check the Invoices page" when a charge state is unresolved',
+      'Recurrence templates require the Dispatch editor.',
+    ]) {
+      expect(DESCRIPTION_REDIRECT_RE.test(old.replace(NEGATED_REDIRECT, ' '))).toBe(true);
+    }
+    expect(DESCRIPTION_REDIRECT_RE.test('use resend_receipt (it shows a card; do not send the operator to the Invoices page)'.replace(NEGATED_REDIRECT, ' '))).toBe(false);
   });
 
   test('a refusal the owner ruled stays on its screen carries by_owner_rule, which the gap list skips', () => {
@@ -128,6 +160,12 @@ describe('refusal wording: the gap reporter records a "the bar cannot" refusal',
     expect(recordableRefusalCode(result)).toBeNull();
   });
 
+  test('a switched-off capability (gate_off) adds no build work, even in decline wording', () => {
+    const result = { error: "Merging customers from the bar is not enabled (GATE_IB_MERGE_CUSTOMERS), so the bar can't merge customers from here yet.", code: 'gate_off' };
+    expect(BAR_DECLINE_RE.test(result.error)).toBe(true);
+    expect(recordableRefusalCode(result)).toBeNull();
+  });
+
   test('codes that were never gap rows stay unrecorded after the text rule', () => {
     const result = { error: "The bar can't rerun these from here.", code: 'no_rerunnable_checks' };
     expect(recordableRefusalCode(result)).toBeNull();
@@ -141,6 +179,9 @@ describe('refusal wording: rewritten refusals carry a stable snake_case code', (
     ['schedule-tools.js', "code: 'package_visit_two_linked'", 3],
     ['tools.js', "code: 'package_visit_two_linked'", 1],
     ['tools.js', "code: 'cancel_with_effects_unsupported'", 2],
+    ['tools.js', "code: 'collective_move_unsupported'", 1],
+    ['routes/admin-intelligence-bar.js', "code: 'collective_move_unsupported'", 1],
+    ['tools.js', 'booking.code', 4],
     ['tools.js', "code: 'addon_by_name_unsupported'", 1],
     ['routes/admin-intelligence-bar.js', "code: 'cancel_with_effects_unsupported'", 3],
     ['reprice-visits-tools.js', "code: 'free_visit_unsupported'", 1],

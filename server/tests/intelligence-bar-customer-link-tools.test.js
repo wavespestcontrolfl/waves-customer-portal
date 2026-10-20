@@ -72,7 +72,7 @@ describe('tool definitions', () => {
     expect(byName.send_autopay_setup_link._sideEffects).toBe(true);
     // No link-only mode from the bar: sms or email, and the description says where a link-only link lives.
     expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email']);
-    expect(byName.send_autopay_setup_link.description).toMatch(/link-only Auto Pay link .* stays on the Customers page/);
+    expect(byName.send_autopay_setup_link.description).toMatch(/can't make a link-only Auto Pay link .* from here yet/);
     expect(byName.send_autopay_setup_link.description).toMatch(/saved card .* billing change/);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).toEqual([
       'reschedule', 'reservice', 'pay_balance', 'estimate', 'referral', 'consultation', 'appointment',

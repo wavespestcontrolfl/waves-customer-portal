@@ -438,6 +438,15 @@ describe('the Intelligence Bar never books an area add-on by name', () => {
     }
   });
 
+  test('the booking proposal keeps the pricer\'s refusal code, so the gap list and Tool Health see it', async () => {
+    const db = require('../models/db');
+    db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: async () => ({ id: 'c-1' }) }) } : conn()));
+    const { ibBookingProposal } = require('../services/intelligence-bar/tools');
+    const out = await ibBookingProposal('c-1', 'Fire Ant Yard Treatment', undefined, undefined, undefined);
+    expect(out).toMatchObject({ code: 'addon_by_name_unsupported', error: expect.stringContaining('can\'t book it by name from here yet') });
+    db.mockReset();
+  });
+
   test('every booking path of the bar asks that pricer', () => {
     expect(src.split('await ibBookingPricing(').length - 1).toBeGreaterThanOrEqual(4);
     const fn = src.slice(src.indexOf('async function ibBookingPricing('));

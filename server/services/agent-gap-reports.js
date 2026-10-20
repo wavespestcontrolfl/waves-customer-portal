@@ -56,7 +56,7 @@ const BY_DESIGN_REFUSAL_CODES = new Set([
 // never gap rows (a switch that is off, a provider-side limit, a gate flip that
 // is the owner's). Skipped by the text rule below so it adds no new build work.
 const UNRECORDED_DECLINE_CODES = new Set([
-  'autopay_off_not_enabled', 'no_rerunnable_checks',
+  'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks',
 ]);
 // A tool's own refusal that sends the operator to another screen. Only used to
 // classify; the text itself is never stored (it can hold customer data).
