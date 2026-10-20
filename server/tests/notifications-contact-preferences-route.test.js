@@ -238,6 +238,16 @@ describe('PUT /contact-preferences', () => {
     expect(res.body.preferences.techEnRoute).toBe(true);
   });
 
+  test('text-only delivery of the service report is refused while the contact report text is off (codex r9)', async () => {
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    const res = await put({ serviceCompleteChannel: 'sms' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('REPORT_TEXT_UNAVAILABLE');
+    expect(tables.service_contact_notification_prefs).toEqual([]);
+    // Text + email (whatever the account sends) stays available.
+    expect((await put({ serviceCompleteChannel: 'both' })).status).toBe(200);
+  });
+
   test('email-only delivery needs an address on file for this contact', async () => {
     mockSession.current.contactSession = TERRY;
     const res = await put({ enRouteChannel: 'email' });

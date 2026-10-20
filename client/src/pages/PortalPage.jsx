@@ -4439,7 +4439,9 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
 // otherwise); that attestation also stands in for the YES reply on a pending
 // opt-in text (owner 2026-10-20).
 const CONTACT_PREF_ROWS = [
-  { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'Appointment updates', desc: 'Bookings, changes and cancellations', icon: 'calendar' },
+  // Cancellation notices carry no per-purpose switch (for the holder or a
+  // contact), so this row promises only what it controls (codex #6363 r9).
+  { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'Appointment updates', desc: 'Bookings and schedule changes', icon: 'calendar' },
   { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '3-day reminder', desc: 'A reminder three days before the visit', icon: 'clock' },
   { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: 'Day-before reminder', desc: 'A reminder the day before the visit', icon: 'bell' },
   { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'On the way', desc: 'Live technician tracking', icon: 'truck' },
@@ -4578,6 +4580,12 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
   // nothing here may read as texts switched back on (codex #6363 r3 P2).
   const stopped = data.smsOptin === 'declined';
   const channelOptions = data.emailAvailable ? CONTACT_CHANNEL_OPTIONS : CONTACT_CHANNEL_OPTIONS.filter((o) => o.value !== 'email');
+  // The service report reaches a contact by text only while the contact
+  // report text is on (server: contactReportTexts); otherwise "Text" would
+  // just hold the email (codex #6363 r9 P2).
+  const optionsFor = (row) => (row.key === 'serviceCompleted' && data.contactReportTexts !== true
+    ? channelOptions.filter((o) => o.value !== 'sms')
+    : channelOptions);
   return (
     <section data-glass="card" style={{ ...card, overflow: 'hidden' }} data-testid="contact-notification-card">
       <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
@@ -4629,7 +4637,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
                   disabled={holderOff || !isOn || busy}
                   aria-label={`Delivery method for ${p.label}`}
                 >
-                  {channelOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {optionsFor(p).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </CustomerSelect>
                 <GoldSwitch on={isOn} disabled={holderOff || busy} onChange={() => save({ [p.key]: !isOn })} label={p.label} />
               </div>

@@ -54,6 +54,7 @@ const contactPrefs = () => ({
   accountOff: { appointmentConfirmation: false, serviceReminder72h: true, serviceReminder24h: false, techEnRoute: false, techArrived: false, serviceCompleted: false },
   emailAvailable: true,
   reportsWithheld: false,
+  contactReportTexts: false,
   consentAttestedAt: null,
   smsOptin: 'pending',
 });
@@ -187,6 +188,19 @@ describe('ContactNotificationCard', () => {
     fireEvent.click(screen.getByRole('switch', { name: 'Technician arrival' }));
     await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenLastCalledWith({ techArrived: true }));
     expect(alerts.showCustomerAlert).not.toHaveBeenCalled();
+  });
+
+  it('the Service reports row offers Text only while the contact report text is on (codex r9)', async () => {
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    const options = (name) => [...screen.getByRole('combobox', { name }).querySelectorAll('option')].map((o) => o.value);
+    expect(options('Delivery method for Service reports')).toEqual(['both', 'email']);
+    expect(options('Delivery method for On the way')).toEqual(['both', 'sms', 'email']);
+    cleanup();
+    api.getContactNotificationPrefs.mockResolvedValue({ ...contactPrefs(), contactReportTexts: true });
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    expect(options('Delivery method for Service reports')).toEqual(['both', 'sms', 'email']);
   });
 
   it('a failed attestation un-ticks the statement and says so', async () => {

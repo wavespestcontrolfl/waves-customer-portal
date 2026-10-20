@@ -22309,11 +22309,19 @@ const CallRecordingProcessor = {
                   // this from the Step 5 gate, and this is a TEXT TO A
                   // CUSTOMER. Re-check immediately before it (codex P1).
                   if (!(await claimStillOwned())) return false;
-                  const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
+                  // A confirmation redirected to the calling CONTACT's own
+                  // number (not the account's phone) follows that contact's
+                  // own choices (contact login, GATE_CONTACT_LOGIN): texts or
+                  // appointment updates off holds it, exactly as the fan-out
+                  // below is narrowed (codex #6363 r9 P2). Fail closed.
+                  const contactDeclined = String(smsRecipient || '').replace(/\D/g, '').slice(-10) !== String(smsPhone || '').replace(/\D/g, '').slice(-10)
+                    && (await require('./contact-notification-prefs')
+                      .filterContactsByOwnPrefs([{ phone: smsRecipient, role: 'service_contact' }], customerId, 'appointment_confirmation', { channel: 'sms' })).length === 0;
+                  const sendResult = (holdImpliedSmsLeg || v2SmsBlocked || contactDeclined)
                     ? {
                       sent: false,
                       blocked: true,
-                      code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : 'v2_tcpa_gate',
+                      code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : (v2SmsBlocked ? 'v2_tcpa_gate' : 'contact_declined'),
                     }
                     : await sendCustomerMessage({
                       to: smsRecipient,

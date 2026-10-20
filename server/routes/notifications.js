@@ -802,6 +802,12 @@ router.put('/contact-preferences', async (req, res, next) => {
         if (patch[col] === 'email') return res.status(400).json({ error: 'Add an email address with the account holder before choosing email delivery.' });
       }
     }
+    // Text-only delivery of the service report needs the contact report text
+    // (GATE_CONTACT_REPORT_TEXT) to exist — otherwise "text" would only hold
+    // the email, and no report would reach them (codex #6363 r9 P2).
+    if (patch.service_complete_channel === 'sms' && !contactReportTextsOn()) {
+      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
+    }
     // Turning texts on (any text-capable choice) requires the attestation
     // when none is on file yet — the same consent rail as the holder's save.
     // Only a save that OPENS a text path (a purpose that will now text this

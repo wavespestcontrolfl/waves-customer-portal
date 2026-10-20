@@ -237,15 +237,22 @@ async function rerouteForContactEmailOptOut(customerId, email, { dbh = db } = {}
   // mail a contact whose switch may be off.
   const customer = await dbh('customers').where({ id: customerId }).first();
   if (!customer) return { email, rerouted: false };
-  const slotEmail = String(customer.service_contact_email || '').trim().toLowerCase();
-  if (!slotEmail || slotEmail !== current) return { email, rerouted: false };
-  const declines = await contactDeclinesChannel(customer.id, { phone: customer.service_contact_phone, role: 'service_contact' }, 'email', { dbh });
-  if (!declines) return { email, rerouted: false };
-  const holderCandidate = String(customer.email || '').trim().toLowerCase();
-  const holderEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(holderCandidate) ? holderCandidate : null;
-  if (holderEmail === current) return { email, rerouted: false };
-  logger.info(`[contact-prefs] slot-1 contact declined email on ${customer.id} — ${holderEmail ? 'rerouting to the account holder' : 'holding (no holder email)'}`);
-  return { email: holderEmail, rerouted: true };
+  const addr = (v) => String(v || '').trim().toLowerCase();
+  // A customer-recipient run is addressed from the row itself: the holder's
+  // address or the slot-1 contact's (project-email.js
+  // resolveProjectEmailRecipient). The holder's own address, and another
+  // slot's, pass through. Anything else is slot 1's — the address it has
+  // NOW, or one the holder has since replaced — so the recipient is
+  // re-resolved from the current row with the contact's switch applied
+  // (codex #6363 r9 P1): the contact's current address, the holder when the
+  // switch is off, or nothing when the holder has none.
+  if (current === addr(customer.email)) return { email, rerouted: false };
+  if ([customer.service_contact2_email, customer.service_contact3_email].map(addr).includes(current)) return { email, rerouted: false };
+  const target = await require('./project-email').resolveProjectEmailRecipientForSend(customer);
+  const targetEmail = addr(target.email) || null;
+  if (targetEmail === current) return { email, rerouted: false };
+  logger.info(`[contact-prefs] queued contact email on ${customer.id} re-resolved — ${targetEmail ? `now ${target.role}` : 'holding (no address)'}`);
+  return { email: targetEmail, rerouted: true };
 }
 
 // The holder's contact save rewrote the slots: drop the rows of phones that

@@ -329,6 +329,31 @@ async function createRefreshSession(customerId, accountId = null, { contactKey =
   });
 }
 
+// A CONTACT family (GATE_CONTACT_LOGIN) stays bound to the phone it was
+// minted for. It rotates only while the gate is on, the row is ACTIVE (no
+// cancelled allowance: a churned account's contacts have nothing to see) and
+// the number still occupies a contact slot; a profile switch is never a
+// contact's to make. The number gone from the row (or the row inactive) ends
+// the FAMILY, not just this exchange — a later re-add of the same phone must
+// not revive it (codex #6363 r6 P2); a gate flip only refuses, so sessions
+// survive it. Returns the refusal, or null when the rotation may proceed.
+async function contactRotationRefusal(trx, customer, decoded, options) {
+  const refused = { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+  if (!contactLoginLive()) return refused;
+  if (customer.active !== true || !contactSessionFor(customer, decoded.contactKey)) {
+    if (decoded.familyId) {
+      const now = new Date();
+      await trx(REFRESH_TABLE)
+        .where({ family_id: decoded.familyId })
+        .whereNull('revoked_at')
+        .update({ revoked_at: now, revoke_reason: 'contact_removed', updated_at: now });
+    }
+    return refused;
+  }
+  if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) return refused;
+  return null;
+}
+
 /**
  * Atomically consume a refresh token and replace it inside the same family.
  * Reusing any consumed token revokes every descendant in that family.
@@ -368,33 +393,10 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
 
-    // Contact session (GATE_CONTACT_LOGIN): the family stays bound to the
-    // phone it was minted for. It rotates only while the gate is on, the
-    // row is ACTIVE (no cancelled allowance: a churned account's contacts
-    // have nothing to see) and the number still occupies a contact slot —
-    // the holder removing the contact ends the session here. A profile
-    // switch is never a contact's to make.
+    // Contact session (GATE_CONTACT_LOGIN): may this contact family rotate?
     const contactKey = decoded.contactKey || null;
-    if (contactKey) {
-      if (!contactLoginLive()) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-      if (customer.active !== true || !contactSessionFor(customer, contactKey)) {
-        // The number is gone from the row (or the row is inactive): the
-        // family ends here, not just this exchange — a later re-add of the
-        // same phone must not revive it (codex #6363 r6 P2). A gate flip is
-        // not that: it only refuses, so the sessions survive it.
-        if (decoded.familyId) {
-          const now = new Date();
-          await trx(REFRESH_TABLE)
-            .where({ family_id: decoded.familyId })
-            .whereNull('revoked_at')
-            .update({ revoked_at: now, revoke_reason: 'contact_removed', updated_at: now });
-        }
-        return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-      }
-      if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {
-        return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-      }
-    }
+    const contactRefusal = contactKey ? await contactRotationRefusal(trx, customer, decoded, options) : null;
+    if (contactRefusal) return contactRefusal;
 
     let nextCustomer = customer;
     if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {

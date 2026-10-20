@@ -216,11 +216,19 @@ describe('rerouteForContactEmailOptOut (deferred sends: automation steps, queued
     await expect(ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).rejects.toThrow('timeout');
   });
 
-  test('passes through: the holder\'s own address, an unmatched address, a contact with email on, and the gate off', async () => {
+  test('an address the holder has since replaced on slot 1 is re-resolved: the contact\'s current address with the switch on, the holder with it off (codex r9 P1)', async () => {
+    rows = [];
+    wireCustomer({ ...CUSTOMER, service_contact_email: 'sam.new@example.com' });
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam.new@example.com', rerouted: true });
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'pat@example.com', rerouted: true });
+  });
+
+  test('passes through: the holder\'s own address, another slot\'s address, a contact with email on, and the gate off', async () => {
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
     wireCustomer(CUSTOMER);
     expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'pat@example.com')).toEqual({ email: 'pat@example.com', rerouted: false });
-    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'other@example.com')).toEqual({ email: 'other@example.com', rerouted: false });
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'terry@example.com')).toEqual({ email: 'terry@example.com', rerouted: false });
     rows = [];
     expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam@example.com', rerouted: false });
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
