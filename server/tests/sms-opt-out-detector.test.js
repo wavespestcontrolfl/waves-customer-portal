@@ -96,6 +96,8 @@ describe('SMS opt-out detector', () => {
     'No\nmessages',
     'I got no texts, keep it that way',
     'I got no texts. Please keep it that way.',
+    'No texts delivered to this number please',
+    'Please no messages delivered to my phone anymore',
     'There were no messages this week and I want it that way',
     'no more texts',
     'Please, no more messages.',
