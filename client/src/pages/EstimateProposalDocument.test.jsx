@@ -860,7 +860,7 @@ describe('acceptance mode', () => {
 
   it('terminal states and review/quote gating still outrank the mode', () => {
     const accepted = view(withMode({ mode: 'invoice_only' }, { terminalState: 'accepted' }));
-    expect(accepted.button.textContent).toBe('See your visit details');
+    expect(accepted.button.textContent).toBe('View your estimate');
     expect(accepted.text).toContain('has been approved');
     const expired = view(withMode({ mode: 'existing_appointment' }, { terminalState: 'expired' }));
     expect(expired.button).toBeNull();
@@ -873,6 +873,35 @@ describe('acceptance mode', () => {
   it('reads the contract from estimate.acceptance, not from the accepted-terms record', () => {
     const v = view({ ...withMode(undefined), acceptance: { mode: 'contact_office' } });
     expect(v.button.textContent).toBe('Accept & pick a start date');
+  });
+});
+
+describe('accepted wording follows the acceptance mode (codex #6343 r7)', () => {
+  const accepted = (acceptance) => {
+    const data = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, ...(acceptance ? { acceptance } : {}) },
+      proposal: { ...BASE_DATA.proposal, enabled: false, synthesized: true },
+      cta: { terminalState: 'accepted' },
+    };
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const next = [...container.querySelectorAll('p')].find((p) => /has been approved/.test(p.textContent));
+    return { button: container.querySelector('[data-testid="doc-action-online"]').textContent, next: next.textContent, text: container.textContent };
+  };
+
+  it.each([undefined, { mode: 'standard_slot_pick' }, { mode: 'existing_appointment' }])('%j keeps the visit-details wording', (acceptance) => {
+    const v = accepted(acceptance);
+    expect(v.button).toBe('See your visit details');
+    expect(v.next).toContain('has your visit details');
+  });
+
+  it.each(['invoice_only', 'contact_office', 'commercial_site_confirmation', 'quote_required', 'some_future_mode'])('%s: acceptance-neutral wording, no visit promise', (mode) => {
+    const v = accepted({ mode });
+    expect(v.button).toBe('View your estimate');
+    expect(v.next).toContain('This estimate has been approved.');
+    expect(v.next).toContain('has the details.');
+    expect(v.next).toContain('Questions? Call');
+    expect(v.text).not.toMatch(/visit details/);
   });
 });
 
