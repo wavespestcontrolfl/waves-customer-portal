@@ -258,7 +258,7 @@ describe('grounding, visit context and prompt note', () => {
     at, act: true, kind: 'new_visit', day: '2040-03-14', from_day: null, daypart: 'any', service: 'Quarterly Pest Control Service',
     blockers: [], confidence: 0.9, reason: 'Agreed.',
   });
-  const smsSrc = { kind: 'sms', key: 'sms:9415550142:x', callLogId: null, phoneDigits: '9415550142', customerId: 'c1', agreedAt: NOW, stamps: new Set(['2040-03-12T11:15', '2040-03-12T10:20']) };
+  const smsSrc = { kind: 'sms', key: 'sms:9415550142:x', callLogId: null, phoneDigits: '9415550142', customerId: 'c1', agreedAt: new Date('2040-03-12T15:15:00Z'), stamps: new Set(['2040-03-12T11:15', '2040-03-12T10:20']) };
   const ctx = { now: NOW, todayET: '2040-03-12', model: 'm', deps: {} };
 
   test('etMinuteKey is the Eastern minute in the form the model returns', () => {

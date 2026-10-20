@@ -480,6 +480,16 @@ async function placeVisit(conn, src, { a, fromVisit, catalog }, deps) {
   return pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit, service }, deps);
 }
 
+// Why a text action cannot be judged from this source, or null. Its time must be
+// a shown message's minute (grounded), and not before this source's own inbound:
+// an earlier moment was judged when its own text was the latest, and the visits
+// shown now are as of the newer text (Codex #6350 r10 + r11).
+function smsMomentSkip(src, parsedAt) {
+  if (!src.stamps?.has(etMinuteKey(parsedAt))) return 'at_ungrounded';
+  if (Math.floor(parsedAt.getTime() / 60000) < Math.floor(src.agreedAt.getTime() / 60000)) return 'earlier_moment';
+  return null;
+}
+
 async function decideMoment(conn, src, index, agreement, ctx) {
   const a = rules.normalizeAgreement(agreement);
   const parsedAt = src.kind === 'call' ? src.agreedAt : parseAt(a.at);
@@ -491,9 +501,8 @@ async function decideMoment(conn, src, index, agreement, ctx) {
   if (a.act && !parsedAt) return skipRow(src, index, 'at_unreadable', { ...known, ...(rules.validDay(a.day) ? { target_date: a.day } : {}) });
   // ...and it must be the minute of a message the model was shown: a time that
   // matches none is a guess, not the moment the day was agreed.
-  if (a.act && src.kind === 'sms' && !src.stamps?.has(etMinuteKey(parsedAt))) {
-    return skipRow(src, index, 'at_ungrounded', { ...known, ...(rules.validDay(a.day) ? { target_date: a.day } : {}) });
-  }
+  const smsSkip = a.act && src.kind === 'sms' ? smsMomentSkip(src, parsedAt) : null;
+  if (smsSkip) return skipRow(src, index, smsSkip, { ...known, ...(rules.validDay(a.day) ? { target_date: a.day } : {}) });
   const dayVisits = a.act ? await visitFacts(conn, src.customerId, [a.day, a.from_day]) : [];
   const decision = rules.decideAgreement({
     agreement: a, kind: src.kind, customerId: src.customerId, todayET: ctx.todayET, agreedAt, now: ctx.now,
@@ -567,7 +576,16 @@ async function processSource(conn, src, ctx) {
   const judged = await judge(parts, ctx.deps);
   if (!judged.ok) return judged.transient ? { transient: true } : { rows: [skipRow(src, 0, 'judge_unusable')] };
   const rows = [];
-  for (const [index, agreement] of judged.agreements.entries()) {
+  // An agreement the model repeated is recorded once (Codex #6350 r11).
+  const seen = new Set();
+  const unique = judged.agreements.filter((ag) => {
+    const n = rules.normalizeAgreement(ag);
+    const key = JSON.stringify([n.at, n.act, n.kind, n.day, n.from_day, n.daypart, n.service]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  for (const [index, agreement] of unique.entries()) {
     rows.push(await decideMoment(conn, src, index, agreement, { ...ctx, catalog, model: judged.model }));
   }
   return { rows };

@@ -622,6 +622,20 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(prompt).not.toContain('other number');
     });
 
+    test('a repeated agreement is recorded once, and a text moment before the source inbound is an earlier_moment skip (Codex #6350 r11)', async () => {
+      const customerId = await customer();
+      await text(customerId, 'Thursday?', 150);
+      await text(customerId, 'We can come Wednesday morning.', 100, { direction: 'outbound' });
+      await text(customerId, 'Wednesday works', 45);
+      const same = agreement({ at: '2040-03-12T11:15', daypart: 'morning' });
+      const early = agreement({ at: '2040-03-12T09:30' });
+      const dispatch = answering(same, same, early);
+      await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00', await technician())] })) });
+      const rows = await decisions();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => r.skip_reason)).toContain('earlier_moment');
+    });
+
     test('which threads are candidates: day word, 3 hour window, 30 quiet minutes either way, latest inbound only', async () => {
       const customerId = await customer();
       const wanted = await text(customerId, 'sat is fine', 45);
@@ -724,7 +738,8 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await text(customerId, 'Tuesday works', 45);
       // 480 minutes before NOW (12:00 ET) is 04:00 ET: a message the model was shown, but too old to act on.
       await sweep({ dispatch: answering(agreement({ at: '2040-03-12T04:00' })), findSlots: jest.fn() });
-      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'stale_moment' })]);
+      // Before the source's own inbound, so it is skipped as an earlier moment (Codex #6350 r11).
+      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'earlier_moment' })]);
     });
 
     test('an SMS action whose time is not the minute of a message in the thread is at_ungrounded and the picker is never asked', async () => {
