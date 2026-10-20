@@ -12,6 +12,10 @@ jest.mock('../config/feature-gates', () => ({
   billingEmailDetailsLive: () => false,
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../routes/estimate-public', () => ({
+  findLinkedUpcomingAppointment: jest.fn(async () => null),
+  adoptionServiceModesForContract: jest.fn(() => []),
+}));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
   estimateOffCustomerSurface: jest.fn(() => false),
@@ -229,6 +233,176 @@ describe('a live-repriced estimate does not veto itself (codex #6343 r5)', () =>
   });
 });
 
+describe('the linked appointment is part of the fence (codex #6343 r8)', () => {
+  const estimatePublic = require('../routes/estimate-public');
+  const appt = (extra = {}) => ({
+    id: 'appt-1', status: 'confirmed', scheduled_date: '2026-10-30', window_start: '09:00:00', window_end: '11:00:00',
+    service_type: 'Pest control', customer_id: 'cust-1', reservation_expires_at: null, notes: 'office note', updated_at: new Date('2026-10-19T12:00:00Z'), ...extra,
+  });
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    estimatePublic.findLinkedUpcomingAppointment.mockReset();
+    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+  });
+  afterEach(() => build.mockRestore());
+
+  // Follow-up path: render with `atRender`, then run the handoff with `atHandoff`.
+  async function followUpFence(atRender, atHandoff) {
+    readsRow(row(), row());
+    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(atRender);
+    const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(o.attachments).toEqual([ATTACHMENT]);
+    let check;
+    await o.withProviderHandoff(async (_d, b) => { check = b; });
+    if (atHandoff instanceof Error) estimatePublic.findLinkedUpcomingAppointment.mockRejectedValueOnce(atHandoff);
+    else estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(atHandoff);
+    return check({ database: db });
+  }
+
+  test('the finder is asked exactly like the page asks it (same service modes)', async () => {
+    estimatePublic.adoptionServiceModesForContract.mockReturnValueOnce(['recurring']);
+    await followUpFence(appt(), appt());
+    expect(estimatePublic.findLinkedUpcomingAppointment).toHaveBeenCalledWith(expect.objectContaining({ id: ID }), expect.any(Object), { serviceModes: ['recurring'] });
+  });
+
+  test('the same appointment, and an unrelated column changing on it, do not trip the fence', async () => {
+    await expect(followUpFence(appt(), appt())).resolves.toEqual({ ok: true });
+    await expect(followUpFence(appt(), appt({ notes: 'something else', updated_at: new Date() }))).resolves.toEqual({ ok: true });
+  });
+
+  test('no appointment before and after is fine', async () => {
+    await expect(followUpFence(null, null)).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['cancelled (the finder no longer returns it)', null],
+    ['rescheduled to another day', appt({ scheduled_date: '2026-11-02' })],
+    ['moved to another window', appt({ window_start: '13:00:00', window_end: '15:00:00' })],
+    ['changed status', appt({ status: 'rescheduled' })],
+    ['replaced by another appointment', appt({ id: 'appt-2' })],
+    ['changed service', appt({ service_type: 'Lawn care' })],
+    ['released from the customer', appt({ customer_id: null })],
+    ['turned into a timed hold', appt({ customer_id: null, reservation_expires_at: new Date(Date.now() + 600000) })],
+  ])('a linked appointment %s between render and handoff vetoes the PDF', async (_label, atHandoff) => {
+    await expect(followUpFence(appt(), atHandoff)).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+
+  test('an appointment that appears after a render with none vetoes it too (the mode would now read existing_appointment)', async () => {
+    await expect(followUpFence(null, appt())).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+
+  test('a failed appointment read at the handoff is a tagged retryable check failure, not a pass', async () => {
+    await expect(followUpFence(appt(), new Error('db down'))).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  });
+
+  test('a failed appointment read at render time means no PDF', async () => {
+    readsRow(row());
+    estimatePublic.findLinkedUpcomingAppointment.mockRejectedValueOnce(new Error('db down'));
+    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('the delivery fence carries it too: a cancel between render and handoff vetoes the send', async () => {
+    const draft = (extra = {}) => row({ status: 'sending', ...extra });
+    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(appt());
+    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
+    let check;
+    await fence.withProviderHandoff(async (_d, b) => { check = b; });
+    readsRow(draft());
+    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(null);
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+});
+
+describe('prepareDeliveryPdfCopy: the delivery send\'s whole PDF step (codex #6343 r8)', () => {
+  let build;
+  const fresh = (extra = {}) => row({ status: 'sending', ...extra });
+  const prepare = (input = {}) => emailPdf.prepareDeliveryPdfCopy({ freshEstimate: fresh(), sendTo: 'lead@example.com', validThrough: new Date('2099-01-01T00:00:00Z'), ...input });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    readsRow(fresh());
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockReset();
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+  });
+  afterEach(() => build.mockRestore());
+
+  test('gate on, plain estimate: attachment, the delivery note, a fence, no warning', async () => {
+    const out = await prepare();
+    expect(out).toMatchObject({ expected: true, attachment: ATTACHMENT, note: pdf.ESTIMATE_EMAIL_PDF_NOTES.delivery, warning: null });
+    expect(out.fence.withProviderHandoff).toEqual(expect.any(Function));
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ id: ID }), { validThrough: new Date('2099-01-01T00:00:00Z') });
+  });
+
+  test('a commercial proposal, the gate off, or a review with no stored decision: nothing expected, nothing built', async () => {
+    const proposalRow = fresh({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'x', lineItems: [{ id: 'a', description: 'a', quantity: 1, unit: 'acre', unitPrice: 1, frequency: 'one_time' }] }] } } });
+    for (const input of [{ proposalMode: true }, { freshEstimate: proposalRow }, { reviewedMessages: { email: { provider: 'sendgrid' } } }]) {
+      expect(await prepare(input)).toMatchObject({ expected: false, attachment: null, fence: null });
+    }
+    setGates(false);
+    expect(await prepare()).toMatchObject({ expected: false, attachment: null });
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('a review that stored yes still gets the file', async () => {
+    expect(await prepare({ reviewedMessages: { email: { pdfCopy: true } } })).toMatchObject({ expected: true, attachment: ATTACHMENT });
+  });
+
+  test('annotate stamps the channel result only for a successful channel that was expected to carry the file', async () => {
+    const withFile = await prepare();
+    const ok = { ok: true };
+    withFile.annotate(ok);
+    expect(ok).toEqual({ ok: true, pdfAttached: true });
+    const failed = { ok: false };
+    withFile.annotate(failed);
+    expect(failed).toEqual({ ok: false });
+    const noFile = await prepare({ sendTo: 'old@example.com' });
+    const warned = { ok: true };
+    noFile.annotate(warned);
+    expect(warned).toEqual({ ok: true, pdfAttached: false, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
+    const unexpected = await prepare({ proposalMode: true });
+    const untouched = { ok: true };
+    unexpected.annotate(untouched);
+    expect(untouched).toEqual({ ok: true });
+  });
+
+  test('recordDelivered records the disclosure for the attachment it built, and does nothing without one', async () => {
+    const spy = jest.spyOn(pdf, 'recordEmailedPdfDisclosure').mockResolvedValue('persisted');
+    await (await prepare()).recordDelivered();
+    expect(spy).toHaveBeenCalledWith(ATTACHMENT, ID);
+    spy.mockClear();
+    await (await prepare({ proposalMode: true })).recordDelivered();
+    await (await prepare({ sendTo: 'old@example.com' })).recordDelivered();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('an address that is not the row\'s, a render that returns nothing or throws, or a failed fence read: expected but no file, with the warning', async () => {
+    const warning = 'The PDF copy could not be attached; the email went out with the link only.';
+    expect(await prepare({ sendTo: 'old@example.com' })).toMatchObject({ expected: true, attachment: null, fence: null, warning });
+    expect(build).not.toHaveBeenCalled();
+    build.mockResolvedValue(null);
+    expect(await prepare()).toMatchObject({ expected: true, attachment: null, warning });
+    build.mockRejectedValue(new Error('browser down'));
+    expect(await prepare()).toMatchObject({ expected: true, attachment: null, warning });
+    build.mockResolvedValue(ATTACHMENT);
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockRejectedValueOnce(new Error('db down'));
+    expect(await prepare()).toMatchObject({ expected: true, attachment: null, warning });
+  });
+});
+
 describe('grouped estimates carry no PDF (codex #6343 r6)', () => {
   let build;
   beforeEach(() => {
@@ -315,20 +489,20 @@ describe('deliveryPdfFence: the manual delivery send (codex #6343 r4)', () => {
     persistence.staleCallLinkageReason.mockResolvedValue(null);
   });
   const draft = (extra = {}) => row({ status: 'sending', expires_at: new Date('2020-01-01T00:00:00Z'), ...extra });
-  const fenceFor = (fresh, recipient = 'lead@example.com') => emailPdf.deliveryPdfFence(fresh, { recipient });
+  const fenceFor = async (fresh, recipient = 'lead@example.com') => emailPdf.deliveryPdfFence(fresh, { recipient });
   const run = async (fence) => { let c; await fence.withProviderHandoff(async (_d, b) => { c = b; }); return c({ database: db }); };
 
-  test('no fence (so no PDF) when the address being sent to is not the row\'s current one', () => {
-    expect(fenceFor(draft(), 'old@example.com')).toBeNull();
-    expect(fenceFor(draft({ customer_email: null }))).toBeNull();
-    expect(fenceFor(null)).toBeNull();
-    expect(fenceFor(draft(), ' LEAD@example.com ')).not.toBeNull();
+  test('no fence (so no PDF) when the address being sent to is not the row\'s current one', async () => {
+    expect(await fenceFor(draft(), 'old@example.com')).toBeNull();
+    expect(await fenceFor(draft({ customer_email: null }))).toBeNull();
+    expect(await fenceFor(null)).toBeNull();
+    expect(await fenceFor(draft(), ' LEAD@example.com ')).not.toBeNull();
   });
 
   test('a draft in flight passes: status and the persisted expiry are not part of this fence', async () => {
     const fresh = draft();
     readsRow(draft({ status: 'sending', expires_at: new Date('2099-01-01T00:00:00Z') }));
-    await expect(run(fenceFor(fresh))).resolves.toEqual({ ok: true });
+    await expect(run(await fenceFor(fresh))).resolves.toEqual({ ok: true });
   });
 
   test.each([
@@ -342,20 +516,20 @@ describe('deliveryPdfFence: the manual delivery send (codex #6343 r4)', () => {
     ['the row already marked sent', { status: 'sent' }, 'estimate_not_open'],
   ])('%s vetoes the handoff', async (_label, change, reason) => {
     readsRow(draft(change));
-    await expect(run(fenceFor(draft()))).rejects.toMatchObject({ providerBoundaryBlocked: true, reason });
+    await expect(run(await fenceFor(draft()))).rejects.toMatchObject({ providerBoundaryBlocked: true, reason });
   });
 
   test('an invalidation or call-side block vetoes it', async () => {
     readsRow(draft());
     claimSql.estimateOffCustomerSurface.mockReturnValue(true);
-    await expect(run(fenceFor(draft()))).rejects.toMatchObject({ reason: 'estimate_invalidated' });
+    await expect(run(await fenceFor(draft()))).rejects.toMatchObject({ reason: 'estimate_invalidated' });
     claimSql.estimateOffCustomerSurface.mockReturnValue(false);
     claimSql.callSideBlockForEstimateData.mockResolvedValue('call_draft_block');
-    await expect(run(fenceFor(draft()))).rejects.toMatchObject({ reason: 'call_side_call_draft_block' });
+    await expect(run(await fenceFor(draft()))).rejects.toMatchObject({ reason: 'call_side_call_draft_block' });
   });
 
   test('a read failure is tagged retryable, not a pass', async () => {
-    const fence = fenceFor(draft());
+    const fence = await fenceFor(draft());
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(run(fence)).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
   });

@@ -289,29 +289,9 @@ function estimateSendableAmount(estimate = {}) {
 // is intentionally rejected for them. Use proposal-specific copy instead.
 const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement. Call (941) 297-5749 anytime.';
 
-// Both gates, read here so a gate-off send never loads the PDF module.
-function estimateEmailPdfOn() {
-  const featureGates = require('../config/feature-gates');
-  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
-}
-
-// True when a reviewed email's stored PDF decision disagrees with the current
-// one. No stored decision (undefined) is never stale: it means "no PDF".
-function reviewedPdfDecisionStale(reviewedMessages, currentDecision) {
-  const stored = reviewedMessages?.email?.pdfCopy;
-  return reviewedMessages?.email != null && stored !== undefined && stored !== currentDecision;
-}
-
-// Whether THIS delivery email carries the PDF copy: both gates on, not a
-// commercial proposal (it keeps its own PDF path), and not a multi-property
-// group (the shared link renders the whole group; the document is one
-// property's). The review preview, the schedule and the send all use this one
-// answer, so what was reviewed is what is sent (codex #6343 r6).
-async function deliveryPdfCopyDecision(estimateRow, database = db) {
-  if (!estimateEmailPdfOn()) return false;
-  if (normalizeProposal(estimateRow).enabled) return false;
-  return !(await require('../services/estimate-email-pdf').estimateInMultiPropertyGroup(estimateRow, database));
-}
+// The PDF-copy decision helpers live with the rest of the feature (the review
+// preview, the verdict check and the send all use these).
+const emailPdfCopy = () => require('../services/estimate-email-pdf');
 
 function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '' }) {
   const serviceSummary = inferEstimateServiceInterest({
@@ -931,7 +911,7 @@ async function buildEstimateSendPreview(estimate) {
     // template text, so the reviewed contentHash (a template-version hash)
     // is unaffected; the messageVersion covers the previewed text, and the
     // send re-runs this same builder, so a review and its send agree.
-    const pdfCopy = !proposalMode && await deliveryPdfCopyDecision(estimate);
+    const pdfCopy = !proposalMode && await emailPdfCopy().deliveryPdfCopyDecision(estimate);
     const pdfNote = pdfCopy ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
     const rendered = EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
@@ -2756,7 +2736,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // joining a group, since the review or schedule): never silently add or
       // drop the file. Reviews that carry no decision mean "no PDF" and are not
       // stale (codex #6343 r6).
-      if (sendMethod !== 'sms' && reviewedPdfDecisionStale(options.reviewedMessages, await deliveryPdfCopyDecision(verdictRow, trx))) {
+      if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
       let data;
@@ -3068,38 +3048,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         }
         // GATE_ESTIMATE_EMAIL_PDF: an ordinary estimate email carries the
         // browser work-order document too, for customers who cannot open the
-        // link. The builder never throws and has no pdfkit fallback; a null
-        // sends the email exactly as before (no PDF, no note) and only adds a
-        // warning to the channel result. The same validThrough pin as the
-        // proposal path keeps the PDF's date equal to the link's.
-        // The PDF is rendered from freshEstimate but the email goes to
-        // estimate.customer_email: a correction that landed in between (the
-        // email fan-out updates `sending` rows) must not mail a PDF of the
-        // corrected row to the old address. So it is built only when both are
-        // the same address, and the handoff fence repeats that, and the row
-        // fingerprint, at the provider boundary (emailPdfFence).
-        let emailPdfAttachment = null;
-        let emailPdfFence = null;
-        let emailPdfExpected = false;
-        if (!proposalMode) {
-          // A reviewed message with no stored PDF decision is "no PDF" (an old
-          // schedule or a review made with the gate off), never stale.
-          emailPdfExpected = (!options.reviewedMessages || options.reviewedMessages.email?.pdfCopy === true)
-            && await deliveryPdfCopyDecision(freshEstimate);
-          emailPdfFence = emailPdfExpected
-            ? require('../services/estimate-email-pdf').deliveryPdfFence(freshEstimate, { recipient: estimate.customer_email, validThrough: nextExpiresAt })
-            : null;
-          if (emailPdfExpected && emailPdfFence) {
-            try {
-              emailPdfAttachment = await require('../services/pdf/estimate-doc-pdf')
-                .buildEstimateEmailPdfAttachment(freshEstimate, { validThrough: nextExpiresAt });
-            } catch (e) {
-              // The builder returns null on its own failures; this only guards
-              // a surprise so a PDF problem can never fail the email.
-              logger.warn(`[admin-estimates] estimate email PDF skipped for estimate ${estimate.id}: ${String(e?.message || e).slice(0, 200)}`);
-            }
-          }
-        }
+        // link. The whole decision, address check, fence and render live in
+        // prepareDeliveryPdfCopy; it never throws, and no attachment sends the
+        // email exactly as before (no PDF, no note) with a warning on the
+        // channel result. The same validThrough pin as the proposal path keeps
+        // the PDF's date equal to the link's.
+        const pdfCopy = await emailPdfCopy().prepareDeliveryPdfCopy({
+          freshEstimate, sendTo: estimate.customer_email, validThrough: nextExpiresAt,
+          reviewedMessages: options.reviewedMessages, proposalMode,
+        });
         if (proposalPdfFailed) {
           // The proposal email + template promise an attached PDF, and the
           // public link doesn't expose it, so never send proposal copy with
@@ -3125,8 +3082,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
-            attachments: emailPdfAttachment ? [emailPdfAttachment] : proposalAttachments,
-            ...(emailPdfAttachment ? { pdfNote: require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery, pdfFence: emailPdfFence } : {}),
+            attachments: pdfCopy.attachment ? [pdfCopy.attachment] : proposalAttachments,
+            ...(pdfCopy.attachment ? { pdfNote: pdfCopy.note, pdfFence: pdfCopy.fence } : {}),
             proposalMode,
             versionId: options.reviewedMessages?.email?.versionId || null,
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
@@ -3137,14 +3094,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           channels.email = result.ok
             ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
-          if (channels.email.ok && !proposalMode && emailPdfExpected) {
-            channels.email.pdfAttached = !!emailPdfAttachment;
-            if (!emailPdfAttachment) channels.email.warning = 'The PDF copy could not be attached; the email went out with the link only.';
-          }
+          pdfCopy.annotate(channels.email);
           if (result.ok && result.providerAccepted) {
             // The provider accepted the email that carried the PDF: only now is
             // its rate review disclosure evidence (never throws).
-            if (emailPdfAttachment) await require('../services/pdf/estimate-doc-pdf').recordEmailedPdfDisclosure(emailPdfAttachment, estimate.id);
+            await pdfCopy.recordDelivered();
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }

@@ -32,6 +32,8 @@ jest.mock('../services/estimate-deposits', () => ({
 jest.mock('../services/estimate-conversion-guard', () => ({ customerConvertedSince: jest.fn(async () => ({ converted: false })) }));
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => null) }));
 jest.mock('../routes/estimate-public', () => ({
+  findLinkedUpcomingAppointment: jest.fn(async () => null),
+  adoptionServiceModesForContract: jest.fn(() => []),
   isEstimateAcceptActive: jest.fn(() => true),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   resolveEstimateInvoiceMode: jest.fn(() => false),

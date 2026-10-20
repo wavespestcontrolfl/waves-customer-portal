@@ -78,6 +78,7 @@ jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   ESTIMATE_EMAIL_PDF_NOTES: { delivery: 'Synthetic delivery PDF note.', followUp: 'Synthetic follow-up PDF note.' },
 }));
 jest.mock('../routes/estimate-public', () => ({
+  findLinkedUpcomingAppointment: jest.fn(async () => null), adoptionServiceModesForContract: jest.fn(() => []),
   acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({ services: [] })),
 }));

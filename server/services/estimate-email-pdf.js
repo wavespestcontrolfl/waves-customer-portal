@@ -110,6 +110,39 @@ function rowFingerprint(row, { omitExpiry = false } = {}) {
   return canonical(pick);
 }
 
+// The linked appointment the page's acceptance contract reads
+// (resolveEstimateAcceptance: findLinkedUpcomingAppointment), as the state the
+// document's mode and its "Confirm appointment / your appointment stays as
+// scheduled" copy depend on. A cancel or reschedule changes it; an unrelated
+// scheduled_services row does not (the finder returns only the linked one).
+// Throws when the read fails, which the callers treat like any fence read
+// failure (codex #6343 r8).
+async function linkedAppointmentState(row) {
+  const estimatePublic = require('../routes/estimate-public');
+  const data = parseData(row) || {};
+  const appointment = await estimatePublic.findLinkedUpcomingAppointment(row, data, {
+    serviceModes: estimatePublic.adoptionServiceModesForContract(row, data),
+  });
+  if (!appointment) return null;
+  const when = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
+  return {
+    id: appointment.id,
+    status: appointment.status || null,
+    scheduled_date: when(appointment.scheduled_date),
+    window_start: when(appointment.window_start),
+    window_end: when(appointment.window_end),
+    service_type: appointment.service_type || null,
+    claimed: appointment.customer_id != null,
+    hold: appointment.reservation_expires_at != null,
+  };
+}
+
+// What the fence compares: the estimates row's content plus the linked
+// appointment state.
+async function fullFingerprint(row, opts) {
+  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}`;
+}
+
 // The address an email actually goes to must still be the estimate's current
 // recipient: an email correction in the estimate editor does not cancel the
 // old address's queued sends, and the PDF is a permanent copy.
@@ -160,7 +193,7 @@ async function handoffBlockReason(estimateId, expectedFingerprint, { validThroug
   if (recipient && !sameRecipient(row.customer_email, recipient)) return 'recipient_changed';
   const stateBlock = rowStateBlock(row, { validThrough, now, delivery });
   if (stateBlock) return stateBlock;
-  if (expectedFingerprint && rowFingerprint(row, { omitExpiry: delivery }) !== expectedFingerprint) return 'estimate_changed_since_render';
+  if (expectedFingerprint && (await fullFingerprint(row, { omitExpiry: delivery })) !== expectedFingerprint) return 'estimate_changed_since_render';
   const data = parseData(row);
   if (data === null) return 'estimate_data_unreadable';
   return callSideBlock(row, data);
@@ -241,7 +274,7 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
     const pdf = require('./pdf/estimate-doc-pdf');
     // The fingerprint is of the row as the database returned it, taken before
     // anything else touches the object (the builder works on clones).
-    const fingerprint = rowFingerprint(fresh);
+    const fingerprint = await fullFingerprint(fresh);
     const attachment = await pdf.buildEstimateEmailPdfAttachment(fresh, { validThrough: validThrough || fresh.expires_at || null });
     if (!attachment) return NONE;
     return {
@@ -268,9 +301,9 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
 // between the render and the provider request vetoes the send. Returns null
 // when the address being sent to is not the row's current one (no PDF should
 // be built at all).
-function deliveryPdfFence(freshEstimate, { recipient, validThrough = null } = {}) {
+async function deliveryPdfFence(freshEstimate, { recipient, validThrough = null } = {}) {
   if (!freshEstimate?.id || !sameRecipient(freshEstimate.customer_email, recipient)) return null;
-  const fingerprint = rowFingerprint(freshEstimate, { omitExpiry: true });
+  const fingerprint = await fullFingerprint(freshEstimate, { omitExpiry: true });
   const opts = { validThrough, recipient, delivery: true };
   return {
     withProviderHandoff: pdfProviderHandoff(freshEstimate.id, fingerprint, opts),
@@ -278,8 +311,87 @@ function deliveryPdfFence(freshEstimate, { recipient, validThrough = null } = {}
   };
 }
 
+// The manual delivery send's whole PDF-copy step, in one place so the sender
+// gains no branching (codex #6343 r8). `freshEstimate` is the row the send just
+// read; `sendTo` the address the email goes to; `validThrough` the date the
+// document advertises; `reviewedMessages` the reviewed/scheduled messages (a
+// review with no stored PDF decision means "no PDF": an old schedule or a
+// review made with the gate off, never stale).
+//
+// The PDF is rendered from freshEstimate but mailed to `sendTo`: a correction
+// that landed in between (the email fan-out updates `sending` rows) must not
+// mail a PDF of the corrected row to the old address, so it is built only when
+// both are the same address, and the returned fence repeats that, the row
+// fingerprint and the linked appointment at the provider boundary.
+//
+// Returns { expected, attachment, note, fence, warning }: `expected` is whether
+// this email was meant to carry the file (so the channel result can say
+// whether it did), `warning` the operator-visible text when it did not. Never
+// throws: any failure means no attachment.
+async function prepareDeliveryPdfCopy({ freshEstimate, sendTo, validThrough = null, reviewedMessages = null, proposalMode = false }) {
+  // `annotate(channel)` stamps the operator-visible result on a successful email
+  // channel; `recordDelivered()` records the rate review disclosure once the
+  // provider accepted. Both are plain calls so the sender gains no branching.
+  const finish = (copy) => ({
+    ...copy,
+    annotate: (channel) => {
+      if (!copy.expected || !channel?.ok) return;
+      channel.pdfAttached = !!copy.attachment;
+      if (copy.warning) channel.warning = copy.warning;
+    },
+    recordDelivered: async () => {
+      if (copy.attachment) await require('./pdf/estimate-doc-pdf').recordEmailedPdfDisclosure(copy.attachment, freshEstimate.id);
+    },
+  });
+  const none = finish({ expected: false, attachment: null, note: '', fence: null, warning: null });
+  if (proposalMode) return none;
+  try {
+    const reviewedAllows = !reviewedMessages || reviewedMessages.email?.pdfCopy === true;
+    if (!reviewedAllows || !(await deliveryPdfCopyDecision(freshEstimate))) return none;
+  } catch (e) {
+    logger.warn(`[estimate-email-pdf] delivery PDF decision failed for estimate ${freshEstimate?.id}: ${String(e?.message || e).slice(0, 200)}`);
+    return none;
+  }
+  const expected = finish({ expected: true, attachment: null, note: '', fence: null, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
+  try {
+    const fence = await deliveryPdfFence(freshEstimate, { recipient: sendTo, validThrough });
+    if (!fence) return expected;
+    const pdf = require('./pdf/estimate-doc-pdf');
+    const attachment = await pdf.buildEstimateEmailPdfAttachment(freshEstimate, { validThrough });
+    if (!attachment) return expected;
+    return finish({ expected: true, attachment, note: pdf.ESTIMATE_EMAIL_PDF_NOTES.delivery, fence, warning: null });
+  } catch (e) {
+    // The builder returns null on its own failures; this guards a surprise (or a
+    // failed fence read) so a PDF problem can never fail the email.
+    logger.warn(`[estimate-email-pdf] delivery PDF skipped for estimate ${freshEstimate?.id}: ${String(e?.message || e).slice(0, 200)}`);
+    return expected;
+  }
+}
+
+// Whether THIS delivery email carries the PDF copy: both gates on, not a
+// commercial proposal (it keeps its own PDF path), and not a multi-property
+// group (the shared link renders the whole group; the document is one
+// property's). The review preview, the schedule and the send all use this one
+// answer, so what was reviewed is what is sent (codex #6343 r6).
+async function deliveryPdfCopyDecision(estimateRow, database = db) {
+  if (!pdfGatesOn()) return false;
+  if (require('./estimate-proposal').normalizeProposal(estimateRow).enabled) return false;
+  // Through module.exports so a test can pin the group answer without a group fixture.
+  return !(await module.exports.estimateInMultiPropertyGroup(estimateRow, database));
+}
+
+// True when a reviewed email's stored PDF decision disagrees with the current
+// one. No stored decision (undefined) is never stale: it means "no PDF".
+function reviewedPdfDecisionStale(reviewedMessages, currentDecision) {
+  const stored = reviewedMessages?.email?.pdfCopy;
+  return reviewedMessages?.email != null && stored !== undefined && stored !== currentDecision;
+}
+
 module.exports = {
   openEstimateEmailPdf,
+  prepareDeliveryPdfCopy,
+  deliveryPdfCopyDecision,
+  reviewedPdfDecisionStale,
   estimateInMultiPropertyGroup,
   deliveryPdfFence,
   sameRecipient,
