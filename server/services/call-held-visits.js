@@ -242,7 +242,9 @@ function clearedByBooking({ call, kind, slot, moved, movedFrom }, bookedRows, { 
 // A visit that can still be moved: on the calendar and not started or done. A completed (or
 // on-site) visit on the old day means the move is moot (Codex #6345 r1).
 const MOVABLE_STATUSES = new Set(['pending', 'confirmed']);
-const isMovable = (status) => status == null || MOVABLE_STATUSES.has(status);
+// A legacy row with no status is not movable: Dispatch's day view leaves NULL-status rows out
+// (status NOT IN (...) drops NULL), so a link to it would find nothing (Codex #6345 r2).
+const isMovable = (status) => MOVABLE_STATUSES.has(status);
 
 // The movable visits a day-only move could mean: the call's customer's, on the old day.
 function visitsToMove(call, movedFrom, bookedRows) {

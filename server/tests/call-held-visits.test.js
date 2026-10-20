@@ -473,8 +473,9 @@ describe('a move to a day with no time (move_day_only)', () => {
       expect(run([moveCall()], [oldVisit({ customer_id: 'cust-2' })])).toEqual([]);
     });
 
-    it('holds with a legacy visit that has no status, and with several visits on the old day', () => {
-      expect(run([moveCall()], [oldVisit({ status: null })])).toHaveLength(1);
+    it('a legacy no-status visit does not hold the move; several visits on the old day link to the day', () => {
+      // A legacy no-status row is not movable (Dispatch hides it), so it does not hold the row.
+      expect(run([moveCall()], [oldVisit({ status: null })])).toEqual([]);
       const [row] = run([moveCall()], [oldVisit({ id: 'visit-pm', window_start: '14:00:00' }), oldVisit({ id: 'visit-am', window_start: '08:00:00' })]);
       expect(row.from_visit_id).toBeNull(); // ambiguous: the row links to the old day
     });
