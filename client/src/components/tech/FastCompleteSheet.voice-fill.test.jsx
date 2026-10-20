@@ -66,7 +66,7 @@ const FILL = {
   unclear: [{ heard: 'some other stuff', reason: 'unknown_product' }],
 };
 
-function makeRequest({ fill = FILL, fillError = null } = {}) {
+function makeRequest({ fill = FILL, fillError = null, products = CATALOG, context = {} } = {}) {
   const calls = [];
   let fills = 0;
   const request = vi.fn(async (path, options) => {
@@ -79,7 +79,7 @@ function makeRequest({ fill = FILL, fillError = null } = {}) {
       if (answer.status >= 200 && answer.status < 300) return answer.body;
       throw Object.assign(new Error(answer.body?.error || `Request failed (${answer.status})`), { status: answer.status, code: answer.body?.code });
     }
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: CONTEXT_SERVICE, products: CATALOG };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: CONTEXT_SERVICE, products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.endsWith('/photos')) return { photos: [] };
@@ -362,6 +362,19 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     const check = await screen.findByRole('region', { name: 'Check' });
     expect(within(check).getByText('You tapped Spot treatment; heard Perimeter spray.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Spot treatment' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  // GATE_PEST_STOCK_ADVISORY: the advisory Check stock waits for a voice capture like every other control (codex r1
+  // on #6355): another tap would drop words still in flight.
+  test('stockAdvisory: the Check stock beside a 0-in-stock line waits for the voice capture', async () => {
+    const products = CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' } : p));
+    await openSheet(makeRequest({ products, context: { stockAdvisory: true } }));
+    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Check stock' }).disabled).toBe(false);
+    setDictation({ listening: true, mode: 'speech' });
+    expect(screen.getByRole('button', { name: 'Check stock' }).disabled).toBe(true);
+    setDictation({ listening: false });
+    expect(screen.getByRole('button', { name: 'Check stock' }).disabled).toBe(false);
   });
 
   test('live browser speech holds Complete until the words are in', async () => {

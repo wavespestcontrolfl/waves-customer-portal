@@ -119,12 +119,14 @@ export function useVisitPhotos({ serviceId, request, version, keepOnFailure = fa
         }
         setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true, failed: false, read: true });
       })
-      // The photo manager reports its own errors.
+      // The photo manager reports its own errors. Outside the note's box a failed read holds nothing, but it is no
+      // answer either: `read` false says so, and the report body then leaves photoCaptionsSeen out (an empty list
+      // would refuse the send if saved photos carry descriptions).
       .catch(() => {
         if (sequence !== readSequence.current) return;
         setState((prev) => (keepOnFailure
           ? { ...prev, loaded: true, failed: true }
-          : { photos: [], loaded: true, failed: false, read: prev.read }));
+          : { photos: [], loaded: true, failed: false, read: false }));
       });
     return () => { readSequence.current += 1; };
   }, [request, serviceId, version, keepOnFailure]);

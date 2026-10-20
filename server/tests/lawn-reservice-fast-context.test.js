@@ -137,6 +137,26 @@ describe('buildLawnReserviceFastContext', () => {
     });
   });
 
+  describe('GATE_ONE_TAP_REPORT', () => {
+    const saved = process.env.GATE_ONE_TAP_REPORT;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = saved; });
+    const read = () => buildLawnReserviceFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog }));
+
+    test('gate off: the key is absent', async () => {
+      delete process.env.GATE_ONE_TAP_REPORT;
+      const ctx = await read();
+      expect(ctx.eligible).toBe(true);
+      expect('oneTap' in ctx).toBe(false);
+    });
+
+    test('gate on (exactly true): oneTap is true; any other value stays off', async () => {
+      process.env.GATE_ONE_TAP_REPORT = 'true';
+      expect((await read()).oneTap).toBe(true);
+      process.env.GATE_ONE_TAP_REPORT = 'TRUE';
+      expect('oneTap' in await read()).toBe(false);
+    });
+  });
+
   test('a failed profile lookup is a retryable ineligibility with the identity', async () => {
     resolveCompletionProfileForScheduledService.mockRejectedValue(new Error('db down'));
     const ctx = await buildLawnReserviceFastContext('visit-1', fakeKnex({ scheduled_services: visit() }));

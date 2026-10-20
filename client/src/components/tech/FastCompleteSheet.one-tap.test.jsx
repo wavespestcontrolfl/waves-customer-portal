@@ -3,11 +3,14 @@
 // pest report sheet, whose context says `oneTap: true`,
 //  - the report is written in the background when the tech taps the 1-5 rating;
 //  - the note is not read for products (its facts are still read);
-//  - a product at 0 in stock holds nothing, and a line says so;
-//  - the trace is optional: typed feet cover a perimeter spray with no saved trace.
-// A re-service (and, with it, every lane, typed, station and prepare path), a first
-// cleanout that opens with no house mix, and a context without the key keep the sheet
-// as it was (FastCompleteSheet.report-flow.test.jsx).
+//  - a product at 0 in stock still holds, as without the gate, unless the context also says stockAdvisory
+//    (GATE_PEST_STOCK_ADVISORY: FastCompleteSheet.report-flow.test.jsx);
+//  - the trace is optional: typed feet cover a perimeter spray with no saved trace;
+//  - the photo and trace reads hold nothing: a read still loading or failed sends with its field left out.
+// A re-service gets the same sheet (the server sends the key for a recurring series or
+// a re-service only). Every lane, typed, station and prepare path, a first cleanout that
+// opens with no house mix, and a context without the key keep the sheet as it was
+// (FastCompleteSheet.report-flow.test.jsx).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -31,7 +34,7 @@ const REGULAR = {
   // As the server sends them: a free callback or not, and a visit of a recurring series (the one-tap scope).
   serviceKey: 'pest_general_quarterly', status: 'confirmed', isCallback: false, isRecurring: true,
 };
-const RESERVICE = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' };
+const RESERVICE = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service', isRecurring: false };
 const REPORT = ['WHAT WE FOUND', 'Ants on the counter.', '', 'WHAT WE DID AND WHY', 'We treated the kitchen.', '', 'WHAT TO EXPECT', 'Fewer ants.', '', "WHAT'S NEXT", 'Wipe the counters.'].join('\n');
 const NOTE = 'Ants on the kitchen counter, light. Sprayed around the outside of the house.';
 const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], pests: ['ants'] };
@@ -40,6 +43,7 @@ const NO_STOCK = () => CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory
 
 function makeRequest({
   service = REGULAR, facts = FACTS, trace = { enabled: true, treatmentZone: null }, products = CATALOG, context = { oneTap: true }, reportGate = null,
+  photos = { photos: [] },
 } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
@@ -49,8 +53,9 @@ function makeRequest({
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return { available: false, promises: [] };
     if (path.split('?')[0].endsWith('/blog-posts')) return { available: false, posts: [] };
-    if (path.endsWith('/photos')) return { photos: [] };
-    if (path.split('?')[0].endsWith('/treatment-zone')) return trace;
+    // `photos` / `trace` may be functions: a read that never answers, or one that fails.
+    if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : photos;
+    if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace() : trace;
     if (path === '/admin/schedule/generate-report') {
       if (reportGate) await reportGate;
       return { report: REPORT };
@@ -153,39 +158,113 @@ describe('one-tap: the rating tap starts the writer', () => {
 });
 
 describe('one-tap: a product at 0 in stock', () => {
-  test('holds nothing: the line shows on both steps, Check stock stays, and the visit goes out', async () => {
-    const request = makeRequest({ products: NO_STOCK });
+  // Without GATE_PEST_STOCK_ADVISORY, /complete refuses a pest deduction below zero (only a WaveGuard lawn completion
+  // may go negative), so the one-tap report keeps the hold: letting it through would only move the refusal to the last tap.
+  test.each([['gate on', { oneTap: true }], ['gate off', {}]])('%s: the hold stays, and nothing says the visit can still go', async (_label, context) => {
+    const request = makeRequest({ products: NO_STOCK, context });
     await openSheet(request);
-    const line = 'Taurus SC shows 0 in stock. You can still send. Tell the office to restock it.';
-    expect(screen.getByText(line)).toBeTruthy();
-    expect(screen.queryByText('Taurus SC shows 0 in stock. Update inventory or remove it.')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
-    writeNote();
-    tapRating();
-    await openReport();
-    expect(screen.getByText(line)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await screen.findByTestId('fast-complete-sent');
-    expect(request.bodies('/complete')).toHaveLength(1);
-  });
-
-  test('every product at 0 in stock gets its own line, with one Check stock', async () => {
-    const twoOut = () => CATALOG.map((p) => (p.id === 'surfactant' ? p : { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' }));
-    await openSheet(makeRequest({ products: twoOut }));
-    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. Tell the office to restock it.')).toBeTruthy();
-    expect(screen.getByText('Atticus Talak 7.9 F shows 0 in stock. You can still send. Tell the office to restock it.')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Check stock' })).toHaveLength(1);
-  });
-
-  test('gate off: the hold stays as it was', async () => {
-    await openSheet(makeRequest({ products: NO_STOCK, context: {} }));
     writeNote();
     tapRating();
     expect(screen.getByText('Taurus SC shows 0 in stock. Update inventory or remove it.')).toBeTruthy();
     expect(screen.queryByText(/You can still send/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    // The rating tap's write waits on the same hold.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reportCalls(request)).toHaveLength(0);
+  });
+
+  test('with stockAdvisory too (GATE_PEST_STOCK_ADVISORY): each product at 0 gets its own line and one Check stock, and the rating tap writes', async () => {
+    const twoOut = () => CATALOG.map((p) => (p.id === 'surfactant' ? p : { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' }));
+    const request = makeRequest({ products: twoOut, context: { oneTap: true, stockAdvisory: true } });
+    await openSheet(request);
+    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.getByText('Atticus Talak 7.9 F shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Check stock' })).toHaveLength(1);
+    writeNote();
+    tapRating();
+    await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
+  });
+});
+
+// The photo and trace reads hold nothing on the one-tap report (owner 2026-10-17, the scope page's "Loading photos"
+// and "Check the trace" holds and their Full form escapes). The body then omits the field of a read that did not
+// answer, so /complete skips that check instead of refusing a mismatch (an answered read still sends it).
+describe('one-tap: the photo and trace reads hold nothing', () => {
+  const never = () => new Promise(() => {});
+  const failed = () => Promise.reject(Object.assign(new Error('Read failed'), { status: 503 }));
+  const openWithFullForm = async (request) => {
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} onFullForm={onFullForm} voiceFillEnabled />);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    return onFullForm;
+  };
+  const sentBody = async (request) => {
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(request.bodies('/complete')).toHaveLength(1));
+    return request.bodies('/complete')[0];
+  };
+
+  test('a photo read still loading: the tap writes, the report opens and sends, with no photoCaptionsSeen', async () => {
+    const request = makeRequest({ photos: never });
+    await openWithFullForm(request);
+    writeNote();
+    tapRating();
+    await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
+    await openReport();
+    const body = await sentBody(request);
+    expect('photoCaptionsSeen' in body).toBe(false);
+    // the trace read answered (none saved), so its check still goes
+    expect(body.traceSeen).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+  });
+
+  test('a photo read that failed (photos outside the note box): it sends, with no photoCaptionsSeen', async () => {
+    const request = makeRequest({ photos: failed });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    const body = await sentBody(request);
+    // an empty list would be refused if saved photos carry descriptions
+    expect('photoCaptionsSeen' in body).toBe(false);
+  });
+
+  test('a trace read that failed: no hold, no Full form, typed feet cover the spray, and the body omits traceSeen', async () => {
+    const request = makeRequest({ facts: PERIMETER, trace: failed });
+    await openWithFullForm(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    expect(screen.queryByText(/Couldn’t check for a saved trace/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+    // its retry stays offered
+    expect(screen.getByRole('button', { name: 'Check the trace again' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Feet sprayed'), { target: { value: '150' } });
+    const body = await sentBody(request);
+    expect('traceSeen' in body).toBe(false);
+    // the photo read answered, so its check still goes
+    expect(body.photoCaptionsSeen).toEqual([]);
+    expect(body.products.find((p) => p.applicationMethod === 'perimeter_spray')).toMatchObject({ areaValue: 150, areaUnit: 'linear_ft' });
+  });
+
+  test('a trace read still loading: the feet box shows and the body omits traceSeen', async () => {
+    const request = makeRequest({ facts: PERIMETER, trace: never });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    expect(screen.queryByText('Checking for a saved trace…')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Feet sprayed'), { target: { value: '120' } });
+    const body = await sentBody(request);
+    expect('traceSeen' in body).toBe(false);
+  });
+
+  test('gate off: a trace read that failed still holds and offers the Full form', async () => {
+    const request = makeRequest({ facts: PERIMETER, trace: failed, context: {} });
+    await openWithFullForm(request);
+    expect(await screen.findByRole('button', { name: 'Full form' })).toBeTruthy();
   });
 });
 
@@ -302,11 +381,28 @@ describe('one-tap: the visit identity echoes the series', () => {
   });
 });
 
-describe('one-tap: not a plain recurring pest report', () => {
-  test('a re-service keeps its sheet: the tap writes nothing, the note is read for products, the trace hold stays', async () => {
-    const request = makeRequest({ service: RESERVICE, facts: PERIMETER });
+describe('one-tap: a re-service', () => {
+  const openReservice = async (request) => {
     render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Control Re-Service' }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
     await screen.findByText(/Taurus SC/);
+  };
+
+  test('gets the one-tap sheet: the tap writes, the note is not read for products, typed feet cover an untraced spray', async () => {
+    const request = makeRequest({ service: RESERVICE, facts: PERIMETER });
+    await openReservice(request);
+    writeNote();
+    tapRating();
+    await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
+    await openReport();
+    expect(reportCalls(request)).toHaveLength(1);
+    expect(request.bodies('/voice-fill/products')).toEqual([]);
+    expect(screen.getByText('Type the feet you sprayed, or trace it.')).toBeTruthy();
+    expect(screen.getByLabelText('Feet sprayed')).toBeTruthy();
+  });
+
+  test('a context without the key keeps the re-service sheet as it was', async () => {
+    const request = makeRequest({ service: RESERVICE, facts: PERIMETER, context: {} });
+    await openReservice(request);
     writeNote();
     tapRating();
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -315,7 +411,9 @@ describe('one-tap: not a plain recurring pest report', () => {
     expect(request.bodies('/voice-fill/products')).toEqual([{ note: NOTE }]);
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
   });
+});
 
+describe('one-tap: not a plain recurring pest report', () => {
   test('a first cleanout opens with no house mix: the tap writes nothing and Generate still reads the note for products', async () => {
     const CLEANOUT = { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' };
     const request = makeRequest({ service: CLEANOUT });

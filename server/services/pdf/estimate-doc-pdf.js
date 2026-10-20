@@ -125,12 +125,33 @@ async function withDocumentPdfCapacity(render) {
   }
 }
 
-async function renderEstimateDocumentPdf(estimate, { validThrough = null } = {}) {
+// `failOnImageErrors` (opt-in; only the emailed copy passes it): the document
+// counts its failed remote images (the satellite snapshot) into
+// window.__WAVES_PDF_IMAGE_FAILURES and drops them, which is right for the
+// download route (a document without a map beats no document) but not for a
+// permanent emailed copy, so there the render throws a tagged error instead and
+// the send goes out without the file (codex #6343 r12).
+async function renderEstimateDocumentPdf(estimate, { validThrough = null, failOnImageErrors = false } = {}) {
   if (!estimate?.token) throw new Error('estimate token required for document render');
-  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough }));
+  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough, failOnImageErrors }));
 }
 
-async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } = {}) {
+// The page's own count of images that failed to load, read after the render;
+// null when unknown (an older page bundle, or the page cannot be read), which
+// never fails a render.
+async function pageImageFailures(page) {
+  try {
+    // globalThis === window in the page context; spelled this way so the
+    // server-side lint (no browser globals) accepts the in-page function.
+    return await page.evaluate(() => (
+      typeof globalThis.__WAVES_PDF_IMAGE_FAILURES === 'number' ? globalThis.__WAVES_PDF_IMAGE_FAILURES : null
+    ));
+  } catch {
+    return null;
+  }
+}
+
+async function renderEstimateDocumentPdfInner(estimate, { validThrough = null, failOnImageErrors = false } = {}) {
   const url = estimateDocumentUrl(estimate.token, { validThrough });
   const browser = await launchBrowser();
   let page = null;
@@ -147,6 +168,12 @@ async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } 
       headerTemplate: '<div></div>',
       footerTemplate: '<div style="font-size:8px; width:100%; text-align:center; color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
     });
+    if (failOnImageErrors) {
+      const failures = await pageImageFailures(page);
+      if (failures > 0) {
+        throw Object.assign(new Error(`estimate document had ${failures} image(s) that failed to load`), { code: 'estimate_doc_image_failed', imageFailures: failures });
+      }
+    }
     return Buffer.from(pdf);
   } finally {
     if (page) await page.close().catch(() => {});
@@ -186,6 +213,123 @@ async function buildEstimateDocEmailAttachment(estimate, { validThrough = null }
   };
 }
 
+// ── Estimate PDF on the customer email (owner ask 2026-10-19) ──────────────
+// "Attach a pdf version of the estimates to all outgoing emails for customers
+// who can't open the estimate", and no glass look. So this is the browser
+// work-order document ONLY: there is no pdfkit fallback (that is the
+// commercial "Proposal" look), and a failure returns null — the email then
+// goes out as it always did, without the PDF or the note about it.
+// The one line under the button when the PDF rides along. Mode-neutral: the
+// email also goes to estimates that are accepted by confirming an existing
+// appointment, by invoice, or through the office, so it promises no start date
+// and no first visit (codex #6343 r6). It is a template
+// variable (`estimate_pdf_note`) so a send with no PDF drops the block and
+// stays byte-identical to today.
+const ESTIMATE_EMAIL_PDF_NOTES = Object.freeze({
+  delivery: "Can't open the link? A PDF copy of this estimate is attached. Reply to this email or call (941) 297-5749 with any questions or to go ahead.",
+  followUp: "Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 with any questions.",
+});
+const EMAIL_PDF_BUSY_ATTEMPTS = 3;
+const EMAIL_PDF_BUSY_DELAY_MS = 8000;
+
+function estimateEmailPdfEnabled() {
+  const featureGates = require('../../config/feature-gates');
+  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
+}
+
+// No customer name in the file name: the number the estimate page prints
+// (estimate_slug), else a short id.
+function estimateEmailPdfFilename(estimate) {
+  const slug = String(estimate?.estimate_slug || estimate?.slug || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+  const fallback = String(estimate?.id || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+  return `Waves-Estimate-${slug || fallback || 'copy'}.pdf`;
+}
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Waits and retries while the render capacity is busy; any other failure throws.
+async function renderWhileNotBusy(estimate, { validThrough, render, sleep, attempts, delayMs }) {
+  const doRender = render || renderEstimateDocumentPdf;
+  const wait = sleep || defaultSleep;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      // Only the emailed copy asks the render to fail on a failed image.
+      return await doRender(estimate, { validThrough, failOnImageErrors: true });
+    } catch (e) {
+      if (e?.code !== 'estimate_doc_render_busy' || attempt >= attempts) throw e;
+      await wait(delayMs);
+    }
+  }
+}
+
+// A customer-emailed PDF is a disclosure to the customer exactly like the
+// /:token/pdf download, but its evidence is written only AFTER the provider
+// accepted the email that carried it (recordEmailedPdfDisclosure below): the
+// documented rule is that a missed marker costs a frozen document its line,
+// while an EXTRA marker (written for a render that failed, a fence veto or a
+// provider rejection) would give an older-tab acceptance a line the customer
+// never saw. So before the render this only CHECKS whether the document will
+// print the line, on clones: billing resolution reconciles a membership
+// snapshot onto the row it is handed, and the caller's row is the one the
+// handoff fence fingerprints. Unknown (the check threw) fails closed: no PDF.
+async function rateReviewCheckForEmail(estimate) {
+  try {
+    const billingMod = require('../estimate-proposal-billing');
+    const billing = await billingMod.resolveProposalBillingContext(structuredClone(estimate));
+    const prints = await billingMod.documentPrintsRateReviewTerms(structuredClone(estimate), { billing });
+    return { prints: prints === true };
+  } catch (e) {
+    logger.warn(`[estimate-doc-pdf] rate review check failed for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
+    return { unknown: true };
+  }
+}
+
+// Returns a SendGrid attachment, or null. Never throws. No attachment when the
+// rate-review check is unknown: the browser renderer reads the row itself and
+// cannot be told to withhold the line, and there is no pdfkit fallback for
+// this copy, so the email goes out without it. An attachment whose document
+// prints the line carries a non-enumerable `rateReviewServed` flag (never
+// serialized to the provider) for recordEmailedPdfDisclosure.
+async function buildEstimateEmailPdfAttachment(estimate, { validThrough = null, render = null, sleep = null, attempts = EMAIL_PDF_BUSY_ATTEMPTS, delayMs = EMAIL_PDF_BUSY_DELAY_MS } = {}) {
+  try {
+    if (!estimateEmailPdfEnabled()) return null;
+    const check = await rateReviewCheckForEmail(estimate);
+    if (check.unknown) return null;
+    const buffer = await renderWhileNotBusy(estimate, { validThrough, render, sleep, attempts, delayMs });
+    if (!buffer || !buffer.length) return null;
+    const attachment = {
+      filename: estimateEmailPdfFilename(estimate),
+      content: Buffer.from(buffer).toString('base64'),
+      type: 'application/pdf',
+      disposition: 'attachment',
+    };
+    if (check.prints) Object.defineProperty(attachment, 'rateReviewServed', { value: true, enumerable: false });
+    return attachment;
+  } catch (e) {
+    try {
+      logger.warn(`[estimate-doc-pdf] email PDF skipped for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
+    } catch { /* logging must not turn a skipped PDF into a failed send */ }
+    return null;
+  }
+}
+
+// Call after the provider ACCEPTED the email that carried `attachment`. Marks
+// estimate_data.rateReviewTermsServed when that document printed the line, via
+// recordRateReviewTermsServedOutcome (SQL-guarded: never touches a frozen
+// estimate; an accept that landed first makes it a zero-row no-op). Never
+// throws; a missed marker only costs a frozen document its line.
+async function recordEmailedPdfDisclosure(attachment, estimateId) {
+  if (!attachment?.rateReviewServed || !estimateId) return 'skipped';
+  try {
+    const row = await require('../../models/db')('estimates').where({ id: estimateId }).first();
+    if (!row) return 'failed';
+    return await require('../estimate-proposal-billing').recordRateReviewTermsServedOutcome(row);
+  } catch (e) {
+    logger.warn(`[estimate-doc-pdf] rate review disclosure not recorded for estimate ${estimateId}: ${sanitizeRenderError(e)}`);
+    return 'failed';
+  }
+}
+
 // Preferred attachment entry point for the send path: browser document when
 // the gate is on, pdfkit otherwise or on ANY render failure. Throwing only
 // when BOTH generators fail preserves the send path's "no proposal email
@@ -213,5 +357,10 @@ module.exports = {
   renderEstimateDocumentPdf,
   buildEstimateDocEmailAttachment,
   buildEstimateProposalEmailAttachmentPreferred,
+  buildEstimateEmailPdfAttachment,
+  recordEmailedPdfDisclosure,
+  estimateEmailPdfEnabled,
+  ESTIMATE_EMAIL_PDF_NOTES,
+  estimateEmailPdfFilename,
   sanitizeRenderError,
 };

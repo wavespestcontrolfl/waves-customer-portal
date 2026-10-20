@@ -73,8 +73,14 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../services/triage-auto-resolve', () => ({ deliveredEstimateScope: jest.fn(() => ({ lines: [] })) }));
 jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   buildEstimateProposalEmailAttachmentPreferred: jest.fn(async () => ({ filename: 'synthetic-proposal.pdf', content: 'c3ludGhldGlj', type: 'application/pdf' })),
+  buildEstimateEmailPdfAttachment: jest.fn(async () => null),
+  recordEmailedPdfDisclosure: jest.fn(async () => 'persisted'),
+  ESTIMATE_EMAIL_PDF_NOTES: { delivery: 'Synthetic delivery PDF note.', followUp: 'Synthetic follow-up PDF note.' },
 }));
 jest.mock('../routes/estimate-public', () => ({
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
+  composeEstimateDataPayload: jest.fn((...args) => require('./helpers/estimate-document-payload').documentPayloadFromRow(...args)),
+  findLinkedUpcomingAppointment: jest.fn(async () => null), adoptionServiceModesForContract: jest.fn(() => []),
   acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({ services: [] })),
 }));
@@ -1792,5 +1798,381 @@ describe('impossible US phone is refused before any provider call', () => {
     row.customer_phone = '+12035550123';
     const ok = await invoke('/:id/send-preview', 'get');
     expect(ok.body.smsBlockReason).toBeNull();
+  });
+});
+
+
+describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', () => {
+  const featureGates = require('../config/feature-gates');
+  const docPdf = require('../services/pdf/estimate-doc-pdf');
+  const PDF = { filename: 'Waves-Estimate-EST-2026-0001.pdf', content: 'c3ludGhldGlj', type: 'application/pdf', disposition: 'attachment' };
+  const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && (name === 'estimateEmailPdf' || name === 'estimateDocPdf'));
+  let originalRender;
+  beforeEach(() => {
+    originalRender = email.renderTemplate.getMockImplementation();
+    // The preview text carries the note, like the real template does.
+    email.renderTemplate.mockImplementation(({ payload }) => ({
+      subject: 'Synthetic estimate message',
+      text: `${payload.price_summary}\n${payload.estimate_url}${payload.estimate_pdf_note ? `\n${payload.estimate_pdf_note}` : ''}`,
+      html: '<p>Synthetic estimate message</p>',
+    }));
+    docPdf.buildEstimateEmailPdfAttachment.mockReset();
+    docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(PDF);
+  });
+  afterEach(() => {
+    featureGates.isEnabled.mockImplementation(() => false);
+    email.renderTemplate.mockImplementation(originalRender);
+  });
+
+  test('gate on: the email carries the PDF and the note, and the channel says so', async () => {
+    setGates(true);
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+    expect(result.channels.email.warning).toBeUndefined();
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.templateKey).toBe('estimate.delivery');
+    expect(sent.attachments).toEqual([PDF]);
+    expect(sent.payload.estimate_pdf_note).toBe('Synthetic delivery PDF note.');
+    // The document advertises the same valid-through date as the link.
+    expect(docPdf.buildEstimateEmailPdfAttachment).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), { validThrough: expect.any(Date) });
+  });
+
+  test('gate off: nothing is built, no note, no attachment, and the channel result is unchanged', async () => {
+    setGates(false);
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.attachments).toEqual([]);
+    expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+    expect(result.channels.email).not.toHaveProperty('pdfAttached');
+    expect(result.channels.email.warning).toBeUndefined();
+  });
+
+  test('the PDF gate alone is not enough: the browser document gate must be on too', async () => {
+    featureGates.isEnabled.mockImplementation((name) => name === 'estimateEmailPdf');
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+    expect(email.sendTemplate.mock.calls[0][0].payload).not.toHaveProperty('estimate_pdf_note');
+  });
+
+  test.each([
+    ['returns nothing', () => docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(null)],
+    ['throws', () => docPdf.buildEstimateEmailPdfAttachment.mockRejectedValue(new Error('browser down'))],
+  ])('a render that %s still sends the email as today, with a warning', async (_label, arrange) => {
+    setGates(true);
+    arrange();
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: false, warning: expect.stringMatching(/PDF copy could not be attached/) });
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.attachments).toEqual([]);
+    expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+  });
+
+  test.each([
+    ['persisted without a file', { has_attachments: false }, { pdfAttached: false, warning: expect.stringMatching(/PDF copy could not be attached/) }],
+    ['persisted with a file', { has_attachments: true }, { pdfAttached: true }],
+    ['not reported', { provider_message_id: 'earlier' }, null],
+  ])('a deduped answer (the earlier message %s) never claims the new render went out and records no disclosure (codex #6343 r12)', async (_label, message, expected) => {
+    setGates(true);
+    docPdf.recordEmailedPdfDisclosure.mockClear();
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, message });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email.ok).toBe(true);
+    if (expected) expect(result.channels.email).toMatchObject(expected);
+    else expect(result.channels.email).not.toHaveProperty('pdfAttached');
+    expect(docPdf.recordEmailedPdfDisclosure).not.toHaveBeenCalled();
+  });
+
+  test('a fresh provider-accepted send records the disclosure once and says the file went out', async () => {
+    setGates(true);
+    docPdf.recordEmailedPdfDisclosure.mockClear();
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+    expect(docPdf.recordEmailedPdfDisclosure).toHaveBeenCalledTimes(1);
+  });
+
+  test('a commercial proposal keeps its own PDF path and never gets the estimate copy', async () => {
+    setGates(true);
+    row.estimate_data = { proposal: { enabled: true, validThrough: '2099-12-21',
+      buildings: [{ name: 'Synthetic property', lineItems: [
+        { id: 'application', description: 'Synthetic application', quantity: 1, unit: 'acre', unitPrice: 100, frequency: 'one_time' },
+      ] }] } };
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(docPdf.buildEstimateProposalEmailAttachmentPreferred).toHaveBeenCalledTimes(1);
+    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+    expect(email.sendTemplate.mock.calls[0][0].payload).not.toHaveProperty('estimate_pdf_note');
+  });
+
+  test('reviewed send: the preview shows the note, the same review sends, and the reviewed template hash is untouched', async () => {
+    setGates(true);
+    row.status = 'draft';
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.email.text).toContain('Synthetic delivery PDF note.');
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    const sent = email.sendTemplate.mock.calls[0][0];
+    expect(sent.attachments).toEqual([PDF]);
+    expect(sent.expectedContentHash).toBe(preview.body.messages.email.contentHash);
+  });
+
+  test('reviewed send: the review of a message with no PDF line goes stale when the gate comes on', async () => {
+    setGates(false);
+    row.status = 'draft';
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.email.text).not.toContain('Synthetic delivery PDF note.');
+    setGates(true);
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.code).toBe('ESTIMATE_REVIEW_STALE');
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('reviewed send: a PDF that fails to render still sends the reviewed email without the file', async () => {
+    setGates(true);
+    row.status = 'draft';
+    const preview = await invoke('/:id/send-preview', 'get');
+    docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(null);
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(email.sendTemplate.mock.calls[0][0].attachments).toEqual([]);
+    expect(email.sendTemplate.mock.calls[0][0].expectedContentHash).toBe(preview.body.messages.email.contentHash);
+  });
+
+  // codex #6343 r6 P1/P2: the reviewed PDF decision travels with the review and
+  // the schedule; a grouped estimate carries no PDF; the delivery fence also
+  // requires the claimed 'sending' state.
+  describe('reviewed PDF decision, groups and the claimed state', () => {
+    const emailPdf = require('../services/estimate-email-pdf');
+    afterEach(() => jest.restoreAllMocks());
+
+    test('the review records the decision (only when true) and a schedule built from it keeps it', async () => {
+      setGates(true);
+      row.status = 'draft';
+      const preview = await invoke('/:id/send-preview', 'get');
+      expect(preview.body.messages.email.pdfCopy).toBe(true);
+      const scheduled = await invoke('/:id/send', 'post', {
+        sendMethod: 'email', scheduledAt: new Date(Date.now() + 86400000).toISOString(), idempotencyKey: 'synthetic-pdf-schedule',
+        expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+      });
+      expect(scheduled.statusCode).toBe(200);
+      // The schedule receipt carries the reviewed messages, decision included.
+      const stored = dataOf().manualSendAttempts.at(-1).scheduleReview.reviewedMessages.email;
+      expect(stored.pdfCopy).toBe(true);
+      // Gate off: the review is exactly as before (no key at all).
+      setGates(false);
+      expect((await invoke('/:id/send-preview', 'get')).body.messages.email).not.toHaveProperty('pdfCopy');
+    });
+
+    test('a scheduled send reviewed WITH the PDF is stale when the decision is now no, and nothing is sent', async () => {
+      setGates(false);
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', {
+        callerPreClaimed: false, reviewedMessages: { sms: null, email: { provider: 'sendgrid', pdfCopy: true } },
+      })).rejects.toMatchObject({ code: 'ESTIMATE_REVIEW_STALE' });
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('a review made WITHOUT a stored decision (an old schedule) sends with no PDF and no note, never stale', async () => {
+      setGates(true);
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', {
+        reviewedMessages: { sms: null, email: { provider: 'sendgrid' } },
+      });
+      expect(result.channels.email.ok).toBe(true);
+      expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+      const sent = email.sendTemplate.mock.calls[0][0];
+      expect(sent.attachments).toEqual([]);
+      expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+    });
+
+    test('a reviewed yes that is still yes sends the file; an estimate that joined a group since the review is stale', async () => {
+      setGates(true);
+      const reviewed = { sms: null, email: { provider: 'sendgrid', pdfCopy: true } };
+      const ok = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: reviewed });
+      expect(ok.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+      email.sendTemplate.mockClear();
+      jest.spyOn(emailPdf, 'estimateInMultiPropertyGroup').mockResolvedValue(true);
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: reviewed }))
+        .rejects.toMatchObject({ code: 'ESTIMATE_REVIEW_STALE' });
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    describe('SMTP fallback previews record the same decision (codex #6343 r9)', () => {
+      const gate = () => require('../services/email-fallback-gate').smtpFallbackAllowed;
+      let priorPassword;
+      beforeEach(() => {
+        priorPassword = process.env.GOOGLE_SMTP_PASSWORD;
+        process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-password';
+        sendgrid.isConfigured.mockReturnValue(false);
+        gate().mockReturnValue(true);
+        row.status = 'draft';
+      });
+      afterEach(() => {
+        gate().mockReturnValue(false);
+        sendgrid.isConfigured.mockReturnValue(true);
+        if (priorPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+        else process.env.GOOGLE_SMTP_PASSWORD = priorPassword;
+      });
+
+      test('the SMTP preview carries pdfCopy only when true, and its content hash is the same either way', async () => {
+        setGates(true);
+        const on = (await invoke('/:id/send-preview', 'get')).body.messages.email;
+        setGates(false);
+        const off = (await invoke('/:id/send-preview', 'get')).body.messages.email;
+        expect(on).toMatchObject({ provider: 'smtp', pdfCopy: true });
+        expect(off.provider).toBe('smtp');
+        expect(off).not.toHaveProperty('pdfCopy');
+        expect(on.contentHash).toBe(off.contentHash);
+        expect(on.text).toBe(off.text);
+      });
+
+      test('a reviewed SMTP send attaches the file it was reviewed with; one reviewed without the decision does not', async () => {
+        setGates(true);
+        const reviewed = (await invoke('/:id/send-preview', 'get')).body.messages;
+        row.status = 'sending';
+        const sendMail = jest.fn(async () => ({}));
+        require('nodemailer').createTransport.mockReturnValueOnce({ sendMail });
+        const result = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: reviewed });
+        expect(result.channels.email).toMatchObject({ ok: true, provider: 'smtp_fallback', pdfAttached: true });
+        expect(sendMail.mock.calls[0][0].attachments).toEqual([expect.objectContaining({ filename: PDF.filename, contentType: 'application/pdf' })]);
+
+        row.status = 'sending';
+        const sendMail2 = jest.fn(async () => ({}));
+        require('nodemailer').createTransport.mockReturnValueOnce({ sendMail: sendMail2 });
+        const { pdfCopy: _dropped, ...withoutDecision } = reviewed.email;
+        const legacy = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: { ...reviewed, email: withoutDecision } });
+        expect(legacy.channels.email.ok).toBe(true);
+        expect(sendMail2.mock.calls[0][0].attachments).toBeUndefined();
+      });
+    });
+
+    test('a sms-only send is not held up by an email PDF decision', async () => {
+      setGates(false);
+      const result = await router.sendEstimateNow(structuredClone(row), 'sms', {
+        reviewedMessages: { sms: 'Synthetic text', email: { provider: 'sendgrid', pdfCopy: true } },
+      });
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+      expect(result.channels.sms).toBeDefined();
+    });
+
+    test('a grouped estimate: no PDF built, no note, no fence, and the review shows no note', async () => {
+      setGates(true);
+      jest.spyOn(emailPdf, 'estimateInMultiPropertyGroup').mockResolvedValue(true);
+      row.status = 'draft';
+      const preview = await invoke('/:id/send-preview', 'get');
+      expect(preview.body.messages.email).not.toHaveProperty('pdfCopy');
+      expect(preview.body.messages.email.text).not.toContain('Synthetic delivery PDF note.');
+      row.status = 'sending';
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+      const sent = email.sendTemplate.mock.calls[0][0];
+      expect(sent.attachments).toEqual([]);
+      expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+      expect(sent).not.toHaveProperty('withProviderHandoff');
+      expect(result.channels.email.ok).toBe(true);
+    });
+
+    test('a decline landing during the render vetoes the send at the handoff', async () => {
+      setGates(true);
+      email.sendTemplate.mockImplementation(async ({ onQueued, withProviderHandoff }) => {
+        await onQueued?.();
+        try {
+          await withProviderHandoff(async (_database, boundaryCheck) => { await boundaryCheck({}); });
+        } catch (err) {
+          return { sent: false, aborted: true, providerAttempted: false, boundaryBlocked: !!err.providerBoundaryBlocked };
+        }
+        return { sent: true, providerAttempted: true, providerAccepted: true, message: { provider_message_id: 'x' } };
+      });
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.status = 'declined'; return PDF; });
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
+    });
+  });
+
+  // codex #6343 r4 P1: the PDF is rendered from the fresh row but mailed to
+  // estimate.customer_email; the handoff fence ties the two together.
+  describe('recipient and content fence on the delivery PDF', () => {
+    // Stand-in for sendTemplate's provider handoff: runs the caller's fence the
+    // way sendOne does, and reports a veto the way sendTemplate does.
+    const runFenceLikeSendTemplate = () => email.sendTemplate.mockImplementation(async ({ onQueued, withProviderHandoff }) => {
+      await onQueued?.();
+      if (withProviderHandoff) {
+        try {
+          await withProviderHandoff(async (_database, boundaryCheck) => { await boundaryCheck({}); });
+        } catch (err) {
+          return { sent: false, aborted: true, providerAttempted: false, boundaryBlocked: !!err.providerBoundaryBlocked, boundaryCheckFailed: !!err.providerBoundaryCheckFailed };
+        }
+      }
+      return { sent: true, providerAttempted: true, providerAccepted: true, message: { provider_message_id: 'synthetic-email-accepted' } };
+    });
+    beforeEach(() => { setGates(true); runFenceLikeSendTemplate(); });
+
+    test('nothing changed: the fence passes and the PDF goes out', async () => {
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+      expect(email.sendTemplate.mock.calls[0][0].withProviderHandoff).toEqual(expect.any(Function));
+    });
+
+    test('an address corrected before the render: no PDF is built, no note, and the no-document fence stops the send to the old address', async () => {
+      const stale = structuredClone(row);
+      row.customer_email = 'corrected@example.invalid';
+      const result = await router.sendEstimateNow(stale, 'email', { callerPreClaimed: true });
+      expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
+      const sent = email.sendTemplate.mock.calls[0][0];
+      expect(sent.attachments).toEqual([]);
+      expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
+      expect(sent.withProviderHandoff).toEqual(expect.any(Function));
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
+    });
+
+    test('the same address in another case or with spaces still gets the PDF', async () => {
+      const stale = structuredClone(row);
+      stale.customer_email = ' Recipient@Example.Invalid ';
+      const result = await router.sendEstimateNow(stale, 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+    });
+
+    test('an address corrected while the PDF renders vetoes the email: the channel fails with a clear error', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.customer_email = 'corrected@example.invalid'; return PDF; });
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email.ok).toBe(false);
+      expect(result.channels.email.error).toMatch(/changed .* while the PDF copy was being prepared; the email was not sent/);
+      expect(result.channels.email.uncertain).toBeFalsy();
+      expect(result.sent).toBe(false);
+    });
+
+    test('a price edit while the PDF renders vetoes the email too', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.monthly_total = '150'; return PDF; });
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
+    });
+
+    test('a fence that cannot read fails the channel and says to try again', async () => {
+      const failing = jest.fn(async ({ onQueued }) => {
+        await onQueued?.();
+        return { sent: false, aborted: true, providerAttempted: false, boundaryCheckFailed: true };
+      });
+      email.sendTemplate.mockImplementation(failing);
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/could not be re-checked .* Try sending again/) });
+    });
+
+    test('a render that returns nothing still carries a no-document fence: untouched by a content edit, stopped by a decline', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.monthly_total = '150'; return null; });
+      const edited = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      const sent = email.sendTemplate.mock.calls[0][0];
+      expect(sent.attachments).toEqual([]);
+      expect(sent.withProviderHandoff).toEqual(expect.any(Function));
+      expect(edited.channels.email).toMatchObject({ ok: true, pdfAttached: false });
+      row.status = 'sending';
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.status = 'declined'; return null; });
+      const declined = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(declined.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
+    });
   });
 });

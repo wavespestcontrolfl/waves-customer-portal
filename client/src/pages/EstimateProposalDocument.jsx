@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { fmtMoney } from '../lib/money';
 import { RATE_REVIEW_TERMS_LINE, copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import {
@@ -11,6 +11,7 @@ import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-se
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
+import { ACCEPT_MODE_LABELS, NextSteps, WAVES_EMAIL, acceptanceModeOf, mailtoHref, resolveDocNextSteps } from './estimateDocumentNextSteps';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -39,6 +40,49 @@ const MUTED = '#3F4A65'; // DOC.muted
 const LINE = '#D8D0C0'; // DOC.borderStrong
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
+const WAVES_SITE_URL = 'https://www.wavespestcontrol.com';
+const HEADER_LINK = { color: 'inherit', textDecoration: 'none' };
+
+// Tappable actions (owner 2026-10-19: the emailed PDF must be clickable for a
+// customer who cannot open the estimate link). Plain anchors: Chromium's
+// page.pdf keeps each one as a PDF link annotation, so the buttons, phone and
+// email work inside a phone's PDF viewer as well as on screen.
+function DocButton({ href, primary = false, children, testId }) {
+  return (
+    <a
+      href={href}
+      data-testid={testId}
+      style={{
+        display: 'inline-block',
+        padding: '8px 16px',
+        borderRadius: 8,
+        border: `1.5px solid ${NAVY}`,
+        background: primary ? NAVY : '#fff',
+        color: primary ? '#fff' : NAVY,
+        // 14px: the repo's floor for customer-surface text (codex #6343 r1).
+        fontSize: 14,
+        fontWeight: 700,
+        textDecoration: 'none',
+        lineHeight: 1.3,
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+export { ACCEPT_MODE_LABELS, acceptanceModeOf };
+
+export function DocActions({ cta, authoredProposal, estimateUrl, estimateNumber, acceptanceMode = 'standard_slot_pick' }) {
+  const { primaryLabel } = resolveDocNextSteps({ cta, authoredProposal, acceptanceMode });
+  return (
+    <div className="doc-keep" data-testid="doc-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+      {primaryLabel ? <DocButton href={estimateUrl} primary testId="doc-action-online">{primaryLabel}</DocButton> : null}
+      <DocButton href={WAVES_SUPPORT_PHONE_TEL} testId="doc-action-call">Call {WAVES_SUPPORT_PHONE_DISPLAY}</DocButton>
+      <DocButton href={mailtoHref(estimateNumber)} testId="doc-action-email">Email us</DocButton>
+    </div>
+  );
+}
 
 // Shared ET formatter (lib/timezone) — no parallel date utility here.
 function formatAcceptedAt(value) {
@@ -170,6 +214,7 @@ export default function EstimateProposalDocument({ data, token }) {
   const estimate = data?.estimate || {};
   const proposal = data?.proposal || null;
   const cta = data?.cta || {};
+  const acceptanceMode = acceptanceModeOf(data);
   const totals = proposal?.totals || {};
   const isCommercial = cta.commercialProposal === true
     || cta.commercialAutoPriced === true
@@ -349,6 +394,7 @@ export default function EstimateProposalDocument({ data, token }) {
   const docTitle = authoredProposal
     ? (proposal.title || 'Commercial Service Proposal')
     : (isCommercial ? 'Commercial Service Estimate' : 'Service Estimate');
+  const validThroughText = fmtValidThrough(proposal.validThrough || estimate.expiresAt);
   const estimateNumber = estimate.slug
     || String(estimate.id || '').split('-')[0].toUpperCase()
     || '';
@@ -379,13 +425,22 @@ export default function EstimateProposalDocument({ data, token }) {
       `}</style>
       <div className="doc-page">
 
-        {/* Letterhead */}
-        <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        {/* Letterhead — navy band (owner 2026-10-19 "navy header"), the same
+            brand band the invoice PDFs carry. White type on NAVY; the print
+            color-adjust rule above keeps the fill in the PDF. */}
+        <div className="doc-keep" data-testid="doc-letterhead" style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16,
+          background: NAVY, color: '#fff', borderRadius: 10, padding: '12px 18px',
+        }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
-          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
-            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
-            <div>{WAVES_SUPPORT_PHONE_DISPLAY} &middot; wavespestcontrol.com</div>
-            <div>contact@wavespestcontrol.com</div>
+          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: '#E6EEF5' }}>
+            <div style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
+            <div>
+              <a href={WAVES_SUPPORT_PHONE_TEL} style={HEADER_LINK}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
+              {' '}&middot;{' '}
+              <a href={WAVES_SITE_URL} style={HEADER_LINK}>wavespestcontrol.com</a>
+            </div>
+            <div><a href={`mailto:${WAVES_EMAIL}`} style={HEADER_LINK}>{WAVES_EMAIL}</a></div>
             <div>Licensed &amp; insured &middot; {WAVES_FL_LICENSE_LINE}</div>
           </div>
         </div>
@@ -393,7 +448,7 @@ export default function EstimateProposalDocument({ data, token }) {
         {/* Title row */}
         <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8, gap: 12,
+          marginTop: 14, gap: 12,
         }}>
           <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
           <div className="doc-number" style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
@@ -413,11 +468,13 @@ export default function EstimateProposalDocument({ data, token }) {
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Estimate details</SectionHeader>
             <InfoRow label="Date">{fmtInstant(estimate.createdAt)}</InfoRow>
-            <InfoRow label="Valid through">{fmtValidThrough(proposal.validThrough || estimate.expiresAt) || '7 days after sending'}</InfoRow>
+            <InfoRow label="Valid through">{validThroughText || '7 days after sending'}</InfoRow>
             <InfoRow label="Prepared by">Waves Pest Control, LLC</InfoRow>
             {estimate.licenseNumber ? <InfoRow label="License">{estimate.licenseNumber}</InfoRow> : null}
           </div>
         </div>
+
+        <DocActions cta={cta} authoredProposal={authoredProposal} estimateUrl={estimateUrl} estimateNumber={estimateNumber} acceptanceMode={acceptanceMode} />
 
         {/* Property scope (slice 1A-i) — the estimator-captured facts the
             price was scoped against. Authored proposals only; absent →
@@ -666,46 +723,16 @@ export default function EstimateProposalDocument({ data, token }) {
 
         <div className="doc-keep">
           <SectionHeader>Next steps</SectionHeader>
-          {/* Next-step copy follows the CTA state (codex #3281 r1): accepted
-              and declined estimates stay downloadable, and quote-required /
-              review-gated ones can't self-book — none of them may be told to
-              "approve online". */}
-          {cta.terminalState === 'accepted' ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              This estimate has been approved — your live estimate at{' '}
-              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a> has your visit details.
-              Questions? Call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
-            </p>
-          ) : cta.terminalState === 'declined' ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              This estimate was declined. Changed your mind? Call {WAVES_SUPPORT_PHONE_DISPLAY} and
-              we&rsquo;ll refresh the numbers with you.
-            </p>
-          ) : authoredProposal ? (
-            // Every customer surface (this document, the terminal card, the
-            // SSR banner) names the shared account-manager constant — a
-            // per-proposal override lands as one slice with its authoring
-            // path so the PDF can never name a different contact than the
-            // page it links to (codex #3297 r1/r3).
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              {WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
-              questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
-              Your live estimate stays available at{' '}
-              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
-            </p>
-          ) : cta.quoteRequired === true || cta.reviewBeforeBooking === true ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              Our team will confirm the final details and scheduling with you — call{' '}
-              {WAVES_SUPPORT_PHONE_DISPLAY} any time. Your live estimate stays available at{' '}
-              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
-            </p>
-          ) : (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              Open your live estimate at <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a> to
-              pick a start date and approve online — or call {WAVES_SUPPORT_PHONE_DISPLAY} and we&rsquo;ll
-              take care of it with you.
-            </p>
-          )}
+          {/* Next-step copy follows the CTA state (codex #3281 r1) and the
+              acceptance mode (codex #6343 r5/r7): see estimateDocumentNextSteps. */}
+          <NextSteps
+            cta={cta}
+            authoredProposal={authoredProposal}
+            acceptanceMode={acceptanceMode}
+            estimateUrl={estimateUrl}
+            estimateNumber={estimateNumber}
+            validThroughText={validThroughText}
+          />
         </div>
 
         {/* Acceptance record (GATE_ESTIMATE_ACCEPTANCE_TERMS): only when the
