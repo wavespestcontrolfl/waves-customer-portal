@@ -64,6 +64,7 @@ const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
 const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like)\b/i;
 const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|it|asap|already|just)\b/gi;
+const STOP_LANGUAGE = /\b(?:stop(?!\s+(?:by|over|in|at|back))|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 
 function sentencesOf(body) {
@@ -91,10 +92,13 @@ function asksForNoTexts(body) {
   const sentences = sentencesOf(body);
   const kinds = sentences.map(noTextsKind);
   if (kinds.includes('request')) return true;
-  // A missing-text report is exempt, but not when a clause of the message is a plain opt-out
-  // keyword, with polite words around it ("I got no text, STOP", "I got no text. Please stop"):
-  // the exact-keyword check above only reads a whole message. "can the tech stop by" is no keyword.
-  return kinds.includes('report') && String(body || '').split(/[.!?;,\n\r]+/).some((clause) => {
+  // A missing-text report is exempt, but not when the message also says stop: explicit stop
+  // language anywhere ("I got no text. Stop contacting me"; "stop by" is a visit, not stop
+  // language), or a clause that is a plain opt-out keyword with polite words around it ("I got no
+  // text. Cancel please"). The exact-keyword check above only reads a whole message.
+  if (!kinds.includes('report')) return false;
+  if (STOP_LANGUAGE.test(body)) return true;
+  return String(body || '').split(/[.!?;,\n\r]+/).some((clause) => {
     const keyword = compactKeyword(clause.replace(KEYWORD_FILLER, ' '));
     return EXACT_OPT_OUT.has(keyword) || /^STO+P+$/.test(keyword);
   });
