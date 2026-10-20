@@ -42,7 +42,7 @@ const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-ser
 function Label({ children }) {
   return (
     <span style={{
-      display: 'inline-block', minWidth: 86, color: MUTED, fontSize: 9.5,
+      display: 'inline-block', minWidth: 112, color: MUTED, fontSize: 14,
       fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
     }}>{children}</span>
   );
@@ -51,9 +51,9 @@ function Label({ children }) {
 function InfoRow({ label, children }) {
   if (children == null || children === '') return null;
   return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0', minWidth: 0 }}>
+    <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '2px 0', minWidth: 0 }}>
       <Label>{label}</Label>
-      <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
+      <span style={{ color: INK, fontSize: 15, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
     </div>
   );
 }
@@ -63,19 +63,19 @@ function InfoRow({ label, children }) {
 function SectionHeader({ children }) {
   return (
     <div role="heading" aria-level={2} className="doc-keep-with-next" style={{
-      borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
-      color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
+      borderBottom: `2px solid ${NAVY}`, margin: '18px 0 8px', paddingBottom: 4,
+      color: NAVY, fontSize: 14, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
   );
 }
 
-const paragraphStyle = { margin: '0 0 6px', fontSize: 11.5, lineHeight: 1.5, color: INK, whiteSpace: 'pre-wrap' };
+const paragraphStyle = { margin: '0 0 8px', fontSize: 15, lineHeight: 1.5, color: INK, whiteSpace: 'pre-wrap' };
 
 // One finding: bold label, then its value (the species row reads as a sentence).
 function FindingRow({ label, children }) {
   return (
-    <div className="doc-keep" style={{ margin: '0 0 8px' }}>
-      <div style={{ fontSize: 11.5, fontWeight: 700, color: INK }}>{label}</div>
+    <div className="doc-keep" style={{ margin: '0 0 10px' }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: INK }}>{label}</div>
       {children}
     </div>
   );
@@ -123,7 +123,7 @@ function Narrative({ text, upcomingAppointment }) {
 
 function PhotoGrid({ photos, failed, onFail }) {
   return (
-    <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+    <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 13 }}>
       {photos.map((ph) => {
         const label = getPhotoLabel(ph);
         const missing = !ph.url || failed.has(ph.url);
@@ -132,8 +132,8 @@ function PhotoGrid({ photos, failed, onFail }) {
             {missing ? (
               <div style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center',
-                width: '100%', height: 190, background: '#F7F8F9', borderRadius: 10,
-                border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
+                width: '100%', height: 248, background: '#F7F8F9', borderRadius: 13,
+                border: `1px dashed ${LINE}`, color: MUTED, fontSize: 14, padding: 10, boxSizing: 'border-box',
               }}>
                 Photo unavailable right now
               </div>
@@ -143,11 +143,11 @@ function PhotoGrid({ photos, failed, onFail }) {
                   src={ph.url}
                   alt={label}
                   onError={() => onFail(ph.url)}
-                  style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
+                  style={{ display: 'block', width: '100%', height: 248, objectFit: 'contain', background: '#F7F8F9', borderRadius: 13, border: `1px solid ${HAIR}` }}
                 />
               </a>
             )}
-            <figcaption style={{ fontSize: 9.5, color: MUTED, lineHeight: 1.45, marginTop: 3, textTransform: 'capitalize' }}>{label}</figcaption>
+            <figcaption style={{ fontSize: 14, color: MUTED, lineHeight: 1.45, marginTop: 4, textTransform: 'capitalize' }}>{label}</figcaption>
           </figure>
         );
       })}
@@ -192,7 +192,7 @@ export default function ProjectReportDocument({ data }) {
     >
       <style>{`
         .project-report-document { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        .project-report-document .doc-page { max-width: 760px; margin: 0 auto; padding: 20px 16px 28px; }
+        .project-report-document .doc-page { max-width: 988px; margin: 0 auto; padding: 26px 16px 36px; }
         @media print {
           /* The document IS the artifact: no shell chrome, no button, no glass. */
           [data-waves-shell-header],
@@ -201,17 +201,16 @@ export default function ProjectReportDocument({ data }) {
           .project-report-document .doc-noprint { display: none !important; }
           html[data-glass-theme] .glass-scene-orbs,
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
-          .project-report-document .doc-page { padding: 0; max-width: none; zoom: 1; }
+          .project-report-document .doc-page { padding: 0; max-width: none; }
           .project-report-document .doc-keep { break-inside: avoid; page-break-inside: avoid; }
           .project-report-document .doc-keep-with-next { break-after: avoid-page; page-break-after: avoid; }
         }
-        /* The sizes are set for a letter-size page, too small for a screen: scale
-           the page so body text reads at about 15px (the service report's web view). */
-        .project-report-document.is-web .doc-page { zoom: 1.3; }
+        /* Screen sizes (the service report's web view at its 1.3 zoom, 14px
+           floor): this page has no letter-size PDF capture to scale from. */
         @media (max-width: 640px) {
           .project-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
           .project-report-document.is-web .doc-letterhead,
-          .project-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 8px !important; }
+          .project-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 10px !important; }
           .project-report-document.is-web .doc-letterhead > div { text-align: left !important; }
           .project-report-document.is-web .doc-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
         }
@@ -219,24 +218,24 @@ export default function ProjectReportDocument({ data }) {
       <div className="doc-page">
 
         {!isNativeApp() && (
-          <div className="doc-noprint" style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <div className="doc-noprint" style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
             <button
               type="button"
               onClick={() => window.print()}
               style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: 36, padding: '0 12px',
-                borderRadius: 8, border: 0, background: NAVY, color: '#fff', fontWeight: 600, fontSize: 11.5,
+                display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 44, padding: '0 16px',
+                borderRadius: 10, border: 0, background: NAVY, color: '#fff', fontWeight: 600, fontSize: 15,
                 fontFamily: FONT, cursor: 'pointer',
               }}
-            ><Printer size={13} aria-hidden="true" /> Print / Save as PDF</button>
+            ><Printer size={17} aria-hidden="true" /> Print / Save as PDF</button>
           </div>
         )}
 
         {/* Letterhead */}
-        <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
-          <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
-          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
-            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
+        <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 21 }}>
+          <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 83, display: 'block' }} />
+          <div style={{ textAlign: 'right', fontSize: 14, lineHeight: 1.5, color: MUTED }}>
+            <div style={{ color: NAVY, fontSize: 16, fontWeight: 700 }}>Waves Pest Control, LLC</div>
             <div>{WAVES_SUPPORT_PHONE_DISPLAY} · wavespestcontrol.com</div>
             <div>contact@wavespestcontrol.com</div>
             <div>Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}</div>
@@ -246,16 +245,16 @@ export default function ProjectReportDocument({ data }) {
         {/* Title row */}
         <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
+          borderTop: `3px solid ${NAVY}`, marginTop: 16, paddingTop: 10,
         }}>
-          <div role="heading" aria-level={1} style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>
+          <div role="heading" aria-level={1} style={{ color: NAVY, fontSize: 27, fontWeight: 700, letterSpacing: '0.02em' }}>
             {`${typeLabel} Report`.toUpperCase()}
           </div>
-          {dateLabel ? <div style={{ fontSize: 11, color: MUTED }}>{dateLabel}</div> : null}
+          {dateLabel ? <div style={{ fontSize: 14, color: MUTED }}>{dateLabel}</div> : null}
         </div>
 
         {/* Info grid */}
-        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr', gap: '5px 29px', marginTop: 13 }}>
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Customer</SectionHeader>
             <InfoRow label="Name">{customerName}</InfoRow>
@@ -343,8 +342,8 @@ export default function ProjectReportDocument({ data }) {
         )}
 
         {/* Record footer */}
-        <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
-          <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
+        <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 23, paddingTop: 10, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.6 }}>
             Questions about today&apos;s service? Call {WAVES_SUPPORT_PHONE_DISPLAY}.<br />
             Every product we use and our safety protocol:{' '}
             <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>{WAVES_PRODUCTS_SAFETY_URL}</a>
