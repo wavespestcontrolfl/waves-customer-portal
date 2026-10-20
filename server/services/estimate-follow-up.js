@@ -966,9 +966,9 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       reconcileFrozenMembershipSnapshot,
       resolveAcceptOneTimeTotal,
       commercialAcceptDepositExempt,
-      isCommercialAutoAcceptEstimate,
       matchAcceptCustomerByPhone,
     } = require("../routes/estimate-public");
+    const { isCommercialAutoAcceptEstimate } = require("./estimate-commercial-identity");
     const { commercialLowConfidenceRange } = require("./estimate-delivery-options");
     const { resolveRecurringCardPolicyForEstimate } = require("./recurring-card-on-file");
     const { resolveCardHoldPolicy } = require("./estimate-card-holds");

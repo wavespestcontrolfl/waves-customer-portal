@@ -7705,7 +7705,7 @@ ${shellQuestionsBar()}
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
       el.textContent = fmt(Math.round((adjusted * visits / 365) * 100) / 100);
-    });${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(prefOff, null);' : ''}
+    });${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(prefOff);' : ''}
   };
 
   document.querySelectorAll('.ai-satellite').forEach((img) => {
@@ -7860,19 +7860,23 @@ ${shellQuestionsBar()}
 ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is computed for the server-rendered
   // preferences and a pay-per-application plan. A preference change re-prices
   // the cards client-side, and the annual prepay choice is not "pay after each
-  // application", so either one hides the average rather than restate it.
-  function syncMonthlyAverageVisibility(prefOff, prepay) {
+  // application", so either one hides the average rather than restate it. The
+  // prepay test reads the RETAINED booking state (pending or picked), never a
+  // one-shot flag, so it stays hidden through the slot reservation and the
+  // "Confirm annual prepay" step and only returns when the choice is cleared.
+  function syncMonthlyAverageVisibility(prefOff) {
     const root = document.documentElement;
     if (prefOff != null) root.dataset.avgPrefOff = String(prefOff);
-    if (prepay != null) root.dataset.avgPrepay = prepay ? '1' : '';
+    let prepay = false;
+    try { prepay = bookingState.pendingPref === 'prepay_annual' || bookingState.pickedPref === 'prepay_annual'; } catch (e) { prepay = false; }
     document.querySelectorAll('[data-monthly-average]').forEach((el) => {
       const base = Number(el.dataset.avgPrefOff || 0);
       const current = root.dataset.avgPrefOff === undefined ? base : Number(root.dataset.avgPrefOff);
-      el.style.display = (root.dataset.avgPrepay === '1' || current !== base) ? 'none' : '';
+      el.style.display = (prepay || current !== base) ? 'none' : '';
     });
   }
 
-` : ''}  function syncPaymentSetupCards() {
+` : ''}  function syncPaymentSetupCards() {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null);' : ''}
     document.querySelectorAll('[data-payment-setup]').forEach((btn) => {
       const selected = bookingState.pendingPref === btn.dataset.paymentSetup;
       btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
@@ -7950,7 +7954,7 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
     return STANDARD_NO_PAYMENT_COPY + ' Choose a service window to continue.';
   }
 
-  function updatePaymentSetupSummary(pref) {${ssrMonthlyAverage ? " syncMonthlyAverageVisibility(null, pref === 'prepay_annual');" : ''}
+  function updatePaymentSetupSummary(pref) {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null);' : ''}
     const summary = document.getElementById('payment-setup-summary');
     if (!summary) return;
     const bookingTitle = document.getElementById('booking-title');
@@ -7973,7 +7977,7 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
     }
   }
 
-  function resetPaymentSetupSummary() {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null, false);' : ''}
+  function resetPaymentSetupSummary() {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null);' : ''}
     const summary = document.getElementById('payment-setup-summary');
     if (summary) summary.style.display = 'none';
     const bookingTitle = document.getElementById('booking-title');
@@ -31421,7 +31425,6 @@ module.exports.estimateReferralCardFor = estimateReferralCardFor;
 module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
 module.exports.requestedFirstVisitFromRow = requestedFirstVisitFromRow;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
-module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.isCommercialOneTimePricedEstimate = isCommercialOneTimePricedEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.isNonBillableOneTimeRow = isNonBillableOneTimeRow;

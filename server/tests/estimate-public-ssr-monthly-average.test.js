@@ -33,8 +33,56 @@ describe('legacy SSR page: monthly average', () => {
     const main = scripts.find((code) => code.includes('syncMonthlyAverageVisibility'));
     expect(main).toBeDefined();
     expect(() => new (require('vm').Script)(main)).not.toThrow();
-    expect(main).toContain("syncMonthlyAverageVisibility(null, pref === 'prepay_annual')");
-    expect(main).toContain('syncMonthlyAverageVisibility(prefOff, null)');
+    // One visibility function, called from every place the payment choice or the prices change.
+    expect(main).toContain('syncMonthlyAverageVisibility(prefOff)');
+    expect(main).toMatch(/function syncPaymentSetupCards\(\) \{ syncMonthlyAverageVisibility\(null\);/);
+    expect(main).toMatch(/function updatePaymentSetupSummary\(pref\) \{ syncMonthlyAverageVisibility\(null\);/);
+    expect(main).toMatch(/function resetPaymentSetupSummary\(\) \{ syncMonthlyAverageVisibility\(null\);/);
+  });
+
+  test('visibility follows the RETAINED payment choice: prepay selected, reserve, "Confirm annual prepay" all stay hidden; clearing it or a preference change behaves', () => {
+    const html = render(estimate(66.75), data(tree));
+    const main = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((code) => code.includes('function syncMonthlyAverageVisibility'));
+    const fnSource = main.match(/ {2}function syncMonthlyAverageVisibility[\s\S]*?\n {2}\}\n/)[0];
+    const els = [{ dataset: { avgPrefOff: '0' }, style: { display: '' } }, { dataset: { avgPrefOff: '0' }, style: { display: '' } }];
+    const sandbox = {
+      document: { documentElement: { dataset: {} }, querySelectorAll: () => els },
+      bookingState: { pendingPref: null, pickedPref: null },
+    };
+    const vm = require('vm');
+    vm.createContext(sandbox);
+    vm.runInContext(`${fnSource}; this.sync = syncMonthlyAverageVisibility;`, sandbox);
+    const shown = () => els.every((el) => el.style.display === '');
+    const hidden = () => els.every((el) => el.style.display === 'none');
+
+    sandbox.sync(null);
+    expect(shown()).toBe(true);
+    // Prepay chosen (updatePaymentSetupSummary runs after pendingPref is set).
+    sandbox.bookingState.pendingPref = 'prepay_annual';
+    sandbox.sync(null);
+    expect(hidden()).toBe(true);
+    // Slot reserved: pickPaymentPref keeps the pref and resetPaymentSetupSummary runs: still hidden.
+    sandbox.bookingState.pickedPref = 'prepay_annual';
+    sandbox.sync(null);
+    expect(hidden()).toBe(true);
+    // "Confirm annual prepay": nothing cleared the choice, so it stays hidden.
+    sandbox.sync(null);
+    expect(hidden()).toBe(true);
+    // The customer backs out to the payment choices (both prefs cleared): the average returns.
+    sandbox.bookingState.pendingPref = null;
+    sandbox.bookingState.pickedPref = null;
+    sandbox.sync(null);
+    expect(shown()).toBe(true);
+    // Pay per application keeps it.
+    sandbox.bookingState.pendingPref = 'pay_at_visit';
+    sandbox.bookingState.pickedPref = 'pay_at_visit';
+    sandbox.sync(null);
+    expect(shown()).toBe(true);
+    // A pest preference change re-prices the cards: hidden until restored.
+    sandbox.sync(5);
+    expect(hidden()).toBe(true);
+    sandbox.sync(0);
+    expect(shown()).toBe(true);
   });
 
   test('single service: the per-application card stays the price, "about $X a month" hangs under it, context prints once', () => {

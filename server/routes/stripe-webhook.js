@@ -5092,7 +5092,8 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     // drop the backstop (round-4: resolveForInvoice is fail-soft by default,
     // and the payer must be checked against the ACCEPTED job's per-job scope,
     // not just the customer default).
-    const { isCommercialAutoAcceptEstimate, findLinkedUpcomingAppointment } = require('./estimate-public');
+    const { findLinkedUpcomingAppointment } = require('./estimate-public');
+    const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
     if (!estimate.customer_id
       || estimate.accepted_service_mode === 'one_time'
       || estimate.bill_by_invoice === true

@@ -71,7 +71,6 @@ jest.mock('../routes/estimate-public', () => ({
   reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
   resolveAcceptOneTimeTotal: jest.fn(() => 149),
   commercialAcceptDepositExempt: jest.fn(() => false),
-  isCommercialAutoAcceptEstimate: jest.fn(() => false),
 }));
 jest.mock('../services/estimate-delivery-options', () => ({
   commercialLowConfidenceRange: jest.fn(() => ({ hasLowConfidence: false, forceSiteQuote: false })),
@@ -224,7 +223,6 @@ beforeEach(() => {
   estimatePublic.reconcileFrozenMembershipSnapshot.mockResolvedValue(undefined);
   estimatePublic.resolveAcceptOneTimeTotal.mockReturnValue(149);
   estimatePublic.commercialAcceptDepositExempt.mockReturnValue(false);
-  estimatePublic.isCommercialAutoAcceptEstimate.mockReturnValue(false);
   findConsentedChargeableCard.mockResolvedValue(null);
   resolveRecurringCardPolicyForEstimate.mockResolvedValue({ required: true });
   resolveCardHoldPolicy.mockReturnValue({ required: true });
