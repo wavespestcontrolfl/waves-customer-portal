@@ -36,6 +36,7 @@ const {
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
+const { openEstimateEmailPdf } = require("./estimate-email-pdf");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -525,6 +526,17 @@ async function sendDualChannel(est, { sms, email }) {
       return false;
     }
   }
+  // GATE_ESTIMATE_EMAIL_PDF: a PDF-bearing email row (has_attachments) is NOT on
+  // the provider-retry rail, as on main. That is safe here because a failed email
+  // leg (SendGrid rejection, a thrown error, or the PDF fence aborting before the
+  // request) leaves `attempted` false when no text went out, so every caller
+  // releases its stage claim (releaseStage / releaseFollowupSend) and the next
+  // sweep re-runs the WHOLE touch through every first-send check. The engagement
+  // engine passes `email` only (no `sms`), so its failed email always releases
+  // the claim and defers the job. The one path that keeps the claim without the
+  // email is a stage whose SMS template is active and whose text went out (or was
+  // queued by the send-window hold): follow-up SMS are off by owner ruling
+  // 2026-09-28, so that path is dormant, but it is not a code guarantee.
   if (est.customer_email && email?.templateKey) {
     // Optional lifecycle suffix (codex 2736 r10): a stage that can
     // legitimately re-fire for the same estimate (an expiring reminder
@@ -536,10 +548,17 @@ async function sendDualChannel(est, { sms, email }) {
     const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
       + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
+      // GATE_ESTIMATE_EMAIL_PDF: an allowlisted open-estimate email also
+      // carries the PDF copy plus its one-line note. Empty (gate off, other
+      // template, estimate no longer open, render failed) = sent as before.
+      const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         to: est.customer_email,
-        payload: await withFollowupPropertyRow(est, email.payload || {}),
+        payload: await withFollowupPropertyRow(est, { ...(email.payload || {}), ...pdfCopy.payload }),
+        ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
+        // The fence rides every prepared send, with the file or without it.
+        ...(pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
@@ -561,6 +580,7 @@ async function sendDualChannel(est, { sms, email }) {
         attempted = true;
       } else if (result?.sent) {
         attempted = true;
+        await pdfCopy.recordDelivered?.(result);
       }
     } catch (e) {
       const message = EmailTemplateLibrary.redactEmailAddresses(e.message);

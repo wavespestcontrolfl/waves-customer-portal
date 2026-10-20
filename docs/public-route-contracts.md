@@ -1565,6 +1565,8 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Signed render-pin validity (estimate PDF copy, #6343). GET `/api/estimates/:token/data?mode=pdf&dpin=...` is the browser renderer's read of the estimate document, and the pin is the only thing that changes the payload. The pin is honored only when it VERIFIES (`verifyEstimateDocPin`: a JWT of kind `estimate_doc_render` signed with the server's secret and bound to this estimate's token hash); an unsigned, malformed, expired or other-estimate pin is ignored exactly as if absent, with the same payload, status and headers as a request without one. A verified pin that carries `validThrough` (a) overrides `estimate.expiresAt` in the payload and (b) decides `cta.terminalState`: past that date the state is `expired`, on or before it the offer renders open, whatever the stored `expires_at` says (the send path pins the new deadline because it persists only after the attachment is built). `accepted` and `declined` still win over the pin. A verified pin also skips the view count and the served-disclosure write. No new key, no new exposure and no new route: the pin is minted only by the server's send paths, so a token holder cannot extend an offer by adding a `validThrough` of their own.
+
 Lethal bronzing injection disclosure (owner ruling 2026-10-05). In GET
 `/api/estimates/:token/data` and the server-rendered estimate page, the
 `palm_injection` supplement row may carry a `scopeNote` string. It is set only
