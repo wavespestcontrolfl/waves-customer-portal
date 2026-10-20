@@ -330,11 +330,14 @@ function contextFrom(data, service) {
     neonicCap: objectOrNull(data?.neonicCap),
     // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
     wrapUp: data?.wrapUp === true,
+    // GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20): /complete takes this visit's stock below zero instead of refusing,
+    // so no product at 0 in stock holds the sheet. The server says so with `stockAdvisory: true`.
+    stockAdvisory: data?.stockAdvisory === true,
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -394,9 +397,34 @@ function useProductRows(ctx) {
 
 const sameSet = (analyzed, photos) => analyzed.length === photos.length && analyzed.every((data, index) => data === photos[index].data);
 
+// The active products whose stock shows 0 for the unit they were measured in, split by what the server does about it:
+// `hold` is the first one that holds Complete, `notices` lists each one the sheet only names. With
+// GATE_LAWN_TS_STOCK_ADVISORY (the context's `stockAdvisory`) /complete takes the stock below zero and records the
+// shortfall, so nothing holds and every such product is named.
+function stockState(rows, ctx) {
+  const out = rows.filter((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  return ctx.stockAdvisory ? { hold: undefined, notices: out } : { hold: out[0], notices: [] };
+}
+
+// The lines for the products at 0 in stock while the stock is advisory (none holds the send; the office gets an alert
+// for each), one each, and Check stock for a count the office has fixed since.
+function StockNotices({ rows, checking, locked, onCheck }) {
+  if (!rows.length) return null;
+  return (
+    <>
+      {rows.map((row) => (
+        <p key={row.productId} className="tech-visit-muted tech-visit-status--warn" role="status">
+          {`${row.name} shows 0 in stock. You can still send. The office will restock it.`}
+        </p>
+      ))}
+      {!locked && <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checking} onClick={onCheck}>Check stock</Button>}
+    </>
+  );
+}
+
 function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPending }) {
   const active = rows.filter((row) => row.active);
-  const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const outOfStock = stockState(rows, ctx).hold;
   const missingAmount = active.find((row) => !hasAmount(row));
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const manualIrac = needsManualIrac(rows, ctx);
@@ -589,7 +617,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || productBlock;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
-  const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const { hold: stockRow, notices: stockNotices } = stockState(rows, ctx);
   const [checkingStock, setCheckingStock] = useState(false);
   const checkStock = async () => {
     setCheckingStock(true);
@@ -683,6 +711,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
         onSubmit={submit}
         coverProps={picker.coverProps}
       >
+        <StockNotices rows={stockNotices} checking={checkingStock} locked={locked} onCheck={checkStock} />
         {stockRow && !locked && (
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
         )}

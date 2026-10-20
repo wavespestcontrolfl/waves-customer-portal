@@ -11,13 +11,16 @@ jest.mock('../services/admin-alert-compose', () => ({
 const compose = require('../services/admin-alert-compose');
 const logger = require('../services/logger');
 const {
-  deductProductInventory, isPestStockAdvisoryCompletion, isStockAdvisoryCompletion, notifyOfficeOfStockShortfalls,
+  deductProductInventory, isPestStockAdvisoryCompletion, isLawnTsStockAdvisoryCompletion, isStockAdvisoryCompletion, notifyOfficeOfStockShortfalls,
 } = require('../services/complete-scheduled-service');
 
 const GATE = 'GATE_PEST_STOCK_ADVISORY';
+const LAWN_TS_GATE = 'GATE_LAWN_TS_STOCK_ADVISORY';
 const savedGate = process.env[GATE];
+const savedLawnTsGate = process.env[LAWN_TS_GATE];
 afterEach(() => {
   if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
+  if (savedLawnTsGate === undefined) delete process.env[LAWN_TS_GATE]; else process.env[LAWN_TS_GATE] = savedLawnTsGate;
   jest.clearAllMocks();
 });
 
@@ -28,7 +31,8 @@ describe('which completions may take stock below zero', () => {
     expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
   });
 
-  test.each(['Lawn Care', 'Tree & Shrub Care', 'Mosquito Control', 'Termite Bait Station'])('gate on: %s may not', (serviceType) => {
+  test.each(['Lawn Care', 'Tree & Shrub Care', 'Mosquito Control', 'Termite Bait Station'])('pest gate on: %s may not', (serviceType) => {
+    delete process.env[LAWN_TS_GATE];
     process.env[GATE] = 'true';
     expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
     expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
@@ -42,6 +46,38 @@ describe('which completions may take stock below zero', () => {
   test('a WaveGuard lawn completion stays advisory with the gate off', () => {
     delete process.env[GATE];
     expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' })).toBe(true);
+  });
+});
+
+describe('which completions may take stock below zero under GATE_LAWN_TS_STOCK_ADVISORY', () => {
+  test.each(['Lawn Care', 'Lawn Care Re-Service', 'Tree & Shrub Care', 'Shrub Fertilization'])('gate on: a non-member %s may', (serviceType) => {
+    delete process.env[GATE];
+    process.env[LAWN_TS_GATE] = 'true';
+    expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
+    expect(isStockAdvisoryCompletion({ service_type: serviceType, cust_waveguard_tier: 'Commercial' })).toBe(true);
+  });
+
+  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion', 'Quarterly Pest Control'])('gate on: %s may not', (serviceType) => {
+    delete process.env[GATE];
+    process.env[LAWN_TS_GATE] = 'true';
+    expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
+    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
+  });
+
+  test.each([[undefined], [''], ['TRUE'], ['1']])('gate %p: a non-member lawn and a tree & shrub visit may not', (value) => {
+    delete process.env[GATE];
+    if (value === undefined) delete process.env[LAWN_TS_GATE]; else process.env[LAWN_TS_GATE] = value;
+    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care' })).toBe(false);
+    expect(isStockAdvisoryCompletion({ service_type: 'Tree & Shrub Care' })).toBe(false);
+  });
+
+  test('the pest gate does not open lawn, and this gate does not open pest', () => {
+    process.env[GATE] = 'true';
+    delete process.env[LAWN_TS_GATE];
+    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care' })).toBe(false);
+    delete process.env[GATE];
+    process.env[LAWN_TS_GATE] = 'true';
+    expect(isStockAdvisoryCompletion({ service_type: 'Quarterly Pest Control' })).toBe(false);
   });
 });
 
@@ -166,5 +202,67 @@ describe('the office alert for a product a pest visit took below zero', () => {
     const database = catalog({ taurus: '-3' });
     await expect(notifyOfficeOfStockShortfalls({ svc, record: record([shortfall('taurus', 'Taurus SC')]), database })).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('stock shortfall alert failed (non-blocking)'));
+  });
+});
+
+describe('the office alert for a lawn or tree & shrub visit', () => {
+  const shortfall = { productId: 'prod-1', productName: 'Taurus SC', status: 'deducted_insufficient_stock', stockAfter: -3, deductedAmount: 4, inventoryUnit: 'fl_oz' };
+  const record = { id: 'record-1', structured_notes: { inventoryDeductions: [shortfall] } };
+  const catalog = (stockById) => {
+    const trx = () => ({ where: ({ id }) => ({ forUpdate: () => ({ first: async () => (id in stockById ? { inventory_on_hand: stockById[id] } : undefined) }) }) });
+    return { transaction: jest.fn(async (work) => work(trx)) };
+  };
+  const alertFor = async (svc) => {
+    await notifyOfficeOfStockShortfalls({ svc, record, database: catalog({ 'prod-1': '-3' }) });
+    return compose.raiseAdminAlert.mock.calls[0];
+  };
+
+  test.each([
+    ['Lawn Care', 'lawn'],
+    ['Tree & Shrub Care', 'tree & shrub'],
+    ['Quarterly Pest Control', 'pest'],
+  ])('a non-member %s record alerts, and the text names a %s visit, whatever the live gate says', async (serviceType, label) => {
+    delete process.env[LAWN_TS_GATE];
+    const [, spec, opts] = await alertFor({ id: 'visit-1', service_type: serviceType });
+    expect(spec).toMatchObject({ action: 'restock Taurus SC', why: `Taurus SC went below zero in stock after a ${label} visit.` });
+    expect(opts).toMatchObject({ dedupeKey: 'stock-shortfall:prod-1', dedupeOpenOnly: true });
+    expect(opts.detail).toBe(`Taurus SC went to -3 fl oz on hand after a ${label} visit used 4 fl oz. Restock it, or fix the count if the shelf has more.`);
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('the plain-words fallback names the visit and passes the alert rules', async () => {
+    const odd = { ...shortfall, productName: 'Bait [old lot]' };
+    await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', service_type: 'Tree & Shrub Care' }, record: { id: 'record-1', structured_notes: { inventoryDeductions: [odd] } }, database: catalog({ 'prod-1': '-3' }) });
+    const [, spec] = compose.raiseAdminAlert.mock.calls[0];
+    expect(spec).toMatchObject({ action: 'restock a product', why: 'A product went below zero in stock after a tree & shrub visit.' });
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a long product name still fits the why limit on the longest visit label', async () => {
+    const long = { ...shortfall, productName: 'Extraordinarily Long Product Name Concentrate' };
+    await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', service_type: 'Tree & Shrub Care' }, record: { id: 'record-1', structured_notes: { inventoryDeductions: [long] } }, database: catalog({ 'prod-1': '-3' }) });
+    const [, spec] = compose.raiseAdminAlert.mock.calls[0];
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a WaveGuard lawn record alerts only while GATE_LAWN_TS_STOCK_ADVISORY is live', async () => {
+    const svc = { id: 'visit-1', service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' };
+    delete process.env[LAWN_TS_GATE];
+    const quiet = catalog({ 'prod-1': '-3' });
+    await notifyOfficeOfStockShortfalls({ svc, record, database: quiet });
+    expect(quiet.transaction).not.toHaveBeenCalled();
+    expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
+    process.env[LAWN_TS_GATE] = 'true';
+    await notifyOfficeOfStockShortfalls({ svc, record, database: catalog({ 'prod-1': '-3' }) });
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(compose.raiseAdminAlert.mock.calls[0][1].why).toBe('Taurus SC went below zero in stock after a lawn visit.');
+  });
+
+  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('a %s record never alerts', async (serviceType) => {
+    process.env[LAWN_TS_GATE] = 'true';
+    const database = catalog({ 'prod-1': '-3' });
+    await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', service_type: serviceType }, record, database });
+    expect(database.transaction).not.toHaveBeenCalled();
+    expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
   });
 });

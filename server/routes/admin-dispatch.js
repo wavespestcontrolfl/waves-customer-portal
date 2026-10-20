@@ -14,6 +14,7 @@ const {
   techTipsGateOn,
   backfillCompletionPlan,
   isPestStockAdvisoryCompletion,
+  isLawnTsStockAdvisoryCompletion,
 } = require('../services/complete-scheduled-service');
 const express = require('express');
 const crypto = require('crypto');
@@ -4693,7 +4694,9 @@ router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
     const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     const { ok, ...body } = ctx;
-    res.json({ enabled: true, ...body });
+    // GATE_LAWN_TS_STOCK_ADVISORY: /complete takes this tree & shrub visit's stock below zero instead of refusing (the
+    // same rule), so the sheet lets a 0-in-stock product through. The key exists only while it does.
+    res.json({ enabled: true, ...body, ...(isLawnTsStockAdvisoryCompletion({ service_type: body.service?.serviceType }) ? { stockAdvisory: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -4770,7 +4773,10 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...lawnFastGroupedAsk(req), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
-    res.json({ enabled: true, ...body });
+    // GATE_LAWN_TS_STOCK_ADVISORY: /complete takes this lawn visit's stock below zero instead of refusing (the same rule),
+    // so the sheet lets a 0-in-stock product through. The key exists only while it does; absent, the sheet keeps its
+    // WaveGuard-tier rule (a WaveGuard lawn completion is always advisory).
+    res.json({ enabled: true, ...body, ...(isLawnTsStockAdvisoryCompletion({ service_type: body.service?.serviceType }) ? { stockAdvisory: true } : {}) });
   } catch (err) { next(err); }
 });
 

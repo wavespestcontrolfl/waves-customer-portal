@@ -6784,6 +6784,17 @@ function pestStockAdvisoryLive() {
 }
 // GATE_PEST_STOCK_ADVISORY reader, on its own line so gate PRs never conflict.
 module.exports.pestStockAdvisoryLive = pestStockAdvisoryLive;
+
+// GATE_LAWN_TS_STOCK_ADVISORY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-20,
+// "make lawn and tree & shrub work the same as pest"). On, a lawn or tree & shrub visit's completion may take a
+// product's stock below zero (recorded on the visit, as a WaveGuard lawn completion's is) instead of refusing, the lawn
+// and tree & shrub sheets let a 0-in-stock product through, and the office gets one alert per product. A WaveGuard lawn
+// visit's alert also waits on this gate. Off = /complete refuses a non-member lawn or tree & shrub deduction below zero.
+function lawnTsStockAdvisoryLive() {
+  return process.env.GATE_LAWN_TS_STOCK_ADVISORY === 'true';
+}
+// GATE_LAWN_TS_STOCK_ADVISORY reader, on its own line so gate PRs never conflict.
+module.exports.lawnTsStockAdvisoryLive = lawnTsStockAdvisoryLive;
 // GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
 module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
 
