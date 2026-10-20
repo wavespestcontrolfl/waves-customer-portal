@@ -38,17 +38,21 @@ const OPT_OUT_PATTERNS = [
 ];
 
 // A bare "no text(s)" / "no messages" stays a stop request almost everywhere ("No texts please",
-// "Please no texts or calls", "I get too many notifications so no texts"). It is NOT one when the
-// words around it report a text that never came, as a complaint did on 2026-10-19 ("I got the
-// confirmation but no text that day" unsubscribed the customer twice): the word just before it is
-// a receiving or reporting word ("got no text", "still no text", "there was no message"), the words
-// just after it are an arrival or past-time word ("no text yet", "no text that day", "no texts
-// came"), or the sentence is a short question ("No text?"). A strong request word anywhere in the
-// sentence ("please", "anymore", "from now on") keeps it a stop request, questions included.
-// "No more texts" stays a stop request anywhere (OPT_OUT_PATTERNS above).
+// "Can I get no texts from you?", "I want to receive no texts"). It is NOT one only when the
+// sentence reports, in the past tense, a text that never came, as a complaint did on 2026-10-19
+// ("I got the confirmation but no text that day" unsubscribed the customer twice). A request is
+// never in the past tense, so only past-tense evidence counts: a past receiving or reporting word
+// just before it ("got no text", "there was no message", "have had no texts"), a past arrival word
+// just after it ("no text came", "no texts went out", "no text yesterday"), or "that day" after it
+// with a past receiving word earlier in the sentence. A short question ("No text?") is a report
+// too. A strong request word anywhere in the sentence ("please", "anymore", "from now on") keeps
+// it a stop request, questions included. "No more texts" stays a stop request anywhere
+// (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:texts?|text\s+messages?|messages?|sms)\b/gi;
-const REPORTED_JUST_BEFORE = /\b(?:got|get|gets|getting|gotten|received|receive|receiving|saw|see|seen|heard|still|was|were|is|are|there|there'?s|been|had|have|has|why)\s+$/i;
-const MISSED_AFTER = /^\s+(?:yet|yesterday|that\s+day|last\s+(?:night|week|time)|this\s+time|came|comes?|arrived|arrives?|showed\s+up|went\s+out|(?:was|were|got)\s+sent|sent|received)\b/i;
+const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
+const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out|(?:was|were|got)\s+sent|yesterday|last\s+(?:night|week|time))\b/i;
+const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
+const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard|had|was|were)\b/i;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 const SHORT_QUESTION_WORDS = 4;
 
@@ -68,8 +72,13 @@ function asksForNoTexts(body) {
     if (!matches.length) return false;
     if (STRONG_REQUEST.test(text)) return true;
     if (question && text.split(' ').length <= SHORT_QUESTION_WORDS) return false;
-    return matches.some((match) => !REPORTED_JUST_BEFORE.test(text.slice(0, match.index))
-      && !MISSED_AFTER.test(text.slice(match.index + match[0].length)));
+    return matches.some((match) => {
+      const before = text.slice(0, match.index);
+      const after = text.slice(match.index + match[0].length);
+      const reportsPastText = PAST_REPORT_JUST_BEFORE.test(before) || PAST_ARRIVAL_AFTER.test(after)
+        || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(before));
+      return !reportsPastText;
+    });
   });
 }
 
