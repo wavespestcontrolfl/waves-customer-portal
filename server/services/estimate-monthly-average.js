@@ -116,9 +116,11 @@ async function emailAverageParts(estimate) {
   try {
     const { normalizeProposal } = require('./estimate-proposal');
     const { resolveProposalBillingContext } = require('./estimate-proposal-billing');
-    // The billing resolution can refresh totals on the row it is given
-    // (reconcileFrozenMembershipSnapshot), so it works on a copy.
-    const copy = { ...estimate };
+    // The billing resolution can refresh totals AND nested estimate_data on
+    // the row it is given (reconcileFrozenMembershipSnapshot mutates in
+    // place), so it works on a deep copy: the caller's row (hashed into the
+    // review's editVersion) must never change (#6360 pre-push P1).
+    const copy = structuredClone(estimate);
     const ctx = await resolveProposalBillingContext(copy);
     if (!ctx || ctx.billsPerApplication !== true) return null;
     const proposal = normalizeProposal(copy, { recurringMode: 'per_application', livePricing: ctx.livePricing || null });

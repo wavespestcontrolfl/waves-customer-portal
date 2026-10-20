@@ -123,6 +123,22 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     expect(parseFloat(bundleEstimate.monthly_total)).toBe(72.3);
   });
 
+  // #6360 pre-push P1: billing resolution (reconcileFrozenMembershipSnapshot)
+  // mutates nested estimate_data in place; the caller's row is hashed into
+  // the review's editVersion, so it must come back untouched.
+  test('never mutates the caller row, including nested estimate_data', async () => {
+    const billing = require('../services/estimate-proposal-billing');
+    billing.resolveProposalBillingContext.mockImplementationOnce(async (row) => {
+      row.monthly_total = '1.00';
+      row.estimate_data.sendSnapshot.mutatedByReconcile = true;
+      return mockBilling.ctx;
+    });
+    const row = structuredClone(pestEstimate);
+    const before = JSON.stringify(row);
+    await emailAverageParts(row);
+    expect(JSON.stringify(row)).toBe(before);
+  });
+
   test('gate off: no average, and the payload is byte-identical to before', async () => {
     mockGate.on = false;
     expect(await emailAverageParts(pestEstimate)).toBeNull();
