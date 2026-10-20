@@ -423,33 +423,41 @@ async function typedCustomerIds(prompt, namedResult) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
   const ids = new Set();
-  const groups = new Map();
-  for (const customer of namedResult.matches || []) {
-    const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
-    // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
-    const full = `${first} ${last}`.trim();
-    const key = full.includes(' ') && ` ${normalized} `.includes(` ${full} `) ? full : '*bare name';
-    groups.set(key, [...(groups.get(key) || []), customer]);
-  }
-  for (const group of groups.values()) {
-    const inCity = group.filter(customer => customer.city && ` ${normalized} `.includes(` ${normalizeName(customer.city)} `));
-    if (group.length === 1) ids.add(String(group[0].id));
-    else if (inCity.length === 1) ids.add(String(inCity[0].id));
+  // Fail closed: a name lookup that hit its limit has rows we never saw, so the
+  // rows we did see cannot show that a name or a city picks out one customer.
+  // Incomplete name evidence names nobody (a card, never a direct edit).
+  if (namedResult.complete !== false) {
+    const groups = new Map();
+    for (const customer of namedResult.matches || []) {
+      const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+      // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
+      const full = `${first} ${last}`.trim();
+      const key = full.includes(' ') && ` ${normalized} `.includes(` ${full} `) ? full : '*bare name';
+      groups.set(key, [...(groups.get(key) || []), customer]);
+    }
+    for (const group of groups.values()) {
+      const inCity = group.filter(customer => customer.city && ` ${normalized} `.includes(` ${normalizeName(customer.city)} `));
+      if (group.length === 1) ids.add(String(group[0].id));
+      else if (inCity.length === 1) ids.add(String(inCity[0].id));
+    }
   }
   const literals = [...clause.matchAll(CONTACT_LITERAL_RE)].map(match => match[0]);
   const phones = [...new Set(literals.filter(value => !value.includes('@')).map(value => value.replace(/\D/g, '').slice(-10)).filter(value => value.length === 10))];
   const emails = [...new Set(literals.filter(value => value.includes('@')).map(value => normalizeEmail(value)).filter(Boolean))];
-  if (phones.length || emails.length) {
-    // One customer per literal: a phone or email shared by two accounts names neither.
+  const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
+  // One lookup per literal, bounded at two rows: a second row proves the phone
+  // or email is shared, so it names neither account. No combined limit can hide
+  // a duplicate behind other literals' rows.
+  const owners = async (literal) => {
     const rows = await db('customers').whereNull('deleted_at').where(function () {
-      if (phones.length) this.orWhereRaw(`right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) IN (${phones.map(() => '?').join(',')})`, phones);
-      if (emails.length) this.orWhereRaw(`lower(coalesce(email, '')) IN (${emails.map(() => '?').join(',')})`, emails);
-    }).limit(10).select('id', 'phone', 'email');
-    const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
-    for (const literal of [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))]) {
-      const owners = rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
-      if (owners.length === 1) ids.add(String(owners[0].id));
-    }
+      if (literal.phone) this.whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [literal.phone]);
+      else this.whereRaw("lower(coalesce(email, '')) = ?", [literal.email]);
+    }).limit(2).select('id', 'phone', 'email');
+    return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
+  };
+  for (const literal of [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))]) {
+    const found = await owners(literal);
+    if (found.length === 1) ids.add(String(found[0].id));
   }
   return [...ids];
 }

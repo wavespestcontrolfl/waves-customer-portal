@@ -170,10 +170,20 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     limitSeen = [];
     db.mockReset().mockImplementation((table) => {
       let limit = Infinity;
-      const q = { where: () => q, whereNull: () => q, whereIn: () => q, whereRaw: () => q, orWhereRaw: () => q, groupBy: () => q, select: () => q,
+      const filters = [];
+      const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
+      const q = { whereNull: () => q, whereIn: () => q, groupBy: () => q, select: () => q,
+        // A contact lookup narrows the rows the way the SQL would; every other query sees all rows.
+        where: (fn) => { if (typeof fn === 'function') fn.call(q); return q; },
+        whereRaw: (sql, bindings) => {
+          if (/regexp_replace\(coalesce\(phone/.test(sql)) filters.push(row => digits(row.phone) === bindings[0]);
+          if (/lower\(coalesce\(email/.test(sql)) filters.push(row => String(row.email || '').toLowerCase() === bindings[0]);
+          return q;
+        },
+        orWhereRaw: () => q,
         limit: (n) => { limit = n; limitSeen.push(n); return q; },
         first: async () => undefined,
-        then: resolve => Promise.resolve(table === 'customers' ? customers.slice(0, limit) : table === 'service_records' ? serviceRecords : []).then(resolve) };
+        then: resolve => Promise.resolve(table === 'customers' ? customers.filter(row => filters.every(f => f(row))).slice(0, limit) : table === 'service_records' ? serviceRecords : []).then(resolve) };
       return q;
     });
     db.raw = text => ({ text });
@@ -231,6 +241,34 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(byPhone.typedCustomerIds).toEqual([id(101)]);
     // A phone no customer carries names nobody.
     expect((await ask('update Pat Example 941-555-9999 notes')).typedCustomerIds).toEqual([]);
+  });
+
+  test('gate on: a capped name list names nobody, even when one listed row matches the typed city', async () => {
+    process.env[ON] = 'true';
+    // 30 same-name customers: the lookup stops at 26 and never sees the rest, so a lone city match proves nothing.
+    customers = sameName(30);
+    customers[1].city = 'Englewood';
+    const resolved = await ask('update Pat Example in Englewood notes');
+    expect(resolved).toMatchObject({ code: 'target_clarification_required' });
+    expect(resolved.typedCustomerIds).toEqual([]);
+    const owner = Context.ownerDirectContext(resolved);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: customers[1].id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
+    // Directly: incomplete evidence is not named evidence.
+    expect(await Context.typedCustomerIds('update Pat Example in Englewood notes', { matches: customers.slice(0, 26), complete: false })).toEqual([]);
+  });
+
+  test('gate on: a phone or email two customers share names neither, however many other rows precede them', async () => {
+    process.env[ON] = 'true';
+    customers = [...sameName(12).map((c, i) => ({ ...c, id: id(300 + i), first_name: 'Other', last_name: `Person${i}`, phone: `94177700${String(i).padStart(2, '0')}`, email: `other${i}@example.test` })), ...sameName(2)];
+    customers[12].phone = customers[13].phone = '9415550199';
+    customers[12].email = customers[13].email = 'shared@example.test';
+    // Two accounts carry the typed number: neither is named. The lookup is bounded at two rows per literal.
+    expect((await Context.typedCustomerIds('fix the notes on 941-555-0199', { matches: [], complete: true })).sort()).toEqual([]);
+    expect(await Context.typedCustomerIds('fix the notes on shared@example.test', { matches: [], complete: true })).toEqual([]);
+    expect(limitSeen).toEqual([2, 2]);
+    // A number only one account carries still names that account, even beside a shared one.
+    customers[0].phone = '9417770000';
+    expect(await Context.typedCustomerIds('fix the notes on 941-777-0000 and 941-555-0199', { matches: [], complete: true })).toEqual([id(300)]);
   });
 
   test('gate on: a unique name names its customer; the bare phone alone does too', async () => {
