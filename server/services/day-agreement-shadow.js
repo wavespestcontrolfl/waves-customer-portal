@@ -48,6 +48,7 @@ const { scrubPans } = require('../utils/pan-scrub');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const prompts = require('./prompts/day-agreement-v1');
 const rules = require('./day-agreement-rules');
+const { refreshCustomerBookingWindowConfig, currentDayEndMinutes } = require('./scheduling/customer-windows');
 
 const HOUR_MS = 3600 * 1000;
 const RECENT_MS = 3 * HOUR_MS;
@@ -73,6 +74,12 @@ const validateShape = new Ajv({ strict: false, allErrors: true }).compile(prompt
 // ---- time helpers ------------------------------------------------------------------------
 
 const pad2 = (n) => String(n).padStart(2, '0');
+
+// 'YYYY-MM-DDTHH:MM' in Eastern time: the form of the agreement time the model returns.
+function etMinuteKey(date) {
+  const p = etParts(date);
+  return `${etDateString(date)}T${pad2(p.hour)}:${pad2(p.minute)}`;
+}
 
 function etStamp(date) {
   const p = etParts(date);
@@ -156,29 +163,67 @@ function quietProbe(conn, since) {
 
 // The latest inbound text per phone in the window, recruiting applicants' texts
 // (job_* message types) left out: they belong to Recruiting, never to a customer visit.
-function latestInboundPerPhone(conn, since) {
+// `digits` narrows it to one phone (the recheck before a model call).
+function latestInboundPerPhone(conn, since, digits = null) {
   // Inbound only, so a send reservation can never match; the shared helper is
   // applied anyway, as every sms_log reader does (sms-log general-reader guard).
-  return excludeUnresolvedSendReservations(conn('sms_log'))
+  const latest = excludeUnresolvedSendReservations(conn('sms_log'))
     .select(conn.raw(`DISTINCT ON (${last10('from_phone')}) id, customer_id, created_at, message_body, ${last10('from_phone')} AS digits`))
     .where('direction', 'inbound').where('created_at', '>=', since).whereNotNull('message_body')
-    .modify((q) => excludeRecruitingSmsLog(q, 'message_type'))
+    .modify((q) => excludeRecruitingSmsLog(q, 'message_type'));
+  return (digits ? latest.whereRaw(`${last10('from_phone')} = ?`, [digits]) : latest)
     .orderByRaw(`${last10('from_phone')}, created_at DESC, id DESC`);
 }
 
+// A delivered Waves text with a day word sent to this phone in the 3 hours before
+// the latest inbound: the offer ("Wednesday morning?") that a day-less "yes that
+// works" accepts. Same delivered, push and recruiting rules as the thread.
+function offerProbe(conn) {
+  const probe = conn('sms_log as w').select(conn.raw('1'))
+    .where('w.direction', 'outbound')
+    .whereIn('w.status', DELIVERED_STATUSES)
+    .whereRaw(notPushSql('w'))
+    .modify((q) => excludeRecruitingSmsLog(q, 'w.message_type'))
+    .whereRaw(`${last10('w.to_phone')} = l.digits`)
+    .whereRaw(`w.created_at < l.created_at AND w.created_at >= l.created_at - interval '${RECENT_MS / HOUR_MS} hours'`)
+    .whereRaw('w.message_body ~* ?', [rules.DAY_WORD_PATTERN]);
+  return excludeUnresolvedSendReservations(probe, 'w');
+}
+
+// What makes the latest inbound text per phone (`l`) a candidate: a real phone, a day
+// word in the text itself or in a delivered Waves offer just before it, not judged
+// yet, and a thread quiet for QUIET_MS. One definition for the scan and the recheck.
+function smsEligibility(conn, now) {
+  return {
+    sql: `length(l.digits) = 10
+      AND (l.message_body ~* ? OR EXISTS (?))
+      AND NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0')
+      AND NOT EXISTS (?)`,
+    bindings: [rules.DAY_WORD_PATTERN, offerProbe(conn), quietProbe(conn, new Date(now.getTime() - QUIET_MS))],
+  };
+}
+
 function smsCandidatesQuery(conn, now) {
+  const eligible = smsEligibility(conn, now);
   return conn.raw(`
     SELECT l.id, l.customer_id, l.created_at, l.digits
     FROM (?) l
-    WHERE length(l.digits) = 10
-      AND l.message_body ~* ?
-      AND NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0')
-      AND NOT EXISTS (?)
+    WHERE ${eligible.sql}
     ORDER BY l.created_at ASC
-    LIMIT ?`, [
-    latestInboundPerPhone(conn, new Date(now.getTime() - RECENT_MS)), rules.DAY_WORD_PATTERN,
-    quietProbe(conn, new Date(now.getTime() - QUIET_MS)), BATCH.sms,
-  ]);
+    LIMIT ?`, [latestInboundPerPhone(conn, new Date(now.getTime() - RECENT_MS)), ...eligible.bindings, BATCH.sms]);
+}
+
+// Is this candidate still the latest inbound text for its phone, still quiet, still
+// a day-agreement candidate? Asked right before its model call, because earlier
+// sources in the same tick can take minutes.
+async function smsStillCandidate(conn, src, now) {
+  const id = src.key.split(':')[2];
+  const eligible = smsEligibility(conn, now);
+  const result = await conn.raw(`
+    SELECT 1 FROM (?) l
+    WHERE l.id = ? AND l.digits = ? AND ${eligible.sql}
+    LIMIT 1`, [latestInboundPerPhone(conn, new Date(now.getTime() - RECENT_MS), src.phoneDigits), id, src.phoneDigits, ...eligible.bindings]);
+  return (result.rows || []).length > 0;
 }
 
 async function loadSmsCandidates(conn, now) {
@@ -188,6 +233,9 @@ async function loadSmsCandidates(conn, now) {
 
 // ---- context for the model ---------------------------------------------------------------
 
+// The customer's visits as they stood at the agreement. A visit changed after that
+// moment may show a post-agreement state (a window staff set afterwards), so it is
+// left out and counted: { lines, omitted }.
 async function visitLines(conn, customerId, referenceAt, now) {
   const since = etDateString(addETDays(now, -30));
   const rows = await conn('scheduled_services')
@@ -197,8 +245,12 @@ async function visitLines(conn, customerId, referenceAt, now) {
     .whereNotIn('status', rules.DEAD_STATUSES)
     .orderBy('scheduled_date', 'asc')
     .limit(40)
-    .select('status', 'service_type', 'window_start', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS d"));
-  return rows.map((r) => `${r.d} ${r.window_start ? String(r.window_start).slice(0, 5) : 'no time set'} ${r.service_type || 'service'} (${r.status})`);
+    .select('status', 'service_type', 'window_start', 'updated_at', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS d"));
+  const shown = rows.filter((r) => !(new Date(r.updated_at).getTime() > referenceAt.getTime()));
+  return {
+    lines: shown.map((r) => `${r.d} ${r.window_start ? String(r.window_start).slice(0, 5) : 'no time set'} ${r.service_type || 'service'} (${r.status})`),
+    omitted: rows.length - shown.length,
+  };
 }
 
 function messageLine(row) {
@@ -227,8 +279,11 @@ async function threadLines(conn, customerId, digits, now) {
   const thread = rows
     .filter((r) => digitsOf(r.direction === 'inbound' ? r.from_phone : r.to_phone) === digits)
     .slice(0, THREAD_MESSAGES).reverse();
+  const kept = thread.filter((r) => messageLine(r));
   return {
-    lines: thread.map(messageLine).filter(Boolean),
+    lines: kept.map(messageLine),
+    // The minute of every message the model reads: an SMS agreement time must be one of these.
+    stamps: new Set(kept.map((r) => etMinuteKey(new Date(r.created_at)))),
     truncated: thread.some((r) => String(r.message_body || '').replace(/\s+/g, ' ').trim().length > MESSAGE_CHARS),
   };
 }
@@ -244,11 +299,11 @@ function callSource(row) {
 }
 
 async function smsSource(conn, row, now) {
-  const thread = row.customer_id ? await threadLines(conn, row.customer_id, row.digits, now) : { lines: [], truncated: false };
+  const thread = row.customer_id ? await threadLines(conn, row.customer_id, row.digits, now) : { lines: [], stamps: new Set(), truncated: false };
   return {
     kind: 'sms', key: `sms:${row.digits}:${row.id}`, callLogId: null, phoneDigits: row.digits,
     customerId: row.customer_id || null, agreedAt: new Date(row.created_at),
-    lines: thread.lines, truncated: thread.truncated,
+    lines: thread.lines, stamps: thread.stamps, truncated: thread.truncated,
     label: 'This is a text thread, oldest first. Times are Eastern. CUSTOMER lines are texts from the customer; WAVES lines are texts from Waves, with the automated message type in brackets.',
   };
 }
@@ -378,6 +433,10 @@ async function pickSlot(conn, {
   const where = await coordinates(conn, customerId, fromVisit);
   if (!where) return { reason: 'no_coordinates' };
   const findSlots = deps.findSlots || require('./scheduling/find-time').findAvailableSlots;
+  // The customer day end (booking_config.day_end, 18:00 unless reconfigured), as
+  // /book and the estimate picker pass it: find-time's own default close is 17:00,
+  // which would drop every 17:00 start in legacy mode.
+  await refreshCustomerBookingWindowConfig(conn);
   const result = await findSlots({
     lat: where.lat, lng: where.lng,
     durationMinutes: identity.minutes,
@@ -387,6 +446,7 @@ async function pickSlot(conn, {
     // The customer-window admission every customer-facing caller asks for (find-time
     // applies it in capacity mode); the agent will confirm the window to the customer.
     customerFacing: true,
+    dayEndHour: currentDayEndMinutes() / 60,
     excludeServiceIds: fromVisit ? [fromVisit.id] : [],
   });
   const offered = result && !result.error && Array.isArray(result.slots) ? result.slots : [];
@@ -429,6 +489,11 @@ async function decideMoment(conn, src, index, agreement, ctx) {
   // readable time the staleness and staff-acted rules cannot be trusted, so an
   // action is never judged against the latest inbound time instead.
   if (a.act && !parsedAt) return skipRow(src, index, 'at_unreadable', { ...known, ...(rules.validDay(a.day) ? { target_date: a.day } : {}) });
+  // ...and it must be the minute of a message the model was shown: a time that
+  // matches none is a guess, not the moment the day was agreed.
+  if (a.act && src.kind === 'sms' && !src.stamps?.has(etMinuteKey(parsedAt))) {
+    return skipRow(src, index, 'at_ungrounded', { ...known, ...(rules.validDay(a.day) ? { target_date: a.day } : {}) });
+  }
   const dayVisits = a.act ? await visitFacts(conn, src.customerId, [a.day, a.from_day]) : [];
   const decision = rules.decideAgreement({
     agreement: a, kind: src.kind, customerId: src.customerId, todayET: ctx.todayET, agreedAt, now: ctx.now,
@@ -468,18 +533,35 @@ async function customerOverQuota(conn, customerId, now) {
   return Number(row?.n || 0) >= CUSTOMER_QUOTA;
 }
 
+// The clock at this moment: the sweep's `now` plus the time the sweep has run.
+const clockOf = (ctx) => new Date(ctx.now.getTime() + (Date.now() - ctx.startedAt));
+
+// A text candidate was chosen at the start of the tick; earlier sources can take
+// minutes. Reload its thread and confirm it is still the latest inbound text, still
+// quiet and still a candidate; else leave it unjudged (no row) for a later tick.
+async function refreshSmsSource(conn, src, ctx) {
+  const now = clockOf(ctx);
+  if (!(await smsStillCandidate(conn, src, now))) return false;
+  if (src.customerId) {
+    const thread = await threadLines(conn, src.customerId, src.phoneDigits, now);
+    Object.assign(src, { lines: thread.lines, stamps: thread.stamps, truncated: thread.truncated });
+  }
+  return true;
+}
+
 async function processSource(conn, src, ctx) {
+  if (src.kind === 'sms' && !(await refreshSmsSource(conn, src, ctx))) return { leave: true };
   if (!src.customerId) return { rows: [skipRow(src, 0, 'no_customer')] };
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
   if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };
   if (await customerOverQuota(conn, src.customerId, ctx.now)) return { rows: [skipRow(src, 0, 'judge_rate_limited')] };
-  const lines = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
+  const visits = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
   // A failed read throws (the source stays unjudged and is retried next tick); the
   // legacy empty list would record every agreement as service_unresolved for good.
   const catalog = await loadBookableCallServices(conn, { strict: true });
   if (!catalog.length) throw Object.assign(new Error('catalog_empty'), { code: 'catalog_empty' });
   const parts = prompts.buildDayAgreementPrompt({
-    sourceLabel: src.label, todayET: ctx.todayET, weekdayET: WEEKDAYS[etParts(ctx.now).dayOfWeek], visits: lines, lines: src.lines,
+    sourceLabel: src.label, todayET: ctx.todayET, weekdayET: WEEKDAYS[etParts(ctx.now).dayOfWeek], visits: visits.lines, omittedVisits: visits.omitted, lines: src.lines,
     services: catalog.filter((row) => !isGenericCallCatalogRow(row)).map((row) => row.name),
   });
   const judged = await judge(parts, ctx.deps);
@@ -502,6 +584,7 @@ async function sweepKind(conn, sources, ctx, tally) {
     try {
       const outcome = await processSource(conn, src, ctx);
       if (outcome.transient) { tally.transient += 1; return false; }
+      if (outcome.leave) { tally.left = (tally.left || 0) + 1; continue; }
       await record(conn, outcome.rows);
       tally.judged += 1;
       for (const row of outcome.rows) tally[row.verdict] += 1;
@@ -519,7 +602,9 @@ async function sweepKind(conn, sources, ctx, tally) {
  */
 async function runDayAgreementShadow({ conn = db, now = new Date(), deps = {} } = {}) {
   if (!isEnabled('dayAgreementShadow')) return { skipped: 'gate_off' };
-  const ctx = { now, todayET: etDateString(now), deps };
+  const ctx = {
+    now, todayET: etDateString(now), deps, startedAt: Date.now(),
+  };
   const tally = {
     judged: 0, would_book: 0, would_move: 0, skip: 0, errors: 0, transient: 0,
   };
@@ -537,6 +622,9 @@ module.exports = {
   _internals: {
     callCandidatesQuery,
     smsCandidatesQuery,
+    smsStillCandidate,
+    visitLines,
+    etMinuteKey,
     loadCallCandidates,
     loadSmsCandidates,
     validateAnswer,

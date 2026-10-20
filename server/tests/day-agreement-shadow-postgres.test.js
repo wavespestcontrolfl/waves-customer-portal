@@ -88,10 +88,12 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     });
     return id;
   };
-  const text = async (customerId, body, minutesAgo, { direction = 'inbound', type = null, to = '+19415550100', status = null } = {}) => {
+  const text = async (customerId, body, minutesAgo, {
+    direction = 'inbound', type = null, to = '+19415550100', status = null, phone = PHONE,
+  } = {}) => {
     const id = randomUUID();
     await trx('sms_log').insert({
-      id, customer_id: customerId, direction, from_phone: direction === 'inbound' ? PHONE : to, to_phone: direction === 'inbound' ? to : PHONE,
+      id, customer_id: customerId, direction, from_phone: direction === 'inbound' ? phone : to, to_phone: direction === 'inbound' ? to : phone,
       message_body: body, created_at: ago(minutesAgo), message_type: type || (direction === 'inbound' ? 'inbound' : 'manual'),
       status: status || (direction === 'inbound' ? 'received' : 'sent'),
     });
@@ -534,7 +536,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await text(customerId, 'We can come Wednesday morning.', 100, { direction: 'outbound', type: 'manual' });
       await text(customerId, 'Your visit is tomorrow at 9.', 99, { direction: 'outbound', type: 'reminder' });
       const latest = await text(customerId, 'Wednesday works', 45);
-      const dispatch = answering(agreement({ at: '2040-03-12T10:15', daypart: 'morning' }));
+      const dispatch = answering(agreement({ at: '2040-03-12T11:15', daypart: 'morning' }));
       const target = dayPlus(2);
       const findSlots = jest.fn(async () => ({ slots: [slot(target, '09:00')] }));
       expect(await sweep({ dispatch, findSlots })).toMatchObject({ judged: 1, would_book: 1 });
@@ -547,7 +549,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
         source_kind: 'sms', source_key: `sms:9415550142:${latest}#0`, phone_digits: '9415550142', call_log_id: null, verdict: 'would_book',
       });
       // The moment's own time (the customer's reply), not the sweep's.
-      expect(row.agreed_at.toISOString()).toBe('2040-03-12T14:15:00.000Z');
+      expect(row.agreed_at.toISOString()).toBe('2040-03-12T15:15:00.000Z');
       expect(JSON.stringify(row)).not.toMatch(/Wednesday works|come Wednesday/);
     });
 
@@ -718,9 +720,104 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
 
     test('an agreement older than the 6 hour limit inside a long thread is history, not news', async () => {
       const customerId = await customer();
+      await text(customerId, 'Tuesday works', 480);
       await text(customerId, 'Tuesday works', 45);
-      await sweep({ dispatch: answering(agreement({ at: '2040-03-11T09:00' })), findSlots: jest.fn() });
+      // 480 minutes before NOW (12:00 ET) is 04:00 ET: a message the model was shown, but too old to act on.
+      await sweep({ dispatch: answering(agreement({ at: '2040-03-12T04:00' })), findSlots: jest.fn() });
       expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'stale_moment' })]);
+    });
+
+    test('an SMS action whose time is not the minute of a message in the thread is at_ungrounded and the picker is never asked', async () => {
+      const customerId = await customer();
+      await text(customerId, 'Tuesday works', 45); // 11:15 ET
+      const findSlots = jest.fn();
+      for (const at of ['2040-03-12T11:30', '2040-03-12T10:30', '2040-03-11T11:15']) {
+        await trx('day_agreement_decisions').delete();
+        await sweep({ dispatch: answering(agreement({ at })), findSlots });
+        expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'at_ungrounded', target_date: expect.anything() })]);
+      }
+      expect(findSlots).not.toHaveBeenCalled();
+      // The same time as a message minute is grounded and goes on to the picker.
+      await trx('day_agreement_decisions').delete();
+      await sweep({ dispatch: answering(agreement({ at: '2040-03-12T11:15' })), findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] })) });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
+    });
+
+    test('a day-less "yes that works" is a candidate when a delivered Waves text with a day word was sent to the phone in the 3 hours before it', async () => {
+      const customerId = await customer();
+      const yes = await text(customerId, 'Yes that works', 45);
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+      const offer = (body, minutesAgo, opts = {}) => text(customerId, body, minutesAgo, { direction: 'outbound', ...opts });
+      // Not an offer: undelivered, push-only, recruiting, no day word, or sent more than 3 hours before the reply.
+      const notOffers = [
+        await offer('We can come Wednesday', 100, { status: 'scheduled' }),
+        await offer('We can come Wednesday', 100, { status: 'failed' }),
+        await offer('We can come Wednesday', 100, { type: 'job_interview' }),
+        await offer('Does a morning visit suit you', 100),
+        await offer('We can come Wednesday', 45 + 181),
+      ];
+      const push = await offer('We can come Wednesday', 100);
+      await trx('sms_log').where({ id: push }).update({ from_phone: 'push' });
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+      await trx('sms_log').whereIn('id', [...notOffers, push]).delete();
+      // A delivered Waves text with a day word inside the 3 hours before the reply is the offer.
+      await offer('We can come Wednesday morning', 100);
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([yes]);
+      // The quiet period still applies: a delivered Waves text 10 minutes ago ends it.
+      await offer('Great, see you then', 10);
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+    });
+
+    test('the offer admits the thread to the model, which sees the offer and the reply', async () => {
+      const customerId = await customer();
+      await text(customerId, 'We can come Wednesday morning', 100, { direction: 'outbound' });
+      await text(customerId, 'Yes that works', 45);
+      const dispatch = answering(agreement({ act: false, kind: null, day: null, blockers: ['no_day_agreed'] }));
+      await sweep({ dispatch });
+      expect(dispatch.mock.calls[0][1].text).toMatch(/WAVES \(manual\): We can come Wednesday morning[\s\S]*CUSTOMER: Yes that works/);
+    });
+
+    test('a candidate that is no longer the latest inbound text, or no longer quiet, is left unjudged: no row, no model call', async () => {
+      const customerId = await customer();
+      const other = await customer({ phone: '+19415550177' });
+      const PHONE2 = '+19415550177';
+      await text(customerId, 'Tuesday works', 60);
+      await text(other, 'Thursday works', 50, { phone: PHONE2 });
+      // While the first source is being judged, the second phone writes again.
+      const dispatch = jest.fn(async () => {
+        await text(other, 'actually Friday', 1, { phone: PHONE2 });
+        return { ok: true, json: { agreements: [agreement({ act: false, kind: null, day: null, blockers: ['no_day_agreed'] })] }, model: 'm' };
+      });
+      const tally = await sweep({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(tally).toMatchObject({ judged: 1, left: 1 });
+      expect((await decisions()).map((r) => r.customer_id)).toEqual([customerId]);
+    });
+
+    test('smsStillCandidate: latest inbound and quiet is true; a newer inbound or a delivered Waves text since is false', async () => {
+      const customerId = await customer();
+      const id = await text(customerId, 'Tuesday works', 60);
+      const src = { key: `sms:9415550142:${id}`, phoneDigits: '9415550142' };
+      expect(await shadow._internals.smsStillCandidate(trx, src, NOW)).toBe(true);
+      const reply = await text(customerId, 'On our way', 5, { direction: 'outbound' });
+      expect(await shadow._internals.smsStillCandidate(trx, src, NOW)).toBe(false);
+      await trx('sms_log').where({ id: reply }).delete();
+      expect(await shadow._internals.smsStillCandidate(trx, src, NOW)).toBe(true);
+      await text(customerId, 'thanks', 40);
+      expect(await shadow._internals.smsStillCandidate(trx, src, NOW)).toBe(false);
+    });
+
+    test('a visit changed after the agreement is left out of what the model sees, with a count; one untouched since is shown', async () => {
+      const customerId = await customer();
+      await visit(customerId, dayPlus(5), { window_start: '10:00' });
+      await visit(customerId, dayPlus(6), { window_start: '11:00', updated_at: ago(30) });
+      await call(customerId);
+      const dispatch = answering(agreement({ act: false, kind: null, day: null, blockers: ['no_day_agreed'] }));
+      await sweep({ dispatch });
+      const prompt = dispatch.mock.calls[0][1].text;
+      expect(prompt).toContain(`${dayPlus(5)} 10:00 Pest Control (confirmed)`);
+      expect(prompt).not.toContain(dayPlus(6));
+      expect(prompt).toContain('1 visit(s) changed after this moment are not shown.');
     });
   });
 
@@ -808,6 +905,16 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       const candidate = (techId) => ({ date: target, techId, windowStart: '10:00', windowEnd: '11:00' });
       const range = { dateFrom: target, dateTo: target, serviceMix: { services: [SERVICE_NAME] } };
       expect(await filterCollidingSlots([candidate(off), candidate(SLOT_TECH)], range)).toEqual([candidate(SLOT_TECH)]);
+    });
+
+    test('outside capacity routing a 17:00 start is possible: the customer day end (18:00) reaches find-time', async () => {
+      const technicianId = randomUUID();
+      await trx('technicians').insert({ id: technicianId, name: 'Sample Tech', field_dispatchable: true, employment_status: 'active' });
+      // At the depot, so the drive back to the day's end costs nothing and the last start is the day-end limit.
+      const { HQ } = require('../services/auto-dispatch/geo');
+      const customerId = await customer({ latitude: HQ.lat, longitude: HQ.lng });
+      const picked = await shadow._internals.pickSlot(trx, { customerId, day: dayPlus(2), daypart: 'after 17:00', fromVisit: null, service: await catalogService() }, {});
+      expect(picked.slot).toMatchObject({ start_time: '17:00', technician: { id: technicianId } });
     });
 
     test('under capacity routing the picker still hands back only customer-grid starts: no 08:00, no lunch-overlapping start', async () => {

@@ -62,12 +62,17 @@ describe('candidate SQL (compile only)', () => {
     expect(sql).toContain("d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0'");
     // The quiet probe counts only what the thread counts: inbound texts and Waves texts that
     // went out; scheduled, reserved or failed rows are not activity.
-    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$5 and \("m"\."direction" = \$6 or "m"\."status" in \(\$7, \$8, \$9\)\)/);
+    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$11 and \("m"\."direction" = \$12 or "m"\."status" in \(\$13, \$14, \$15\)\)/);
     expect(sql).toContain("right(regexp_replace(m.to_phone, '\\D', '', 'g'), 10) = l.digits");
     expect(sql).toContain("COALESCE(m.metadata->>'review_ask_reservation', 'false')");
     expect(sql).toContain("COALESCE(m.status, '') IN ('canceled', 'cancelled')");
+    // A day-less latest inbound is admitted by a delivered Waves text with a day word sent in the 3 hours before it.
+    expect(sql).toMatch(/\(l\.message_body ~\* \$4 OR EXISTS \(\(select 1 from "sms_log" as "w" where "w"\."direction" = \$5 and "w"\."status" in \(\$6, \$7, \$8\)/);
+    expect(sql).toContain("w.created_at < l.created_at AND w.created_at >= l.created_at - interval '3 hours'");
+    expect(sql).toContain('w.message_body ~* $10');
     expect(bindings).toEqual([
       'inbound', new Date(NOW.getTime() - 3 * 3600 * 1000), 'job\\_%', rules.DAY_WORD_PATTERN,
+      'outbound', 'sent', 'delivered', 'read', 'job\\_%', rules.DAY_WORD_PATTERN,
       new Date(NOW.getTime() - 30 * 60 * 1000), 'inbound', 'sent', 'delivered', 'read', 'job\\_%', internals.BATCH.sms,
     ]);
   });
@@ -75,7 +80,8 @@ describe('candidate SQL (compile only)', () => {
   test('texts: push-only deliveries are no activity in the quiet probe, and recruiting (job_) texts are left out of candidates and the probe', () => {
     const { sql } = internals.smsCandidatesQuery(pg, NOW).toSQL().toNative();
     expect(sql).toContain("COALESCE(m.from_phone, '') <> 'push' AND COALESCE(m.metadata->>'channel', '') <> 'push'");
-    expect(sql.match(/not like \$/g)).toHaveLength(2); // the candidate inner query and the quiet probe
+    expect(sql).toContain("COALESCE(w.from_phone, '') <> 'push' AND COALESCE(w.metadata->>'channel', '') <> 'push'");
+    expect(sql.match(/not like \$/g)).toHaveLength(3); // the candidate inner query, the offer probe and the quiet probe
   });
 
   test('calls: voicemail, spam and the scheduling status are tested in SQL before the scan limit', () => {
@@ -247,6 +253,49 @@ describe('which service the picker is asked about', () => {
   });
 });
 
+describe('grounding, visit context and prompt note', () => {
+  const act = (at) => ({
+    at, act: true, kind: 'new_visit', day: '2040-03-14', from_day: null, daypart: 'any', service: 'Quarterly Pest Control Service',
+    blockers: [], confidence: 0.9, reason: 'Agreed.',
+  });
+  const smsSrc = { kind: 'sms', key: 'sms:9415550142:x', callLogId: null, phoneDigits: '9415550142', customerId: 'c1', agreedAt: NOW, stamps: new Set(['2040-03-12T11:15', '2040-03-12T10:20']) };
+  const ctx = { now: NOW, todayET: '2040-03-12', model: 'm', deps: {} };
+
+  test('etMinuteKey is the Eastern minute in the form the model returns', () => {
+    expect(internals.etMinuteKey(new Date('2040-03-12T15:15:40Z'))).toBe('2040-03-12T11:15');
+  });
+
+  test('an SMS action whose time is not the minute of a shown message is at_ungrounded; no visit is read', async () => {
+    const conn = jest.fn(() => { throw new Error('no read before the grounding check'); });
+    for (const at of ['2040-03-12T11:16', '2040-03-12T09:00', '2040-03-11T11:15']) {
+      expect(await internals.decideMoment(conn, smsSrc, 0, act(at), ctx)).toMatchObject({ verdict: 'skip', skip_reason: 'at_ungrounded', target_date: '2040-03-14' });
+    }
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('a time that is a shown message (to the minute) passes grounding and moves on to the visit read', async () => {
+    const conn = jest.fn(() => { throw new Error('reached the visit read'); });
+    await expect(internals.decideMoment(conn, smsSrc, 0, act('2040-03-12T11:15'), ctx)).rejects.toThrow('reached the visit read');
+  });
+
+  test('visitLines leaves out a visit changed after the agreement and counts it', async () => {
+    const before = new Date(NOW.getTime() - 3600 * 1000);
+    const rows = [
+      { d: '2040-03-14', window_start: '09:00:00', service_type: 'Pest Control', status: 'confirmed', updated_at: new Date(before.getTime() - 1000) },
+      { d: '2040-03-15', window_start: '10:00:00', service_type: 'Lawn Care', status: 'confirmed', updated_at: new Date(before.getTime() + 1000) },
+    ];
+    const conn = () => ({ where: () => ({ where: () => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ limit: () => ({ select: async () => rows }) }) }) }) }) }) });
+    conn.raw = () => 'raw';
+    expect(await internals.visitLines(conn, 'c1', before, NOW)).toEqual({ lines: ['2040-03-14 09:00 Pest Control (confirmed)'], omitted: 1 });
+  });
+
+  test('the prompt says how many visits were left out, and says nothing when none were', () => {
+    const base = { sourceLabel: 'x', todayET: '2040-03-12', weekdayET: 'Monday', lines: ['l'] };
+    expect(prompts.buildDayAgreementPrompt({ ...base, omittedVisits: 2 }).text).toContain('2 visit(s) changed after this moment are not shown.');
+    expect(prompts.buildDayAgreementPrompt({ ...base, omittedVisits: 0 }).text).not.toContain('changed after this moment');
+  });
+});
+
 describe('retryable and ambiguous inputs', () => {
   const failing = new Proxy({}, { get: (_t, key) => (key === 'then' ? (_res, rej) => rej(new Error('db down')) : () => failing) });
 
@@ -258,7 +307,7 @@ describe('retryable and ambiguous inputs', () => {
   });
 
   test('a source is left unjudged (the error propagates, no row) when the catalog read fails or is empty', async () => {
-    const src = { kind: 'sms', key: 'sms:9415550142:x', customerId: 'c1', lines: ['[Mon 2040-03-12 11:00] CUSTOMER: Wed works'], agreedAt: NOW, truncated: false };
+    const src = { kind: 'call', key: 'call:x', customerId: 'c1', lines: ['[Mon 2040-03-12 11:00] CUSTOMER: Wed works'], agreedAt: NOW, truncated: false };
     const dispatch = jest.fn();
     const ctx = { now: NOW, todayET: '2040-03-12', deps: { dispatch } };
     const visits = { where: () => ({ where: () => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ limit: () => ({ select: async () => [] }) }) }) }) }) }) };
@@ -335,11 +384,19 @@ describe('the collision guard on offered slots', () => {
     const args = { customerId: 'c1', day: '2040-03-14', daypart: 'any' };
     await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', service_type: 'Lawn Care', lat: '27.9', lng: '-82.1' } }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.9, lng: -82.1 }));
-    expect(conn).not.toHaveBeenCalled(); // the visit's pin was enough
+    expect(conn).not.toHaveBeenCalledWith('customers'); // the visit's pin was enough
     await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', service_type: 'Lawn Care', lat: null, lng: null } }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
     await internals.pickSlot(conn, { ...args, fromVisit: null, service: SERVICE }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
+  });
+
+  test('pickSlot passes the configured customer day end (18:00 by default), so a 17:00 start is possible in legacy mode', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
+    const findSlots = jest.fn(async () => ({ slots: [] }));
+    await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: SERVICE }, { findSlots });
+    expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ dayEndHour: 18 }));
   });
 
   test('pickSlot asks find-time for customer-facing slots, so capacity mode applies the 09:00 grid, close and lunch gate', async () => {

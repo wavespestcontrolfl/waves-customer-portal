@@ -85,7 +85,7 @@ OUTPUT: return only JSON: {"agreements":[...]}. One object for each agreement mo
 
 // Pure: the user message. `lines` are already scrubbed and labelled.
 function buildDayAgreementPrompt({
-  sourceLabel, todayET, weekdayET, visits = [], lines = [], services = [],
+  sourceLabel, todayET, weekdayET, visits = [], lines = [], services = [], omittedVisits = 0,
 }) {
   const visitBlock = visits.length ? visits.map((v) => `- ${v}`).join('\n') : '- (none on file)';
   return {
@@ -96,6 +96,7 @@ function buildDayAgreementPrompt({
       '',
       'Visits on file for this customer (date, start, service, status):',
       visitBlock,
+      ...(omittedVisits > 0 ? [`${omittedVisits} visit(s) changed after this moment are not shown.`] : []),
       '',
       'Service list (the only values allowed in "service"):',
       services.length ? services.map((name) => `- ${name}`).join('\n') : '- (none)',
