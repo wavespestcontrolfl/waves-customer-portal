@@ -95,7 +95,7 @@ function parseDaypart(daypart) {
   const m = /^(after|before) (\d{1,2}):(\d{2})$/.exec(text);
   if (!m) return null;
   const minutes = Number(m[2]) * 60 + Number(m[3]);
-  if (Number(m[2]) > 24 || Number(m[3]) > 59) return null;
+  if (Number(m[2]) > 23 || Number(m[3]) > 59) return null;
   return m[1] === 'after' ? { from: minutes, before: 1440 } : { from: 0, before: minutes };
 }
 

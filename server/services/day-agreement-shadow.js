@@ -16,7 +16,7 @@
  *        - TEXT THREADS: a phone whose latest inbound text is under 3 hours
  *          old, carries a day word, and has had no message either way for 30
  *          minutes (staff had time to act);
- *   2. asks ONE model call per source (TEXT_POLICIES.highStakes through
+ *   2. asks ONE model call per source (TEXT_POLICIES.deepAnalysis (the DEEP judge tier) through
  *      dispatchWithFallback, lane day_agreement) what the office should do at
  *      each agreement moment (prompts/day-agreement-v1.js);
  *   3. applies the deterministic rules (day-agreement-rules.js), picks the
@@ -42,6 +42,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isRealConversation, parseExtraction } = require('./call-held-visits');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { scrubPans } = require('../utils/pan-scrub');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const prompts = require('./prompts/day-agreement-v1');
@@ -92,6 +93,9 @@ const digitsOf = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
 // Calls whose pipeline verdict landed in the window and that no row covers yet.
 // Every judged source has a '#0' row (see the migration), so one equality on
 // the unique index says "already judged".
+// The extraction may be stored as a JSON string inside the jsonb column.
+const EXTRACTION_SQL = "(CASE WHEN jsonb_typeof(c.ai_extraction_enriched::jsonb) = 'string' THEN (c.ai_extraction_enriched::jsonb #>> '{}')::jsonb ELSE c.ai_extraction_enriched::jsonb END)";
+
 function callCandidatesQuery(conn, now) {
   return conn('call_log as c')
     .modify((q) => whereNotSandboxCall(q, 'c.source'))
@@ -100,10 +104,14 @@ function callCandidatesQuery(conn, now) {
     .whereNotNull('c.ai_extraction_enriched')
     .whereNotNull('c.transcription')
     .whereRaw("COALESCE(c.processing_status, '') NOT IN ('voicemail', 'spam', 'processing')")
-    // The scheduling status filter runs in SQL, before the scan limit, so
-    // ineligible calls never crowd eligible ones out (pre-push audit P1). The
-    // extraction may be stored as a JSON string inside the jsonb column.
-    .whereRaw(`(CASE WHEN jsonb_typeof(c.ai_extraction_enriched::jsonb) = 'string' THEN (c.ai_extraction_enriched::jsonb #>> '{}')::jsonb ELSE c.ai_extraction_enriched::jsonb END) -> 'scheduling' ->> 'status' IN (${[...SCHEDULING_STATUSES].map(() => '?').join(', ')})`, [...SCHEDULING_STATUSES])
+    // Scheduling status and the non-conversation tests (isRealConversation's own
+    // reads: voicemail, spam verdict) run in SQL, before the scan limit, so
+    // ineligible calls never crowd eligible ones out (pre-push audit P1). The JS
+    // check below stays as the second look.
+    .whereRaw(`${EXTRACTION_SQL} -> 'scheduling' ->> 'status' IN (${[...SCHEDULING_STATUSES].map(() => '?').join(', ')})`, [...SCHEDULING_STATUSES])
+    .whereRaw("COALESCE(c.answered_by, '') <> 'voicemail'")
+    .whereRaw(`COALESCE(${EXTRACTION_SQL} -> 'meta' ->> 'is_voicemail', '') <> 'true'`)
+    .whereRaw(`COALESCE(NULLIF(${EXTRACTION_SQL} -> 'spam_verdict' ->> 'spam_kind', ''), 'not_spam') = 'not_spam'`)
     .whereRaw("NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'call:' || c.id::text || '#0')")
     .orderBy('c.processed_at', 'asc')
     .limit(CALL_SCAN_LIMIT)
@@ -129,31 +137,42 @@ const last10 = (column) => LAST10_SQL.replace('%I', column);
 // delivered-and-reservation filter threadLines uses). The inner query keeps the
 // latest inbound text per phone; the day word and quiet tests judge that one
 // text, so an older text never stands in for a newer one.
+// A push-only delivery (an app notification, not a text) is no text to or from
+// the customer's phone: the same predicate twilio-webhook.js uses.
+const notPushSql = (table) => `COALESCE(${table}.from_phone, '') <> 'push' AND COALESCE(${table}.metadata->>'channel', '') <> 'push'`;
+
 function quietProbe(conn, since) {
   const probe = conn('sms_log as m').select(conn.raw('1'))
     .where('m.created_at', '>', since)
     .where((q) => q.where('m.direction', 'inbound').orWhereIn('m.status', DELIVERED_STATUSES))
+    .whereRaw(notPushSql('m'))
+    .modify((q) => excludeRecruitingSmsLog(q, 'm.message_type'))
     .whereRaw(`(${last10('m.from_phone')} = l.digits OR ${last10('m.to_phone')} = l.digits)`);
   return excludeUnresolvedSendReservations(probe, 'm');
+}
+
+// The latest inbound text per phone in the window, recruiting applicants' texts
+// (job_* message types) left out: they belong to Recruiting, never to a customer visit.
+function latestInboundPerPhone(conn, since) {
+  return conn('sms_log')
+    .select(conn.raw(`DISTINCT ON (${last10('from_phone')}) id, customer_id, created_at, message_body, ${last10('from_phone')} AS digits`))
+    .where('direction', 'inbound').where('created_at', '>=', since).whereNotNull('message_body')
+    .modify((q) => excludeRecruitingSmsLog(q, 'message_type'))
+    .orderByRaw(`${last10('from_phone')}, created_at DESC, id DESC`);
 }
 
 function smsCandidatesQuery(conn, now) {
   return conn.raw(`
     SELECT l.id, l.customer_id, l.created_at, l.digits
-    FROM (
-      SELECT DISTINCT ON (${last10('from_phone')})
-        id, customer_id, created_at, message_body, ${last10('from_phone')} AS digits
-      FROM sms_log
-      WHERE direction = 'inbound' AND created_at >= ? AND message_body IS NOT NULL
-      ORDER BY ${last10('from_phone')}, created_at DESC, id DESC
-    ) l
+    FROM (?) l
     WHERE length(l.digits) = 10
       AND l.message_body ~* ?
       AND NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0')
       AND NOT EXISTS (?)
     ORDER BY l.created_at ASC
     LIMIT ?`, [
-    new Date(now.getTime() - RECENT_MS), rules.DAY_WORD_PATTERN, quietProbe(conn, new Date(now.getTime() - QUIET_MS)), BATCH.sms,
+    latestInboundPerPhone(conn, new Date(now.getTime() - RECENT_MS)), rules.DAY_WORD_PATTERN,
+    quietProbe(conn, new Date(now.getTime() - QUIET_MS)), BATCH.sms,
   ]);
 }
 
@@ -186,8 +205,9 @@ function messageLine(row) {
 
 // The last THREAD_MESSAGES texts between Waves and this phone, oldest first.
 async function threadLines(conn, customerId, digits, now) {
-  const rows = await excludeUnresolvedSendReservations(conn('sms_log'))
+  const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(conn('sms_log')))
     .where('customer_id', customerId)
+    .whereRaw(notPushSql('sms_log'))
     .where('created_at', '>=', new Date(now.getTime() - THREAD_DAYS * 24 * HOUR_MS))
     .whereNotNull('message_body')
     // A Waves text counts only once it went out: a scheduled or failed row was
@@ -237,9 +257,11 @@ function validateAnswer(result) {
 
 async function judge(parts, deps) {
   const dispatch = deps.dispatch || dispatchWithFallback;
-  const result = await dispatch(MODELS.TEXT_POLICIES.highStakes, {
+  const result = await dispatch(MODELS.TEXT_POLICIES.deepAnalysis, {
     system: parts.system, text: parts.text, jsonMode: true, jsonSchema: prompts.SCHEMA,
-    maxTokens: 3000, laneId: 'day_agreement', promptVersion: prompts.VERSION,
+    // The documented DEEP output floor: MODEL_DEEP may point at a thinking model that
+    // spends thinking from the same budget.
+    maxTokens: 4096, laneId: 'day_agreement', promptVersion: prompts.VERSION,
   }, { validate: validateAnswer });
   if (result?.ok) return { ok: true, agreements: result.json.agreements, model: String(result.model || '').slice(0, 80) };
   // A validator rejection on every leg is a deterministic bad answer: record it.
@@ -263,11 +285,18 @@ async function visitFacts(conn, customerId, days) {
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS d"));
 }
 
+// Where the visit will be: a move uses the moved visit's own pin (its service
+// address can differ from the customer's), the customer's pin only when the
+// visit has none; a new visit has the customer's pin.
 async function coordinates(conn, customerId, fromVisit) {
+  const pin = (lat, lng) => {
+    const point = { lat: parseFloat(lat), lng: parseFloat(lng) };
+    return Number.isFinite(point.lat) && Number.isFinite(point.lng) ? point : null;
+  };
+  const own = pin(fromVisit?.lat, fromVisit?.lng);
+  if (own) return own;
   const customer = await conn('customers').where({ id: customerId }).first('latitude', 'longitude');
-  const lat = parseFloat(customer?.latitude ?? fromVisit?.lat);
-  const lng = parseFloat(customer?.longitude ?? fromVisit?.lng);
-  return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  return pin(customer?.latitude, customer?.longitude);
 }
 
 // Offer/commit parity (AGENTS.md booking conflict-check class): without

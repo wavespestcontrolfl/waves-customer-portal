@@ -58,20 +58,32 @@ describe('candidate SQL (compile only)', () => {
   test('texts: latest inbound per phone, day word on that text, quiet for 30 minutes both ways, not judged yet', () => {
     const { sql, bindings } = internals.smsCandidatesQuery(pg, NOW).toSQL().toNative();
     expect(sql).toContain('DISTINCT ON');
-    expect(sql).toContain("direction = 'inbound'");
-    expect(sql).toContain('l.message_body ~* $2');
+    expect(sql).toContain('l.message_body ~* $4');
     expect(sql).toContain("d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0'");
     // The quiet probe counts only what the thread counts: inbound texts and Waves texts that
     // went out; scheduled, reserved or failed rows are not activity.
-    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$3 and \("m"\."direction" = \$4 or "m"\."status" in \(\$5, \$6, \$7\)\)/);
+    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$5 and \("m"\."direction" = \$6 or "m"\."status" in \(\$7, \$8, \$9\)\)/);
     expect(sql).toContain("right(regexp_replace(m.to_phone, '\\D', '', 'g'), 10) = l.digits");
     expect(sql).toContain("COALESCE(m.metadata->>'review_ask_reservation', 'false')");
     expect(sql).toContain("COALESCE(m.status, '') IN ('canceled', 'cancelled')");
-    expect(bindings.slice(0, 7)).toEqual([
-      new Date(NOW.getTime() - 3 * 3600 * 1000), rules.DAY_WORD_PATTERN, new Date(NOW.getTime() - 30 * 60 * 1000),
-      'inbound', 'sent', 'delivered', 'read',
+    expect(bindings).toEqual([
+      'inbound', new Date(NOW.getTime() - 3 * 3600 * 1000), 'job\\_%', rules.DAY_WORD_PATTERN,
+      new Date(NOW.getTime() - 30 * 60 * 1000), 'inbound', 'sent', 'delivered', 'read', 'job\\_%', internals.BATCH.sms,
     ]);
-    expect(bindings[bindings.length - 1]).toBe(internals.BATCH.sms);
+  });
+
+  test('texts: push-only deliveries are no activity in the quiet probe, and recruiting (job_) texts are left out of candidates and the probe', () => {
+    const { sql } = internals.smsCandidatesQuery(pg, NOW).toSQL().toNative();
+    expect(sql).toContain("COALESCE(m.from_phone, '') <> 'push' AND COALESCE(m.metadata->>'channel', '') <> 'push'");
+    expect(sql.match(/not like \$/g)).toHaveLength(2); // the candidate inner query and the quiet probe
+  });
+
+  test('calls: voicemail, spam and the scheduling status are tested in SQL before the scan limit', () => {
+    const { sql } = internals.callCandidatesQuery(pg, NOW).toSQL().toNative();
+    expect(sql).toContain("COALESCE(c.answered_by, '') <> 'voicemail'");
+    expect(sql).toContain("'meta' ->> 'is_voicemail', '') <> 'true'");
+    expect(sql).toContain("'spam_verdict' ->> 'spam_kind', ''), 'not_spam') = 'not_spam'");
+    expect(sql.indexOf("'scheduling' ->> 'status' IN")).toBeLessThan(sql.indexOf('limit $'));
   });
 });
 
@@ -168,13 +180,14 @@ describe('the judge, through the real fallback chain', () => {
     expect(await internals.judge(parts, { dispatch: allBad })).toMatchObject({ transient: false });
   });
 
-  test('a stubbed dispatch gets the highStakes policy, the lane label, the prompt version and the validator', async () => {
+  test('a stubbed dispatch gets the deepAnalysis (DEEP) policy with the DEEP output floor, the lane label, the prompt version and the validator', async () => {
     const dispatch = jest.fn(async () => ({ ok: true, json: JSON.parse(good), model: 'stub-model' }));
     const out = await internals.judge(parts, { dispatch });
     expect(out).toMatchObject({ ok: true, model: 'stub-model' });
     const [policy, payload, options] = dispatch.mock.calls[0];
-    expect(policy.name).toBe('highStakes');
-    expect(payload).toMatchObject({ laneId: 'day_agreement', promptVersion: 'day-agreement-v1', jsonMode: true });
+    expect(policy.name).toBe('deepAnalysis');
+    expect(policy.primary.model).toBe(require('../config/models').DEEP);
+    expect(payload).toMatchObject({ laneId: 'day_agreement', promptVersion: 'day-agreement-v1', jsonMode: true, maxTokens: 4096 });
     expect(options.validate({ json: JSON.parse(good) })).toBeNull();
     expect(options.validate({ json: { agreements: [] } })).toBeTruthy();
   });
@@ -224,6 +237,20 @@ describe('the collision guard on offered slots', () => {
     const args = { customerId: 'c1', day: '2040-03-14', daypart: 'afternoon', fromVisit: null };
     expect((await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00']) })).slot.start_time).toBe('15:00');
     expect(await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00', '15:00']) })).toEqual({ reason: 'no_slot' });
+  });
+
+  test('a move is placed at the moved visit\'s own pin; the customer pin only when the visit has none', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
+    const findSlots = jest.fn(async () => ({ slots: [] }));
+    const args = { customerId: 'c1', day: '2040-03-14', daypart: 'any' };
+    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', lat: '27.9', lng: '-82.1' } }, { findSlots });
+    expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.9, lng: -82.1 }));
+    expect(conn).not.toHaveBeenCalled(); // the visit's pin was enough
+    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', lat: null, lng: null } }, { findSlots });
+    expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
+    await internals.pickSlot(conn, { ...args, fromVisit: null }, { findSlots });
+    expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
   });
 
   test('pickSlot asks find-time for customer-facing slots, so capacity mode applies the 09:00 grid, close and lunch gate', async () => {

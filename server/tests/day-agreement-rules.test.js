@@ -53,6 +53,8 @@ describe('decideAgreement: every rule records its own skip reason', () => {
     ['day_not_after_today', { agreement: agreement({ day: '2040-03-10' }) }],
     ['no_customer', { customerId: null }],
     ['daypart_unreadable', { agreement: agreement({ daypart: 'whenever' }) }],
+    ['daypart_unreadable', { agreement: agreement({ daypart: 'after 24:00' }) }],
+    ['daypart_unreadable', { agreement: agreement({ daypart: 'before 12:75' }) }],
   ];
   test.each(cases)('%s', (reason, over) => {
     expect(decide(over)).toMatchObject({ pass: false, reason });
@@ -159,6 +161,10 @@ describe('parseDaypart, slotsForDaypart and chooseSlot', () => {
   test('an unreadable daypart offers nothing', () => {
     expect(rules.parseDaypart('whenever')).toBeNull();
     expect(rules.parseDaypart('after 25:99')).toBeNull();
+    expect(rules.parseDaypart('after 24:00')).toBeNull();
+    expect(rules.parseDaypart('before 24:30')).toBeNull();
+    expect(rules.parseDaypart('after 13:60')).toBeNull();
+    expect(rules.parseDaypart('after 23:59')).toEqual({ from: 1439, before: 1440 });
     expect(starts('after one')).toEqual([]);
   });
 

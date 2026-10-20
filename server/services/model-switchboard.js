@@ -570,7 +570,7 @@ const LANES = [
   L('inventory_research', 'Inventory vendor mapping + price research', 'routes/admin-inventory.js', 'reason', T('FLAGSHIP'), null, { note: 'Anthropic web_search tool' }),
   L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('ROUTINE'), null, { inbound: true }),
   L('call_commitments', 'Call commitments from transcript', 'call-commitments.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
-  L('day_agreement', 'Day-only agreement judge (shadow)', 'day-agreement-shadow.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
+  L('day_agreement', 'Day-only agreement judge (shadow)', 'day-agreement-shadow.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('FLAGSHIP')),
   L('portal_assistant', 'Customer portal assistant', 'ai-assistant/assistant.js', 'reason', T('FLAGSHIP')),
   L('signup_worker', 'Backlink signup worker', 'backlink-agent/signup-worker.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),

@@ -77,6 +77,17 @@ function classifyOutcome(decision, visits) {
 const bump = (map, key, by = 1) => { map[key] = (map[key] || 0) + by; };
 const id8 = (value) => String(value || '').slice(0, 8);
 
+// The key one agreement counts under: a would_* row by customer + day + verdict,
+// an action-shaped skip (the model said act and a rule or the picker said no) by
+// customer + day + the model's kind, so a re-judged agreement counts once.
+function dedupeKey(d) {
+  if (d.verdict === 'would_book' || d.verdict === 'would_move') return `${d.customer_id}|${d.target_date}|${d.verdict}`;
+  if (d.verdict === 'skip' && d.judged && d.judged.act === true && d.customer_id && d.target_date) {
+    return `skip|${d.customer_id}|${d.target_date}|${d.judged.kind || ''}`;
+  }
+  return null;
+}
+
 /**
  * Counts and rows for a set of decisions. Pure.
  * @param decisions  rows, each with `from_day` read from judged
@@ -91,7 +102,7 @@ function summarize(decisions, visitsOf) {
   // thread ("See you Tuesday"): count each customer + day + kind once (pre-push audit).
   const seen = new Set();
   for (const d of decisions) {
-    const wouldKey = (d.verdict === 'would_book' || d.verdict === 'would_move') ? `${d.customer_id}|${d.target_date}|${d.verdict}` : null;
+    const wouldKey = dedupeKey(d);
     if (wouldKey && seen.has(wouldKey)) { report.duplicates = (report.duplicates || 0) + 1; continue; }
     if (wouldKey) seen.add(wouldKey);
     bump(report.byVerdict, d.verdict);

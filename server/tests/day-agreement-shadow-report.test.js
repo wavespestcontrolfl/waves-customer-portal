@@ -100,6 +100,30 @@ describe('summarize and format', () => {
   });
 });
 
+describe('a re-judged agreement counts once', () => {
+  const act = (id, over = {}) => decision({
+    id, verdict: 'skip', skip_reason: 'no_slot', judged: { act: true, kind: 'new_visit' }, customer_id: 'cust-1', target_date: '2040-03-14', ...over,
+  });
+  const visitsOf = () => [visit()];
+
+  test('action-shaped skips with the same customer, day and kind are one skip and one missed opportunity', () => {
+    const out = report.summarize([act('a'), act('b', { skip_reason: 'low_confidence' }), act('c')], visitsOf);
+    expect(out.byVerdict).toEqual({ skip: 1 });
+    expect(out.skipReasons).toEqual({ no_slot: 1 });
+    expect(out.missedOpportunities).toEqual({ no_slot: 1 });
+    expect(out.duplicates).toBe(2);
+  });
+
+  test('a different day, kind or customer is a different agreement; a skip the model did not call act is never merged', () => {
+    const out = report.summarize([
+      act('a'), act('b', { target_date: '2040-03-15' }), act('c', { judged: { act: true, kind: 'move' } }), act('d', { customer_id: 'cust-2' }),
+      act('e', { judged: { act: false } }), act('f', { judged: { act: false } }),
+    ], visitsOf);
+    expect(out.byVerdict).toEqual({ skip: 6 });
+    expect(out.duplicates).toBeUndefined();
+  });
+});
+
 describe('parseArgs', () => {
   test('needs an ET date range, from not after to', () => {
     expect(report.parseArgs(['--from', '2040-03-12', '--to', '2040-03-19'])).toEqual({ from: '2040-03-12', to: '2040-03-19' });

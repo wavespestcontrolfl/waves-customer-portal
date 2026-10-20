@@ -178,6 +178,27 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(found.map((r) => r.id)).toEqual([wanted]);
     });
 
+    test('voicemail and spam calls are filtered in SQL, so they cannot crowd an eligible call out of the scan limit', async () => {
+      const customerId = await customer();
+      const rows = [];
+      for (let i = 0; i < 105; i += 1) {
+        rows.push({
+          id: randomUUID(), direction: 'inbound', from_phone: PHONE, customer_id: customerId, created_at: ago(120), processed_at: ago(170 - (i % 60)),
+          processing_status: 'processed', v2_extraction_status: 'valid', transcription: 'Agent: hi\nCaller: hi',
+          answered_by: i % 3 === 0 ? 'voicemail' : null,
+          ai_extraction_enriched: JSON.stringify(i % 3 === 0 ? extraction() : i % 3 === 1
+            ? { scheduling: { status: 'requested' }, meta: { is_voicemail: true } }
+            : { scheduling: { status: 'requested' }, meta: {}, spam_verdict: { spam_kind: 'robocall' } }),
+        });
+      }
+      await trx('call_log').insert(rows);
+      const wanted = await call(customerId, { processed_at: ago(5) });
+      expect((await shadow._internals.loadCallCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+      // A spam verdict of not_spam, or an empty one, is still a conversation.
+      const notSpam = await call(customerId, { processed_at: ago(4), ai_extraction_enriched: { scheduling: { status: 'requested' }, meta: {}, spam_verdict: { spam_kind: 'not_spam' } } });
+      expect((await shadow._internals.loadCallCandidates(trx, NOW)).map((r) => r.id).sort()).toEqual([wanted, notSpam].sort());
+    });
+
     test('all four scheduling statuses are candidates (the fourth stored as a stringified extraction), up to the per-tick batch', async () => {
       const customerId = await customer();
       const ids = [];
@@ -228,6 +249,21 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await visit(customerId, from, { window_start: '13:00' });
       await sweep({ dispatch, findSlots });
       expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'move_visit_ambiguous', from_visit_id: null })]);
+    });
+
+    test('a move is placed at the moved visit\'s own pin, not the customer\'s', async () => {
+      const customerId = await customer({ latitude: 27.4, longitude: -82.45 });
+      const from = dayPlus(4);
+      await visit(customerId, from, { lat: 27.9, lng: -82.1 });
+      await call(customerId);
+      const findSlots = jest.fn(async () => ({ slots: [] }));
+      await sweep({ dispatch: answering(agreement({ kind: 'move', from_day: from })), findSlots });
+      expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.9, lng: -82.1 }));
+      // A visit with no pin falls back to the customer\'s.
+      await trx('day_agreement_decisions').delete();
+      await trx('scheduled_services').where({ customer_id: customerId }).update({ lat: null, lng: null });
+      await sweep({ dispatch: answering(agreement({ kind: 'move', from_day: from })), findSlots });
+      expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
     });
 
     test('staff already acted: a visit created on the agreed day after the call skips the moment', async () => {
@@ -461,6 +497,35 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       // A delivered Waves text 10 minutes ago does end the quiet period.
       await unsent('delivered');
       expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+    });
+
+    test('push-only deliveries are no activity and no thread context (from_phone push, or metadata channel push)', async () => {
+      const customerId = await customer();
+      const wanted = await text(customerId, 'sat is fine', 45);
+      const push = await text(customerId, 'PUSHBODY app notice', 10, { direction: 'outbound' });
+      await trx('sms_log').where({ id: push }).update({ from_phone: 'push', status: 'sent' });
+      const channel = await text(customerId, 'CHANNELBODY app notice', 9, { direction: 'outbound' });
+      await trx('sms_log').where({ id: channel }).update({ status: 'sent', metadata: JSON.stringify({ channel: 'push' }) });
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+      const dispatch = answering(agreement({ act: false, kind: null, day: null, blockers: ['no_day_agreed'] }));
+      await sweep({ dispatch });
+      const prompt = dispatch.mock.calls[0][1].text;
+      expect(prompt).toContain('sat is fine');
+      expect(prompt).not.toMatch(/PUSHBODY|CHANNELBODY/);
+    });
+
+    test('recruiting applicants\' texts (job_* types) are never candidates, never a quiet-breaking message, never thread context', async () => {
+      const customerId = await customer();
+      // An applicant\'s inbound text with a day word is not a candidate.
+      await text(customerId, 'I can start Monday', 45, { type: 'job_application' });
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+      // A real customer thread: a recruiting reply 10 minutes ago neither ends the quiet period nor reaches the model.
+      const wanted = await text(customerId, 'sat is fine', 50);
+      await text(customerId, 'RECRUITBODY interview Tuesday', 10, { direction: 'outbound', type: 'job_interview' });
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+      const dispatch = answering(agreement({ act: false, kind: null, day: null, blockers: ['no_day_agreed'] }));
+      await sweep({ dispatch });
+      expect(dispatch.mock.calls[0][1].text).not.toMatch(/RECRUITBODY|start Monday/);
     });
 
     test('outside the window or with no day word nothing is a candidate', async () => {
