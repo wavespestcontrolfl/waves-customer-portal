@@ -12,6 +12,7 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { computeStopsAhead } = require('../services/stops-ahead');
+const { withoutTrackBearers } = require('../services/contact-session-projection');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(authenticate);
@@ -463,7 +464,9 @@ router.get('/active', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
+      // A contact session (GATE_CONTACT_LOGIN) gets the tracker without the
+      // public /track bearer (services/contact-session-projection.js).
+      return res.json({ tracker: req.contactSession ? withoutTrackBearers(formatted) : formatted, propertyScope: resolvedScopePayload(scope) });
     }
 
     return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
@@ -538,7 +541,9 @@ router.get('/today', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
+      // A contact session (GATE_CONTACT_LOGIN) gets the tracker without the
+      // public /track bearer (services/contact-session-projection.js).
+      return res.json({ tracker: req.contactSession ? withoutTrackBearers(formatted) : formatted, propertyScope: resolvedScopePayload(scope) });
     }
 
     return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });

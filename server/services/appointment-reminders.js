@@ -135,9 +135,15 @@ async function hasTextReachableApptRecipient(customer, prefsRow = undefined) {
   // count as text-reachable, or the no-reachable-channel human alert gets
   // suppressed by a phone we deliberately are not texting (#2956 r4).
   const { filterRecipientsByOptin } = require('./recipient-optin');
-  const reachableContacts = await filterRecipientsByOptin(
+  const optedIn = await filterRecipientsByOptin(
     getAppointmentContacts(customer, prefs || {}), customer.id
   ).catch(() => getAppointmentContacts(customer, prefs || {}));
+  // A contact who switched their own texts off (contact login,
+  // GATE_CONTACT_LOGIN) is not text-reachable either, whatever the SMS log
+  // says about last month (codex #6363 r3 P2). Fails closed like the send
+  // path: an unreadable table holds the contact, so the alert still fires.
+  const reachableContacts = await require('./contact-notification-prefs')
+    .filterContactsByOwnPrefs(optedIn, customer.id, null, { channel: 'sms' });
   for (const contact of reachableContacts) {
     const digits = lastTenDigits(contact.phone);
     if (!digits) continue;

@@ -107,6 +107,12 @@ describe('pure projections', () => {
     expect(JSON.stringify(out)).not.toMatch(/Pat|Owner|0101|pat@|gold|120/);
   });
 
+  test('withoutTrackBearers keeps the live tracker and drops the public /track bearer', () => {
+    const tracker = { id: 's', state: 'en_route', currentStep: 3, trackToken: 'tt', trackUrl: '/track/tt', etaMinutes: 12, steps: [] };
+    expect(projection.withoutTrackBearers(tracker)).toEqual({ ...tracker, trackToken: null, trackUrl: null });
+    expect(projection.withoutTrackBearers(null)).toBeNull();
+  });
+
   test('contactSchedulePayload / contactNextPayload drop every bearer and the re-service card', () => {
     const out = projection.contactSchedulePayload({
       hasCancellableWork: true, reservice: { url: '/reservice/rt', lanes: ['pest'] }, overlayHandoff: true,

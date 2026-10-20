@@ -4451,7 +4451,15 @@ const CONTACT_CHANNEL_OPTIONS = [
   { value: 'sms', label: 'Text' },
   { value: 'email', label: 'Email' },
 ];
-export function ContactNotificationCard({ customer, card, sectionTitle, muted, subtle }) {
+// Any change that can only mean "text me" needs the attestation on file.
+const contactPatchEnablesTexts = (patch) => Object.entries(patch).some(([k, v]) => (k === 'smsEnabled' && v === true)
+  || (CONTACT_PREF_ROWS.some((r) => r.key === k) && v === true)
+  || (CONTACT_PREF_ROWS.some((r) => r.channelKey === k) && ['sms', 'both'].includes(v)));
+
+// The contact card's state machine: the read, the optimistic save with its
+// per-control lock and rollback, and the attestation — kept apart from the
+// rendering decisions (codex #6363 r3 P2).
+function useContactNotificationPrefs() {
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
   const [locked, setLocked] = useState({});
@@ -4460,19 +4468,10 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
     .then((d) => { setData(d); setFailed(false); })
     .catch(() => setFailed(true)), []);
   useEffect(() => { void load(); }, [load]);
-
-  const prefs = data?.preferences || {};
-  const accountOff = data?.accountOff || {};
   const attested = !!data?.consentAttestedAt;
-  const phone = data?.contact?.phone || customer?.phone || '';
-  const rows = CONTACT_PREF_ROWS.filter((r) => r.key !== 'serviceCompleted' || !data?.reportsWithheld);
-  // Any change that can only mean "text me" needs the attestation on file.
-  const enablesTexts = (patch) => Object.entries(patch).some(([k, v]) => (k === 'smsEnabled' && v === true)
-    || (CONTACT_PREF_ROWS.some((r) => r.key === k) && v === true)
-    || (CONTACT_PREF_ROWS.some((r) => r.channelKey === k) && ['sms', 'both'].includes(v)));
   const save = async (lockKey, patch) => {
     if (locked[lockKey]) return;
-    const needsConsent = !attested && enablesTexts(patch);
+    const needsConsent = !attested && contactPatchEnablesTexts(patch);
     if (needsConsent && !consentChecked) {
       showCustomerAlert('Please confirm the text-message consent statement first.');
       return;
@@ -4508,6 +4507,40 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
       setLocked((prev) => ({ ...prev, consent: false }));
     }
   };
+  return { data, failed, locked, consentChecked, attested, load, save, attest };
+}
+
+// One master switch row of the contact card (texts, email).
+function ContactMasterSwitch({ icon, label, description, on, disabled, onChange }) {
+  return (
+    <div data-reminder-row="" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', padding: '12px 0', borderBottom: '1px solid #E7E2D7', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
+        <GlassTile name={icon} size={34} />
+        <NotificationLabelDisclosure label={label} description={description} />
+      </div>
+      <GoldSwitch on={on} disabled={disabled} onChange={onChange} label={label} />
+    </div>
+  );
+}
+
+// The contact's own text-consent statement, worded for the opt-in ask's
+// state: a pending ask is confirmed by agreeing; after a STOP, agreeing only
+// records consent — texts stay paused until the carrier START.
+function ContactConsentStatement({ phone, smsOptin, checked, disabled, onChange }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 0 4px', borderTop: '1px solid #E7E2D7', fontSize: 14, lineHeight: 1.5, color: B.glassNavy, cursor: 'pointer' }}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} style={{ width: 20, height: 20, marginTop: 2, flexShrink: 0 }} />
+      <span>
+        I agree to receive service text messages from Waves Pest Control{phone ? ` at ${phone}` : ''} about this property. Message and data rates may apply. Reply STOP to opt out.
+        {smsOptin === 'pending' && ' We also sent you a text asking you to confirm; agreeing here confirms it.'}
+        {smsOptin === 'declined' && ' Agreeing here records your consent; texts stay paused until you text START.'}
+      </span>
+    </label>
+  );
+}
+
+export function ContactNotificationCard({ customer, card, sectionTitle, muted, subtle }) {
+  const { data, failed, locked, consentChecked, attested, load, save, attest } = useContactNotificationPrefs();
 
   if (failed && !data) {
     return (
@@ -4521,6 +4554,13 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
     );
   }
   if (!data) return null;
+  const prefs = data.preferences || {};
+  const accountOff = data.accountOff || {};
+  const phone = data.contact?.phone || customer?.phone || '';
+  const rows = CONTACT_PREF_ROWS.filter((r) => r.key !== 'serviceCompleted' || !data.reportsWithheld);
+  // The contact replied STOP: the carrier is the only way back (START), so
+  // nothing here may read as texts switched back on (codex #6363 r3 P2).
+  const stopped = data.smsOptin === 'declined';
   const channelOptions = data.emailAvailable ? CONTACT_CHANNEL_OPTIONS : CONTACT_CHANNEL_OPTIONS.filter((o) => o.value !== 'email');
   return (
     <section data-glass="card" style={{ ...card, overflow: 'hidden' }} data-testid="contact-notification-card">
@@ -4533,23 +4573,22 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
         {data.reportsWithheld && (
           <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.5, color: muted }}>Service reports for this property go to the account holder.</p>
         )}
+        {stopped && (
+          <p role="status" style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.5, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
+            Texts to {phone || 'your number'} are paused because you replied STOP. To start them again, text START to the number our messages come from; the choices below are kept and apply once texts resume.
+          </p>
+        )}
       </div>
       <div style={{ padding: '4px 18px 12px' }}>
-        <div data-reminder-row="" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', padding: '12px 0', borderBottom: '1px solid #E7E2D7', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
-            <GlassTile name="smartphone" size={34} />
-            <NotificationLabelDisclosure label="Text messages" description="Off stops every text to your number; email updates are unaffected." />
-          </div>
-          <GoldSwitch on={prefs.smsEnabled !== false} disabled={!!locked.smsEnabled} onChange={() => save('smsEnabled', { smsEnabled: prefs.smsEnabled === false })} label="Text messages" />
-        </div>
+        <ContactMasterSwitch
+          icon="smartphone" label="Text messages" description="Off stops every text to your number; email updates are unaffected."
+          on={prefs.smsEnabled !== false} disabled={!!locked.smsEnabled} onChange={() => save('smsEnabled', { smsEnabled: prefs.smsEnabled === false })}
+        />
         {data.emailAvailable && (
-          <div data-reminder-row="" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', padding: '12px 0', borderBottom: '1px solid #E7E2D7', gap: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
-              <GlassTile name="mail" size={34} />
-              <NotificationLabelDisclosure label="Email messages" description="Off stops every email to your address, including notices with no setting of their own; texts are unaffected." />
-            </div>
-            <GoldSwitch on={prefs.emailEnabled !== false} disabled={!!locked.emailEnabled} onChange={() => save('emailEnabled', { emailEnabled: prefs.emailEnabled === false })} label="Email messages" />
-          </div>
+          <ContactMasterSwitch
+            icon="mail" label="Email messages" description="Off stops every email to your address, including notices with no setting of their own; texts are unaffected."
+            on={prefs.emailEnabled !== false} disabled={!!locked.emailEnabled} onChange={() => save('emailEnabled', { emailEnabled: prefs.emailEnabled === false })}
+          />
         )}
         {rows.map((p, i) => {
           const holderOff = accountOff[p.key] === true;
@@ -4582,13 +4621,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
           );
         })}
         {!attested && (
-          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 0 4px', borderTop: '1px solid #E7E2D7', fontSize: 14, lineHeight: 1.5, color: B.glassNavy, cursor: 'pointer' }}>
-            <input type="checkbox" checked={consentChecked} disabled={!!locked.consent} onChange={(e) => attest(e.target.checked)} style={{ width: 20, height: 20, marginTop: 2, flexShrink: 0 }} />
-            <span>
-              I agree to receive service text messages from Waves Pest Control{phone ? ` at ${phone}` : ''} about this property. Message and data rates may apply. Reply STOP to opt out.
-              {data.smsOptin === 'pending' && ' We also sent you a text asking you to confirm; agreeing here confirms it.'}
-            </span>
-          </label>
+          <ContactConsentStatement phone={phone} smsOptin={data.smsOptin} checked={consentChecked} disabled={!!locked.consent} onChange={attest} />
         )}
       </div>
     </section>

@@ -104,7 +104,9 @@ async function activeCustomerByPhone(phone) {
     })
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${last10}`])
     .orderBy('active', 'desc')
-    .orderBy('is_primary_profile', 'desc')
+    // NULLS LAST: a legacy row with no flag must never outrank a primary
+    // profile (Postgres sorts NULL first on DESC; codex #6363 r3 P2).
+    .orderBy('is_primary_profile', 'desc', 'last')
     .orderBy('created_at', 'asc')
     .limit(10);
   return rows.find((row) => sessionCustomerAdmitted(row)) || null;
@@ -128,7 +130,9 @@ async function contactCustomerByPhone(phone) {
         this.orWhereRaw(`regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') LIKE ?`, [`%${last10}`]);
       }
     })
-    .orderBy('is_primary_profile', 'desc')
+    // NULLS LAST: a legacy row with no flag must never outrank a primary
+    // profile (Postgres sorts NULL first on DESC; codex #6363 r3 P2).
+    .orderBy('is_primary_profile', 'desc', 'last')
     .orderBy('created_at', 'asc')
     .limit(10);
   for (const row of rows) {

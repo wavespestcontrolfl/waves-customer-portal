@@ -246,6 +246,23 @@ describe('PUT /contact-preferences', () => {
     expect(res.body.accountOff.serviceReminder72h).toBe(true);
   });
 
+  test('a contact the holder removed between the token check and the write gets 401 and nothing is written or confirmed (codex r3)', async () => {
+    tables.recipient_optin.push({ customer_id: 'cust-1', phone_key: '9415550202', status: 'pending' });
+    // The holder's save landed first: slot 1 now holds someone else.
+    const holder = tables.customers[0];
+    const original = holder.service_contact_phone;
+    holder.service_contact_phone = '+19415550909';
+    try {
+      const res = await put({ techEnRoute: true, consentAttested: true });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('CONTACT_REMOVED');
+      expect(tables.service_contact_notification_prefs).toEqual([]);
+      expect(tables.recipient_optin[0].status).toBe('pending');
+    } finally {
+      holder.service_contact_phone = original;
+    }
+  });
+
   test('rejects an unknown field, an unknown channel, and an empty body', async () => {
     expect((await put({ billingEmail: 'x@y.z' })).status).toBe(500);
     expect((await put({ enRouteChannel: 'push' })).status).toBe(500);

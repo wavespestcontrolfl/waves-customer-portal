@@ -136,7 +136,15 @@ function heldContactPrefsError(customer, err) {
   return held;
 }
 
-async function resolveRecipients(customer, { scheduledServiceId = null, eventType = null } = {}) {
+// The notification_prefs row an appointment EMAIL resolves against: the
+// customer row, the on-site texts-only demotion undone, the visit's saved
+// property overlaid. Throws PROPERTY_PREFS_UNAVAILABLE when either read is
+// unreadable — ONE posture: the recipient list cannot be built (the
+// service-contact fan-out and the primary fallback would send a notice
+// whose notify-primary is unknown), so sendTemplate HOLDS, never sends —
+// the same fail-closed rule safeSendAppointment applies to the SMS twin
+// (in-session review on f9945dc89).
+async function resolveEmailPrefs(customer, scheduledServiceId) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
   // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
@@ -157,17 +165,16 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
       prefs = PREFS_UNAVAILABLE;
     }
   }
-  // ONE posture for an unreadable row — the customer row's read or the
-  // property's under enforcement: the recipient list cannot be built (the
-  // service-contact fan-out and the primary fallback below would send a
-  // notice whose notify-primary is unknown), so sendTemplate HOLDS, never
-  // sends — the same fail-closed rule safeSendAppointment applies to the
-  // SMS twin (in-session review on f9945dc89).
   if (unreadable(prefs)) {
     const held = new Error(`notification preferences unreadable for customer ${customer.id}`);
     held.code = PROPERTY_PREFS_UNAVAILABLE;
     throw held;
   }
+  return prefs;
+}
+
+async function resolveRecipients(customer, { scheduledServiceId = null, eventType = null } = {}) {
+  const prefs = await resolveEmailPrefs(customer, scheduledServiceId);
   const seen = new Set();
   const recipients = [];
   const add = (email, name) => {

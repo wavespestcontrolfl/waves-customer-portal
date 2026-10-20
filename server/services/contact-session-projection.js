@@ -68,6 +68,15 @@ function contactSafeReportCustomer(customer, contact) {
   };
 }
 
+// The /api/tracking tracker for a contact: the live steps, ETA and map stay;
+// the public /track/:token bearer goes (codex #6363 r3 P1) — a completed
+// visit's tracker summary carries the invoice token, the report token and
+// the review link, none of which a contact session may reach.
+function withoutTrackBearers(tracker) {
+  if (!tracker) return tracker;
+  return { ...tracker, trackToken: null, trackUrl: null };
+}
+
 // An upcoming-visit entry with its action bearers removed.
 function withoutVisitBearers(visit) {
   if (!visit) return visit;
@@ -94,6 +103,7 @@ module.exports = {
   contactSessionReportsWithheld,
   withholdReportArtifacts,
   contactSafeReportCustomer,
+  withoutTrackBearers,
   contactSchedulePayload,
   contactNextPayload,
   _test: { WITHHELD_REPORT_ARTIFACTS },

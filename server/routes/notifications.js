@@ -815,9 +815,15 @@ router.put('/contact-preferences', async (req, res, next) => {
     }
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
-    await withCustomerCommsLock(db, req.customerId, async (trx) => {
+    const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
+      // The session's slot is re-read under the row lock: a holder who
+      // removed or replaced this number since the token was checked must
+      // not have the pruned row (and its attestation) recreated here, nor
+      // the old phone's pending ask confirmed (codex #6363 r3 P2).
+      const live = await trx('customers').where({ id: req.customerId }).forUpdate().first();
+      if (!require('../services/customer-contact').findServiceContactSlotByPhoneKey(live, contact.phoneKey)) return 'removed';
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
-      if (updates.consentAttested !== true) return;
+      if (updates.consentAttested !== true) return 'saved';
       // The in-app attestation confirms THIS customer's pending or
       // undelivered ask for this phone. ask_failed included (the ask never
       // reached them, but they have now agreed in the app); declined (STOP)
@@ -834,7 +840,11 @@ router.put('/contact-preferences', async (req, res, next) => {
         .update({ status: 'confirmed', confirmed_at: new Date(), updated_at: new Date() })
         .catch((err) => { if (err && err.code === '42P01') return 0; throw err; });
       if (confirmed) await onRecipientConfirmed(contact.phoneKey, { dbh: trx });
+      return 'saved';
     });
+    if (outcome === 'removed') {
+      return res.status(401).json({ error: 'This number is no longer a contact on this account.', code: 'CONTACT_REMOVED' });
+    }
 
     logger.info(`Contact notification prefs updated for ${req.customerId} (slot ${contact.slot}): ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
     res.json({ success: true, ...(await contactPreferencePayload(req)) });

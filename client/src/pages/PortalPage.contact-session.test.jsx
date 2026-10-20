@@ -191,6 +191,20 @@ describe('ContactNotificationCard', () => {
     expect(screen.queryByRole('switch', { name: 'Email messages' })).not.toBeInTheDocument();
   });
 
+  it('a contact who replied STOP sees the START recovery note, and the statement never reads as texts switched back on (codex r3)', async () => {
+    api.getContactNotificationPrefs.mockResolvedValue({ ...contactPrefs(), smsOptin: 'declined' });
+    api.updateContactNotificationPrefs.mockImplementation(async (patch) => ({ ...contactPrefs(), smsOptin: 'declined', consentAttestedAt: patch.consentAttested ? '2026-10-20T00:00:00Z' : null }));
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    expect(screen.getByRole('status')).toHaveTextContent(/replied STOP.*text START/);
+    expect(screen.getByText(/texts stay paused until you text START/i)).toBeInTheDocument();
+    expect(screen.queryByText(/agreeing here confirms it/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox'));
+    await waitFor(() => expect(screen.queryByRole('checkbox')).not.toBeInTheDocument());
+    // Attested, still paused: the note stays.
+    expect(screen.getByRole('status')).toHaveTextContent(/replied STOP/);
+  });
+
   it('a contact the report rule withholds from sees no Service reports row, and a note instead', async () => {
     api.getContactNotificationPrefs.mockResolvedValue({ ...contactPrefs(), reportsWithheld: true, emailAvailable: false });
     await renderSchedule(contactCustomer);
