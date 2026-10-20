@@ -40,12 +40,15 @@ const OPT_OUT_PATTERNS = [
 // A bare "no text(s)" / "no messages" stays a stop request almost everywhere ("No texts please",
 // "Can I get no texts from you?", "No texts, only calls?"). It is NOT one only when the sentence
 // reports, in the past tense, a text that never came, as a complaint did on 2026-10-19 ("I got the
-// confirmation but no text that day" unsubscribed the customer twice). A request is never in the
-// past tense, so only past-tense evidence counts: a past receiving or reporting word just before
-// it ("got no text", "there was no message", "have had no texts"), a past arrival word just after
-// it ("no text came", "no text messages arrived", "no texts went out"; a time word alone is not
-// delivery evidence: "I said no texts yesterday" is a request), or "that day" after it
-// with a past receiving word earlier in the sentence. A strong request word anywhere in the
+// confirmation but no text that day" unsubscribed the customer twice). A request is never a past
+// report, so only past-tense evidence counts:
+//   - a past receiving or reporting word just before it ("got no text", "there was no message",
+//     "have had no texts");
+//   - a delivery verb just after it ("no text came", "no text messages arrived"); a time word alone
+//     is not evidence ("I said no texts yesterday" is a request);
+//   - "that day" just after it, with a past receiving word earlier in the sentence.
+// None of these counts after "if", "unless", "rather", "wish" or "prefer" earlier in the sentence
+// ("I would prefer it if I received no texts" is a request). A strong request word anywhere in the
 // sentence ("please", "anymore", "from now on") keeps it a stop request. Sentences end at . ! ? ;
 // or a line break; a comma does not end one. "No more texts" stays a stop request anywhere
 // (OPT_OUT_PATTERNS above).
@@ -54,6 +57,7 @@ const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|bee
 const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out|(?:was|were|got)\s+sent)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard|had|was|were)\b/i;
+const CONDITIONAL_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred)\b/i;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 
 function sentencesOf(body) {
@@ -69,8 +73,8 @@ function asksForNoTexts(body) {
     return matches.some((match) => {
       const before = text.slice(0, match.index);
       const after = text.slice(match.index + match[0].length);
-      const reportsPastText = PAST_REPORT_JUST_BEFORE.test(before) || PAST_ARRIVAL_AFTER.test(after)
-        || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(before));
+      const reportsPastText = !CONDITIONAL_EARLIER.test(before) && (PAST_REPORT_JUST_BEFORE.test(before)
+        || PAST_ARRIVAL_AFTER.test(after) || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(before)));
       return !reportsPastText;
     });
   });
