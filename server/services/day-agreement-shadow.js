@@ -599,6 +599,7 @@ async function processSource(conn, src, ctx) {
   });
   const judged = await judge(parts, ctx.deps);
   if (!judged.ok) return judged.transient ? { transient: true } : { rows: [skipRow(src, 0, 'judge_unusable')] };
+  src.modelCalled = true;
   const rows = [];
   // An agreement the model repeated is recorded once (Codex #6350 r11).
   const seen = new Set();
@@ -621,6 +622,27 @@ async function record(conn, rows) {
 
 // ---- the sweep ---------------------------------------------------------------------------
 
+// A source whose model call succeeded but whose placement then threw (picker,
+// collision query, config) is retried once more, then recorded: each retry pays
+// for the model again, and the quota counts only recorded rows (pre-push audit).
+// Process memory is enough to bound the spend; a restart allows one more try.
+const FAILED_AFTER_JUDGE = new Map();
+const MAX_TRIES_AFTER_JUDGE = 2;
+async function recordAfterRepeatedFailure(conn, src, tally) {
+  if (!src.modelCalled) return;
+  if (FAILED_AFTER_JUDGE.size > 500) FAILED_AFTER_JUDGE.clear();
+  const tries = (FAILED_AFTER_JUDGE.get(src.key) || 0) + 1;
+  FAILED_AFTER_JUDGE.set(src.key, tries);
+  if (tries < MAX_TRIES_AFTER_JUDGE) return;
+  FAILED_AFTER_JUDGE.delete(src.key);
+  try {
+    await record(conn, [skipRow(src, 0, 'slot_lookup_failed')]);
+    tally.skip += 1;
+  } catch (err) {
+    logger.error(`[day-agreement] could not record a repeated failure (${err.code || err.name || 'error'})`);
+  }
+}
+
 async function sweepKind(conn, sources, ctx, tally) {
   for (const src of sources) {
     try {
@@ -633,6 +655,7 @@ async function sweepKind(conn, sources, ctx, tally) {
     } catch (err) {
       tally.errors += 1;
       logger.error(`[day-agreement] source failed (${err.code || err.name || 'error'})`);
+      await recordAfterRepeatedFailure(conn, src, tally);
     }
   }
   return true;

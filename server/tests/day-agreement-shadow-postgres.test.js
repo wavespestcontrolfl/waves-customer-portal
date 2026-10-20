@@ -366,6 +366,13 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       const down = await sweep({ dispatch: answering(agreement()), findSlots: jest.fn(async () => { throw new Error('picker down'); }) });
       expect(down).toMatchObject({ errors: 1 });
       expect(await decisions()).toEqual([]);
+      // A second failure after a paid judgment records the source, so the model is not paid for again.
+      const dispatch2 = answering(agreement());
+      await sweep({ dispatch: dispatch2, findSlots: jest.fn(async () => { throw new Error('picker down'); }) });
+      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'slot_lookup_failed' })]);
+      await sweep({ dispatch: dispatch2, findSlots: jest.fn() });
+      expect(dispatch2).toHaveBeenCalledTimes(1);
+      await trx('day_agreement_decisions').delete();
       // The picker recovers: the next sweep judges the source.
       await sweep({ dispatch: answering(agreement()), findSlots: jest.fn(async () => ({ slots: [slot(target, '09:00')] })) });
       expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
