@@ -211,7 +211,7 @@ const EstimateAutoRenew = {
                       templateKey: 'estimate.extension_notice',
                       to: est.customer_email,
                       payload: { ...extensionPayload, ...pdfCopy.payload },
-                      ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
+                      ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments, withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
                       recipientType: est.customer_id ? 'customer' : 'lead',
                       recipientId: est.customer_id || null,
                       triggerEventId: `estimate_auto_renew:${est.id}`,

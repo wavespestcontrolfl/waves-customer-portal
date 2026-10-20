@@ -244,6 +244,14 @@ describe('sendDualChannel with the PDF copy', () => {
     expect(build).not.toHaveBeenCalled();
   });
 
+  test('a PDF-bearing send passes the final fence as its provider handoff; a body-only send has none', async () => {
+    await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
+    expect(sent().withProviderHandoff).toEqual(expect.any(Function));
+    build.mockResolvedValue(null);
+    await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
+    expect(sent()).not.toHaveProperty('withProviderHandoff');
+  });
+
   test('gate off: the send is exactly as before (no attachments key, same payload)', async () => {
     setGates(false);
     await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });

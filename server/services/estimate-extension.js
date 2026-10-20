@@ -661,7 +661,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
             new_expiry: newExpiryLabel,
             ...pdfCopy.payload,
           },
-          ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
+          ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments, withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
           recipientType: estimate.customer_id ? 'customer' : 'lead',
           recipientId: estimate.customer_id || null,
           triggerEventId: `estimate_extended:${estimate.id}:${newExpiry.toISOString()}`,

@@ -13,6 +13,12 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: jest.fn((value) => String(value).replace(/\b[^\s@]+@[^\s@]+\b/g, '[redacted-email]')),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+// The PDF rebuild is covered in estimate-email-pdf-handoff.test.js; here only
+// the rail's use of it. The allowlist stays real.
+jest.mock('../services/estimate-email-pdf', () => ({
+  ...jest.requireActual('../services/estimate-email-pdf'),
+  prepareRetryPdf: jest.fn(),
+}));
 jest.mock('../services/visit-completion-summary', () => ({
   retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
   reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
@@ -962,5 +968,124 @@ describe('a row stamped as addressed to a replaced email', () => {
     expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
     expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider retries of an open-estimate email that carried the PDF copy (codex #6343 r1)', () => {
+  const estimatePdf = require('../services/estimate-email-pdf');
+  const pdfRow = (overrides = {}) => message({
+    template_key: 'estimate.viewed_followup', estimate_id: 'est-1', has_attachments: true,
+    send_attempt_token: 'attempt-pdf', from_email_snapshot: 'contact@example.com', from_name_snapshot: 'Waves',
+    reply_to_snapshot: 'reply@example.com', html_snapshot: '<p>stored with the PDF note</p>', text_snapshot: 'stored with the PDF note',
+    ...overrides,
+  });
+  const ATTACHMENT = { filename: 'Waves-Estimate-EST-1.pdf', content: 'AA==', type: 'application/pdf', disposition: 'attachment' };
+  let chain;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql) => sql);
+    db.transaction = jest.fn(async (cb) => cb(db));
+    chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'sent' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'estimate.viewed_followup' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-pdf' });
+  });
+
+  test('the follow-up, engagement, extension and delivery emails stay on the rail with their PDF; the proposal does not', () => {
+    for (const key of estimatePdf.ESTIMATE_PDF_RETRY_TEMPLATE_KEYS) {
+      expect(retry.isTransactionalRetryEligible(pdfRow({ template_key: key }))).toBe(true);
+    }
+    expect(retry.isTransactionalRetryEligible(pdfRow({ template_key: 'estimate.delivery' }))).toBe(true);
+    expect(retry.isTransactionalRetryEligible(pdfRow({ template_key: 'estimate.proposal_delivery' }))).toBe(false);
+    expect(retry.isTransactionalRetryEligible(pdfRow({ template_key: 'invoice.sent' }))).toBe(false);
+    // A SendGrid block on such a row now schedules the retry it used to skip.
+    const now = new Date('2026-10-19T12:00:00Z');
+    expect(retry.retryStateForProviderBlock(pdfRow({ provider_handoff_phase: 'started' }), now)).toMatchObject({
+      provider_retry_next_at: new Date(now.getTime() + 10 * 60 * 1000), provider_handoff_phase: 'rejected',
+    });
+  });
+
+  test('the claim query takes attachment-free rows and PDF-copy template rows, nothing else', async () => {
+    const q = {};
+    for (const m of ['whereRaw', 'whereNotNull', 'orderBy', 'forUpdate', 'skipLocked', 'where', 'whereIn']) q[m] = jest.fn(() => q);
+    const subQuery = { where: jest.fn(() => subQuery), orWhere: jest.fn((fn) => { if (typeof fn === 'function') fn(subQuery); return subQuery; }), whereIn: jest.fn(() => subQuery) };
+    q.where = jest.fn((arg) => { if (typeof arg === 'function') arg(subQuery); return q; });
+    q.limit = jest.fn(async () => []);
+    const trx = jest.fn(() => q);
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    await retry.claimDueRetries(5);
+    expect(subQuery.where).toHaveBeenCalledWith({ has_attachments: false });
+    expect(subQuery.where).toHaveBeenCalledWith({ has_attachments: true });
+    expect(subQuery.whereIn).toHaveBeenCalledWith('template_key', estimatePdf.ESTIMATE_PDF_RETRY_TEMPLATE_KEYS);
+  });
+
+  test('a rebuilt PDF goes out as the attachment, with the stored body, behind the same final fence', async () => {
+    const boundaryCheck = jest.fn(async () => ({ ok: true }));
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ attachments: [ATTACHMENT], boundaryCheck });
+    sendgrid.sendOne.mockImplementation(async (args) => { await args.providerBoundaryCheck({ database: db }); return { messageId: 'provider-pdf' }; });
+    const stored = pdfRow();
+    const result = await retry.retryOne(stored);
+    expect(result.sent).toBe(true);
+    expect(estimatePdf.prepareRetryPdf).toHaveBeenCalledWith(stored);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      html: '<p>stored with the PDF note</p>', text: 'stored with the PDF note', attachments: [ATTACHMENT],
+    }));
+    expect(boundaryCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test('with no PDF to give, the retry sends the body with the note removed and no attachment', async () => {
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ attachments: [], html: '<p>no note</p>', text: 'no note' });
+    const result = await retry.retryOne(pdfRow());
+    expect(result.sent).toBe(true);
+    const sent = sendgrid.sendOne.mock.calls[0][0];
+    expect(sent.html).toBe('<p>no note</p>');
+    expect(sent.text).toBe('no note');
+    expect(sent).not.toHaveProperty('attachments');
+    expect(sent.providerBoundaryCheck).toBeUndefined();
+  });
+
+  test('a body whose note cannot be removed is stopped before the provider, with an alert', async () => {
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ unsendable: true });
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed', template_key: 'estimate.viewed_followup', recipient_email_snapshot: 'a@example.com' }]);
+    const result = await retry.retryOne(pdfRow());
+    expect(result).toMatchObject({ sent: false, stopped: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null }));
+  });
+
+  test('a fence veto at the boundary is a definite non-send: next ladder slot, never uncertain', async () => {
+    const veto = Object.assign(new Error('estimate not sent with a PDF: estimate_invalidated'), { providerBoundaryBlocked: true });
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ attachments: [ATTACHMENT], boundaryCheck: jest.fn(async () => { throw veto; }) });
+    sendgrid.sendOne.mockImplementation(async (args) => { await args.providerBoundaryCheck({ database: db }); return { messageId: 'x' }; });
+    const result = await retry.retryOne(pdfRow());
+    expect(result).toMatchObject({ sent: false });
+    expect(result.uncertain).toBeUndefined();
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', provider_handoff_phase: 'rejected', provider_retry_next_at: expect.any(Date),
+    }));
+  });
+
+  test('a fence that could not read settles as rejected-unsent and retries later, never uncertain', async () => {
+    const unavailable = Object.assign(new Error('fence unavailable'), { providerBoundaryCheckFailed: true });
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ attachments: [ATTACHMENT], boundaryCheck: jest.fn(async () => { throw unavailable; }) });
+    sendgrid.sendOne.mockImplementation(async (args) => { await args.providerBoundaryCheck({ database: db }); return { messageId: 'x' }; });
+    const result = await retry.retryOne(pdfRow());
+    expect(result).toMatchObject({ sent: false });
+    expect(result.uncertain).toBeUndefined();
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', provider_handoff_phase: 'rejected', provider_retry_next_at: expect.any(Date),
+    }));
+  });
+
+  test('other attachment-free rows never touch the PDF rebuild', async () => {
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    await retry.retryOne(message({ send_attempt_token: 'attempt-plain', html_snapshot: '<p>x</p>', text_snapshot: 'x' }));
+    expect(estimatePdf.prepareRetryPdf).not.toHaveBeenCalled();
   });
 });

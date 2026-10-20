@@ -7,6 +7,7 @@ const NotificationService = require('./notification-service');
 const billingReplay = require('./billing-email-provider-replay');
 const billingReservation = require('./billing-email-reservation');
 const { isSenderRenderedEmail, SENDER_RENDERED_TEMPLATES, alertFinalNoticeMissed } = require('./billing-email-no-replay');
+const estimatePdfEmail = require('./estimate-email-pdf');
 
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -36,8 +37,16 @@ function isProviderBlockedEvent(ev) {
   return event === 'blocked' || (event === 'bounce' && type === 'blocked');
 }
 
+// A stored attachment is not kept, so an attachment-bearing row is normally
+// off this rail. The open-estimate emails that carry the estimate PDF copy
+// (GATE_ESTIMATE_EMAIL_PDF) are the exception: retryOne rebuilds the PDF from
+// the live estimate, or sends the body without the PDF note.
+function retriesAttachmentCopy(message) {
+  return !!message?.has_attachments && estimatePdfEmail.isRetryTemplate(message.template_key);
+}
+
 function isTransactionalRetryEligible(message) {
-  if (!message || message.has_attachments) return false;
+  if (!message || (message.has_attachments && !retriesAttachmentCopy(message))) return false;
   if (isSenderRenderedEmail(message)) return false;
   if (String(message.recipient_type || '').toLowerCase() === 'test') return false;
   // Applicant emails (recruiting-comms.js) have no email_templates row and
@@ -90,7 +99,10 @@ async function activeSuppressionForMessage(message) {
 async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
   return db.transaction(async (trx) => {
     const rows = await retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED])
-      .where({ status: 'failed', has_attachments: false })
+      .where({ status: 'failed' })
+      .where((q) => q.where({ has_attachments: false })
+        .orWhere((pdf) => pdf.where({ has_attachments: true })
+          .whereIn('template_key', estimatePdfEmail.ESTIMATE_PDF_RETRY_TEMPLATE_KEYS)))
       .whereNotNull('provider_retry_next_at')
       .where('provider_retry_next_at', '<=', now)
       .where('provider_retry_count', '<', MAX_RETRIES)
@@ -894,8 +906,12 @@ async function retryOne(message) {
         fromName: message.from_name_snapshot,
         replyTo: message.reply_to_snapshot,
         subject: message.subject_snapshot,
-        html: message.html_snapshot,
-        text: message.text_snapshot,
+        // An estimate PDF copy is rebuilt per attempt (state.pdf), or the body
+        // goes without its PDF note: the stored copy never promises a file the
+        // attempt does not carry.
+        html: state.pdf?.html ?? message.html_snapshot,
+        text: state.pdf?.text ?? message.text_snapshot,
+        ...(state.pdf?.attachments?.length ? { attachments: state.pdf.attachments } : {}),
         categories: asArray(message.categories),
         asmGroupId,
         customArgs: {
@@ -907,8 +923,8 @@ async function retryOne(message) {
         database,
         // A billing replay's authority boundary wins; a plain stored pay-link lifecycle notice
         // carries the hold recheck as its own FINAL boundary (state.holdBoundaryCheck below).
-        ...((providerBoundaryCheck || state.holdBoundaryCheck)
-          ? { providerBoundaryCheck: providerBoundaryCheck || state.holdBoundaryCheck } : {}),
+        ...((providerBoundaryCheck || state.holdBoundaryCheck || state.pdfBoundaryCheck)
+          ? { providerBoundaryCheck: providerBoundaryCheck || state.holdBoundaryCheck || state.pdfBoundaryCheck } : {}),
       });
       if (providerBoundaryCheck) {
         state.acceptedMessage = await settleRetrySend(
@@ -931,6 +947,7 @@ async function retryOne(message) {
       state.rejected = !!(err && (err.annualOfferWithheld
         || err.annualOfferGuardFailed
         || err.providerBoundaryBlocked
+        || err.providerBoundaryCheckFailed
         || err.code === 'SENDGRID_NOT_CONFIGURED'
         || sendgrid.isDefiniteRejection(err)));
       if (err?.providerBoundaryBlocked) {
@@ -999,6 +1016,27 @@ async function retryOne(message) {
       // SendGrid, exactly as a fresh send does (payment-lifecycle-email.js): the retry waits.
       const holdOutcome = await holdGateLifecycleRetry(message);
       if (holdOutcome) return holdOutcome;
+      // An open-estimate email that carried the PDF copy: rebuild the PDF from
+      // the live estimate (with the same final fence a fresh send has), or send
+      // the stored body with the PDF note removed.
+      if (retriesAttachmentCopy(message)) {
+        const prepared = await estimatePdfEmail.prepareRetryPdf(message);
+        if (prepared.unsendable) {
+          return stopRetry(message, { status: 'failed', exhaustedAlert: true,
+            reason: 'The PDF note could not be removed from the stored email; retry stopped.' });
+        }
+        state.pdf = prepared;
+        if (prepared.boundaryCheck) {
+          state.pdfBoundaryCheck = async (args) => {
+            try {
+              return await prepared.boundaryCheck(args);
+            } catch (err) {
+              if (err?.providerBoundaryBlocked) state.pdfRefusal = err;
+              throw err;
+            }
+          };
+        }
+      }
       // The same hold, read again as sendOne's FINAL boundary check (after the block-clear and
       // marker awaits and SendGrid's own request preparation, right before the fetch): a dispute
       // committed since the read above still stops the stored copy. A WAIT, never a spent retry.
@@ -1016,6 +1054,12 @@ async function retryOne(message) {
         };
       }
       await dispatchToProvider();
+      if (state.pdfRefusal) {
+        // The estimate changed or was invalidated since the PDF was rendered:
+        // definitely unsent. Next slot on the ladder re-checks it.
+        await markRetryFailure(message, state.pdfRefusal, new Date(), { rejectedAfterStart: true });
+        return { sent: false, error: state.pdfRefusal };
+      }
       if (state.holdRefusal) {
         await markRetryHeld(message, collectionHold.holdDeferOutcome(state.holdRefusal).reason, new Date(), { rejectedAfterStart: true });
         return { sent: false, held: true };
