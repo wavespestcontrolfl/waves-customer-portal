@@ -431,6 +431,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const paletteRef = useModalFocus(open, () => setOpen(false));
 
   const ibPageData = useIntelligenceBarPageData();
+  // The customer on screen, id only (never words): the server spells their name right when it hears
+  // the mic. The mic's existing "Customer on this screen" section already uses this id; the wider
+  // name list needs GATE_DICTATION_CUSTOMER_NAMES.
+  const dictationContext = ibPageData?.customer_id ? { customerId: String(ibPageData.customer_id) } : undefined;
   const { notifyMutation } = useIntelligenceBarActions();
   const context = detectContext(location.pathname, location.search, location.hash, user);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
@@ -995,6 +999,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         openThread={openThread}
         accentColor={accentColor}
         appendTranscript={appendTranscript}
+        dictationContext={dictationContext}
         attachments={attachments}
         attachmentsLoading={attachmentsLoading}
         addAttachments={addAttachments}
@@ -1105,6 +1110,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                   onAppend={appendTranscript}
                   title="Dictate your question"
                   size={30}
+                  dictationContext={dictationContext}
                   palette={{ accent: accentColor, muted: D.muted, red: D.red, card: "#fff" }}
                 />
               )}
@@ -1438,6 +1444,7 @@ function MobileSheet({
   openThread,
   accentColor,
   appendTranscript,
+  dictationContext,
   attachments,
   attachmentsLoading,
   addAttachments,
@@ -1613,6 +1620,7 @@ function MobileSheet({
                   onAppend={appendTranscript}
                   title="Tap to talk"
                   size={44}
+                  dictationContext={dictationContext}
                   palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
                 />{" "}
               </div>

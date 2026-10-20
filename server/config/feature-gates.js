@@ -279,6 +279,7 @@
  *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
  *   GATE_LAWN_REPORT_CLARITY=true (lawn service report, owner ruling 2026-10-08, one gated change left: "Your plan" on a LAWN report lists only the next upcoming lawn visit at the report's property (needs GATE_REPORT_UPCOMING_VISITS; merged or standalone); other service lines are unchanged. The ruling's other half is permanent and ungated since 2026-10-09: a water-in instruction frozen at completion for a customer with NO sprinkler head type or measured rate on file states the AMOUNT and no minutes ("Water in today's treatment with about ½ inch by Fri 8 PM"), and the LIVE banner adds one line inviting the customer to add their sprinkler setup (banner.setupLine, stripped from the PDF, static and text renders). Strict opt-in: exactly 'true' in every environment, read at call time via lawnReportClarityLive(). Ships DARK; off = byte-identical plan card. Sends nothing to a customer.)
+ *   GATE_DICTATION_CUSTOMER_NAMES=true (owner 2026-10-20, after a dictated surname was heard as a common word: staff dictation word list (needs GATE_SERVER_DICTATION) adds a "Customers who may be named" section, full names: the customer on screen first, then customers with a visit today or tomorrow (a technician login: only their own stops), customers who texted or called in the last 48 hours and recently updated active customers (admin logins only), and passes their surnames as extra transcriber keyword hints. Products shrink to make room; the prompt stays at 1800 characters. The list is cached 5 minutes per login scope and day. Strict opt-in: exactly 'true' in every environment, read at call time via dictationCustomerNamesLive(). Ships DARK; off = the word list and keyword hints are exactly as before. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -6857,3 +6858,12 @@ function reportCleanup1020Live() {
 }
 // GATE_REPORT_CLEANUP_1020 reader, on its own line so gate PRs never conflict.
 module.exports.reportCleanup1020Live = reportCleanup1020Live;
+
+// GATE_DICTATION_CUSTOMER_NAMES read at CALL time, strict `=== 'true'`, dark in every environment. The one reader
+// for the customer-name section of the staff dictation word list (services/dictation-word-list.js) and the
+// surname keyword hints (routes/tech-dictation.js). Off = today's word list byte for byte.
+function dictationCustomerNamesLive() {
+  return process.env.GATE_DICTATION_CUSTOMER_NAMES === 'true';
+}
+// GATE_DICTATION_CUSTOMER_NAMES reader, on its own line so gate PRs never conflict.
+module.exports.dictationCustomerNamesLive = dictationCustomerNamesLive;
