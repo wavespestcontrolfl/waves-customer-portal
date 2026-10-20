@@ -220,6 +220,17 @@ describe('one-tap: the photo and trace reads hold nothing', () => {
     expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
   });
 
+  test('a photo read that failed (photos outside the note box): it sends, with no photoCaptionsSeen', async () => {
+    const request = makeRequest({ photos: failed });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    const body = await sentBody(request);
+    // an empty list would be refused if saved photos carry descriptions
+    expect('photoCaptionsSeen' in body).toBe(false);
+  });
+
   test('a trace read that failed: no hold, no Full form, typed feet cover the spray, and the body omits traceSeen', async () => {
     const request = makeRequest({ facts: PERIMETER, trace: failed });
     await openWithFullForm(request);

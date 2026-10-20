@@ -1086,8 +1086,9 @@ const reportCustomerText = (isReservice) => ({
 // server what was written so an edit gets its heads-up. A regular visit gets
 // the full form's customer text, pay link and review ask; a re-service never
 // gets a pay link or a review ask.
-// A read the sheet got an answer to (not still loading, not failed).
-const readAnswered = (read) => read.loaded === true && read.failed !== true;
+// A read the sheet got an answer to: not still loading, not failed, and (the photo read) not a failure it swallowed
+// (`read` false; the trace read has no such field).
+const readAnswered = (read) => read.loaded === true && read.failed !== true && read.read !== false;
 
 function reportCompletionBody({
   form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, customerText, promiseMarks, recordFields = null,
