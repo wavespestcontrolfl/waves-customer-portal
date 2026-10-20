@@ -25,7 +25,7 @@ const REASON_MAX_CHARS = 200;
 // today, tomorrow, a m/d date or an ordinal ("the 24th"). Written with
 // character classes only so the SAME pattern runs in Postgres (~*) and in
 // JavaScript (RegExp, flag i).
-const DAY_WORD_PATTERN = '(^|[^a-z])(mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?|today|tomorrow|tmrw)([^a-z]|$)'
+const DAY_WORD_PATTERN = '(^|[^a-z])(mon(day)?|tue(s|sday)?|wed(s|nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?|today|tomorrow|tmrw)([^a-z]|$)'
   + '|[0-9]{1,2}/[0-9]{1,2}'
   + '|[0-9]{1,2}(st|nd|rd|th)([^a-z]|$)';
 const DAY_WORD_RE = new RegExp(DAY_WORD_PATTERN, 'i');
@@ -40,12 +40,20 @@ function validDay(value) {
   return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d;
 }
 
-// The model's free-text reason is stored. It is told to leave out names and
-// numbers; this clips it and masks any digit run or address-like token anyway.
+// The model's free-text reason is stored. It is told to leave out names, numbers
+// and addresses; this clips it and masks a street address (house number and
+// street), any phone-like run, any number of three or more digits (account, gate,
+// reference numbers) and any "#12" reference anyway. An ISO date is kept: it is
+// no personal detail and the reason reads better with it.
+const STREET_WORDS = 'street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|boulevard|blvd|way|place|pl|circle|cir|terrace|ter|trail|trl|highway|hwy|parkway|pkwy|loop|run|path|point|pt|bay';
+const ADDRESS_RE = new RegExp(`\\b\\d{1,6}[a-z]?\\s+(?:[a-z0-9.'-]+\\s+){0,3}(?:${STREET_WORDS})\\b\\.?`, 'gi');
+const NUMBER_RE = /(\d{4}-\d{2}-\d{2})|\d[\d\s().-]{5,}\d|#\s*\d+|\d{3,}/g;
+
 function safeReason(text) {
   return String(text || '')
     .replace(/[^\s@]+@[^\s@]+/g, '[email]')
-    .replace(/\d[\d\s().-]{5,}\d/g, '[number]')
+    .replace(ADDRESS_RE, '[address]')
+    .replace(NUMBER_RE, (match, isoDate) => (isoDate ? match : '[number]'))
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, REASON_MAX_CHARS);

@@ -256,6 +256,65 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'move_visit_ambiguous', from_visit_id: null })]);
     });
 
+    test('a new visit for a customer with several active properties is property_ambiguous and never placed; one active property, or a move, proceeds', async () => {
+      const customerId = await customer();
+      const property = (over = {}) => trx('customer_properties').insert({
+        id: randomUUID(), customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '1 Example Lane', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(), ...over,
+      });
+      await property({ is_primary: true });
+      await call(customerId);
+      const findSlots = jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] }));
+      await sweep({ dispatch: answering(agreement()), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
+
+      // A second ACTIVE property makes it ambiguous; an inactive one does not.
+      await trx('day_agreement_decisions').delete();
+      await property({ active: false, address_line1: '2 Example Lane' });
+      await sweep({ dispatch: answering(agreement()), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
+      await trx('day_agreement_decisions').delete();
+      findSlots.mockClear();
+      await property({ address_line1: '3 Example Lane' });
+      await sweep({ dispatch: answering(agreement()), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'property_ambiguous', target_date: expect.anything() })]);
+      expect(findSlots).not.toHaveBeenCalled();
+
+      // A move is placed by the moved visit's own pin, so several properties do not block it.
+      await trx('day_agreement_decisions').delete();
+      await visit(customerId, dayPlus(4), { lat: 27.9, lng: -82.1 });
+      await sweep({ dispatch: answering(agreement({ kind: 'move', from_day: dayPlus(4) })), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_move' })]);
+    });
+
+    test('a catalog that cannot be read or is empty leaves the source unjudged and costs no model call; once it is back the source is judged', async () => {
+      const customerId = await customer();
+      await call(customerId);
+      await trx('services').update({ is_active: false });
+      const dispatch = answering(agreement());
+      expect(await sweep({ dispatch, findSlots: jest.fn() })).toMatchObject({ judged: 0, errors: 1 });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(await decisions()).toEqual([]);
+      await trx('services').update({ is_active: true });
+      expect(await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] })) })).toMatchObject({ judged: 1, would_book: 1 });
+    });
+
+    test('an out-of-range or junk agreement time is at_unreadable, never rolled into another time', async () => {
+      const customerId = await customer();
+      await text(customerId, 'Tuesday works', 45);
+      for (const at of ['2040-03-12T12:60', '2040-03-12T24:00', '2040-03-12T11:00 junk']) {
+        await trx('day_agreement_decisions').delete();
+        await sweep({ dispatch: answering(agreement({ at })), findSlots: jest.fn() });
+        expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'at_unreadable' })]);
+      }
+    });
+
+    test('Weds works is a candidate text', async () => {
+      const customerId = await customer();
+      const wanted = await text(customerId, 'Weds works for me', 45);
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+    });
+
     test('a move is placed at the moved visit\'s own pin, not the customer\'s', async () => {
       const customerId = await customer({ latitude: 27.4, longitude: -82.45 });
       const from = dayPlus(4);

@@ -24,9 +24,9 @@
  *      take on the agreed day, and
  *   4. records the verdict and its reason in day_agreement_decisions.
  *
- * A week of rows is scored against what staff did
- * (scripts/day-agreement-shadow-report.js). The act step (book or move, then
- * the confirmation text) is a later PR and is NOT built here.
+ * A week of rows is scored against what staff did by a read-only query. The act
+ * step (book or move, then the confirmation text) is a later PR and is NOT
+ * built here.
  *
  * Privacy: nothing stored or logged holds a transcript or a message. Logs
  * carry counts and error codes only (knex errors carry bindings, so an error
@@ -79,9 +79,11 @@ function etStamp(date) {
   return `${DAY_NAMES[p.dayOfWeek]} ${etDateString(date)} ${pad2(p.hour)}:${pad2(p.minute)}`;
 }
 
-// The model's `at` (YYYY-MM-DDTHH:MM, Eastern) into a Date, or null.
+// The model's `at` (YYYY-MM-DDTHH:MM, Eastern) into a Date, or null. The whole
+// string must be a real wall clock (hour 00-23, minute 00-59, optional seconds):
+// parseETDateTime would roll "12:60" or "24:00" into another time instead.
 function parseAt(text) {
-  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})/.exec(String(text || ''));
+  const m = /^(\d{4}-\d{2}-\d{2})[T ]([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$/.exec(String(text || '').trim());
   if (!m || !rules.validDay(m[1])) return null;
   const date = parseETDateTime(`${m[1]}T${m[2]}:${m[3]}`);
   return Number.isNaN(date.getTime()) ? null : date;
@@ -289,6 +291,14 @@ async function visitFacts(conn, customerId, days) {
 // Where the visit will be: a move uses the moved visit's own pin (its service
 // address can differ from the customer's), the customer's pin only when the
 // visit has none; a new visit has the customer's pin.
+// A customer with several active service properties has no single pin: the
+// conversation names no property, so a NEW visit for them is not placed (a move
+// is placed by the moved visit's own pin).
+async function hasSeveralProperties(conn, customerId) {
+  const ids = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
+  return ids.length > 1;
+}
+
 async function coordinates(conn, customerId, fromVisit) {
   const pin = (lat, lng) => {
     const point = { lat: parseFloat(lat), lng: parseFloat(lng) };
@@ -393,6 +403,21 @@ function baseRow(src, index) {
 
 const skipRow = (src, index, reason, extra = {}) => ({ ...baseRow(src, index), skip_reason: reason, ...extra });
 
+// Where the agreed visit would go: { slot } or { reason }. A move is placed by its
+// own visit; a new visit needs one pinned property and ONE catalog service, and the
+// picker is asked only once both are settled.
+async function placeVisit(conn, src, { a, fromVisit, catalog }, deps) {
+  if (!fromVisit && await hasSeveralProperties(conn, src.customerId)) return { reason: 'property_ambiguous' };
+  const service = fromVisit ? null : resolveNewVisitService(catalog, a.service);
+  if (!fromVisit && !service) return { reason: 'service_unresolved' };
+  try {
+    return await pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit, service }, deps);
+  } catch (err) {
+    logger.error(`[day-agreement] slot lookup failed (${err.code || err.name || 'error'})`);
+    return { reason: 'slot_lookup_failed' };
+  }
+}
+
 async function decideMoment(conn, src, index, agreement, ctx) {
   const a = rules.normalizeAgreement(agreement);
   const parsedAt = src.kind === 'call' ? src.agreedAt : parseAt(a.at);
@@ -411,16 +436,7 @@ async function decideMoment(conn, src, index, agreement, ctx) {
   const target = rules.validDay(a.day) ? { target_date: a.day } : {};
   if (!decision.pass) return skipRow(src, index, decision.reason, { ...known, ...target });
   const fromVisit = decision.fromVisitId ? dayVisits.find((v) => v.id === decision.fromVisitId) : null;
-  // A new visit needs ONE catalog service to ask the picker about (a move keeps its visit's own).
-  const service = fromVisit ? null : resolveNewVisitService(ctx.catalog, a.service);
-  if (!fromVisit && !service) return skipRow(src, index, 'service_unresolved', { ...known, ...target });
-  let picked;
-  try {
-    picked = await pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit, service }, ctx.deps);
-  } catch (err) {
-    logger.error(`[day-agreement] slot lookup failed (${err.code || err.name || 'error'})`);
-    picked = { reason: 'slot_lookup_failed' };
-  }
+  const picked = await placeVisit(conn, src, { a, fromVisit, catalog: ctx.catalog }, ctx.deps);
   const withVisit = { ...known, ...target, from_visit_id: decision.fromVisitId };
   if (!picked.slot) return skipRow(src, index, picked.reason, withVisit);
   return {
@@ -436,7 +452,10 @@ async function processSource(conn, src, ctx) {
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
   if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };
   const lines = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
-  const catalog = await loadBookableCallServices(conn);
+  // A failed read throws (the source stays unjudged and is retried next tick); the
+  // legacy empty list would record every agreement as service_unresolved for good.
+  const catalog = await loadBookableCallServices(conn, { strict: true });
+  if (!catalog.length) throw Object.assign(new Error('catalog_empty'), { code: 'catalog_empty' });
   const parts = prompts.buildDayAgreementPrompt({
     sourceLabel: src.label, todayET: ctx.todayET, weekdayET: WEEKDAYS[etParts(ctx.now).dayOfWeek], visits: lines, lines: src.lines,
     services: catalog.filter((row) => !isGenericCallCatalogRow(row)).map((row) => row.name),
@@ -502,6 +521,7 @@ module.exports = {
     judge,
     pickSlot,
     resolveNewVisitService,
+    hasSeveralProperties,
     dropCollidingSlots,
     processSource,
     decideMoment,

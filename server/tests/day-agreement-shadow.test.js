@@ -247,6 +247,39 @@ describe('which service the picker is asked about', () => {
   });
 });
 
+describe('retryable and ambiguous inputs', () => {
+  const failing = new Proxy({}, { get: (_t, key) => (key === 'then' ? (_res, rej) => rej(new Error('db down')) : () => failing) });
+
+  test('the strict catalog read throws instead of returning the legacy empty list', async () => {
+    const { loadBookableCallServices } = require('../services/call-booking-catalog');
+    const conn = () => failing;
+    expect(await loadBookableCallServices(conn)).toEqual([]);
+    await expect(loadBookableCallServices(conn, { strict: true })).rejects.toThrow('db down');
+  });
+
+  test('a source is left unjudged (the error propagates, no row) when the catalog read fails or is empty', async () => {
+    const src = { kind: 'sms', key: 'sms:9415550142:x', customerId: 'c1', lines: ['[Mon 2040-03-12 11:00] CUSTOMER: Wed works'], agreedAt: NOW, truncated: false };
+    const dispatch = jest.fn();
+    const ctx = { now: NOW, todayET: '2040-03-12', deps: { dispatch } };
+    const visits = { where: () => ({ where: () => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ limit: () => ({ select: async () => [] }) }) }) }) }) }) };
+    const emptyCatalog = { where: () => ({ whereNotIn: () => ({ orderBy: () => ({ orderBy: () => ({ select: async () => [] }) }) }) }) };
+    const conn = (table) => (table === 'services' ? emptyCatalog : (table === 'scheduled_services' ? visits : failing));
+    conn.raw = () => 'raw';
+    await expect(internals.processSource(conn, src, ctx)).rejects.toMatchObject({ code: 'catalog_empty' });
+    const broken = (table) => (table === 'scheduled_services' ? visits : failing);
+    broken.raw = () => 'raw';
+    await expect(internals.processSource(broken, src, ctx)).rejects.toThrow('db down');
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('hasSeveralProperties: two active properties is ambiguous, one or none is not', async () => {
+    const conn = (ids) => () => ({ where: () => ({ limit: () => ({ pluck: async () => ids }) }) });
+    expect(await internals.hasSeveralProperties(conn(['a', 'b']), 'c1')).toBe(true);
+    expect(await internals.hasSeveralProperties(conn(['a']), 'c1')).toBe(false);
+    expect(await internals.hasSeveralProperties(conn([]), 'c1')).toBe(false);
+  });
+});
+
 describe('the collision guard on offered slots', () => {
   const OLD_CAPACITY = process.env.GATE_SCHEDULING_CAPACITY;
   afterEach(() => {
@@ -348,5 +381,11 @@ describe('message and call context lines', () => {
     expect(internals.parseAt('2040-03-12 11:00').toISOString()).toBe('2040-03-12T15:00:00.000Z');
     expect(internals.parseAt('Monday morning')).toBeNull();
     expect(internals.parseAt('2040-02-30T10:00')).toBeNull();
+    // Out-of-range clock values and junk around a valid-looking time are unreadable, never rolled into another time.
+    for (const bad of ['2040-03-12T12:60', '2040-03-12T24:00', '2040-03-12T25:10', '2040-03-12T11:00 junk', 'x2040-03-12T11:00', '2040-03-12T11:0', '2040-03-12T11:00:61', '']) {
+      expect(internals.parseAt(bad)).toBeNull();
+    }
+    expect(internals.parseAt('2040-03-12T23:59').toISOString()).toBe('2040-03-13T03:59:00.000Z');
+    expect(internals.parseAt(' 2040-03-12T11:00:30 ').toISOString()).toBe('2040-03-12T15:00:00.000Z');
   });
 });

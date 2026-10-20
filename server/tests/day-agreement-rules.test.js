@@ -178,7 +178,7 @@ describe('parseDaypart, slotsForDaypart and chooseSlot', () => {
 });
 
 describe('the SMS day-word prefilter', () => {
-  const hits = ['Tuesday works', 'ok tue', 'tues is fine', 'can you come Thurs?', 'How about tomorrow', 'today is better', '10/24 please', 'the 24th', 'SAT morning', 'sun'];
+  const hits = ['Tuesday works', 'ok tue', 'tues is fine', 'can you come Thurs?', 'How about tomorrow', 'today is better', '10/24 please', 'the 24th', 'SAT morning', 'sun', 'Weds works', 'weds', 'wed is fine'];
   const misses = ['thanks', 'sunny out', 'monster ants', 'call me', 'we saturate it', 'unit 2B'];
   test.each(hits)('matches "%s"', (text) => expect(rules.DAY_WORD_RE.test(text)).toBe(true));
   test.each(misses)('does not match "%s"', (text) => expect(rules.DAY_WORD_RE.test(text)).toBe(false));
@@ -207,5 +207,21 @@ describe('unusableReason and normalizeAgreement', () => {
     expect(reason).not.toMatch(/jane@|941|0142/);
     expect(reason).toContain('[email]');
     expect(reason.length).toBeLessThanOrEqual(200);
+  });
+
+  test('short address, account, gate and reference numbers are masked too; a date and plain words survive', () => {
+    const cases = [
+      ['Customer at 123 Main Street accepted Wednesday', /123|Main/, '[address]'],
+      ['Visit at 4455 Example Ln near the gate agreed', /4455|Example/, '[address]'],
+      ['Gate code 1234 given, agreed 2040-03-14', /1234/, '[number]'],
+      ['Reference #42 mentioned by the customer', /#42|\b42\b/, '[number]'],
+      ['Account 98765 and unit 12 discussed', /98765/, '[number]'],
+    ];
+    for (const [input, gone, mask] of cases) {
+      const out = rules.safeReason(input);
+      expect(out).not.toMatch(gone);
+      expect(out).toContain(mask);
+    }
+    expect(rules.safeReason('Staff offered Wednesday 2040-03-14 morning and the customer agreed')).toBe('Staff offered Wednesday 2040-03-14 morning and the customer agreed');
   });
 });
