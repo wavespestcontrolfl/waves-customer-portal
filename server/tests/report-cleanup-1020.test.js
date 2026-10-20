@@ -18,7 +18,7 @@ afterEach(() => { if (saved === undefined) gateOff(); else process.env[GATE] = s
 
 const WATER_IN_ROW = { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24, source: 'owner' };
 const DERIVED_ROW = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default' };
-const product = (name, wateringRule) => ({ product_name: name, approved_report_product_facts: { wateringRule } });
+const product = (name, wateringRule, extra = {}) => ({ product_name: name, approved_report_product_facts: { wateringRule, ...extra } });
 // Synthetic visit: a pre-emergent fertilizer, a granular insecticide and a fungicide spray with no stored rule.
 const VISIT_PRODUCTS = [product('Granular Fertilizer', WATER_IN_ROW), product('Test Granular Insecticide', DERIVED_ROW), product('Test Fungicide', null)];
 
@@ -101,6 +101,35 @@ describe('item 1: a visit with a water-in product never says "No special waterin
     // Only the neutral copy is suppressed: no notes and a hold = no line; no hold = the neutral line.
     expect(buildAftercare([], { instruction: null, waterInRule: { hold: true } }).watering).toBe('');
     expect(buildAftercare([], { instruction: null, waterInRule: null }).watering).toMatch(/^No special watering/);
+  });
+
+  test('one eligibility rule: water-in beside a product with a recorded note or flag and no structured rule keeps the normal aftercare', () => {
+    gateOn();
+    const NOTE = 'Do not irrigate for 24 hours';
+    const mixes = [
+      [product('Granular Fertilizer', WATER_IN_ROW), product('Test Herbicide', null, { irrigationNotes: NOTE })],
+      [product('Granular Fertilizer', WATER_IN_ROW), product('Test Herbicide', null, { irrigationRequired: false })],
+      [product('Granular Fertilizer', WATER_IN_ROW), product('Test Herbicide', null, { irrigationRequired: true })],
+    ];
+    for (const mix of mixes) expect(cleanup.waterInRuleOf(mix)).toBeNull();
+    // The normal path then keeps the recorded note and the review verdict, exactly as with the gate off.
+    const apps = [{ product: { name: 'Test Herbicide', irrigation_notes: NOTE } }];
+    const plan = { title: 'Weekly plan', visitInPlanWeek: true };
+    const kept = buildAftercare(apps, { instruction: null, weekPlan: plan, waterInRule: cleanup.waterInRuleOf(mixes[0]) });
+    expect(kept).toEqual(buildAftercare(apps, { instruction: null, weekPlan: plan }));
+    expect(kept.watering).toMatch(/Do not irrigate for 24 hours/);
+    expect(aftercareVerdict(kept)).toBe('review');
+    // A truly unknown product (no rule, no text, or an unapproved product with no facts) still takes the water-in line.
+    expect(cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null, { irrigationNotes: '  ' })]))
+      .toEqual({ inches: 0.5, hours: 24, sameDay: false });
+    expect(cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), { product_name: 'Unapproved', approved_report_product_facts: null }]))
+      .toEqual({ inches: 0.5, hours: 24, sameDay: false });
+    // A structured "none" rule asserts nothing against a water-in.
+    expect(cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), product('Test Liquid Feed', { mode: 'none', source: 'label' })]))
+      .toEqual({ inches: 0.5, hours: 24, sameDay: false });
+    // A structured water_in product's own note does not block it.
+    expect(cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW, { irrigationNotes: 'Water in after application' })]))
+      .toEqual({ inches: 0.5, hours: 24, sameDay: false });
   });
 
   test('water-in beside a product with no rule (no hold) gives the water-in line', () => {

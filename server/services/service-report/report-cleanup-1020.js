@@ -20,18 +20,24 @@ const { formatInches } = require('./lawn-watering-instruction');
 const live = () => typeof featureGates.reportCleanup1020Live === 'function' && featureGates.reportCleanup1020Live();
 
 // ── Item 1: one water-in line ─────────────────────────────────────────────
-// The visit's products carry their watering rule frozen with the completion (approved_report_product_facts
-// .wateringRule). The strictest rule wins: the deepest amount, the shortest window.
+// The visit's products carry their watering rule and recorded watering text frozen with the completion
+// (approved_report_product_facts: wateringRule, irrigationNotes, irrigationRequired), the same facts buildAftercare reads
+// through applications[].product. ONE eligibility rule decides what the cleanup may do:
+//   - a hold rule on any product: { hold: true } (no fallback; only the neutral "No special watering" line is dropped);
+//   - the water-in fallback: ONLY when every product is a structured water_in rule (or a structured "none"), or has no
+//     structured rule AND no recorded watering text at all (no irrigation_notes, no irrigation_required);
+//   - anything else (a recorded note or flag with no structured rule): null, and the normal aftercare runs unchanged.
+// The strictest water_in rule wins: the deepest amount, the shortest window.
+const hasWateringText = (facts) => !!(String(facts.irrigationNotes || '').trim() || facts.irrigationRequired != null);
+
 function waterInRuleOf(products) {
   if (!live()) return null;
-  const rules = (Array.isArray(products) ? products : [])
-    .map((p) => p && p.approved_report_product_facts && p.approved_report_product_facts.wateringRule)
-    .filter((rule) => rule && typeof rule === 'object');
-  // A hold on any product keeps hold semantics: the instruction builder owns a hold or a hold beside a water-in
-  // (including the case it cannot honour), and this fallback must never override it or print "No special watering".
-  if (rules.some((rule) => rule.mode === 'hold')) return { hold: true };
-  const waterIns = rules.filter((rule) => rule.mode === 'water_in');
-  if (!waterIns.length) return null;
+  const facts = (Array.isArray(products) ? products : []).map((p) => (p && p.approved_report_product_facts) || {});
+  const rules = facts.map((f) => (f.wateringRule && typeof f.wateringRule === 'object' ? f.wateringRule : null));
+  if (rules.some((rule) => rule && rule.mode === 'hold')) return { hold: true };
+  const eligible = facts.every((f, i) => (rules[i] ? ['water_in', 'none'].includes(rules[i].mode) : !hasWateringText(f)));
+  const waterIns = rules.filter((rule) => rule && rule.mode === 'water_in');
+  if (!eligible || !waterIns.length) return null;
   const inches = Math.max(...waterIns.map((r) => Number(r.water_in_inches) || 0.25));
   const hours = Math.min(...waterIns.map((r) => Number(r.water_in_by_hours) || 24));
   return { inches, hours, sameDay: waterIns.some((r) => r.water_in_same_day === true) };
