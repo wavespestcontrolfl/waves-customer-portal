@@ -1076,6 +1076,14 @@ function sameNameNote(context) {
     return { sameNameNote: `More than ${CUSTOMER_LOOKUP_LISTED_V2} customers share the name the owner typed. Ask for one short detail: a phone number, an email or a city.` };
   }
   if (rows.length < 2 || context.target) return {};
+  // A reply that already narrows the name to one (a choice button sends
+  // "Full Name, City"; a typed phone or email works the same) is the owner's
+  // pick: no second round of choices.
+  const typed = new Set((context.typedCustomerIds || []).map(String));
+  const picked = rows.filter(row => typed.has(String(row.customer_id)));
+  if (picked.length === 1) {
+    return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${picked[0].city ? `, ${picked[0].city}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
+  }
   return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the ${Math.min(rows.length, 4)} best matches, most recent last_visit first, each as "Full Name, City" (add the last visit date when two share a city), and ask which one in one short line.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
 }
 

@@ -288,6 +288,19 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await Context.typedCustomerIds(`fix the notes on ${five}`, { matches: [], complete: true })).toEqual([id(100)]);
   });
 
+  test('gate on: a choice-button reply ("Full Name, City") is the pick, so no second round of choices', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(3);
+    const resolved = await ask('Pat Example, Osprey');
+    expect(resolved.typedCustomerIds).toEqual([id(102)]);
+    const note = Context.ownerDirectContext(resolved).sameNameNote;
+    expect(note).toMatch(/picks one of the customers/);
+    expect(note).toContain(id(102));
+    expect(note).not.toMatch(/offer_choices with/);
+    // Without a narrowing detail the choices are still offered.
+    expect(Context.ownerDirectContext(await ask('update Pat Example notes')).sameNameNote).toMatch(/Call offer_choices/);
+  });
+
   test('gate on: a unique name names its customer; the bare phone alone does too', async () => {
     process.env[ON] = 'true';
     customers = sameName(1);
