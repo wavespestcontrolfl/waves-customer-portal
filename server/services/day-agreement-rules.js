@@ -127,6 +127,8 @@ const after = (value, moment) => value != null && new Date(value).getTime() > mo
 // first failure is the recorded reason, so order is cheapest-and-clearest first.
 const RULES = [
   ['model_no_act', ({ a }) => !a.act],
+  // An act:true answer that also lists a blocker contradicts itself: the safe reading is no.
+  ['model_blocker', ({ a }) => a.blockers.length > 0],
   ['low_confidence', ({ a }) => !(a.confidence >= MIN_CONFIDENCE)],
   ['kind_invalid', ({ a }) => !KINDS.includes(a.kind)],
   ['day_invalid', ({ a }) => !validDay(a.day)],

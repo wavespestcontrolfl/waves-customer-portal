@@ -301,6 +301,35 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(await filterCollidingSlots([candidate], { ...range, excludeServiceIds: [moving] })).toEqual([]);
     });
 
+    test('a text agreement whose time cannot be read is at_unreadable, never judged against the latest inbound time', async () => {
+      const customerId = await customer();
+      await text(customerId, 'Tuesday works', 45);
+      const findSlots = jest.fn();
+      await sweep({ dispatch: answering(agreement({ at: 'Monday morning' })), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'at_unreadable' })]);
+      expect(findSlots).not.toHaveBeenCalled();
+      // An act:false moment with no readable time is just recorded as the model's no.
+      await trx('day_agreement_decisions').delete();
+      await sweep({ dispatch: answering(agreement({ at: 'x', act: false, kind: null, day: null, blockers: ['no_day_agreed'] })), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'model_no_act' })]);
+    });
+
+    test('a call agreement is not affected by the model\'s at: the call start is the moment', async () => {
+      const customerId = await customer();
+      await call(customerId);
+      await sweep({ dispatch: answering(agreement({ at: 'garbage' })), findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] })) });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
+    });
+
+    test('act:true with a blocker is a model_blocker skip and the picker is never asked', async () => {
+      const customerId = await customer();
+      await call(customerId);
+      const findSlots = jest.fn();
+      await sweep({ dispatch: answering(agreement({ blockers: ['customer_unsure'] })), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'model_blocker' })]);
+      expect(findSlots).not.toHaveBeenCalled();
+    });
+
     test('a customer with no coordinates and no visit to read them from is a skip', async () => {
       const customerId = await customer({ latitude: null, longitude: null });
       await call(customerId);
@@ -410,6 +439,30 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
     });
 
+    test('the quiet probe ignores Waves texts that never went out (scheduled, failed, cancelled, reserved) but counts delivered ones', async () => {
+      const customerId = await customer();
+      const wanted = await text(customerId, 'sat is fine', 45);
+      const unsent = async (status, extra = {}) => {
+        const id = await text(customerId, 'Great, see you then', 10, { direction: 'outbound' });
+        await trx('sms_log').where({ id }).update({ status, ...extra });
+        return id;
+      };
+      for (const status of ['scheduled', 'failed', 'queued', 'undelivered']) {
+        const id = await unsent(status);
+        expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+        await trx('sms_log').where({ id }).delete();
+      }
+      const cancelled = await unsent('canceled');
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+      await trx('sms_log').where({ id: cancelled }).delete();
+      const reserved = await unsent('sending', { metadata: JSON.stringify({ review_ask_reservation: true }) });
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([wanted]);
+      await trx('sms_log').where({ id: reserved }).delete();
+      // A delivered Waves text 10 minutes ago does end the quiet period.
+      await unsent('delivered');
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+    });
+
     test('outside the window or with no day word nothing is a candidate', async () => {
       const customerId = await customer();
       await text(customerId, 'Tuesday works', 200); // older than 3 hours
@@ -491,6 +544,23 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(picked.reason).toBeUndefined();
       expect(picked.slot).toMatchObject({ date: target, technician: { id: technicianId } });
       expect(picked.slot.start_time).toMatch(/^(12|13|14|15|16):00$/);
+    });
+
+    test('under capacity routing the picker still hands back only customer-grid starts: no 08:00, no lunch-overlapping start', async () => {
+      const OLD = process.env.GATE_SCHEDULING_CAPACITY;
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      try {
+        await trx('technicians').insert({ id: randomUUID(), name: 'Sample Tech', field_dispatchable: true, employment_status: 'active' });
+        const customerId = await customer();
+        const target = dayPlus(2);
+        const first = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'morning', fromVisit: null }, {});
+        expect(first.slot).toBeDefined();
+        expect(first.slot.start_time).not.toBe('08:00');
+        const everyStart = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'before 09:00', fromVisit: null }, {});
+        expect(everyStart).toEqual({ reason: 'no_slot' });
+      } finally {
+        if (OLD === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = OLD;
+      }
     });
   });
 });

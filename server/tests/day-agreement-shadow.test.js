@@ -61,11 +61,17 @@ describe('candidate SQL (compile only)', () => {
     expect(sql).toContain("direction = 'inbound'");
     expect(sql).toContain('l.message_body ~* $2');
     expect(sql).toContain("d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0'");
-    expect(sql).toMatch(/m\.created_at > \$3/);
+    // The quiet probe counts only what the thread counts: inbound texts and Waves texts that
+    // went out; scheduled, reserved or failed rows are not activity.
+    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$3 and \("m"\."direction" = \$4 or "m"\."status" in \(\$5, \$6, \$7\)\)/);
     expect(sql).toContain("right(regexp_replace(m.to_phone, '\\D', '', 'g'), 10) = l.digits");
-    expect(bindings).toEqual([
-      new Date(NOW.getTime() - 3 * 3600 * 1000), rules.DAY_WORD_PATTERN, new Date(NOW.getTime() - 30 * 60 * 1000), internals.BATCH.sms,
+    expect(sql).toContain("COALESCE(m.metadata->>'review_ask_reservation', 'false')");
+    expect(sql).toContain("COALESCE(m.status, '') IN ('canceled', 'cancelled')");
+    expect(bindings.slice(0, 7)).toEqual([
+      new Date(NOW.getTime() - 3 * 3600 * 1000), rules.DAY_WORD_PATTERN, new Date(NOW.getTime() - 30 * 60 * 1000),
+      'inbound', 'sent', 'delivered', 'read',
     ]);
+    expect(bindings[bindings.length - 1]).toBe(internals.BATCH.sms);
   });
 });
 
@@ -218,6 +224,14 @@ describe('the collision guard on offered slots', () => {
     const args = { customerId: 'c1', day: '2040-03-14', daypart: 'afternoon', fromVisit: null };
     expect((await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00']) })).slot.start_time).toBe('15:00');
     expect(await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00', '15:00']) })).toEqual({ reason: 'no_slot' });
+  });
+
+  test('pickSlot asks find-time for customer-facing slots, so capacity mode applies the 09:00 grid, close and lunch gate', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
+    const findSlots = jest.fn(async () => ({ slots: [] }));
+    await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null }, { findSlots });
+    expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: true }));
   });
 });
 

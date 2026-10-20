@@ -43,6 +43,7 @@ describe('decideAgreement: a clean agreement passes', () => {
 describe('decideAgreement: every rule records its own skip reason', () => {
   const cases = [
     ['model_no_act', { agreement: agreement({ act: false, blockers: ['vague_day'] }) }],
+    ['model_blocker', { agreement: agreement({ blockers: ['customer_unsure'] }) }],
     ['low_confidence', { agreement: agreement({ confidence: 0.69 }) }],
     ['kind_invalid', { agreement: agreement({ kind: 'reschedule' }) }],
     ['kind_invalid', { agreement: agreement({ kind: null }) }],
@@ -120,6 +121,11 @@ describe('decideAgreement: every rule records its own skip reason', () => {
     test('a move onto a day that already has a live visit is skipped', () => {
       expect(move({ visitsOnDay: [visit({ id: 'other' })] }).reason).toBe('day_has_visit');
     });
+  });
+
+  test('act:true with any blocker listed never passes, and model_no_act still comes first', () => {
+    expect(decide({ agreement: agreement({ blockers: ['other'] }) })).toMatchObject({ pass: false, reason: 'model_blocker' });
+    expect(decide({ agreement: agreement({ act: false, blockers: ['other'] }) }).reason).toBe('model_no_act');
   });
 
   test('the first failing rule is the recorded one (act false beats everything after it)', () => {

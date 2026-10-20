@@ -123,11 +123,22 @@ const LAST10_SQL = "right(regexp_replace(%I, '\\D', '', 'g'), 10)";
 const last10 = (column) => LAST10_SQL.replace('%I', column);
 
 // Phones whose LATEST inbound text is in the window, has a day word, and whose
-// thread has been quiet (no text either way) for QUIET_MS. The inner query
-// keeps the latest inbound text per phone; the day word and quiet tests judge
-// that one text, so an older text never stands in for a newer one.
-function smsCandidatesSql() {
-  return `
+// thread has been quiet for QUIET_MS. Quiet counts only what the thread itself
+// counts: an inbound text, or a Waves text that went out. A scheduled, reserved
+// or failed row never reached the customer and is no activity (the same
+// delivered-and-reservation filter threadLines uses). The inner query keeps the
+// latest inbound text per phone; the day word and quiet tests judge that one
+// text, so an older text never stands in for a newer one.
+function quietProbe(conn, since) {
+  const probe = conn('sms_log as m').select(conn.raw('1'))
+    .where('m.created_at', '>', since)
+    .where((q) => q.where('m.direction', 'inbound').orWhereIn('m.status', DELIVERED_STATUSES))
+    .whereRaw(`(${last10('m.from_phone')} = l.digits OR ${last10('m.to_phone')} = l.digits)`);
+  return excludeUnresolvedSendReservations(probe, 'm');
+}
+
+function smsCandidatesQuery(conn, now) {
+  return conn.raw(`
     SELECT l.id, l.customer_id, l.created_at, l.digits
     FROM (
       SELECT DISTINCT ON (${last10('from_phone')})
@@ -139,17 +150,10 @@ function smsCandidatesSql() {
     WHERE length(l.digits) = 10
       AND l.message_body ~* ?
       AND NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0')
-      AND NOT EXISTS (
-        SELECT 1 FROM sms_log m
-        WHERE m.created_at > ? AND (${last10('m.from_phone')} = l.digits OR ${last10('m.to_phone')} = l.digits)
-      )
+      AND NOT EXISTS (?)
     ORDER BY l.created_at ASC
-    LIMIT ?`;
-}
-
-function smsCandidatesQuery(conn, now) {
-  return conn.raw(smsCandidatesSql(), [
-    new Date(now.getTime() - RECENT_MS), rules.DAY_WORD_PATTERN, new Date(now.getTime() - QUIET_MS), BATCH.sms,
+    LIMIT ?`, [
+    new Date(now.getTime() - RECENT_MS), rules.DAY_WORD_PATTERN, quietProbe(conn, new Date(now.getTime() - QUIET_MS)), BATCH.sms,
   ]);
 }
 
@@ -273,7 +277,9 @@ async function coordinates(conn, customerId, fromVisit) {
 // zone and travel-gap rules; the shadow uses the same guard so it never records
 // a window the reserve gate would refuse. Under capacity routing the route
 // already holds unassigned blockers and the guard is not applied (it would
-// drop every slot that is not an arrival-window slot). The visit being moved is
+// drop every slot that is not an arrival-window slot); the customer-window
+// admission (09:00 grid, close, lunch) is then applied by find-time itself,
+// because pickSlot asks for customerFacing slots. The visit being moved is
 // excluded from the check.
 async function dropCollidingSlots(slots, { day, where, fromVisit }, deps) {
   const { capacityEnabled } = require('./scheduling/policy');
@@ -300,6 +306,9 @@ async function pickSlot(conn, { customerId, day, daypart, fromVisit }, deps) {
     serviceType: fromVisit?.service_type || undefined,
     dateFrom: day, dateTo: day, topN: SLOT_TOP_N,
     includeWeekends: true, slotStepMinutes: 60, everyStepStart: true, providerTravel: false,
+    // The customer-window admission every customer-facing caller asks for (find-time
+    // applies it in capacity mode); the agent will confirm the window to the customer.
+    customerFacing: true,
     excludeServiceIds: fromVisit ? [fromVisit.id] : [],
   });
   const offered = result && !result.error && Array.isArray(result.slots) ? result.slots : [];
@@ -323,8 +332,13 @@ const skipRow = (src, index, reason, extra = {}) => ({ ...baseRow(src, index), s
 
 async function decideMoment(conn, src, index, agreement, ctx) {
   const a = rules.normalizeAgreement(agreement);
-  const agreedAt = src.kind === 'call' ? src.agreedAt : (parseAt(a.at) || src.agreedAt);
+  const parsedAt = src.kind === 'call' ? src.agreedAt : parseAt(a.at);
+  const agreedAt = parsedAt || src.agreedAt;
   const known = { model: ctx.model, judged: JSON.stringify(a), agreed_at: agreedAt };
+  // A text agreement is only as old as the message that completed it. With no
+  // readable time the staleness and staff-acted rules cannot be trusted, so an
+  // action is never judged against the latest inbound time instead.
+  if (a.act && !parsedAt) return skipRow(src, index, 'at_unreadable', { ...known, ...(rules.validDay(a.day) ? { target_date: a.day } : {}) });
   const dayVisits = a.act ? await visitFacts(conn, src.customerId, [a.day, a.from_day]) : [];
   const decision = rules.decideAgreement({
     agreement: a, kind: src.kind, customerId: src.customerId, todayET: ctx.todayET, agreedAt, now: ctx.now,
@@ -414,7 +428,6 @@ module.exports = {
   _internals: {
     callCandidatesQuery,
     smsCandidatesQuery,
-    smsCandidatesSql,
     loadCallCandidates,
     loadSmsCandidates,
     validateAnswer,
