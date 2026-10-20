@@ -12,6 +12,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 const mockTranscribe = jest.fn();
 const mockImplausible = jest.fn(() => false);
 const mockBuild = jest.fn();
+const mockHints = jest.fn();
 
 const mockVisit = jest.fn();
 const mockCustomerAllowed = jest.fn();
@@ -34,6 +35,7 @@ jest.mock('../services/fast-complete-voice-fill', () => ({ VOICE_FILL_TRANSCRIBE
 jest.mock('../services/dictation-word-list', () => ({
   ...jest.requireActual('../services/dictation-word-list'),
   buildDictationPrompt: (...args) => mockBuild(...args),
+  buildDictationHints: (...args) => mockHints(...args),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -100,10 +102,13 @@ describe('server dictation endpoint', () => {
     mockVisitInScope.mockReturnValue(true);
     mockCustomerAllowed.mockResolvedValue(true);
     mockBuild.mockResolvedValue('SERVER-BUILT WORD LIST');
+    mockHints.mockResolvedValue({ prompt: 'WORD LIST WITH NAMES', keywords: ['Examplesmith', 'Todayman'] });
+    delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
     mockTranscribe.mockResolvedValue({ text: '  Treated the lanai for roaches. ' });
     mockImplausible.mockReturnValue(false);
   });
   afterAll(() => {
+    delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
     if (originalGate === undefined) delete process.env.GATE_SERVER_DICTATION;
     else process.env.GATE_SERVER_DICTATION = originalGate;
     if (originalModel === undefined) delete process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL;
@@ -170,6 +175,49 @@ describe('server dictation endpoint', () => {
       expect(opts.emptyOk).toBe(true);
       expect(JSON.stringify(opts)).not.toMatch(/Ignore all rules|attacker/);
       expect(mockImplausible).toHaveBeenCalledWith('Treated the lanai for roaches.', 9);
+    });
+  });
+
+  describe('GATE_DICTATION_CUSTOMER_NAMES', () => {
+    test('off: the old builder runs and the transcriber gets no keywords', async () => {
+      await withServer(async (baseUrl) => {
+        await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID } });
+        expect(mockHints).not.toHaveBeenCalled();
+        expect(mockBuild).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: null });
+        const opts = mockTranscribe.mock.calls[0][1];
+        expect(opts.prompt).toBe('SERVER-BUILT WORD LIST');
+        expect('keywords' in opts).toBe(false);
+      });
+    });
+
+    test('on, admin login: names prompt and surname keywords reach the transcriber; scope is empty', async () => {
+      process.env.GATE_DICTATION_CUSTOMER_NAMES = 'true';
+      await withServer(async (baseUrl) => {
+        await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { keywords: 'attacker' } });
+        expect(mockBuild).not.toHaveBeenCalled();
+        expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: null, scope: {} });
+        const opts = mockTranscribe.mock.calls[0][1];
+        expect(opts.prompt).toBe('WORD LIST WITH NAMES');
+        expect(opts.keywords).toEqual(['Examplesmith', 'Todayman']);
+        expect(JSON.stringify(opts)).not.toContain('attacker');
+      });
+    });
+
+    test('on, technician login: the scope is the login itself, and a failed fence still drops the id', async () => {
+      process.env.GATE_DICTATION_CUSTOMER_NAMES = 'true';
+      mockCustomerAllowed.mockResolvedValue(false);
+      await withServer(async (baseUrl) => {
+        await clip(baseUrl, { token: 'tech', query: { customer_id: CUSTOMER_ID } });
+        expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: { technicianId: 'tech-1' } });
+      });
+    });
+
+    test('only the exact value "true" turns it on', async () => {
+      process.env.GATE_DICTATION_CUSTOMER_NAMES = 'yes';
+      await withServer(async (baseUrl) => {
+        await clip(baseUrl, { token: 'admin' });
+        expect(mockHints).not.toHaveBeenCalled();
+      });
     });
   });
 

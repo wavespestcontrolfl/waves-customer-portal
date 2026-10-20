@@ -431,6 +431,27 @@ function transcriptionKeywords() {
   return ENV_TRANSCRIPTION_KEYWORDS.length ? ENV_TRANSCRIPTION_KEYWORDS : DEFAULT_TRANSCRIPTION_KEYWORDS;
 }
 
+// Extra literal hints a caller adds for ONE clip (opts.keywords: the staff dictation route adds customer
+// surnames). The base list always stays first, extras are cleaned, de-duplicated and capped. OpenAI's own limit
+// on keywords[] count and length is NOT documented in this repo (unverified): 50 extras, 40 characters each is
+// this code's own conservative bound.
+const EXTRA_KEYWORDS_MAX = 50;
+const EXTRA_KEYWORD_MAX_CHARS = 40;
+function mergeTranscriptionKeywords(base, extra) {
+  const out = [...base];
+  const seen = new Set(out.map((k) => String(k).toLowerCase()));
+  let added = 0;
+  for (const raw of Array.isArray(extra) ? extra : []) {
+    if (added >= EXTRA_KEYWORDS_MAX) break;
+    const word = String(raw ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!word || word.length > EXTRA_KEYWORD_MAX_CHARS || seen.has(word.toLowerCase())) continue;
+    seen.add(word.toLowerCase());
+    out.push(word);
+    added += 1;
+  }
+  return out;
+}
+
 function modelSupportsKeywordHints(model) {
   const m = String(model || '');
   return m === 'gpt-transcribe' || m.startsWith('gpt-transcribe-')
@@ -8745,7 +8766,10 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     } else {
       form.append('prompt', prompt);
       if (modelSupportsKeywordHints(model)) {
-        for (const keyword of transcriptionKeywords()) form.append('keywords[]', keyword);
+        const keywords = Array.isArray(opts.keywords)
+          ? mergeTranscriptionKeywords(transcriptionKeywords(), opts.keywords)
+          : transcriptionKeywords();
+        for (const keyword of keywords) form.append('keywords[]', keyword);
       }
     }
     form.append('temperature', '0');
@@ -25292,6 +25316,7 @@ CallRecordingProcessor._test = {
   estimateMp3DurationSeconds,
   modelSupportsKeywordHints,
   transcriptionKeywords,
+  mergeTranscriptionKeywords,
   isNonLeadCallContent,
   leadContactCompleteness,
   hasWorkableLeadSignal,
