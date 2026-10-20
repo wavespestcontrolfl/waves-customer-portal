@@ -622,17 +622,33 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(prompt).not.toContain('other number');
     });
 
-    test('a repeated agreement is recorded once, and a text moment before the source inbound is an earlier_moment skip (Codex #6350 r11)', async () => {
+    test('an agreement followed by a quick "thanks" is still judged: no earlier sweep saw it (pre-push audit)', async () => {
+      const customerId = await customer();
+      await text(customerId, 'We can come Wednesday morning.', 100, { direction: 'outbound' });
+      await text(customerId, 'Wednesday works', 47);
+      await text(customerId, 'thanks!', 45);
+      const dispatch = answering(agreement({ at: '2040-03-12T11:13', daypart: 'morning' }));
+      await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00', await technician())] })) });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
+    });
+
+    test('a repeated agreement is recorded once, and a moment an earlier sweep of the phone already judged is an earlier_moment skip (Codex #6350 r11)', async () => {
       const customerId = await customer();
       await text(customerId, 'Thursday?', 150);
       await text(customerId, 'We can come Wednesday morning.', 100, { direction: 'outbound' });
       await text(customerId, 'Wednesday works', 45);
+      // An earlier sweep (10:00 ET) already judged this phone's thread, so the 09:30 moment was seen.
+      await trx('day_agreement_decisions').insert({
+        source_kind: 'sms', source_key: `sms:9415550142:${randomUUID()}#0`, phone_digits: '9415550142', customer_id: customerId,
+        verdict: 'skip', skip_reason: 'model_no_act', model: 'stub-model', created_at: ago(120),
+      });
       const same = agreement({ at: '2040-03-12T11:15', daypart: 'morning' });
       const early = agreement({ at: '2040-03-12T09:30' });
       const dispatch = answering(same, same, early);
       await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00', await technician())] })) });
       const rows = await decisions();
-      expect(rows).toHaveLength(2);
+      expect(rows).toHaveLength(3); // the seeded earlier judgment + this source's two distinct moments
       expect(rows.map((r) => r.skip_reason)).toContain('earlier_moment');
     });
 
@@ -738,8 +754,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await text(customerId, 'Tuesday works', 45);
       // 480 minutes before NOW (12:00 ET) is 04:00 ET: a message the model was shown, but too old to act on.
       await sweep({ dispatch: answering(agreement({ at: '2040-03-12T04:00' })), findSlots: jest.fn() });
-      // Before the source's own inbound, so it is skipped as an earlier moment (Codex #6350 r11).
-      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'earlier_moment' })]);
+      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'stale_moment' })]);
     });
 
     test('an SMS action whose time is not the minute of a message in the thread is at_ungrounded and the picker is never asked', async () => {

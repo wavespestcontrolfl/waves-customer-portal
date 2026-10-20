@@ -486,13 +486,25 @@ async function placeVisit(conn, src, { a, fromVisit, catalog }, deps) {
 }
 
 // Why a text action cannot be judged from this source, or null. Its time must be
-// a shown message's minute (grounded), and not before this source's own inbound:
-// an earlier moment was judged when its own text was the latest, and the visits
-// shown now are as of the newer text (Codex #6350 r10 + r11).
+// a shown message's minute (grounded), and it must not be a moment an earlier
+// sweep of this phone already saw (Codex #6350 r10 + r11). A moment followed by a
+// quick "thanks" was never judged on its own (its thread was not quiet), so it is
+// judged here; only a moment at or before the phone's last judged sweep is skipped.
 function smsMomentSkip(src, parsedAt) {
   if (!src.stamps?.has(etMinuteKey(parsedAt))) return 'at_ungrounded';
-  if (Math.floor(parsedAt.getTime() / 60000) < Math.floor(src.agreedAt.getTime() / 60000)) return 'earlier_moment';
+  if (src.lastJudgedAt && parsedAt.getTime() <= src.lastJudgedAt.getTime()) return 'earlier_moment';
   return null;
+}
+
+// When this phone's text thread was last put to the model: a judged '#0' row's
+// sweep time. Every moment before it was in that judged thread.
+async function lastJudgedSmsAt(conn, digits) {
+  if (!digits) return null;
+  const row = await conn('day_agreement_decisions')
+    .where('source_kind', 'sms').where('phone_digits', digits).where('source_key', 'like', '%#0')
+    .where((q) => q.whereNotNull('model').orWhere('skip_reason', 'judge_unusable'))
+    .max({ at: 'created_at' }).first();
+  return row?.at ? new Date(row.at) : null;
 }
 
 async function decideMoment(conn, src, index, agreement, ctx) {
@@ -569,6 +581,7 @@ async function processSource(conn, src, ctx) {
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
   if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };
   if (await customerOverQuota(conn, src.customerId, ctx.now)) return { rows: [skipRow(src, 0, 'judge_rate_limited')] };
+  if (src.kind === 'sms') src.lastJudgedAt = await lastJudgedSmsAt(conn, src.phoneDigits);
   const visits = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
   // A failed read throws (the source stays unjudged and is retried next tick); the
   // legacy empty list would record every agreement as service_unresolved for good.
