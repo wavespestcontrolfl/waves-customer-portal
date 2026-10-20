@@ -842,6 +842,33 @@ describe('row conversion and drop counters (codex gh-r9 P2)', () => {
   });
 });
 
+describe('a historical replay never records a reschedule-link promise (Codex #6346 r4 P1)', () => {
+  const { recordCallCommitments } = require('../services/call-commitments');
+  const transcript = 'Agent: I will text you a link to reschedule your visit, thanks for calling Waves today.';
+  const answer = JSON.stringify({ commitments: [{ party: 'waves', kind: 'send_reschedule_link', description: 'Text a reschedule link', channel: 'sms', due_text: null, due_at: null, confidence: 0.9, evidence: [{ quote: 'I will text you a link to reschedule your visit', speaker: 'agent' }] }] });
+  const setup = () => {
+    const raw = jest.fn(async () => ({ rows: [{ id: 'row' }], rowCount: 1 }));
+    const trx = Object.assign(jest.fn(() => ({ where: () => ({ forShare: () => ({ first: async () => ({ id: 'c' }) }) }) })), { raw });
+    return { trx, conn: { transaction: async (fn) => fn(trx) }, modelClient: { messages: { create: jest.fn(async () => ({ content: [{ type: 'text', text: answer }] })) } } };
+  };
+  const call = { id: 'c', created_at: new Date().toISOString(), transcript_structured: null };
+  // Whether the promise reached the commitments write at all.
+  const reachedWrite = (trx) => trx.mock.calls.some(([table]) => table === 'call_commitments');
+  test('historicalReplay omits it and reports the count', async () => {
+    const { trx, conn, modelClient } = setup();
+    const out = await recordCallCommitments({ conn, call, transcript, procToken: 'tok', modelClient, historicalReplay: true });
+    expect(out.model).toBe(1);
+    expect(out.omittedLinkPromises).toBe(1);
+    expect(reachedWrite(trx)).toBe(false);
+  });
+  test('a live pass records it as before', async () => {
+    const { trx, conn, modelClient } = setup();
+    const out = await recordCallCommitments({ conn, call, transcript, procToken: 'tok', modelClient });
+    expect(out.omittedLinkPromises).toBeUndefined();
+    expect(reachedWrite(trx)).toBe(true);
+  });
+});
+
 describe('recordCallCommitments keeps the deterministic seeds when the model leg fails (codex gh-r8 P1)', () => {
   const { recordCallCommitments } = require('../services/call-commitments');
   test('a rejected provider call is reported, and the seeds are still upserted', async () => {
@@ -1100,6 +1127,12 @@ describe('the model pass falls back to OpenAI when Anthropic cannot answer (call
     expect(out.items).toEqual([]);
     expect(out.skipped).toBeUndefined();
     expect(out.droppedUngrounded).toBe(1);
+  });
+
+  test('one leg dropping every claim while the other fails at the provider is a failure, not an empty answer (Codex #6346 r4)', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: ungrounded }] }));
+    await expect(extractCommitmentsWithModel(transcript, { client: { messages: { create } } })).rejects.toThrow(/all_providers_failed/);
   });
 
   test('an empty commitments array is a successful "nothing promised" and never calls the backup', async () => {

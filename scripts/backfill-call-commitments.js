@@ -20,12 +20,17 @@
  * (Anthropic first, OpenAI if it cannot answer). The owner approved this one
  * replay on 2026-10-19.
  *
- * Candidates: calls created in the range that are processed (not spam, not
- * voicemail, not a voice-relay sandbox call), hold no processing claim, have a
- * stored transcript, and have NO call_commitments row of any kind. No durable
- * marker records a skipped model pass (the pipeline only logs it), so "no rows
- * at all" is the criterion. A call whose model pass failed but whose
- * deterministic seed wrote a row is NOT found by this script.
+ * Candidates: every call created in the range that settled as a two-party
+ * call (processed, or customer/lead creation failed; not spam, not voicemail,
+ * not a voice-relay sandbox call), holds no processing claim and has a stored
+ * transcript. A row is NOT a reason to skip: a call whose model pass failed can
+ * still hold a deterministic seed row, and no marker records the failed pass
+ * (Codex #6346 r4). Re-running a call is idempotent (upsert by commitment key;
+ * staff-touched rows are never rewritten), so the range is the selector.
+ *
+ * Historical replay: a replayed call never records a send_reschedule_link
+ * promise (a live worker would text a stale link). The run lists those calls
+ * as "link promise not recorded" for the office to handle by hand.
  *
  * It does not write rows itself. Apply calls recordCommitmentsStep from
  * call-recording-processor.js, the exact function the pipeline runs after
@@ -107,9 +112,6 @@ function candidateQuery(dbh, { start, end, limit }) {
     .whereRaw("COALESCE(c.answered_by, '') <> 'voicemail'")
     .whereRaw("COALESCE(c.ai_extraction_enriched ->> 'call_nature', '') <> 'voicemail_message'")
     .whereRaw('LENGTH(COALESCE(c.transcription, \'\')) >= ?', [MIN_TRANSCRIPT_CHARS])
-    .whereNotExists(function none() {
-      this.select(dbh.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = c.id');
-    })
     .orderBy('c.created_at', 'asc')
     .limit(limit)
     .select('c.id', 'c.created_at');
@@ -124,8 +126,6 @@ const findCandidates = (dbh, args) => candidateQuery(dbh, args);
 async function runPipelineStep(dbh, id, { recordCommitmentsStep = require('../server/services/call-recording-processor').recordCommitmentsStep } = {}) {
   const call = await dbh('call_log').where({ id }).first();
   if (!call || !SETTLED_TWO_PARTY_STATUSES.includes(call.processing_status) || call.processing_token || !call.transcription) return { ran: false, reason: 'not_eligible_now' };
-  const already = await dbh('call_commitments').where({ call_log_id: id }).first('id');
-  if (already) return { ran: false, reason: 'row_exists_now' };
   const v2Result = call.v2_extraction_status === 'valid' && call.ai_extraction_enriched
     ? { status: 'valid', extraction: call.ai_extraction_enriched }
     : null;
@@ -136,6 +136,7 @@ async function runPipelineStep(dbh, id, { recordCommitmentsStep = require('../se
     extracted: { is_spam: false },
     v2Result,
     procGeneration: call.processing_generation ?? null,
+    historicalReplay: true,
   });
   // A provider/model failure, a write error or a lost claim is a FAILED replay,
   // never "nothing promised" (Codex #6346 r1). A step that did not run at all
@@ -146,7 +147,7 @@ async function runPipelineStep(dbh, id, { recordCommitmentsStep = require('../se
         : FAILED_SKIPS.has(summary.skipped) ? summary.skipped : null;
   if (failure) return { ran: false, failed: true, reason: failure };
   const rows = await dbh('call_commitments').where({ call_log_id: id }).count({ n: '*' }).first();
-  return { ran: true, rows: Number(rows?.n || 0) };
+  return { ran: true, rows: Number(rows?.n || 0), omittedLinkPromises: summary.omittedLinkPromises || 0 };
 }
 
 async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = console.log, find = findCandidates, step = runPipelineStep, gateLive = null } = {}) {
@@ -185,7 +186,7 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
       }
       totals.ran += 1;
       if (out.rows > 0) totals.withRows += 1; else totals.noRows += 1;
-      log(`  ran        ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  rows=${out.rows}`);
+      log(`  ran        ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  rows=${out.rows}${out.omittedLinkPromises ? '  link promise not recorded: office to handle' : ''}`);
     } catch (err) {
       totals.failed += 1;
       log(`  failed     ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${String(err?.code || 'error')}`);

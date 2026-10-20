@@ -27,7 +27,7 @@ describe('backfill-call-commitments', () => {
     expect(() => backfill.etRange('2026-02-30', '2026-03-01')).toThrow(/real ET dates/);
   });
 
-  test('the candidate query keeps processed two-party calls with a transcript and no commitment row', () => {
+  test('the candidate query keeps settled two-party calls with a transcript, rows or not (Codex #6346 r4)', () => {
     const db = knex({ client: 'pg' });
     const sql = backfill.candidateQuery(db, { start: new Date('2026-10-15T04:00:00Z'), end: new Date('2026-10-19T04:00:00Z'), limit: 7 }).toString();
     // Customer/lead creation failures still run the commitments step in the pipeline (Codex #6346 r2).
@@ -36,7 +36,8 @@ describe('backfill-call-commitments', () => {
     expect(sql).toMatch(/COALESCE\(c\.call_outcome, ''\) <> 'voicemail'/);
     expect(sql).toMatch(/COALESCE\(c\.answered_by, ''\) <> 'voicemail'/);
     expect(sql).toMatch(/voicemail_message/);
-    expect(sql).toMatch(/not exists \(select 1 from "call_commitments" as "cc" where cc\.call_log_id = c\.id\)/);
+    // A seed row does not hide a call whose model pass failed.
+    expect(sql).not.toMatch(/call_commitments/);
     expect(sql).toMatch(/limit 7/);
     expect(sql).toMatch(/select "c"\."id", "c"\."created_at" from/);
   });
@@ -93,7 +94,7 @@ describe('backfill-call-commitments', () => {
     ]) {
       await expect(backfill.runPipelineStep(dbh, 'c1', { recordCommitmentsStep: async () => summary })).resolves.toEqual({ ran: false, failed: true, reason });
     }
-    await expect(backfill.runPipelineStep(dbh, 'c1', { recordCommitmentsStep: async () => ({ skipped: null, written: 0 }) })).resolves.toEqual({ ran: true, rows: 0 });
+    await expect(backfill.runPipelineStep(dbh, 'c1', { recordCommitmentsStep: async () => ({ skipped: null, written: 0 }) })).resolves.toEqual({ ran: true, rows: 0, omittedLinkPromises: 0 });
   });
 
   test('a failed step result is counted as failed', async () => {
