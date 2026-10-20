@@ -101,7 +101,9 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     blockers: [], confidence: 0.9, reason: 'Staff offered the day; the customer agreed.', ...over,
   });
   const answering = (...agreements) => jest.fn(async () => ({ ok: true, json: { agreements }, model: 'stub-model' }));
-  const slot = (date, start, techId = null) => ({ date, start_time: start, end_time: start, technician: { id: techId } });
+  const slot = (date, start, techId = null) => ({
+    date, start_time: start, end_time: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}${start.slice(2)}`, technician: { id: techId },
+  });
   const technician = async () => {
     const id = randomUUID();
     await trx('technicians').insert({ id, name: 'Sample Tech' });
@@ -206,10 +208,10 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       const moving = await visit(customerId, from, { estimated_duration_minutes: 90, service_type: 'Lawn Care' });
       await call(customerId);
       const dispatch = answering(agreement({ kind: 'move', from_day: from, daypart: 'morning' }));
-      const findSlots = jest.fn(async () => ({ slots: [slot(target, '08:00')] }));
+      const findSlots = jest.fn(async () => ({ slots: [slot(target, '09:00')] }));
       await sweep({ dispatch, findSlots });
       const [row] = await decisions();
-      expect(row).toMatchObject({ verdict: 'would_move', from_visit_id: moving, chosen_window_start: '08:00:00' });
+      expect(row).toMatchObject({ verdict: 'would_move', from_visit_id: moving, chosen_window_start: '09:00:00' });
       // The picker works around the visit being moved and keeps its length and service.
       expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ durationMinutes: 90, serviceType: 'Lawn Care', excludeServiceIds: [moving] }));
 
@@ -252,6 +254,42 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await trx('day_agreement_decisions').delete();
       await sweep({ dispatch: answering(agreement()), findSlots: jest.fn(async () => { throw new Error('picker down'); }) });
       expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'slot_lookup_failed' })]);
+    });
+
+    test('a visit with NO technician that occupies the window blocks that slot (the mirror collision guard), so the next free hour is chosen', async () => {
+      const customerId = await customer();
+      const other = await customer({ phone: '+19415550188' });
+      const target = dayPlus(2);
+      const techId = await technician();
+      await call(customerId);
+      // Another customer's unassigned visit holds 13:00-14:00 that day.
+      await visit(other, target, { technician_id: null, window_start: '13:00', window_end: '14:00' });
+      const findSlots = jest.fn(async () => ({ slots: [slot(target, '13:00', techId), slot(target, '15:00', techId)] }));
+      await sweep({ dispatch: answering(agreement({ daypart: 'afternoon' })), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book', chosen_window_start: '15:00:00' })]);
+    });
+
+    test('when every offered window is occupied by an unassigned visit the moment is no_slot', async () => {
+      const customerId = await customer();
+      const other = await customer({ phone: '+19415550188' });
+      const target = dayPlus(2);
+      await call(customerId);
+      await visit(other, target, { technician_id: null, window_start: '09:00', window_end: '10:00' });
+      await sweep({ dispatch: answering(agreement({ daypart: 'morning' })), findSlots: jest.fn(async () => ({ slots: [slot(target, '09:00', null)] })) });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'no_slot' })]);
+    });
+
+    test('the moved visit is not a collision for itself; any other visit in the window still is', async () => {
+      const { filterCollidingSlots } = require('../services/estimate-slot-availability');
+      const customerId = await customer();
+      const target = dayPlus(2);
+      const moving = await visit(customerId, target, { technician_id: null, window_start: '13:00', window_end: '14:00' });
+      const candidate = { date: target, techId: null, windowStart: '13:00', windowEnd: '14:00' };
+      const range = { dateFrom: target, dateTo: target };
+      expect(await filterCollidingSlots([candidate], range)).toEqual([]);
+      expect(await filterCollidingSlots([candidate], { ...range, excludeServiceIds: [moving] })).toEqual([candidate]);
+      await visit(await customer({ phone: '+19415550188' }), target, { technician_id: null, window_start: '13:00', window_end: '14:00' });
+      expect(await filterCollidingSlots([candidate], { ...range, excludeServiceIds: [moving] })).toEqual([]);
     });
 
     test('a customer with no coordinates and no visit to read them from is a skip', async () => {
@@ -308,7 +346,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       const latest = await text(customerId, 'Wednesday works', 45);
       const dispatch = answering(agreement({ at: '2040-03-12T10:15', daypart: 'morning' }));
       const target = dayPlus(2);
-      const findSlots = jest.fn(async () => ({ slots: [slot(target, '08:00')] }));
+      const findSlots = jest.fn(async () => ({ slots: [slot(target, '09:00')] }));
       expect(await sweep({ dispatch, findSlots })).toMatchObject({ judged: 1, would_book: 1 });
       const prompt = dispatch.mock.calls[0][1].text;
       expect(prompt).toContain('[Mon 2040-03-12 10:20] WAVES (manual): We can come Wednesday morning.');

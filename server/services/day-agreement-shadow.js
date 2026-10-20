@@ -223,7 +223,10 @@ async function judge(parts, deps) {
   if (result?.ok) return { ok: true, agreements: result.json.agreements, model: String(result.model || '').slice(0, 80) };
   // A validator rejection on every leg is a deterministic bad answer: record it.
   // Anything else (a provider outage) is transient: record nothing, retry next tick.
-  const unusable = (result?.failures || []).some((f) => f.validator === true);
+  // Only when EVERY leg failed on a validator rejection: a mix (one bad answer, one
+  // timeout or 529) stays retryable.
+  const failures = result?.failures || [];
+  const unusable = failures.length > 0 && failures.every((f) => f.validator === true);
   return { ok: false, transient: !unusable, reason: result?.reason || 'error' };
 }
 
@@ -246,6 +249,28 @@ async function coordinates(conn, customerId, fromVisit) {
   return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
 }
 
+// Offer/commit parity (AGENTS.md booking conflict-check class): without
+// capacity routing, find-time reads a technician's own route only, so a visit
+// with no technician is invisible to it. The estimate picker's collision guard
+// (filterCollidingSlots) checks every live row of the day, tech-blind, plus the
+// zone and travel-gap rules; the shadow uses the same guard so it never records
+// a window the reserve gate would refuse. Under capacity routing the route
+// already holds unassigned blockers and the guard is not applied (it would
+// drop every slot that is not an arrival-window slot). The visit being moved is
+// excluded from the check.
+async function dropCollidingSlots(slots, { day, where, fromVisit }, deps) {
+  const { capacityEnabled } = require('./scheduling/policy');
+  if (capacityEnabled()) return slots;
+  const filterColliding = deps.filterColliding || require('./estimate-slot-availability').filterCollidingSlots;
+  const shaped = slots.map((slot) => ({
+    slot, date: slot.date, techId: slot.technician?.id || null, windowStart: slot.start_time, windowEnd: slot.end_time,
+  }));
+  const kept = new Set(await filterColliding(shaped, {
+    dateFrom: day, dateTo: day, coords: where, excludeServiceIds: fromVisit ? [fromVisit.id] : [],
+  }));
+  return shaped.filter((s) => kept.has(s)).map((s) => s.slot);
+}
+
 // The first slot the picker would take on the agreed day, honoring the daypart
 // and whole-hour starts. { slot } or { reason }.
 async function pickSlot(conn, { customerId, day, daypart, fromVisit }, deps) {
@@ -260,7 +285,9 @@ async function pickSlot(conn, { customerId, day, daypart, fromVisit }, deps) {
     includeWeekends: true, slotStepMinutes: 60, everyStepStart: true, providerTravel: false,
     excludeServiceIds: fromVisit ? [fromVisit.id] : [],
   });
-  const slot = result && !result.error ? rules.chooseSlot(result.slots, daypart) : null;
+  const offered = result && !result.error && Array.isArray(result.slots) ? result.slots : [];
+  const free = offered.length ? await dropCollidingSlots(offered, { day, where, fromVisit }, deps) : [];
+  const slot = rules.chooseSlot(free, daypart);
   return slot ? { slot } : { reason: 'no_slot' };
 }
 
@@ -375,6 +402,7 @@ module.exports = {
     validateAnswer,
     judge,
     pickSlot,
+    dropCollidingSlots,
     processSource,
     decideMoment,
     callSource,

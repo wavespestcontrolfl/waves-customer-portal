@@ -139,6 +139,29 @@ describe('the judge, through the real fallback chain', () => {
     expect(await internals.judge(parts, {})).toMatchObject({ ok: false, transient: true });
   });
 
+  test('one validator rejection plus a transient failure on the other leg stays retryable (either order)', async () => {
+    // Primary answers badly, backup is down.
+    mockAnthropicCreate.mockResolvedValue(claude('{"agreements":[{"act":true}]}'));
+    fetchSpy.mockResolvedValue({ ok: false, status: 529 });
+    expect(await internals.judge(parts, {})).toMatchObject({ ok: false, transient: true });
+    // Primary is down, backup answers badly.
+    mockAnthropicCreate.mockRejectedValue(Object.assign(new Error('overloaded'), { status: 529 }));
+    fetchSpy.mockResolvedValue(openai('{"agreements":[]}'));
+    expect(await internals.judge(parts, {})).toMatchObject({ ok: false, transient: true });
+  });
+
+  test('an empty failure list is never proof of an unusable answer', async () => {
+    const dispatch = jest.fn(async () => ({ ok: false, reason: 'no_route', failures: [] }));
+    expect(await internals.judge(parts, { dispatch })).toMatchObject({ ok: false, transient: true });
+  });
+
+  test('a validator rejection mixed with a non-validator failure from a stub is retryable; all validator rejections are not', async () => {
+    const mixed = jest.fn(async () => ({ ok: false, failures: [{ validator: true, reason: 'schema_invalid' }, { reason: 'openai_timeout' }] }));
+    expect(await internals.judge(parts, { dispatch: mixed })).toMatchObject({ transient: true });
+    const allBad = jest.fn(async () => ({ ok: false, failures: [{ validator: true, reason: 'schema_invalid' }, { validator: true, reason: 'kind_invalid' }] }));
+    expect(await internals.judge(parts, { dispatch: allBad })).toMatchObject({ transient: false });
+  });
+
   test('a stubbed dispatch gets the highStakes policy, the lane label, the prompt version and the validator', async () => {
     const dispatch = jest.fn(async () => ({ ok: true, json: JSON.parse(good), model: 'stub-model' }));
     const out = await internals.judge(parts, { dispatch });
@@ -148,6 +171,53 @@ describe('the judge, through the real fallback chain', () => {
     expect(payload).toMatchObject({ laneId: 'day_agreement', promptVersion: 'day-agreement-v1', jsonMode: true });
     expect(options.validate({ json: JSON.parse(good) })).toBeNull();
     expect(options.validate({ json: { agreements: [] } })).toBeTruthy();
+  });
+});
+
+describe('the collision guard on offered slots', () => {
+  const OLD_CAPACITY = process.env.GATE_SCHEDULING_CAPACITY;
+  afterEach(() => {
+    if (OLD_CAPACITY === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = OLD_CAPACITY;
+  });
+  const slot = (start, tech) => ({ date: '2040-03-14', start_time: start, end_time: `${Number(start.slice(0, 2)) + 1}:00`, technician: { id: tech } });
+  const where = { lat: 27.4, lng: -82.45 };
+
+  test('runs the estimate picker\'s filterCollidingSlots on the day, with the pin and the moved visit excluded, and keeps the picker\'s order', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const slots = [slot('13:00', 't1'), slot('14:00', null), slot('15:00', 't1')];
+    const filterColliding = jest.fn(async (shaped) => shaped.filter((s) => s.windowStart !== '14:00'));
+    const out = await internals.dropCollidingSlots(slots, { day: '2040-03-14', where, fromVisit: { id: 'v-move' } }, { filterColliding });
+    expect(out.map((s) => s.start_time)).toEqual(['13:00', '15:00']);
+    expect(filterColliding).toHaveBeenCalledWith(
+      [expect.objectContaining({ date: '2040-03-14', techId: 't1', windowStart: '13:00', windowEnd: '14:00' }),
+        expect.objectContaining({ techId: null, windowStart: '14:00' }), expect.anything()],
+      { dateFrom: '2040-03-14', dateTo: '2040-03-14', coords: where, excludeServiceIds: ['v-move'] },
+    );
+  });
+
+  test('a new visit excludes nothing', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const filterColliding = jest.fn(async (shaped) => shaped);
+    await internals.dropCollidingSlots([slot('09:00', 't1')], { day: '2040-03-14', where, fromVisit: null }, { filterColliding });
+    expect(filterColliding.mock.calls[0][1].excludeServiceIds).toEqual([]);
+  });
+
+  test('under capacity routing the route already holds unassigned blockers: slots pass through untouched', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const filterColliding = jest.fn();
+    const slots = [slot('09:00', 't1')];
+    expect(await internals.dropCollidingSlots(slots, { day: '2040-03-14', where, fromVisit: null }, { filterColliding })).toBe(slots);
+    expect(filterColliding).not.toHaveBeenCalled();
+  });
+
+  test('pickSlot takes the first slot that survives the guard, and no_slot when none does', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
+    const findSlots = jest.fn(async () => ({ slots: [slot('13:00', 't1'), slot('15:00', 't1')] }));
+    const guard = (blocked) => jest.fn(async (shaped) => shaped.filter((s) => !blocked.includes(s.windowStart)));
+    const args = { customerId: 'c1', day: '2040-03-14', daypart: 'afternoon', fromVisit: null };
+    expect((await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00']) })).slot.start_time).toBe('15:00');
+    expect(await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00', '15:00']) })).toEqual({ reason: 'no_slot' });
   });
 });
 
