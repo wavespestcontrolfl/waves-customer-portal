@@ -419,6 +419,8 @@ async function withLastVisit(candidates) {
 // the customer the model found by itself (a call log, a search) is not in this
 // list, so that edit keeps its card. A name shared by several customers names
 // none of them, unless a city or phone/email in the message narrows it to one.
+const MAX_CONTACT_LITERALS = 5;
+
 async function typedCustomerIds(prompt, namedResult) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
@@ -455,7 +457,12 @@ async function typedCustomerIds(prompt, namedResult) {
     }).limit(2).select('id', 'phone', 'email');
     return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
   };
-  for (const literal of [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))]) {
+  // Work budget (Codex #6369 security P2): a message that types more than
+  // MAX_CONTACT_LITERALS phones or emails names nobody by contact (the edit
+  // keeps its card), and runs no lookup at all.
+  const contactLiterals = [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))];
+  if (contactLiterals.length > MAX_CONTACT_LITERALS) return [...ids];
+  for (const literal of contactLiterals) {
     const found = await owners(literal);
     if (found.length === 1) ids.add(String(found[0].id));
   }

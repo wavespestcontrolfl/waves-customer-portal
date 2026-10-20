@@ -276,6 +276,18 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await Context.typedCustomerIds('fix the notes on 941-777-0000 and 941-555-0199', { matches: [], complete: true })).toEqual([id(300)]);
   });
 
+  test('gate on: more than 5 typed phones or emails name nobody by contact and run no lookup (Codex #6369 security P2)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(1);
+    customers[0].phone = '9417770001';
+    limitSeen.length = 0;
+    const many = Array.from({ length: 6 }, (_, i) => `941-777-000${i + 1}`).join(' ');
+    expect(await Context.typedCustomerIds(`fix the notes on ${many}`, { matches: [], complete: true })).toEqual([]);
+    expect(limitSeen).toEqual([]);
+    const five = Array.from({ length: 5 }, (_, i) => `941-777-000${i + 1}`).join(' ');
+    expect(await Context.typedCustomerIds(`fix the notes on ${five}`, { matches: [], complete: true })).toEqual([id(100)]);
+  });
+
   test('gate on: a unique name names its customer; the bare phone alone does too', async () => {
     process.env[ON] = 'true';
     customers = sameName(1);
