@@ -850,8 +850,9 @@ const NotificationService = {
       }, {
         // What the bell is about, for contact devices (contact login): the
         // preference key names the purpose (tech_en_route, service_completed);
-        // a bell without one never reaches a contact device.
-        messageType: preferenceKey || null,
+        // a bell without one (no key, so none passed) never reaches a contact
+        // device. Untyped bells keep today's option shape.
+        ...(preferenceKey ? { messageType: preferenceKey } : {}),
         ...pushOptions,
         ...(dedupeKey ? { notificationId: notification.id } : {}),
       });
