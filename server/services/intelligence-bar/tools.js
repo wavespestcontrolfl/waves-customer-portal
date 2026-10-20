@@ -677,24 +677,36 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
   return context;
 }
 
-// The name index of the customers the main query allows. An unscoped book is
-// built once and kept for five minutes (the key is the exact scoped SQL and
-// its bindings, so one filter set or scope never reads another's index). A
-// customer-scoped task or technician reads its own already-small query and
-// never touches the cache. Final rows are always re-read from the database,
-// so a customer deleted inside the window cannot be returned.
+// The name index. A customer-scoped task or technician reads its own already
+// small scoped query and never touches the cache. An unscoped book is one
+// index of every live customer, built once and kept five minutes in memory
+// (one cache entry, whatever the search filters are, so varying filters cannot
+// force rebuilds). Filters and scope are then applied to the few survivors by
+// the database (see allowedByQuery), and final rows are re-read from it too, so
+// a customer deleted inside the window cannot be returned.
 function scopedNameIndex(unsearched, scoped) {
-  const query = nameCandidates(unsearched);
-  if (scoped) return Promise.resolve(query).then(buildNameIndex);
-  const { sql, bindings } = query.toSQL();
-  return cachedNameIndex(`${sql}|${JSON.stringify(bindings)}`, () => query);
+  if (scoped) return Promise.resolve(nameCandidates(unsearched)).then(buildNameIndex);
+  const book = db('customers').whereNull('customers.deleted_at');
+  return cachedNameIndex('customers:live', () => nameCandidates(book));
+}
+
+// Keep only the survivors the main query (its filters and customer scope)
+// allows: one id-only read of at most MAX_SURVIVORS + 1 rows.
+async function allowedByQuery(unsearched, survivors) {
+  if (!survivors.length) return survivors;
+  const rows = await unsearched.clone().clearSelect().clearOrder()
+    .select('customers.id').whereIn('customers.id', survivors.map(entry => entry.id));
+  const allowed = new Set(rows.map(row => row.id));
+  return survivors.filter(entry => allowed.has(entry.id));
 }
 
 // v2 ranking: look up the few candidates that share a sound key with the
-// search (at most 500), read the context only for them, then score only them.
+// search (at most 500), keep the ones the query allows, read the context only
+// for them, then score only them.
 async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId, scoped) {
   const index = await scopedNameIndex(unsearched, scoped);
-  const survivors = prefilterNameIndex(search, index, { include: pageCustomerId ? [pageCustomerId] : [] });
+  const found = prefilterNameIndex(search, index, { include: pageCustomerId ? [pageCustomerId] : [] });
+  const survivors = scoped ? found : await allowedByQuery(unsearched, found);
   if (!survivors.length) return [];
   const context = await nameMatchContext(pageCustomerId, survivors.map(entry => entry.id));
   return rankNameMatches(search, survivors, { v2: true, limit, context, prefiltered: true });

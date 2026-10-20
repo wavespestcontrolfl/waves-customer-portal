@@ -527,6 +527,11 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
     // The same answer as scoring every row with no prefilter in the way.
     expect(ids(rankNameMatches('Pat Anderson', [named('h', 'Pat', 'Henderson')], v2))).toEqual(['h']);
     expect(survivors('Pat Lindqvest')).toContain('l');
+    // One wrong, missing or extra letter anywhere in the word still retrieves it.
+    const typos = buildNameIndex([named('j', 'Pat', 'Jones'), named('r', 'Pat', 'Ramirez')]);
+    for (const word of ['Jomes', 'Jnes', 'Jonnes', 'Zones']) expect(prefilterNameIndex(`Pat ${word}`, typos).map((e) => e.id)).toContain('j');
+    expect(ids(rankNameMatches('Pat Jomes', [named('j', 'Pat', 'Jones')], v2))).toEqual(['j']);
+    expect(ids(rankNameMatches('Pat Jomes', prefilterNameIndex('Pat Jomes', typos), { v2: true, prefiltered: true }))).toContain('j');
   });
 
   test('survivors are capped and need a shared key; an unrelated book yields none', () => {
@@ -565,9 +570,24 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
       expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(150);
       expect(second.alternatives[0]).toMatchObject({ id: 'stompf-r', match: { score: 1, reasons: ['visit_soon'] } });
       expect(candidateReads()).toBe(1);
-      // Another filter set is another cache entry.
+      // A filter set shares the one cached book: the database applies it to the survivors.
       await executeTool('query_customers', { search: 'richard dump', filters: { active: true } });
-      expect(candidateReads()).toBe(2);
+      expect(candidateReads()).toBe(1);
+      const allowQuery = db.__queries.filter((q) => q.sql.startsWith('select "customers"."id" from "customers"') && q.sql.includes('"active" =')).pop();
+      expect(allowQuery.sql).toContain('"customers"."deleted_at" is null');
+      expect(allowQuery.sql).toContain('"customers"."id" in');
+      expect(allowQuery.bindings.filter((b) => typeof b === 'string' && (/^(b|r)\d+$/.test(b) || b.startsWith('stompf'))).length).toBeLessThanOrEqual(MAX_SURVIVORS + 1);
+    });
+
+    test('a customer the query does not allow never comes back', async () => {
+      db.__rows = (q) => {
+        if (q.sql.includes('count(*)')) return [{ count: '1' }];
+        if (q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')) return everyone;
+        if (q.sql.startsWith('select "customers"."id" from "customers"')) return []; // the filters exclude every survivor
+        return [{ id: 'b00001', first_name: 'Pat', last_name: 'Dunn' }];
+      };
+      const result = await executeTool('query_customers', { search: 'richard dump', filters: { active: true } });
+      expect(result.alternatives).toBeUndefined();
     });
 
     test('a scoped task never uses the cache', async () => {
