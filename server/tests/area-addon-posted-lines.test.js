@@ -434,7 +434,7 @@ describe('the Intelligence Bar never books an area add-on by name', () => {
     const { _ibBookingPricing } = require('../services/intelligence-bar/tools');
     for (const statedPrice of [undefined, 99]) {
       const out = await _ibBookingPricing({ customer: { id: 'c-1' }, serviceType: 'Fire Ant Yard Treatment', statedPrice, conn });
-      expect(out).toEqual({ error: '"Fire Ant Yard Treatment" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.' });
+      expect(out).toEqual({ code: 'addon_by_name_unsupported', error: '"Fire Ant Yard Treatment" is an add-on treatment that is priced and limited from an estimate, so the bar can\'t book it by name from here yet. Nothing was booked.' });
     }
   });
 
