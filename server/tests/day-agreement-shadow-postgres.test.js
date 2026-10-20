@@ -87,12 +87,12 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     });
     return id;
   };
-  const text = async (customerId, body, minutesAgo, { direction = 'inbound', type = null, to = '+19415550100' } = {}) => {
+  const text = async (customerId, body, minutesAgo, { direction = 'inbound', type = null, to = '+19415550100', status = null } = {}) => {
     const id = randomUUID();
     await trx('sms_log').insert({
       id, customer_id: customerId, direction, from_phone: direction === 'inbound' ? PHONE : to, to_phone: direction === 'inbound' ? to : PHONE,
       message_body: body, created_at: ago(minutesAgo), message_type: type || (direction === 'inbound' ? 'inbound' : 'manual'),
-      status: direction === 'inbound' ? 'received' : 'sent',
+      status: status || (direction === 'inbound' ? 'received' : 'sent'),
     });
     return id;
   };
@@ -191,6 +191,15 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       // A fifth waits for the next tick.
       await call(customerId);
       expect(await shadow._internals.loadCallCandidates(trx, NOW)).toHaveLength(shadow._internals.BATCH.call);
+    });
+
+    test('a call longer than the transcript cap is skipped without a model call, never judged on a cut transcript (pre-push audit P1)', async () => {
+      const customerId = await customer();
+      await call(customerId, { transcription: `Agent: We can come Wednesday.\nCaller: Wednesday works.\n${'Caller: more talk. '.repeat(2000)}` });
+      const dispatch = answering(agreement());
+      expect(await sweep({ dispatch, findSlots: jest.fn() })).toMatchObject({ skip: 1 });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect((await decisions())[0]).toMatchObject({ verdict: 'skip', skip_reason: 'transcript_too_long' });
     });
 
     test('a call with no linked customer is recorded as a skip without a model call', async () => {
@@ -359,6 +368,19 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       // The moment's own time (the customer's reply), not the sweep's.
       expect(row.agreed_at.toISOString()).toBe('2040-03-12T14:15:00.000Z');
       expect(JSON.stringify(row)).not.toMatch(/Wednesday works|come Wednesday/);
+    });
+
+    test('a Waves text that never went out (scheduled, failed) is not shown to the judge (pre-push audit P1)', async () => {
+      const customerId = await customer();
+      await text(customerId, 'We can come Thursday instead.', 100, { direction: 'outbound', status: 'scheduled' });
+      await text(customerId, 'Sorry, Thursday is full.', 99, { direction: 'outbound', status: 'failed' });
+      await text(customerId, 'We can come Wednesday morning.', 98, { direction: 'outbound' });
+      await text(customerId, 'Wednesday works', 45);
+      const dispatch = answering(agreement({ daypart: 'morning' }));
+      await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00')] })) });
+      const prompt = dispatch.mock.calls[0][1].text;
+      expect(prompt).toContain('We can come Wednesday morning.');
+      expect(prompt).not.toMatch(/Thursday/);
     });
 
     test('which threads are candidates: day word, 3 hour window, 30 quiet minutes either way, latest inbound only', async () => {

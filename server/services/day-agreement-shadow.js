@@ -53,7 +53,10 @@ const QUIET_MS = 30 * 60 * 1000;
 const THREAD_DAYS = 14;
 const THREAD_MESSAGES = 50;
 const MESSAGE_CHARS = 600;
-const TRANSCRIPT_CHARS = 9000;
+// A longer call is skipped, never judged on a cut transcript: a later
+// withdrawal or change would be invisible (pre-push audit P1).
+const TRANSCRIPT_CHARS = 30000;
+const DELIVERED_STATUSES = ['sent', 'delivered', 'read'];
 const CALL_SCAN_LIMIT = 100;
 // Per tick, per source kind: the rest wait for the next tick (still inside the 3 hour window).
 const BATCH = { call: 4, sms: 4 };
@@ -100,7 +103,7 @@ function callCandidatesQuery(conn, now) {
     .orderBy('c.processed_at', 'asc')
     .limit(CALL_SCAN_LIMIT)
     .select('c.id', 'c.customer_id', 'c.created_at', 'c.processing_status', 'c.answered_by', 'c.ai_extraction_enriched',
-      conn.raw('left(c.transcription, ?) AS transcription', [TRANSCRIPT_CHARS]));
+      conn.raw('left(c.transcription, ?) AS transcription', [TRANSCRIPT_CHARS + 1]));
 }
 
 async function loadCallCandidates(conn, now) {
@@ -178,6 +181,9 @@ async function threadLines(conn, customerId, digits, now) {
     .where('customer_id', customerId)
     .where('created_at', '>=', new Date(now.getTime() - THREAD_DAYS * 24 * HOUR_MS))
     .whereNotNull('message_body')
+    // A Waves text counts only once it went out: a scheduled or failed row was
+    // never seen by the customer, so it is no staff word (pre-push audit P1).
+    .where((q) => q.where('direction', 'inbound').orWhereIn('status', DELIVERED_STATUSES))
     .orderBy('created_at', 'desc').orderBy('id', 'desc')
     .limit(200)
     .select('direction', 'from_phone', 'to_phone', 'message_type', 'message_body', 'created_at');
@@ -191,6 +197,7 @@ function callSource(row) {
   return {
     kind: 'call', key: `call:${row.id}`, callLogId: row.id, phoneDigits: null,
     customerId: row.customer_id || null, agreedAt: new Date(row.created_at), lines: transcript,
+    truncated: String(row.transcription || '').length > TRANSCRIPT_CHARS,
     label: `This is a phone call that started ${etStamp(new Date(row.created_at))} (Eastern time). The speaker labels may be swapped: use the content.`,
   };
 }
@@ -337,6 +344,7 @@ async function decideMoment(conn, src, index, agreement, ctx) {
 async function processSource(conn, src, ctx) {
   if (!src.customerId) return { rows: [skipRow(src, 0, 'no_customer')] };
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
+  if (src.truncated) return { rows: [skipRow(src, 0, 'transcript_too_long')] };
   const lines = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
   const parts = prompts.buildDayAgreementPrompt({
     sourceLabel: src.label, todayET: ctx.todayET, weekdayET: WEEKDAYS[etParts(ctx.now).dayOfWeek], visits: lines, lines: src.lines,
