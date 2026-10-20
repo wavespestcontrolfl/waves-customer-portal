@@ -208,9 +208,9 @@ const { doubleMetaphone } = require('../utils/double-metaphone');
 const { etDateString } = require('../utils/datetime-et');
 
 const named = (id, first, last, company = null) => ({ id, first_name: first, last_name: last, company_name: company });
-// Five other Richards that sound like "dump" push a v1 Stumpf off its list of five.
+// Five other Richards that sound like "dump" push a v1 Stompf off its list of five.
 const richards = [
-  named('stumpf', 'Richard', 'Stumpf'), named('dumas', 'Richard', 'Dumas'), named('dumbar', 'Richard', 'Dumbar'),
+  named('stompf', 'Richard', 'Stompf'), named('dumas', 'Richard', 'Dumas'), named('dumbar', 'Richard', 'Dumbar'),
   named('dumont', 'Richard', 'Dumont'), named('dumford', 'Richard', 'Dumford'), named('dumpson', 'Richard', 'Dumpson'),
   named('quill', 'Zed', 'Quill'), named('stone', 'Rick', 'Stone'),
 ];
@@ -233,28 +233,28 @@ describe('name matcher v2: scoring', () => {
       { id: 'dumpson', score: 0.95 }, { id: 'dumas', score: 0.913 }, { id: 'dumbar', score: 0.913 },
       { id: 'dumford', score: 0.913 }, { id: 'dumont', score: 0.913 },
     ]);
-    expect(ids(v1)).not.toContain('stumpf'); // five results and the cap pushed Stumpf off
-    expect(rankNameMatches('richard dump', [named('stumpf', 'Richard', 'Stumpf')])).toEqual([{ id: 'stumpf', score: 0.75 }]);
+    expect(ids(v1)).not.toContain('stompf'); // five results and the cap pushed Stompf off
+    expect(rankNameMatches('richard dump', [named('stompf', 'Richard', 'Stompf')])).toEqual([]); // v1 misses it entirely
     expect(rankNameMatches('Jhon Smyth', pool)).toEqual([{ id: 'c-person', score: 0.9 }]);
     // Context and the possessive do nothing without v2.
-    const context = { onScreenCustomerId: 'stumpf', visitTodayIds: new Set(['stumpf']), recentContactIds: new Set(['stumpf']) };
+    const context = { onScreenCustomerId: 'stompf', visitTodayIds: new Set(['stompf']), recentContactIds: new Set(['stompf']) };
     expect(rankNameMatches('richard dump', richards, { context })).toEqual(v1);
     expect(tokenize("Richard's dump")).toEqual(['richard', 's', 'dump']);
     expect(rankNameMatches("Richard's dump", richards)).toEqual([]);
     expect(rankNameMatches('Mac Donald', [named('m', 'Pat', 'McDonald')])).toEqual([]);
   });
 
-  test('"richard dump" finds Stumpf in the top eight with no context, and first with a visit today', () => {
+  test('"richard dump" finds Stompf in the top eight with no context, and first with a visit today', () => {
     const plain = rankNameMatches('richard dump', richards, v2);
-    expect(plain.find((r) => r.id === 'stumpf')).toEqual({ id: 'stumpf', score: 0.9 });
+    expect(plain.find((r) => r.id === 'stompf')).toEqual({ id: 'stompf', score: 0.9 });
     expect(plain.length).toBeLessThanOrEqual(MAX_RESULTS_V2);
     expect(plain[0].id).toBe('dumpson');
-    expect(ids(plain).indexOf('stumpf')).toBeLessThan(8);
+    expect(ids(plain).indexOf('stompf')).toBeLessThan(8);
 
-    const visit = rankNameMatches('richard dump', richards, { ...v2, context: { visitTodayIds: new Set(['stumpf']) } });
-    expect(visit[0]).toEqual({ id: 'stumpf', score: 1, reasons: ['visit_soon'] });
-    const screen = rankNameMatches('richard dump', richards, { ...v2, context: { onScreenCustomerId: 'stumpf', recentContactIds: new Set(['stumpf']) } });
-    expect(screen[0]).toEqual({ id: 'stumpf', score: 1.1, reasons: ['on_screen', 'recent_contact'] });
+    const visit = rankNameMatches('richard dump', richards, { ...v2, context: { visitTodayIds: new Set(['stompf']) } });
+    expect(visit[0]).toEqual({ id: 'stompf', score: 1, reasons: ['visit_soon'] });
+    const screen = rankNameMatches('richard dump', richards, { ...v2, context: { onScreenCustomerId: 'stompf', recentContactIds: new Set(['stompf']) } });
+    expect(screen[0]).toEqual({ id: 'stompf', score: 1.1, reasons: ['on_screen', 'recent_contact'] });
   });
 
   test('a context bonus lowers the floor to 0.65 for that customer only', () => {
@@ -270,28 +270,28 @@ describe('name matcher v2: scoring', () => {
     expect(tokenize("Richard's dump", v2)).toEqual(['richard', 'dump']);
     expect(tokenize('Richard’s dump', v2)).toEqual(['richard', 'dump']);
     expect(tokenize('richard s dump', v2)).toEqual(['richard', 'dump']);
-    expect(ids(rankNameMatches("Richard's dump", richards, v2))).toContain('stumpf');
-    expect(ids(rankNameMatches('Richard’s dump', richards, v2))).toContain('stumpf');
+    expect(ids(rankNameMatches("Richard's dump", richards, v2))).toContain('stompf');
+    expect(ids(rankNameMatches('Richard’s dump', richards, v2))).toContain('stompf');
   });
 
   test('shared endings score 0.6 to 0.9; a first name that matches exactly keeps a garbled last name as a choice', () => {
-    expect(suffixSimilarity('stumpf', 'rumpf')).toBeCloseTo(0.6 + 0.3 * (4 / 5), 5);
-    expect(suffixSimilarity('dump', 'stumpf')).toBe(0);
+    expect(suffixSimilarity('stompf', 'rumpf')).toBeCloseTo(0.6 + 0.3 * (3 / 5), 5);
+    expect(suffixSimilarity('dump', 'stompf')).toBe(0);
     expect(suffixSimilarity('jo', 'bo')).toBe(0);
     const three = [named('a', 'Richard', 'Van Dumas'), named('b', 'Zed', 'Quill')];
     expect(ids(rankNameMatches('richard van dumas', three, v2))).toEqual(['a']);
-    const choices = rankNameMatches('richard stunpfel', [named('s', 'Richard', 'Stumpf'), named('q', 'Zed', 'Quill')], v2);
+    const choices = rankNameMatches('richard stunpfel', [named('s', 'Richard', 'Stompf'), named('q', 'Zed', 'Quill')], v2);
     expect(ids(choices)).toEqual(['s']);
   });
 
   test('sound-alike tolerances: voiced pairs, pf, initial st, one dropped final consonant', () => {
     const { tolerantKey } = require('../services/intelligence-bar/name-match');
-    expect(tolerantKey('dump')).toBe(tolerantKey('stumpf'));
+    expect(tolerantKey('dump')).toBe(tolerantKey('stompf'));
     expect(tolerantKey('Tomas')).toBe(tolerantKey('Domas'));
     expect(tolerantKey('Garcia')).toBe(tolerantKey('Karcia'));
     expect(tolerantKey('Zimmer')).toBe(tolerantKey('Simmer'));
     expect(ids(rankNameMatches('Jon Stump', [named('s', 'John', 'Stumps')], v2))).toEqual(['s']);
-    expect(ids(rankNameMatches('Pat Dump', [named('s', 'Pat', 'Stumpf'), named('q', 'Pat', 'Quill')], v2))).toEqual(['s']);
+    expect(ids(rankNameMatches('Pat Dump', [named('s', 'Pat', 'Stompf'), named('q', 'Pat', 'Quill')], v2))).toEqual(['s']);
   });
 
   test('alleman finds Allman and Aleman, ahead of an unrelated name', () => {
@@ -315,7 +315,7 @@ describe('name matcher v2: scoring', () => {
   });
 
   test('a run together search word never passes for a short first name', () => {
-    expect(rankNameMatches('richard xyzzy', [named('r', 'Richard', 'Stumpf'), named('k', 'Rick', 'Stone')], v2)).toEqual([]);
+    expect(rankNameMatches('richard xyzzy', [named('r', 'Richard', 'Stompf'), named('k', 'Rick', 'Stone')], v2)).toEqual([]);
     expect(rankNameMatches('richard dump', [named('k', 'Rick', 'Stone')], v2)).toEqual([]);
   });
 
@@ -342,7 +342,7 @@ describe('name matcher v2: scoring', () => {
 });
 
 describe('query_customers name matcher v2', () => {
-  const candidates = [named('dumas', 'Richard', 'Dumas'), named('stumpf', 'Richard', 'Stumpf'), named('quill', 'Zed', 'Quill')];
+  const candidates = [named('dumas', 'Richard', 'Dumas'), named('stompf', 'Richard', 'Stompf'), named('quill', 'Zed', 'Quill')];
   const today = etDateString();
   let previous;
   beforeEach(() => {
@@ -354,15 +354,15 @@ describe('query_customers name matcher v2', () => {
     if (previous === undefined) delete process.env.GATE_NAME_MATCH_V2; else process.env.GATE_NAME_MATCH_V2 = previous;
   });
 
-  // One exact hit (Dumas), the whole book as candidates, Stumpf has a visit.
-  function oneExactHit({ visits = [{ customer_id: 'stumpf' }], texts = [], calls = [] } = {}) {
+  // One exact hit (Dumas), the whole book as candidates, Stompf has a visit.
+  function oneExactHit({ visits = [{ customer_id: 'stompf' }], texts = [], calls = [] } = {}) {
     db.__rows = (q) => {
       if (q.sql.includes('from "scheduled_services"')) return visits;
       if (q.sql.includes('from "sms_log"')) return texts;
       if (q.sql.includes('from "call_log"')) return calls;
       if (q.sql.includes('count(*)')) return [{ count: '1' }];
       if (!q.sql.includes('"customers"."email"')) return candidates; // name columns only
-      if (q.sql.includes('"customers"."id" in') && q.bindings.includes('stumpf')) return [{ id: 'stumpf', first_name: 'Richard', last_name: 'Stumpf', active: true }];
+      if (q.sql.includes('"customers"."id" in') && q.bindings.includes('stompf')) return [{ id: 'stompf', first_name: 'Richard', last_name: 'Stompf', active: true }];
       return [{ id: 'dumas', first_name: 'Richard', last_name: 'Dumas', active: true }];
     };
   }
@@ -371,7 +371,7 @@ describe('query_customers name matcher v2', () => {
   test('gate off: one exact hit is returned as is and no context is read', async () => {
     delete process.env.GATE_NAME_MATCH_V2;
     oneExactHit();
-    const result = await executeTool('query_customers', { search: 'richard dump' }, { pageCustomerId: 'stumpf' });
+    const result = await executeTool('query_customers', { search: 'richard dump' }, { pageCustomerId: 'stompf' });
     expect(result.alternatives).toBeUndefined();
     expect(result.approximate).toBeUndefined();
     expect(result.note).toBeUndefined();
@@ -384,7 +384,7 @@ describe('query_customers name matcher v2', () => {
     const result = await executeTool('query_customers', { search: 'richard dump' });
     expect(result.customers).toEqual([expect.objectContaining({ id: 'dumas' })]);
     expect(result.total_matching).toBe(1);
-    expect(result.alternatives).toEqual([expect.objectContaining({ id: 'stumpf', match: { score: 1, reasons: ['visit_soon'] } })]);
+    expect(result.alternatives).toEqual([expect.objectContaining({ id: 'stompf', match: { score: 1, reasons: ['visit_soon'] } })]);
     expect(result.exact_hit_match).toEqual({ rank: 2, score: 0.913, reasons: [] });
     expect(result.note).toMatch(/offer_choices/);
     expect(result.approximate).toBeUndefined();
@@ -399,8 +399,8 @@ describe('query_customers name matcher v2', () => {
   test('gate on: the customer on screen and a recent text count', async () => {
     process.env.GATE_NAME_MATCH_V2 = 'true';
     oneExactHit({ visits: [], texts: [{ customer_id: 'dumas' }] });
-    const result = await executeTool('query_customers', { search: 'richard dump' }, { pageCustomerId: 'stumpf' });
-    expect(result.alternatives[0]).toMatchObject({ id: 'stumpf', match: { score: 1.05, reasons: ['on_screen'] } });
+    const result = await executeTool('query_customers', { search: 'richard dump' }, { pageCustomerId: 'stompf' });
+    expect(result.alternatives[0]).toMatchObject({ id: 'stompf', match: { score: 1.05, reasons: ['on_screen'] } });
     expect(result.exact_hit_match).toEqual({ rank: 2, score: 0.963, reasons: ['recent_contact'] });
   });
 
@@ -420,10 +420,10 @@ describe('query_customers name matcher v2', () => {
   test('gate on: a scoped task (or technician) ranks and reads only its own customers', async () => {
     process.env.GATE_NAME_MATCH_V2 = 'true';
     oneExactHit();
-    await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-1'], pageCustomerId: 'stumpf' });
+    await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-1'], pageCustomerId: 'stompf' });
     expect(candidateQuery().sql).toContain('"customers"."id" in');
     expect(candidateQuery().bindings).toContain('scoped-1');
-    const rowsQuery = db.__queries.find((q) => q.sql.includes('"customers"."email"') && q.bindings.includes('stumpf'));
+    const rowsQuery = db.__queries.find((q) => q.sql.includes('"customers"."email"') && q.bindings.includes('stompf'));
     expect(rowsQuery.sql).toContain('"customers"."deleted_at" is null');
     expect(rowsQuery.bindings).toContain('scoped-1');
     // The context reads never touch the customers table: they only re-rank scoped rows.
@@ -452,7 +452,7 @@ describe('query_customers name matcher v2', () => {
     const rows = db.__rows;
     db.__rows = (q) => { if (q.sql.includes('from "sms_log"')) throw new Error('boom'); return rows(q); };
     const result = await executeTool('query_customers', { search: 'richard dump' });
-    expect(result.alternatives).toEqual([expect.objectContaining({ id: 'stumpf', match: { score: 0.9, reasons: [] } })]);
+    expect(result.alternatives).toEqual([expect.objectContaining({ id: 'stompf', match: { score: 0.9, reasons: [] } })]);
   });
 
   test('gate on: phone and email searches never rank or read context', async () => {
@@ -469,22 +469,22 @@ describe('query_customers name matcher v2', () => {
 
 describe('name match v2 work budget (Codex #6367 security P2)', () => {
   const { rankNameMatches } = require('../services/intelligence-bar/name-match');
-  const pool = [{ id: 'a', first_name: 'Richard', last_name: 'Stumpf' }];
+  const pool = [{ id: 'a', first_name: 'Richard', last_name: 'Stompf' }];
 
   test('a search with more than 6 words or 120 characters is not ranked', () => {
     expect(rankNameMatches(Array(1000).fill('richard').join(' '), pool, { v2: true })).toEqual([]);
-    expect(rankNameMatches('richard stumpf one two three four five', pool, { v2: true })).toEqual([]);
+    expect(rankNameMatches('richard stompf one two three four five', pool, { v2: true })).toEqual([]);
     expect(rankNameMatches(`richard ${'x'.repeat(130)}`, pool, { v2: true })).toEqual([]);
   });
 
   test('a long candidate name and long words finish fast', () => {
-    const big = [{ id: 'b', first_name: 'Richard', last_name: Array(500).fill('stumpf').join(' '), company_name: 'y'.repeat(5000) }];
+    const big = [{ id: 'b', first_name: 'Richard', last_name: Array(500).fill('stompf').join(' '), company_name: 'y'.repeat(5000) }];
     const started = Date.now();
-    rankNameMatches('richard stumpf', big, { v2: true });
+    rankNameMatches('richard stompf', big, { v2: true });
     expect(Date.now() - started).toBeLessThan(200);
   });
 
   test('a normal spoken name still matches', () => {
-    expect(rankNameMatches('richard stumpf', pool, { v2: true })[0]).toEqual(expect.objectContaining({ id: 'a' }));
+    expect(rankNameMatches('richard stompf', pool, { v2: true })[0]).toEqual(expect.objectContaining({ id: 'a' }));
   });
 });

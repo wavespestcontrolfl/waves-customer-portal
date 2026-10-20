@@ -178,13 +178,13 @@ function suffixSimilarity(a, b) {
 
 // Sound-alike classes for the tolerant key: a voiced and an unvoiced stop are
 // one sound to a dictation engine (d/t, b/p, g/k, v/f, z/s), and the p/f pair
-// joins them so "Stumpf" ("pf" said as "f") equals "dump".
+// joins them so "Stompf" ("pf" said as "f") equals "dump".
 const TOLERANT_CLASS = {
   D: 'T', B: 'P', V: 'P', F: 'P', G: 'K', Z: 'S',
 };
 
 // Spelling tolerances applied before the sound key: "pf" is said "f", and an
-// initial s+consonant cluster may lose its s (Stumpf / Tumpf, School / Kool).
+// initial s+consonant cluster may lose its s (Stompf / Tumpf, School / Kool).
 function tolerantKey(word) {
   let w = foldNameLetters(word).toLowerCase().replace(/[^a-z]/g, '');
   w = w.replace(/pf/g, 'f');
