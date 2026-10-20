@@ -170,7 +170,7 @@ describe('monthlyAverageFor (server decision)', () => {
       { description: 'WaveGuard setup', quantity: 1, unitPrice: 99, amount: 99, frequency: 'one_time', taxable: false },
     ]);
     const result = monthlyAverageFor({
-      estimate: estimateOf(72.3), proposal, bundle: { combinedRecurring: { waveGuardDiscountPct: 0.1 } },
+      estimate: estimateOf(72.3), proposal, bundle: { combinedRecurring: { waveGuardDiscountPct: 0.1 }, firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] },
     });
     expect(result.model.planMonthly).toBe(72.3);
     expect(result.inputs.oneTime).toEqual({ amount: 99, setup: true });
@@ -229,18 +229,41 @@ describe('monthlyAverageFor (server decision)', () => {
     expect(monthlyAverageFor({ estimate: row, proposal: pest })).toBeNull();
   });
 
-  test('one-time notice: an additive row (flea) is "charges", not "setup"; an either/or one-time option counts only its setup', () => {
-    const flea = { description: 'Flea Treatment', quantity: 1, unitPrice: 150, amount: 150, frequency: 'one_time', taxable: false };
+  describe('one-time charges beside the plan are decided by identity, never by wording', () => {
+    const cleanout = { description: 'Initial Pest Cleanout', quantity: 1, unitPrice: 250, amount: 250, frequency: 'one_time', taxable: false };
     const setup = { description: 'WaveGuard setup', quantity: 1, unitPrice: 99, amount: 99, frequency: 'one_time', taxable: false };
-    const choice = { description: 'One-Time Pest Control', quantity: 1, unitPrice: 250, amount: 250, frequency: 'one_time', taxable: false };
-    const withFlea = monthlyAverageFor({ estimate: estimateOf(31.33), proposal: proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4), setup, flea]) });
-    expect(withFlea.inputs.oneTime).toEqual({ amount: 249, setup: false });
-    expect(emailParts(withFlea.model, withFlea.inputs.oneTime).note).toContain('One-time charges $249.00, not in the average.');
-    const optionEstimate = estimateOf(31.33, { show_one_time_option: true });
-    const withChoice = monthlyAverageFor({ estimate: optionEstimate, proposal: proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4), choice]) });
-    expect(withChoice.inputs.oneTime).toBeNull();
-    const withChoiceAndSetup = monthlyAverageFor({ estimate: optionEstimate, proposal: proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4), setup, choice]) });
-    expect(withChoiceAndSetup.inputs.oneTime).toEqual({ amount: 99, setup: true });
+    const roach = { description: 'Initial German Roach Knockdown', quantity: 1, unitPrice: 75, amount: 75, frequency: 'one_time', taxable: false };
+    const flea = { description: 'Flea Treatment', quantity: 1, unitPrice: 150, amount: 150, frequency: 'one_time', taxable: false };
+    const plan = perApp('Pest Control — 4 applications/yr', 94, 4);
+    const feeSetup = { service: 'waveguard_setup', amount: 99 };
+    const feeRoach = { service: 'pest_initial_roach', amount: 75 };
+    const run = (lines, estimateExtra, bundle) => monthlyAverageFor({ estimate: estimateOf(31.33, estimateExtra), proposal: proposalOf([plan, ...lines]), bundle });
+
+    test('either/or option offered: "Initial Pest Cleanout" is the alternative, not a charge beside the plan', () => {
+      expect(run([cleanout], { show_one_time_option: true }, {}).inputs.oneTime).toBeNull();
+      expect(run([cleanout], { show_one_time_option: true }, { firstVisitFees: [] }).inputs.oneTime).toBeNull();
+    });
+
+    test('either/or option offered: only the bundle\'s real first-visit fees count, whatever the lines say', () => {
+      expect(run([setup, cleanout], { show_one_time_option: true }, { firstVisitFees: [feeSetup] }).inputs.oneTime).toEqual({ amount: 99, setup: true });
+      // Without a fee list the lone setupFee is the source (the page's feeList rule).
+      expect(run([setup, cleanout], { show_one_time_option: true }, { setupFee: feeSetup }).inputs.oneTime).toEqual({ amount: 99, setup: true });
+      expect(run([setup, cleanout], { show_one_time_option: true }, { firstVisitFees: [feeSetup, feeRoach] }).inputs.oneTime).toEqual({ amount: 174, setup: false });
+    });
+
+    test('no one-time option: every positive one-time line counts; "setup" only when it is the WaveGuard setup fee', () => {
+      expect(run([setup], {}, { firstVisitFees: [feeSetup] }).inputs.oneTime).toEqual({ amount: 99, setup: true });
+      // A breakdown row can carry the same setup charge.
+      expect(run([setup], {}, { oneTimeBreakdown: { items: [{ kind: 'charge', service: 'waveguard_setup', amount: 99 }] } }).inputs.oneTime).toEqual({ amount: 99, setup: true });
+      // Setup + roach first-visit fee: "One-time charges".
+      expect(run([setup, roach], {}, { firstVisitFees: [feeSetup, feeRoach] }).inputs.oneTime).toEqual({ amount: 174, setup: false });
+      // An additive flea row beside setup.
+      const withFlea = run([setup, flea], {}, { firstVisitFees: [feeSetup] });
+      expect(withFlea.inputs.oneTime).toEqual({ amount: 249, setup: false });
+      expect(emailParts(withFlea.model, withFlea.inputs.oneTime).note).toContain('One-time charges $249.00, not in the average.');
+      // A setup-sounding line with no setup identity is not setup ("Initial ..." wording proves nothing).
+      expect(run([cleanout], {}, {}).inputs.oneTime).toEqual({ amount: 250, setup: false });
+    });
   });
 
   test('a declared bundle credit explains a gap between the lines and the stored total', () => {

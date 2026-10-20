@@ -133,6 +133,12 @@ function computeTotals(buildings) {
 // plan's monthly (here the sum of the cadences the fixture defaults to), the
 // bundle discount and the one-time lines. The document re-validates it against
 // its own lines, so a fixture that does not reconcile prints nothing new.
+function setupOnly(pricing = {}, oneTime = 0) {
+  const rows = Array.isArray(pricing.oneTimeBreakdown?.items) ? pricing.oneTimeBreakdown.items : [];
+  const setup = round(rows.filter((row) => row?.kind === 'charge' && row.service === 'waveguard_setup').reduce((sum, row) => sum + Number(row.amount), 0));
+  return setup > 0 && Math.abs(setup - oneTime) < 0.005;
+}
+
 function monthlyAverageInputs(pricing = {}, buildings = []) {
   const lines = buildings.flatMap((building) => building.lineItems);
   const recurring = lines.filter((line) => line.frequency !== 'one_time');
@@ -148,7 +154,8 @@ function monthlyAverageInputs(pricing = {}, buildings = []) {
     planMonthly: round(planMonthly),
     credit: null,
     bundleDiscountPct: Number(pricing.combinedRecurring?.waveGuardDiscountPct) || 0,
-    oneTime: oneTime > 0 ? { amount: oneTime, setup: true } : null,
+    // setup only when the one-time dollars ARE the WaveGuard setup fee (by service identity, never wording).
+    oneTime: oneTime > 0 ? { amount: oneTime, setup: setupOnly(pricing, oneTime) } : null,
   };
 }
 

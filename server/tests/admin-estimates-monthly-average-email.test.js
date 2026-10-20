@@ -93,7 +93,7 @@ const bundleEstimate = {
         { label: 'Pest Control', service: 'pest_control', displayPrice: 90, visitsPerYear: 4, monthly: 30 },
       ],
     }],
-    oneTimeBreakdown: { items: [{ kind: 'charge', amount: 99, label: 'WaveGuard setup' }] },
+    oneTimeBreakdown: { items: [{ kind: 'charge', service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup' }] },
   } } },
 };
 
@@ -175,8 +175,8 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
       estimate_data: { sendSnapshot: { pricingBundle: {
         ...bundleEstimate.estimate_data.sendSnapshot.pricingBundle,
         oneTimeBreakdown: { items: [
-          { kind: 'charge', amount: 99, label: 'WaveGuard setup' },
-          { kind: 'charge', amount: 150, label: 'Flea Treatment' },
+          { kind: 'charge', service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup' },
+          { kind: 'charge', service: 'flea', amount: 150, label: 'Flea Treatment' },
         ] },
       } } },
     };

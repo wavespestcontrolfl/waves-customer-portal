@@ -19,8 +19,6 @@ const logger = require('./logger');
 const shared = require('../../shared/estimate-monthly-average.cjs');
 const { isCommercialAutoAcceptEstimate } = require('./estimate-commercial-identity');
 
-const SETUP_WORDING = /set-?up|membership|initial/i;
-
 const num = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -61,6 +59,42 @@ function declaredCredit(bundle, candidate = null) {
   if (candidate?.manualDiscountSuppressed === true) return null;
   const discount = liveCredit(candidate?.manualDiscount) || (bundle?.manualDiscountSuppressed === true ? null : liveCredit(bundle?.manualDiscount));
   return discount ? creditOf(discount) : null;
+}
+
+const cents = (n) => Math.round(num(n) * 100);
+
+// One-time charges that sit BESIDE the plan, by identity, never by wording.
+//
+// With a one-time option on offer (show_one_time_option) the proposal's one-time
+// rows include the either/or alternative ("Initial Pest Cleanout"), which is not
+// an extra charge. What is certainly additive is the bundle's positive first-visit
+// fees (the same source the page's fee list reads: firstVisitFees, else the lone
+// setupFee), so those alone count. Without a one-time option every positive
+// one-time line is additive (today's rule). Either way `setup` (the "One-time
+// setup" wording) is true only when every counted dollar is the WaveGuard setup
+// fee (service waveguard_setup), else the wording is "One-time charges".
+function oneTimeBesidePlan({ estimate, bundle, lines }) {
+  const fees = (Array.isArray(bundle?.firstVisitFees) && bundle.firstVisitFees.length
+    ? bundle.firstVisitFees
+    : (bundle?.setupFee ? [bundle.setupFee] : []))
+    .filter((fee) => num(fee?.amount) > 0);
+  const feeCents = fees.reduce((sum, fee) => sum + cents(fee.amount), 0);
+  const setupFeeCents = fees.filter((fee) => fee.service === 'waveguard_setup').reduce((sum, fee) => sum + cents(fee.amount), 0);
+
+  if (estimate.show_one_time_option) {
+    return feeCents > 0 ? { amount: feeCents / 100, setup: setupFeeCents === feeCents } : null;
+  }
+
+  const lineCents = lines
+    .filter((line) => line.frequency === 'one_time' && num(line.amount) > 0)
+    .reduce((sum, line) => sum + cents(line.amount), 0);
+  if (!(lineCents > 0)) return null;
+  // The setup fee may be carried by the fee list or by a breakdown row; it is the same charge, never both.
+  const rowSetupCents = (Array.isArray(bundle?.oneTimeBreakdown?.items) ? bundle.oneTimeBreakdown.items : [])
+    .filter((item) => item?.kind === 'charge' && item.service === 'waveguard_setup' && num(item.amount) > 0)
+    .reduce((sum, item) => sum + cents(item.amount), 0);
+  const knownSetupCents = setupFeeCents || rowSetupCents;
+  return { amount: lineCents / 100, setup: knownSetupCents > 0 && knownSetupCents === lineCents };
 }
 
 // Plans this feature never touches: commercial (by the canonical classifier the
@@ -126,14 +160,7 @@ function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = nu
   });
   if (!model) return null;
 
-  // When the estimate offers a one-time option, its one-time rows are the either/or
-  // alternative to the plan, not an extra charge: only the setup fee counts then.
-  const oneTimeLines = lines.filter((line) => line.frequency === 'one_time' && num(line.amount) > 0
-    && (!estimate.show_one_time_option || SETUP_WORDING.test(String(line.description || ''))));
-  const oneTimeAmount = Math.round(oneTimeLines.reduce((sum, line) => sum + num(line.amount), 0) * 100) / 100;
-  const oneTime = oneTimeAmount > 0
-    ? { amount: oneTimeAmount, setup: oneTimeLines.every((line) => SETUP_WORDING.test(String(line.description || ''))) }
-    : null;
+  const oneTime = oneTimeBesidePlan({ estimate, bundle, lines });
   return {
     model,
     inputs: { planMonthly: model.planMonthly, credit, bundleDiscountPct: bundlePct, oneTime },

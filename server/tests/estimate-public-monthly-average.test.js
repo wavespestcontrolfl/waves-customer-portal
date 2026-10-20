@@ -88,7 +88,7 @@ function perApplicationRow(overrides = {}) {
             { label: 'Pest Control', service: 'pest_control', displayPrice: 90, visitsPerYear: 4, monthly: 30 },
           ],
         }],
-        oneTimeBreakdown: { items: [{ kind: 'charge', amount: 99, label: 'WaveGuard setup' }] },
+        oneTimeBreakdown: { items: [{ kind: 'charge', service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup' }] },
       } },
     },
     ...overrides,
