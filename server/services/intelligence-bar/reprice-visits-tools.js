@@ -73,7 +73,7 @@ const REPRICE_FUTURE_VISITS_TOOL = {
   name: 'reprice_future_visits',
   description: `Change the per-visit price of ONE customer's upcoming visits for ONE service (e.g. "she is Gold now, make her future pest visits $49"). The first call returns a PREVIEW and changes nothing: each visit that changes (date, service, old price → new price), each visit left alone and why, and that no customer message is sent. The operator approves on the confirmation card. Each visit is then saved exactly as the Schedule screen's Edit appointment price edit saves it.
 Never changes a visit that is completed, in progress, invoiced, prepaid, covered by an annual prepay term, a free re-service or $0 visit, a visit with add-on lines, a plan's first (template) visit, or one holding money — those are listed on the card as left alone. At most ${MAX_VISITS} visits per card: pass through_date to split a longer schedule.
-Refused for a customer with an annual prepay term (change those prices on the Schedule screen). Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
+Refused for a customer with an annual prepay term (the bar can't reprice those from here yet). Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
 new_price is the new price of each visit in dollars (the full visit price after any discount). A percentage is not accepted: ask the operator for the dollar price. Changing a WaveGuard tier never reprices visits by itself — use this tool when the operator wants the visits repriced.
 Admin-only.`,
   input_schema: {
@@ -145,17 +145,18 @@ function pinsVersion(pins, extra) {
 }
 
 function parseInput(input) {
-  if (!UUID_RE.test(String(input.customer_id || ''))) return { error: 'Resolve the customer first (customer_id).' };
+  if (!UUID_RE.test(String(input.customer_id || ''))) return { error: 'Resolve the customer first (customer_id).', code: 'invalid_input' };
   const service = String(input.service || '').trim();
-  if (!service) return { error: 'Name the service whose visits change (for example pest or lawn).' };
+  if (!service) return { error: 'Name the service whose visits change (for example pest or lawn).', code: 'invalid_input' };
   const price = Number(input.new_price);
   if (!Number.isFinite(price) || price <= 0) {
-    return { error: 'Give the new per-visit price in dollars, above $0. To make a visit free, use the Schedule screen.' };
+    if (price === 0 && input.new_price !== null && String(input.new_price).trim() !== '') return { error: 'The bar can\'t make a visit free from here yet. Give the new per-visit price in dollars, above $0.', code: 'free_visit_unsupported' };
+    return { error: 'Give the new per-visit price in dollars, above $0.', code: 'invalid_input' };
   }
-  if (Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) return { error: 'Give the new price in whole cents.' };
-  if (price > 10000) return { error: 'That price is above $10,000 a visit. Check the amount.' };
+  if (Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) return { error: 'Give the new price in whole cents.', code: 'invalid_input' };
+  if (price > 10000) return { error: 'That price is above $10,000 a visit. Check the amount.', code: 'invalid_input' };
   const through = input.through_date == null || input.through_date === '' ? null : String(input.through_date).trim();
-  if (through && !validCalendarDate(through)) return { error: 'through_date must be a real calendar date (YYYY-MM-DD).' };
+  if (through && !validCalendarDate(through)) return { error: 'through_date must be a real calendar date (YYYY-MM-DD).', code: 'invalid_input' };
   return { service, newPrice: Math.round(price * 100) / 100, through };
 }
 
@@ -271,9 +272,9 @@ function exclusionReason(row, { invoice, hasAddons }) {
   if (row.is_callback) return 'a free re-service visit';
   // A series' template visit: the Schedule edit carries its price into the
   // visits the plan adds later, beyond what this card approves.
-  if (row.is_recurring && !row.recurring_parent_id) return "the plan's first visit (later visits copy its price) — change it on the Schedule screen";
-  if (row.estimated_price != null && Number(row.estimated_price) === 0) return 'a $0 visit — change it on the Schedule screen if that is intended';
-  if (hasAddons) return 'has add-on lines — change it on the Schedule screen';
+  if (row.is_recurring && !row.recurring_parent_id) return "the plan's first visit (later visits copy its price), which the bar can't reprice from here";
+  if (row.estimated_price != null && Number(row.estimated_price) === 0) return 'a $0 visit, which the bar can\'t reprice from here';
+  if (hasAddons) return 'has add-on lines, which the bar can\'t reprice from here';
   return null;
 }
 
@@ -282,7 +283,7 @@ async function buildPlan(input) {
     return { error: 'Repricing future visits from the bar is turned off (GATE_IB_REPRICE_VISITS). Nothing was changed.', code: 'gate_off' };
   }
   const parsed = parseInput(input);
-  if (parsed.error) return { error: parsed.error };
+  if (parsed.error) return { error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) };
   const { service, newPrice, through } = parsed;
   const customer = await loadCustomer(input.customer_id);
   if (!customer) return { error: 'Customer not found. Nothing was changed.' };
@@ -298,7 +299,7 @@ async function buildPlan(input) {
   // new prices — an effect this card cannot show. Those customers stay on the
   // Schedule screen.
   if (await hasRefreshablePrepayTerm(customer.id)) {
-    return { error: `${customerName} has an annual prepay term — change visit prices on the Schedule screen. Nothing was changed.`, code: 'annual_prepay_customer' };
+    return { error: `${customerName} has an annual prepay term, and the bar can't change visit prices for those from here yet. Nothing was changed.`, code: 'annual_prepay_customer' };
   }
   const today = etDateString();
   if (through && through < today) return { error: 'through_date is in the past. Nothing was changed.' };
@@ -379,7 +380,7 @@ function cardLines(preview) {
   for (const v of preview.already_at_price || []) {
     lines.push({ kind: 'operational', text: `Already ${v.price}: ${weekdayDate(v.date)} · ${v.service}` });
   }
-  lines.push({ kind: 'operational', text: `Each visit is saved like a price edit on the Schedule screen. Only the listed visits change; visits the plan adds later are not repriced by this card.` });
+  lines.push({ kind: 'operational', text: `Each visit is saved the way the Schedule screen saves a price edit. Only the listed visits change; visits the plan adds later are not repriced by this card.` });
   lines.push({ kind: 'operational', text: NO_MESSAGE });
   return lines;
 }
@@ -513,7 +514,7 @@ function commitResult(plan, { changed, failure, unknown }) {
   if (unknown) {
     return {
       ...body, outcome_unknown: true, code: 'execution_interrupted', unknown_visit: unknown,
-      error: `The save of the ${unknown.date} visit was interrupted — it may or may not have changed. Check it on the Schedule screen. ${resultNote(changed, null, notAttempted)}`,
+      error: `The save of the ${unknown.date} visit was interrupted — it may or may not have changed. Check the visit price before repeating the change. ${resultNote(changed, null, notAttempted)}`,
     };
   }
   if (failure && !changed.length) {

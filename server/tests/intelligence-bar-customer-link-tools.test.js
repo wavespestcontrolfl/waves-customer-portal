@@ -271,8 +271,8 @@ describe('send_autopay_setup_link', () => {
     autopay.findSavedMethodForAutoSecure.mockResolvedValue({ id: 'pm-1', stripe_payment_method_id: 'pm_synthetic' });
     for (const delivery of ['sms', 'email']) {
       const refused = await run({ delivery });
-      expect(refused).toMatchObject({ blocked: true, code: 'saved_method_available' });
-      expect(refused.error).toBe('This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, which is a billing change the bar does not make — do it from the Customers page.');
+      expect(refused).toMatchObject({ blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' });
+      expect(refused.error).toBe('This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, a billing change the bar does not make. That enrollment stays on the Customers page by the owner\'s rule.');
     }
     expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
     expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
@@ -392,7 +392,7 @@ describe('send_autopay_setup_link', () => {
 
   test('confirmed: a state that turned ineligible, got a saved card, or cannot deliver now is refused before the service', async () => {
     autopay.findSavedMethodForAutoSecure.mockResolvedValue({ id: 'pm-1' });
-    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ blocked: true, code: 'saved_method_available' });
+    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' });
     autopay.findSavedMethodForAutoSecure.mockResolvedValue(null);
     autopay.autopayDeliveryPreflight.mockResolvedValue({ ok: false, reason: 'email_opted_out' });
     expect(await run({ delivery: 'email', confirmed: true, _verified_autopay_version: EMAIL_PIN })).toMatchObject({ blocked: true, code: 'email_opted_out' });

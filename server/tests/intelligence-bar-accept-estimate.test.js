@@ -363,7 +363,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep(), { step: 'admin_bell', bell: 'per_application_fee', title: 'Per-application fee not set on a new per-application customer' }]) });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('per_application_unresolved');
-    expect(result.error).toBe('Accept this on the estimate page; the per-visit charge needs a manual review. Nothing was changed.');
+    expect(result.error).toBe("The per-visit charge on this estimate needs a manual review, so the bar can't accept it from here yet. Nothing was changed.");
   });
 
   test('an unpriced per-application add-on, which the converter refuses outright, reaches the operator with the page\'s words', async () => {
@@ -531,7 +531,7 @@ describe('fail closed', () => {
     ];
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('side_effect_outside_plan');
-    expect(result.error).toBe('This accept would also text the customer and ring an admin bell, and the bar cannot show that yet. Accept it from the estimate page. Nothing was changed.');
+    expect(result.error).toBe("This accept would also text the customer and ring an admin bell, and the bar can't show that on a card, so it can't accept this estimate from here yet. Nothing was changed.");
   });
 
   test('rows the accept changes outside the bill are worded on the card: a consultation closed as won, credit entries, repriced visits', async () => {
@@ -615,11 +615,11 @@ describe('refusals before any card', () => {
   test.each([
     ['a bait monitoring plan', { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } }],
     ['a commercial termite program', { recurring: { services: [{ name: 'Commercial Termite Bait', service: 'commercial_termite_bait', visitsPerYear: 4, monthly: 60 }] } }],
-  ])('%s is refused: termite programs are accepted on the estimate page, where the agreement is handled', async (_name, estimateData) => {
+  ])('%s is refused: the bar cannot accept termite programs yet', async (_name, estimateData) => {
     seed({ estimate: { estimate_data: estimateData, monthly_total: 35 } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('termite_program');
-    expect(result.error).toBe('Accept termite programs on the estimate page, where the agreement is handled. Nothing was changed.');
+    expect(result.error).toBe("The bar can't accept termite programs from here yet, because the agreement needs its own handling. Nothing was changed.");
     expect(writes).toEqual([]);
   });
 
@@ -627,14 +627,14 @@ describe('refusals before any card', () => {
     seed({ estimate: { estimate_data: { recurring: { services: [{ name: 'Commercial Pest Control', service: 'commercial_pest', visitsPerYear: 12, monthly: 120 }] } }, monthly_total: 120 } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('commercial_recurring');
-    expect(result.error).toBe('Accept commercial work on the estimate page. Nothing was changed.');
+    expect(result.error).toBe("The bar can't accept commercial recurring work from here yet. Nothing was changed.");
   });
 
   test('a grouped estimate is refused before any card or dry run', async () => {
     seed({ estimate: { estimate_group_id: 'group-1' }, siblings: [{ id: 'sibling-1' }] });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('grouped_estimate');
-    expect(result.error).toBe('This estimate is part of a group. Accept it from the estimate page, where the group is shown. Nothing was changed.');
+    expect(result.error).toBe("This estimate is part of a group, and the bar can't accept a grouped estimate from here yet. Nothing was changed.");
     expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
   });
 
@@ -658,7 +658,7 @@ describe('refusals before any card', () => {
       tables.customer_properties = [];
       const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
       expect(result.code).toBe('property_not_linked');
-      expect(result.error).toBe('Add or link the service address on the customer page first. Nothing was changed.');
+      expect(result.error).toBe("This estimate has no linked service address, so the bar can't accept it from here yet. Link the service address first. Nothing was changed.");
     });
 
     test('round 25: an estimate linked to an active secondary while the only primary is inactive is refused', async () => {

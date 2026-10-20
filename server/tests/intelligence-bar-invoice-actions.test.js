@@ -217,7 +217,7 @@ describe('send_invoice card', () => {
     ['processing', { status: 'processing' }, 'Bank payment is already processing'],
     ['payer statement', { payer_statement_id: 'stmt-1' }, 'Invoice is billed on the payer’s monthly statement; not sent individually.'],
     ['nothing due', { credit_applied: '129.00' }, 'Nothing is due on this invoice, so there is no pay link to send.'],
-    ['an annual-plan invoice', { annual_prepay_term_id: 'term-1' }, 'This is an annual-plan invoice. Send it from the Invoices page.'],
+    ['an annual-plan invoice', { annual_prepay_term_id: 'term-1' }, "This is an annual-plan invoice, and the bar can't send those from here yet."],
   ])('refuses %s with the route text', async (_label, overrides, text) => {
     state.invoices[0] = invoiceRow(overrides);
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ error: text });
@@ -230,7 +230,7 @@ describe('send_invoice card', () => {
     test('an invoice with no tag that is the anchor of its visit\'s annual term is refused (the resolver finds it)', async () => {
       state.invoices[0] = invoiceRow({ annual_prepay_term_id: null });
       const resolve = jest.spyOn(Prepay, 'resolveInvoiceTermId').mockResolvedValue('term-9');
-      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'annual_plan_invoice', error: 'This is an annual-plan invoice. Send it from the Invoices page.' });
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'annual_plan_invoice', error: "This is an annual-plan invoice, and the bar can't send those from here yet." });
       expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), db, { strict: true });
     });
 
@@ -258,7 +258,7 @@ describe('send_invoice card', () => {
     state.invoices[0] = invoiceRow({ scheduled_service_id: 'svc-1' });
     state.scheduled_services = [{ id: 'svc-1', status: 'cancelled' }];
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({
-      code: 'visit_terminal', error: 'Linked visit is cancelled; delivery not attempted. Void or keep this invoice from the Invoices page.',
+      code: 'visit_terminal', error: "Linked visit is cancelled; delivery not attempted. The bar can't void or keep this invoice from here yet.",
     });
     state.invoices[0] = invoiceRow({ scheduled_service_id: null, service_record_id: 'rec-1' });
     state.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1' }];
@@ -269,7 +269,7 @@ describe('send_invoice card', () => {
 
   test('refuses a dispute hold, no recipient, an unknown invoice and a double target', async () => {
     CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValueOnce(true);
-    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'collection_hold' });
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'by_owner_rule', rule: 'collection_hold' });
     Invoices.getInvoiceDeliveryRecipients.mockResolvedValueOnce(recipients({ primaryContact: { phone: '' } }));
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_no_channel', error: expect.stringMatching(/No usable phone/) });
     await expect(preview('send_invoice', { invoice_number: 'WPC-0000-0000' })).resolves.toMatchObject({ error: 'Invoice not found' });
@@ -349,10 +349,10 @@ describe('send_invoice commit', () => {
       expect(cardLines('send_invoice', card).map((l) => l.text).join(' ')).not.toMatch(/Email to|Email body/);
     });
 
-    test('a customer with an email but no phone is refused invoice_no_channel (send it from the invoice page)', async () => {
+    test('a customer with an email but no phone is refused invoice_no_channel (the bar cannot send a text from here)', async () => {
       Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ primaryContact: { phone: '' } }));
       await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({
-        code: 'invoice_no_channel', error: expect.stringMatching(/No usable phone is on file.*invoice page/),
+        code: 'invoice_no_channel', error: expect.stringMatching(/No usable phone is on file.*can't send a text from here/),
       });
     });
 
@@ -382,7 +382,7 @@ describe('send_invoice commit', () => {
     ])('%s is refused invoice_channel_unsupported and builds no card', async (_label, row) => {
       withPrefs(row);
       await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({
-        code: 'invoice_channel_unsupported', error: expect.stringMatching(/Send it from the Invoices page/),
+        code: 'invoice_channel_unsupported', error: expect.stringMatching(/can't send it from here/),
       });
     });
 
@@ -435,7 +435,7 @@ describe('send_invoice commit', () => {
       jest.spyOn(require('../services/invoice'), 'queuedPayLinkText').mockResolvedValue(queuedRow);
       jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue(SMS_RENDERED);
       const card = await preview('send_invoice', { invoice_id: INV });
-      expect(card).toMatchObject({ code: 'invoice_send_queued', error: expect.stringMatching(/A pay-link text is already scheduled for .*(8:00|AM|PM).*ET\. Let it send, or cancel it on the invoice page\./) });
+      expect(card).toMatchObject({ code: 'invoice_send_queued', error: expect.stringMatching(/A pay-link text is already scheduled for .*(8:00|AM|PM).*ET\. Let it send\. The bar can't change or cancel it from here\./) });
       expect(require('../services/invoice').queuedPayLinkText).toHaveBeenCalledWith(INV, expect.objectContaining({ adoptsQueuedInvoiceSend: false }));
       expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
     });
@@ -455,7 +455,7 @@ describe('send_invoice commit', () => {
       queued.mockResolvedValueOnce(null).mockResolvedValue(queuedRow);
       Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 409, json: { error: 'Invoice send already in progress — a text carrying this pay link is queued', code: 'queued_pay_link' } });
       const result = await run();
-      expect(result).toMatchObject({ failed: true, code: 'invoice_send_queued', error: expect.stringMatching(/^Nothing was sent: A pay-link text is already scheduled for .*ET\. Let it send, or cancel it on the invoice page\.$/) });
+      expect(result).toMatchObject({ failed: true, code: 'invoice_send_queued', error: expect.stringMatching(/^Nothing was sent: A pay-link text is already scheduled for .*ET\. Let it send\. The bar can't change or cancel it from here\.$/) });
       expect(result).not.toHaveProperty('outcome_unknown');
       expect(executionOutcome(result)).not.toBe('completed');
     });
@@ -537,7 +537,7 @@ describe('send_invoice commit', () => {
     test('an invoice the page scheduled (status scheduled + a send time) refuses the card as invoice_send_queued and names the time; a parked row does not', async () => {
       state.invoices[0] = invoiceRow({ status: 'scheduled', scheduled_send_at: new Date('2099-03-04T15:00:00Z') });
       const refused = await preview('send_invoice', { invoice_id: INV });
-      expect(refused).toMatchObject({ code: 'invoice_send_queued', error: expect.stringMatching(/A send is already scheduled for March 4 10:00 AM ET; let it send, or cancel it on the invoice page\./) });
+      expect(refused).toMatchObject({ code: 'invoice_send_queued', error: expect.stringMatching(/A send is already scheduled for March 4 10:00 AM ET, and the bar can't change or cancel a scheduled send from here\. Let it send\./) });
       state.invoices[0] = invoiceRow({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: 'parked' });
       await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ preview: true });
     });
@@ -856,7 +856,7 @@ describe('round 6', () => {
 
   test('send: notes longer than 600 characters refuse the card instead of cutting it', async () => {
     state.invoices[0].notes = 'y'.repeat(601);
-    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_copy_too_long', error: expect.stringMatching(/send it from the Invoices page/) });
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_copy_too_long', error: expect.stringMatching(/can't send this invoice from here/) });
     state.invoices[0].notes = 'y'.repeat(600);
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ preview: true });
   });

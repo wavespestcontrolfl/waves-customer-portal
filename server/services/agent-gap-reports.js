@@ -37,16 +37,26 @@ const CODE_RE = /^[a-z][a-z0-9_]{1,47}$/;
 // Refusal codes that become a gap row: the bar lacks a capability, could not
 // establish who or what the ask is about, or must be sent to another workflow.
 // Anything else with a code (not found, invalid input, a gate that is off) is
-// a normal answer and records nothing, unless its text names another screen.
+// a normal answer and records nothing, unless its text names another screen
+// or says the bar cannot do it from here (BAR_DECLINE_RE).
 const RECORDED_REFUSAL_CODES = new Set([
   'capability_unimplemented', 'capability_not_loaded', 'dependency_unresolved',
   'target_clarification_required', 'customer_scope_required', 'requires_existing_owner_workflow',
 ]);
 // By design: the bar working as intended. Never recorded, so they never become
 // `new` build work for the gap launcher (it claims every `new` bar row).
+// `by_owner_rule`: the owner ruled this stays on its screen (a refund, a saved-card
+// charge, a price or catalog change, a delete, a bulk schedule change). The
+// refusal's `rule` field names which rule; it is not a missing capability.
 const BY_DESIGN_REFUSAL_CODES = new Set([
   'permission_denied', 'approval_required', 'invalid_input', 'owner_direct_bulk_limit',
-  'write_access_required', 'execution_interrupted', 'verify_failed',
+  'write_access_required', 'execution_interrupted', 'verify_failed', 'by_owner_rule',
+]);
+// Coded refusals whose text says the bar cannot do something, but that were
+// never gap rows (a switch that is off, a provider-side limit, a gate flip that
+// is the owner's). Skipped by the text rule below so it adds no new build work.
+const UNRECORDED_DECLINE_CODES = new Set([
+  'not_a_boolean_gate', 'autopay_off_not_enabled', 'no_rerunnable_checks',
 ]);
 // A tool's own refusal that sends the operator to another screen. Only used to
 // classify; the text itself is never stored (it can hold customer data).
@@ -59,7 +69,7 @@ const REFUSAL_NOTES = {
   target_clarification_required: 'the target customer or record could not be established',
   customer_scope_required: 'the tool needs a customer scope the request did not give',
   requires_existing_owner_workflow: 'this belongs in an existing owner workflow',
-  [OTHER_SCREEN_CODE]: 'the tool sends the operator to another screen',
+  [OTHER_SCREEN_CODE]: 'the tool sends the operator to another screen or says the bar cannot do this',
   [LOOP_EXHAUSTED_CODE]: 'the tool loop ran out of steps',
 };
 // The owner's triage lifecycle (migration CHECK). Closed statuses stay out of
@@ -429,7 +439,10 @@ function recordableRefusalCode(result) {
   if (BY_DESIGN_REFUSAL_CODES.has(code)) return null;
   if (RECORDED_REFUSAL_CODES.has(code)) return code;
   const text = [result.error, result.refused].filter((value) => typeof value === 'string').join(' ');
-  if (!OTHER_SCREEN_RE.test(text)) return null;
+  if (UNRECORDED_DECLINE_CODES.has(code)) return null;
+  // A refusal that sends the operator to another screen, or that says plainly
+  // the bar cannot do this from here (the wording every tool refusal uses).
+  if (!OTHER_SCREEN_RE.test(text) && !BAR_DECLINE_RE.test(text)) return null;
   return CODE_RE.test(code) ? code : OTHER_SCREEN_CODE;
 }
 
@@ -627,5 +640,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, recordableRefusalCode, RECORDED_REFUSAL_CODES, BY_DESIGN_REFUSAL_CODES, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
+  _private: { prepareGapRow, recordableRefusalCode, RECORDED_REFUSAL_CODES, BY_DESIGN_REFUSAL_CODES, UNRECORDED_DECLINE_CODES, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
 };

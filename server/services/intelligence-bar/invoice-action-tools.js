@@ -118,9 +118,9 @@ async function planEffectsOrRefuse(run, invoice, whatFailed) {
     return await run();
   } catch (err) {
     if (err?.code === 'lead_effects_unverified') {
-      return refusal(`This invoice cannot be ${whatFailed} from the bar right now: the leads it would mark won could not be read. Try again in a minute.`, 'lead_effects_unverified', { invoice_id: invoice.id });
+      return refusal(`This invoice could not be ${whatFailed} right now: the leads it would mark won could not be read. Try again in a minute.`, 'lead_effects_unverified', { invoice_id: invoice.id });
     }
-    return refusal(`This invoice cannot be ${whatFailed} from the bar right now: what it would also do could not be checked.`, 'effects_check_failed', { invoice_id: invoice.id });
+    return refusal(`This invoice could not be ${whatFailed} right now: what it would also do could not be checked.`, 'effects_check_failed', { invoice_id: invoice.id });
   }
 }
 
@@ -136,7 +136,7 @@ const CUSTOM_COPY_LIMIT = 600;
 function customerCopy(invoice) {
   const notes = String(invoice.notes || '').trim();
   if (notes.length > CUSTOM_COPY_LIMIT) {
-    return refusal(`The invoice notes are longer than the card can show (${CUSTOM_COPY_LIMIT} characters); send it from the Invoices page.`, 'invoice_copy_too_long', { invoice_id: invoice.id });
+    return refusal(`The invoice notes are longer than the card can show (${CUSTOM_COPY_LIMIT} characters), so the bar can\'t send this invoice from here.`, 'invoice_copy_too_long', { invoice_id: invoice.id });
   }
   return { lines: [notes ? `Notes on the invoice: "${notes}"` : 'No notes on the invoice.'] };
 }
@@ -158,8 +158,8 @@ async function channelRefusalText(invoice, database, pinnedDigest) {
 // canonical resolver (invoice-payer-ownership.js) reads the stamps and the live Bill-To. Only a verified customer-owned
 // invoice is sent; a payer-owned one, or an answer that cannot be verified, is refused (fail closed). Returns the refusal
 // text, or null. Also run by the send claim (verifyOwner below), on the claimed row.
-const PAYER_OWNED_TEXT = 'This invoice is billed to a payer, not the customer. Send it from the Invoices page.';
-const OWNER_UNVERIFIED_TEXT = 'The bar could not verify who owes this invoice, so it was not sent. Send it from the Invoices page.';
+const PAYER_OWNED_TEXT = 'This invoice is billed to a payer, not the customer, so the bar can\'t send it from here yet.';
+const OWNER_UNVERIFIED_TEXT = 'The bar could not verify who owes this invoice, so it can\'t send it from here. Nothing was sent.';
 async function ownerRefusalText(invoice, database = db) {
   let verdict;
   try {
@@ -174,8 +174,8 @@ async function ownerRefusalText(invoice, database = db) {
 // An annual-plan invoice's send re-enters under the renewal gate, which the bar does not carry. The plan is found the way the
 // pay page finds it (invoice-prepay.js resolveInvoiceTermId: the invoice's own tag, else its visit's term when this invoice is
 // the term's anchor), so an anchor with no tag is still refused. A lookup that fails refuses too. Also run by the send claim.
-const ANNUAL_PLAN_TEXT = 'This is an annual-plan invoice. Send it from the Invoices page.';
-const ANNUAL_PLAN_UNVERIFIED_TEXT = 'The bar could not verify whether this is an annual-plan invoice, so it was not sent. Send it from the Invoices page.';
+const ANNUAL_PLAN_TEXT = 'This is an annual-plan invoice, and the bar can\'t send those from here yet.';
+const ANNUAL_PLAN_UNVERIFIED_TEXT = 'The bar could not verify whether this is an annual-plan invoice, so it can\'t send it from here. Nothing was sent.';
 async function annualPlanRefusalText(invoice, database = db) {
   try {
     return (await require('../invoice-prepay').resolveInvoiceTermId(invoice, database, { strict: true })) ? ANNUAL_PLAN_TEXT : null;
@@ -188,7 +188,7 @@ async function annualPlanRefusalText(invoice, database = db) {
 // text where the route has one), or null.
 // The page's Schedule send stores the time on the invoice itself (status 'scheduled' + scheduled_send_at), not as a queued text.
 // Claiming it would silently cancel that delivery, so the bar refuses and names the time. A parked row (no time) is not queued.
-const scheduledSendMessage = (invoice) => `A send is already scheduled for ${etWhen(invoice.scheduled_send_at)}; let it send, or cancel it on the invoice page.`;
+const scheduledSendMessage = (invoice) => `A send is already scheduled for ${etWhen(invoice.scheduled_send_at)}, and the bar can\'t change or cancel a scheduled send from here. Let it send.`;
 function scheduledSendRefusal(invoice) {
   if (invoice.status !== 'scheduled' || !invoice.scheduled_send_at) return null;
   return refusal(scheduledSendMessage(invoice), 'invoice_send_queued', { invoice_id: invoice.id });
@@ -228,10 +228,10 @@ async function sendRefusal(invoice, dueCents) {
   const visit = visitId ? await db('scheduled_services').where({ id: visitId }).first('status') : null;
   const terminal = neverRanVisitStatus(visit?.status);
   if (terminal) {
-    return refusal(`Linked visit is ${terminal}; delivery not attempted. Void or keep this invoice from the Invoices page.`, 'visit_terminal', at);
+    return refusal(`Linked visit is ${terminal}; delivery not attempted. The bar can\'t void or keep this invoice from here yet.`, 'visit_terminal', at);
   }
   if (await messagingHold(invoice.customer_id)) {
-    return refusal('This customer has a collections hold on billing messages. Send this invoice from the Invoices page if you mean to override it.', 'collection_hold', at);
+    return refusal('This customer has a collections hold on billing messages. Overriding a hold stays on the Invoices page by the owner\'s rule.', 'by_owner_rule', { ...at, rule: 'collection_hold' });
   }
   return null;
 }
@@ -249,7 +249,7 @@ function totalsOf(invoice, customer) {
 // How the customer chose to get invoices (notification_prefs.invoice_channels; invoice_channel for a customer who never chose).
 // The bar sends a plain text only: an App selection (alone or with Text), or a selection with no Text, is not something it can
 // honor, so it is refused. Read on `database` (the claim passes its locked handle). Returns { state, supported }.
-const CHANNEL_UNSUPPORTED_TEXT = 'This customer gets invoices in the app or by email only, not by text. Send it from the Invoices page.';
+const CHANNEL_UNSUPPORTED_TEXT = 'This customer gets invoices in the app or by email only, not by text, so the bar can\'t send it from here (it sends texts only).';
 async function billingChannelState(customerId, database = db) {
   const prefs = await database('notification_prefs').where({ customer_id: customerId }).first('invoice_channels', 'invoice_channel');
   const explicit = explicitBillingChannels(prefs || {}, 'invoice');
@@ -267,7 +267,7 @@ function etWhen(value) {
   return `${formatETDate(at)} ${formatETTime(at)} ET`;
 }
 function queuedSendRefusal(invoiceId, queued) {
-  return refusal(`A pay-link text is already scheduled${queued.scheduled_for ? ` for ${etWhen(queued.scheduled_for)}` : ''}. Let it send, or cancel it on the invoice page.`, 'invoice_send_queued', { invoice_id: invoiceId });
+  return refusal(`A pay-link text is already scheduled${queued.scheduled_for ? ` for ${etWhen(queued.scheduled_for)}` : ''}. Let it send. The bar can\'t change or cancel it from here.`, 'invoice_send_queued', { invoice_id: invoiceId });
 }
 
 // The one text the bar can send, or the refusal: the customer's phone with a text template that renders, a delivery choice
@@ -278,14 +278,14 @@ async function deliverableText(invoice, customer, who) {
   const rendered = rawPhone ? await smsRender(invoice, customer) : null;
   if (!rawPhone || !rendered?.body) {
     return refusal(rawPhone
-      ? 'The invoice text template is switched off, so there is no text to send. Send it from the invoice page.'
-      : 'No usable phone is on file, so no text can be sent. Send it from the invoice page.', 'invoice_no_channel', at);
+      ? 'The invoice text template is switched off, so the bar can\'t send a text from here.'
+      : 'No usable phone is on file, so the bar can\'t send a text from here.', 'invoice_no_channel', at);
   }
   let channels;
   try {
     channels = await billingChannelState(invoice.customer_id);
   } catch {
-    return refusal('The bar could not check how this customer gets invoices, so it was not offered. Send it from the Invoices page.', 'invoice_channel_unsupported', at);
+    return refusal('The bar could not check how this customer gets invoices, so it can\'t offer a send from here.', 'invoice_channel_unsupported', at);
   }
   if (!channels.supported) return refusal(CHANNEL_UNSUPPORTED_TEXT, 'invoice_channel_unsupported', at);
   const queued = await require('../invoice').queuedPayLinkText(invoice.id, { adoptsQueuedInvoiceSend: false });
@@ -394,7 +394,7 @@ async function queuedSendAnswer(plan) {
   let queued = null;
   try { queued = await require('../invoice').queuedPayLinkText(plan.invoice_id, { adoptsQueuedInvoiceSend: false }); } catch { /* the time is a nicety */ }
   const refused = queued ? queuedSendRefusal(plan.invoice_id, queued)
-    : refusal('A pay-link text is already scheduled for this invoice. Let it send, or cancel it on the invoice page.', 'invoice_send_queued', { invoice_id: plan.invoice_id });
+    : refusal('A pay-link text is already scheduled for this invoice. Let it send. The bar can\'t change or cancel it from here.', 'invoice_send_queued', { invoice_id: plan.invoice_id });
   return { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number, error: `Nothing was sent: ${refused.error}`, code: 'invoice_send_queued', failed: true };
 }
 

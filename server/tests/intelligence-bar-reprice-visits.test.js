@@ -179,7 +179,7 @@ describe('the card', () => {
     mockRefreshableTerm = { id: 'term-1', status: 'active', prepay_invoice_id: 'inv-void' };
     const res = await preview();
     expect(res).toMatchObject({ code: 'annual_prepay_customer' });
-    expect(res.error).toMatch(/annual prepay term — change visit prices on the Schedule screen/);
+    expect(res.error).toMatch(/annual prepay term, and the bar can't change visit prices for those from here yet/);
   });
 
   test("a visit still linked to a voided term is eligible: the canonical coverage reader decides, not the bare link", async () => {

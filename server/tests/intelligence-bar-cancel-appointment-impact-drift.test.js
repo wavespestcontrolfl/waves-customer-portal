@@ -350,7 +350,7 @@ describe('round-4 P1/P2: reseed eligibility and grouped-visit membership are rec
       _frozen_cancellation_impact: frozen,
     }, {});
 
-    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(result.error).toMatch(/stays on the Dispatch screen by the owner's rule/);
     expect(mockTransitionJobStatus).not.toHaveBeenCalled();
     expect(mockFollowThrough).not.toHaveBeenCalled();
     // Decided on the LOCKED row, not the pre-transaction read.
@@ -367,7 +367,7 @@ describe('round-4 P1/P2: reseed eligibility and grouped-visit membership are rec
       _frozen_cancellation_impact: frozen,
     }, {});
 
-    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(result.error).toMatch(/stays on the Dispatch screen by the owner's rule/);
     expect(mockTransitionJobStatus).not.toHaveBeenCalled();
     expect(mockFollowThrough).not.toHaveBeenCalled();
   });
@@ -412,7 +412,7 @@ describe('round-5 P1: invoice/credit-offer existence and follow-up-child members
       _frozen_cancellation_impact: FROZEN,
     }, {});
 
-    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(result.error).toMatch(/stays on the Dispatch screen by the owner's rule/);
     expect(mockTransitionJobStatus).not.toHaveBeenCalled();
     expect(mockFollowThrough).not.toHaveBeenCalled();
   });
@@ -425,7 +425,7 @@ describe('round-5 P1: invoice/credit-offer existence and follow-up-child members
       _frozen_cancellation_impact: FROZEN,
     }, {});
 
-    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(result.error).toMatch(/stays on the Dispatch screen by the owner's rule/);
     expect(mockTransitionJobStatus).not.toHaveBeenCalled();
     expect(mockFollowThrough).not.toHaveBeenCalled();
   });
@@ -440,7 +440,7 @@ describe('round-5 P1: invoice/credit-offer existence and follow-up-child members
       _frozen_cancellation_impact: frozen,
     }, {});
 
-    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(result.error).toMatch(/stays on the Dispatch screen by the owner's rule/);
     expect(mockTransitionJobStatus).not.toHaveBeenCalled();
     expect(mockFollowThrough).not.toHaveBeenCalled();
   });
@@ -645,7 +645,7 @@ test('a visit the bar may not cancel (owner ruling: bare visits only) is REFUSED
     _frozen_cancellation_impact: refused,
   }, {});
 
-  expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+  expect(result.error).toMatch(/stays on the Dispatch screen by the owner's rule/);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
   expect(mockFollowThrough).not.toHaveBeenCalled();
 });

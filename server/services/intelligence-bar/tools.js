@@ -3093,7 +3093,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
   // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
   if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
-    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate, so the bar does not book it by name. Booking it from an estimate stays on the Schedule screen by the owner's rule. Nothing was booked.`, code: 'by_owner_rule', rule: 'area_addon_from_estimate' };
   }
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(bookedType)) {
@@ -4020,7 +4020,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
     const oldDateStr = oldDate instanceof Date ? oldDate.toISOString().slice(0, 10) : String(oldDate || '').slice(0, 10);
     if (collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr) {
       return {
-        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was changed.',
+        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move, and the bar can\'t move a series from here yet. Nothing was changed.',
         code: 'COLLECTIVE_MOVE_REQUIRED',
       };
     }
@@ -4140,7 +4140,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // bar does not move it (ib-write-tools: the card shows everything the
   // commit does). The Schedule screen moves both.
   if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
-    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
@@ -4167,7 +4167,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // Package visit 2 recheck, atomic with this write (the preflight
       // above is only a fast refusal).
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
-        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.');
       // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
       // is changed). A same-day change and a visit with no limited add-on cost nothing.
       await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
@@ -4342,7 +4342,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so the bar does not cancel it. That cancellation stays on the Dispatch screen by the owner\'s rule. Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -4472,7 +4472,7 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     // Owner ruling 2026-09-28: the bar cancels bare visits only.
     if ((freshImpact?.card_cancel_refusals || []).length) {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'by_owner_rule', rule: 'bare_visits_only' };
     }
   }
 
@@ -4676,7 +4676,7 @@ async function cancelAppointment(input, actionContext = {}) {
       return { error: 'Appointment not found — nothing was changed.' };
     }
     if (err && err.message === '__cancel_card_refused__') {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'by_owner_rule', rule: 'bare_visits_only' };
     }
     // The visit went cancelled / no_show / skipped between the initial read
     // and the lock chain, which refuses a never-ran visit (Codex round-10

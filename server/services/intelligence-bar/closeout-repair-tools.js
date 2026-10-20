@@ -84,15 +84,15 @@ Use for: "fix the closeout for this visit", "finish what's missing on the job we
 
 // Where each open fact gets fixed when this command will not touch it.
 const MANUAL_REMEDY = {
-  completion: 'Completion is not finished — resume or finish it from Dispatch; every other fact waits on it.',
+  completion: 'Completion is not finished, and the bar can\'t finish it from here; every other fact waits on it.',
   application: 'Application log is field evidence — only the technician can record it; it is never generated.',
   photos: 'Photos are field evidence — only the technician can upload them.',
-  report: 'Publish the report from the project page (project-backed visit) or re-check the report posture.',
-  reportDelivery: 'No safe re-queue exists for this report delivery — check the customer contact and resend from the report.',
-  invoice: 'Bill the visit (or mark it intentionally free) from Billing Recovery.',
-  invoiceDelivery: 'Send the invoice or receipt from the invoice page.',
-  comms: 'There is no completion-text resend — text the customer from Communications if needed.',
-  followUp: 'Book the follow-up from Dispatch.',
+  report: 'The bar can\'t publish a project-backed visit\'s report from here yet; re-check the report posture.',
+  reportDelivery: 'No safe re-queue exists for this report delivery, and the bar can\'t resend it from here; check the customer contact.',
+  invoice: 'The bar can\'t bill this visit (or mark it intentionally free) from here. Billing Recovery does that today.',
+  invoiceDelivery: 'The bar can\'t send this invoice or receipt from here. The Invoices page does that today.',
+  comms: 'The bar has no tool to resend the completion text; text the customer with send_sms if needed.',
+  followUp: 'The bar can\'t book this follow-up from here. The Dispatch follow-up button does that today.',
   license: 'Technician license data — update the technician record; a closeout never edits it.',
 };
 
@@ -355,13 +355,13 @@ async function planInvoiceStep(status, knex) {
   // An open card hold is resolved by completion's hold rail, which this
   // repair does not run — the visit stays manual.
   if (await BillingRecoveryBill.liveCardHoldForVisit(status.serviceId, knex)) {
-    return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: 'a card hold is still open on this visit — resolve the hold, then bill it from Billing Recovery' } };
+    return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: 'a card hold is still open on this visit; resolve the hold first' } };
   }
   // Deposit-bearing visits stay manual: the mint would consume estimate
   // deposit money, an effect this card does not preview or bind.
   const deposit = await BillingRecoveryBill.pendingDepositForVisit(status.serviceId, knex);
   if (deposit > 0) {
-    return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: `an unapplied estimate deposit ($${deposit.toFixed(2)}) would apply — bill it from Billing Recovery` } };
+    return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: `an unapplied estimate deposit ($${deposit.toFixed(2)}) would apply` } };
   }
   // The exact invoice: the real Bill action run in a rolled-back transaction.
   const preview = await BillingRecoveryBill.previewBillVisit(status.serviceId, {
@@ -403,13 +403,13 @@ async function accountCreditTheSendWouldApply(customerId, knex) {
 async function planInvoiceSend(status, knex) {
   const why = (text) => ({ skip: { fact: 'invoiceDelivery', reason: 'no_invoice_yet', why: text } });
   const { customer, prefs } = await loadContact(status.visit?.customerId || null, knex);
-  if (!customer) return why('the customer record could not be read — send the invoice from the Invoices page');
-  if (prefs === PREFS_UNAVAILABLE) return why("the customer's billing settings could not be read — send the invoice from the Invoices page");
+  if (!customer) return why('the customer record could not be read');
+  if (prefs === PREFS_UNAVAILABLE) return why("the customer's billing settings could not be read");
   const { email, phone } = invoiceContacts(customer, prefs);
-  if (!email && !phone) return why('no invoice email or phone on file — the invoice is created; send it from the Invoices page');
+  if (!email && !phone) return why('no invoice email or phone on file, so the invoice is created and waits to be sent');
   const credit = await accountCreditTheSendWouldApply(customer.id, knex);
   if (credit > 0) {
-    return why(`the send would apply $${credit.toFixed(2)} of the customer's account credit — the invoice is created; send it from the Invoices page`);
+    return why(`the send would apply $${credit.toFixed(2)} of the customer's account credit, so the invoice is created and waits to be sent`);
   }
   return {
     step: {
@@ -517,7 +517,7 @@ function manualItems(facts, steps, skipped) {
     if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
     manual.push({ fact: name, state: f.state, reason: f.reason, fix: MANUAL_REMEDY[name] });
   }
-  for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `Not repairable here: ${s.why}.` });
+  for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `The bar can\'t repair this from here: ${s.why}.` });
   return manual;
 }
 
@@ -670,16 +670,16 @@ async function sendBoundaryRefusal(step, invoiceRow, knex) {
   // The approved total must still be the invoice's total — a draft edited
   // between creation and this send is not the invoice that was approved.
   if (step.total !== undefined && Math.round(Number(invoiceRow.total) * 100) !== Math.round(Number(step.total) * 100)) {
-    return `the invoice total changed to $${Number(invoiceRow.total).toFixed(2)} since approval — review it and send it from the Invoices page`;
+    return `the invoice total changed to $${Number(invoiceRow.total).toFixed(2)} since approval, so the bar can\'t send it from here; review it first`;
   }
   const { customer, prefs } = await loadContact(invoiceRow.customer_id, knex);
-  if (!customer || prefs === PREFS_UNAVAILABLE) return "the customer's contact settings could not be read — send it from the Invoices page";
+  if (!customer || prefs === PREFS_UNAVAILABLE) return "the customer's contact settings could not be read, so the bar can't send it from here";
   const { email, phone } = invoiceContacts(customer, prefs);
   if (contactsKey(email, phone) !== step.recipients_key) {
-    return "the customer's invoice email or phone changed since the card was approved — send it from the Invoices page";
+    return "the customer's invoice email or phone changed since the card was approved, so the bar can't send it from here";
   }
   if ((await accountCreditTheSendWouldApply(invoiceRow.customer_id, knex)) > 0) {
-    return 'the customer now has account credit the send would apply — send it from the Invoices page';
+    return 'the customer now has account credit the send would apply, so the bar can\'t send it from here';
   }
   return null;
 }

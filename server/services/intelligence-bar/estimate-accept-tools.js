@@ -41,7 +41,7 @@ const ESTIMATE_ACCEPT_TOOLS = [
     name: 'accept_estimate',
     description: `Mark ONE sent or viewed estimate accepted from the bar — exactly what the estimate page's "Mark accepted" does for a verbal yes. Use it when the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"); it is also how a customer's FIRST program starts. Never fake an acceptance with update_customer or create_appointment.
 The first call is a PREVIEW and changes nothing. The confirmation card shows the estimate (customer, tier, totals), each service the plan starts with its visits a year and monthly price, the monthly bill before and after line by line, the billing lane and tier change, each one-time service the quote sells (the accept does not schedule or invoice it), which visits it books (none — book them on the calendar after), every office bell it rings and every message the customer gets. Confirm marks the estimate accepted, locks its price, makes the customer an active customer, starts the plan's billing, marks a linked lead won and may email the customer a "membership started" email. No text and no invoice. It cannot be undone from the bar.
-Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program or commercial recurring work (accepted on the estimate page), any estimate that is part of a group (accept it from the estimate page), an estimate with visits already booked from it, a quote that also re-prices the customer's existing services, a per-visit charge the converter cannot resolve, and (with customer properties on) an estimate not linked to an existing property. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
+Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program or commercial recurring work, any estimate that is part of a group, an estimate with visits already booked from it, a quote that also re-prices the customer's existing services, a per-visit charge the converter cannot resolve, and (with customer properties on) an estimate not linked to an existing property. The bar does not accept commercial proposals. Annual prepay is not offered here. Admin only. Relay a refusal as it is; do not send the operator to another screen.
 Use for: "Pat accepted the lawn quote", "mark her estimate accepted", "he said yes, set him up from the estimate".`,
     input_schema: {
       type: 'object',
@@ -126,7 +126,7 @@ async function ownerRefusal(estimate, customerId, label) {
 function statusRefusal(estimate, label) {
   const { isCommercialProposalEstimate } = require('../estimate-manual-acceptance');
   if (isCommercialProposalEstimate(estimate)) {
-    return refuse('This is a commercial proposal. Mark it won from the proposal page; the bar does not accept proposals.', 'commercial_proposal');
+    return refuse('This is a commercial proposal. The bar can\'t accept proposals from here yet.', 'commercial_proposal');
   }
   if (estimate.status === 'accepted') {
     const on = estimate.accepted_at ? ` on ${etDay(estimate.accepted_at)}` : '';
@@ -149,7 +149,7 @@ function statusRefusal(estimate, label) {
 // one-time-mode accept).
 function termiteProgramRefusal(estimateData) {
   if (!require('../termite-program-agreement').collectTermiteFacts(estimateData)?.hasProgram) return null;
-  return refuse('Accept termite programs on the estimate page, where the agreement is handled.', 'termite_program');
+  return refuse('The bar can\'t accept termite programs from here yet, because the agreement needs its own handling.', 'termite_program');
 }
 
 // Every grouped estimate (estimate_group_id set) is refused, whatever the
@@ -160,7 +160,7 @@ function termiteProgramRefusal(estimateData) {
 // it again under the estimate row lock.
 function groupRefusal(estimate) {
   if (!estimate.estimate_group_id) return null;
-  return refuse('This estimate is part of a group. Accept it from the estimate page, where the group is shown.', 'grouped_estimate');
+  return refuse('This estimate is part of a group, and the bar can\'t accept a grouped estimate from here yet.', 'grouped_estimate');
 }
 
 // Everything the estimate page itself refuses, with its own words.
@@ -201,10 +201,10 @@ function conversionRefusal(estimate, estimateData, activatedTier) {
   const { selectedTermiteAnnualPlanRows } = require('../estimate-termite-program-rows');
   const parked = ['awaiting_signature', 'activated', 'signature_expired'].includes(estimate.annual_plan_activation_status);
   if (!parked && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
-    return refuse('The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront"). The bar does not offer annual prepay; use the estimate page\'s annual prepay accept.', 'termite_annual_requires_prepay');
+    return refuse('The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront"). The bar can\'t offer annual prepay from here yet.', 'termite_annual_requires_prepay');
   }
   if (frozenExtensionPlan(estimateData, activatedTier) && require('../../config/feature-gates').isEnabled('waveguardExtendExisting')) {
-    return refuse("This quote also lowers the price of the customer's existing services (WaveGuard tier extension), which re-prices booked visits and may credit prepaid ones. The bar cannot show that on a card yet; use Mark accepted on the estimate page.", 'existing_service_extension');
+    return refuse("This quote also lowers the price of the customer's existing services (WaveGuard tier extension), which re-prices booked visits and may credit prepaid ones. The bar can't show that on a card, so it can't accept this quote from here yet.", 'existing_service_extension');
   }
   return null;
 }
@@ -252,7 +252,7 @@ async function activation(estimateData, customerId) {
 // conversion would do that the card cannot show, linked visits, and a
 // property the accept would add or match.
 async function laterRefusal({ converts, estimate, estimateData, act, customerId }) {
-  if (act.commercialRecurring) return refuse('Accept commercial work on the estimate page.', 'commercial_recurring');
+  if (act.commercialRecurring) return refuse('The bar can\'t accept commercial recurring work from here yet.', 'commercial_recurring');
   // Linked visits are refused whether or not the accept converts: a one-time
   // estimate with a booked visit still takes the converter's reservation path.
   const blocked = (converts && conversionRefusal(estimate, estimateData, act.tier)) || await bookedRefusal(estimate.id);
@@ -271,7 +271,7 @@ async function propertyLinkRefusal(estimate, customerId) {
   // (ensurePrimaryProperty) would treat it as existing and create none, and
   // the account would stay without an active address for downstream readers.
   const primary = linked && await db('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first('id');
-  return primary ? null : refuse('Add or link the service address on the customer page first.', 'property_not_linked');
+  return primary ? null : refuse('This estimate has no linked service address, so the bar can\'t accept it from here yet. Link the service address first.', 'property_not_linked');
 }
 
 // The service address the card shows (codex #6113 r56): the linked property
@@ -299,7 +299,7 @@ async function bookedRefusal(estimateId) {
   const { estimateLinkedVisitsQuery } = require('../estimate-manual-acceptance');
   const rows = await estimateLinkedVisitsQuery(db, estimateId).orderBy('scheduled_date', 'asc').select('id', 'scheduled_date');
   if (!rows.length) return null;
-  return refuse(`${rows.length} visit(s) are already linked to this estimate (first ${dateOnly(rows[0].scheduled_date)}). Accepting it can add and change visits that this card cannot show yet; use Mark accepted on the estimate page.`, 'booked_from_estimate');
+  return refuse(`${rows.length} visit(s) are already linked to this estimate (first ${dateOnly(rows[0].scheduled_date)}). Accepting it can add and change visits that this card cannot show yet, so the bar can't accept it from here yet.`, 'booked_from_estimate');
 }
 
 // ── The dry run, worded for the card ──
@@ -457,16 +457,16 @@ function effectRefusal(effects) {
   const outside = effectsOfKind(effects, 'side_effect');
   if (outside.length) {
     const what = [...new Set(outside.map((e) => SIDE_EFFECT_TEXT[e.type] || 'send a message'))].join(' and ');
-    return refuse(`This accept would also ${what}, and the bar cannot show that yet. Accept it from the estimate page.`, 'side_effect_outside_plan');
+    return refuse(`This accept would also ${what}, and the bar can\'t show that on a card, so it can\'t accept this estimate from here yet.`, 'side_effect_outside_plan');
   }
   const plan = effectOf(effects, 'post_commit')?.plan || [];
   const email = plan.find((s) => s.step === 'membership_email');
   if (email && (email.reason === 'prefs_unreadable' || email.reason === 'unknown')) {
     return refuse("Could not verify the customer's email settings — try again.", 'prefs_unavailable');
   }
-  if (effectOf(effects, 'conversion')?.manual_recurring_scheduling) return refuse('Accept commercial work on the estimate page.', 'commercial_recurring');
+  if (effectOf(effects, 'conversion')?.manual_recurring_scheduling) return refuse('The bar can\'t accept commercial recurring work from here yet.', 'commercial_recurring');
   if (plan.some((s) => s.step === 'admin_bell' && s.bell === 'per_application_fee')) {
-    return refuse('Accept this on the estimate page; the per-visit charge needs a manual review.', 'per_application_unresolved');
+    return refuse('The per-visit charge on this estimate needs a manual review, so the bar can\'t accept it from here yet.', 'per_application_unresolved');
   }
   return null;
 }
@@ -693,7 +693,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
 // (the dry run rolls back).
 async function planAccept(input, actionContext = {}) {
   if (!ibAcceptEstimateLive()) {
-    return refuse('Accepting an estimate from the bar is not switched on yet (GATE_IB_ACCEPT_ESTIMATE). Tell the operator to use Mark accepted on the estimate page.', 'accept_estimate_not_enabled');
+    return refuse('Accepting an estimate from the bar is not switched on yet (GATE_IB_ACCEPT_ESTIMATE), so the bar can\'t do it from here yet.', 'accept_estimate_not_enabled');
   }
   const target = await loadTarget(input);
   if (target.error) return target;
@@ -717,7 +717,7 @@ async function planAccept(input, actionContext = {}) {
   // A recurring accept that names no program would start billing the card
   // cannot describe (codex #6113 r56): refuse it to the estimate page.
   if (preview.converts && !preview.services.length) {
-    return refuse('This estimate bills monthly but names no recurring service the card can show, so the bar cannot say what program starts or what to schedule. Accept it from the estimate page.', 'recurring_unnamed');
+    return refuse('This estimate bills monthly but names no recurring service the card can show, so the bar can\'t say what program starts or what to schedule, and can\'t accept it from here yet.', 'recurring_unnamed');
   }
   preview.card_lines = cardLines(preview);
   return preview;

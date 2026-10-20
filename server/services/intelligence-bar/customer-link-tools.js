@@ -57,8 +57,8 @@ const { maskPhone } = require('./closeout-repair-tools');
 // "f•••@example.com": enough for the operator to recognise the address.
 const maskAddress = (address) => String(address || '').replace(/^(.)[^@]*/, '$1•••');
 
-const COMPOSER_ONLY = 'Text it from the Communications composer (Insert Link does the rest: the send is verified and recorded there). The bar\'s send_sms refuses a text carrying this link.';
-const ANY_SENDER = 'Text it with send_sms on the Communications page, or draft_sms elsewhere and let the operator send; the recipient must be this customer\'s own number.';
+const COMPOSER_ONLY = 'The bar can\'t send this link from here: its send_sms refuses a text carrying it. The Communications composer\'s Insert Link sends it today (verified and recorded there).';
+const ANY_SENDER = 'Text it with send_sms, or draft it with draft_sms and let the operator send; the recipient must be this customer\'s own number.';
 
 // The Insert Link kinds, in the composer's own vocabulary. `route`: which
 // admin-communications.js handler builds it. `builds`: what the confirmed run
@@ -226,7 +226,7 @@ async function buildLink(input) {
 // ── send_autopay_setup_link ─────────────────────────────────────
 
 const AUTOPAY_DELIVERIES = ['sms', 'email'];
-const SAVED_CARD_REFUSAL = 'This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, which is a billing change the bar does not make — do it from the Customers page.';
+const SAVED_CARD_REFUSAL = 'This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, a billing change the bar does not make. That enrollment stays on the Customers page by the owner\'s rule.';
 const CHECK_LATER = ' — try again in a moment';
 // The operator's words for the reasons the service's own checks return (the
 // shared AUTOPAY_SKIP_REASONS table covers eligibility, the gates and the
@@ -259,7 +259,9 @@ function autopayReasonWords(reason) {
   const code = String(reason || 'skipped');
   return AUTOPAY_REASON_WORDS[code] || AUTOPAY_SKIP_REASONS[code] || `The Auto Pay setup link was not sent: ${code.slice(0, 160)}`;
 }
-const autopayRefusal = (reason) => ({ error: autopayReasonWords(reason), blocked: true, code: String(reason || 'skipped').slice(0, 80) });
+const autopayRefusal = (reason) => (reason === 'saved_method_available'
+  ? { error: SAVED_CARD_REFUSAL, blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' }
+  : { error: autopayReasonWords(reason), blocked: true, code: String(reason || 'skipped').slice(0, 80) });
 
 // Who the link reaches and the contact the card pins: the number's last ten
 // digits for a text, the lower-cased address for an email.
@@ -289,14 +291,14 @@ async function autopayLinkPlan(autopay, customerId) {
 // the saved card (the bar never enrolls one), then the channel preflight.
 async function autopayPlan(input) {
   const delivery = input.delivery === undefined || input.delivery === null ? 'sms' : String(input.delivery);
-  if (!AUTOPAY_DELIVERIES.includes(delivery)) return { error: `delivery must be one of ${AUTOPAY_DELIVERIES.join(', ')} (a link-only Auto Pay link stays on the Customers page)`, code: 'invalid_target' };
+  if (!AUTOPAY_DELIVERIES.includes(delivery)) return { error: `delivery must be one of ${AUTOPAY_DELIVERIES.join(', ')}. The bar can't make a link-only Auto Pay link from here yet.`, code: 'invalid_target' };
   const id = String(input.customer_id || '').trim().toLowerCase();
   if (!UUID_RE.test(id)) return { error: 'A valid customer_id is required', code: 'invalid_target' };
   const autopay = require('../autopay-setup-link');
   const eligibility = await autopay.setupLinkIneligibility(id);
   if (eligibility.reason) return autopayRefusal(eligibility.reason);
   const { customer } = eligibility;
-  if (await autopay.findSavedMethodForAutoSecure(id)) return { error: SAVED_CARD_REFUSAL, blocked: true, code: 'saved_method_available' };
+  if (await autopay.findSavedMethodForAutoSecure(id)) return { error: SAVED_CARD_REFUSAL, blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' };
   if (delivery === 'sms' && !fullUsNumber(customer.phone)) return autopayRefusal('no_customer_phone');
   const preflight = await autopay.autopayDeliveryPreflight({ customerId: id, customer, delivery, trigger: 'admin' });
   if (!preflight.ok) return autopayRefusal(preflight.reason);

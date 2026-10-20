@@ -238,7 +238,7 @@ async function switchAppointmentProperty(input, actionContext) {
   const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
   // A package visit 1 carries its address to visit 2, which this card does
   // not show: change it from the Schedule screen.
-  if ((plan.packageChildIds || []).length) return { error: 'This visit has a linked second treatment (package visit 2) that would move to the new address too. Change the address from the Schedule screen. Nothing was changed.' };
+  if ((plan.packageChildIds || []).length) return { error: 'This visit has a linked second treatment (package visit 2) that would move to the new address too. The bar can\'t change the address of a package visit 1 from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
   if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
   const result = await db.transaction(async trx => {
@@ -1158,7 +1158,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       const { openMembers, frozenVisitVerdict } = require('../visit-groups');
       const members = await openMembers(db, s.visit_id);
       if (members.length >= 2) {
-        skippedGrouped.push({ id: s.id, status: `${s.status} (grouped visit — move the stop from the schedule so the whole visit moves together)` });
+        skippedGrouped.push({ id: s.id, status: `${s.status} (grouped visit, which moves as a whole; the bar can't move it from here yet)` });
         continue;
       }
       const verdict = await frozenVisitVerdict(db, s.visit_id);
@@ -1174,15 +1174,19 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
   if (!movable.length) {
     let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
+    let errorCode = null;
     if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
-      error = 'Every selected stop is part of a grouped (or frozen) visit — move the stop from the schedule so the whole visit moves together';
+      error = 'Every selected stop is part of a grouped (or frozen) visit, which moves as a whole, and the bar can\'t move grouped visits from here yet';
+      errorCode = 'grouped_visit_move_unsupported';
     } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
-      error = 'Every selected stop is a recurring-plan visit — with collective moves on, move it from dispatch or Edit appointment so its later visits move with it';
+      error = 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet';
+      errorCode = 'collective_move_unsupported';
     } else if (skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is already on that date — nothing to move';
     }
     return {
       error,
+      ...(errorCode ? { code: errorCode } : {}),
       ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
@@ -1338,7 +1342,7 @@ async function moveStopsToDay(input, actionContext = {}) {
   // A package visit 1 with a live visit 2: the card lists only the stops,
   // so the bar does not move it (same rule as the single reschedule).
   if (await require('../package-followup-booking').hasLivePackageChild(db, classified.map((c) => c.s.id))) {
-    return { error: 'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.' };
+    return { error: 'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. The bar can\'t move that stop from here yet. Nothing was moved.', code: 'package_visit_two_linked' };
   }
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   const runBatchTrx = async () => db.transaction(async (trx) => {
@@ -1375,7 +1379,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
       // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [s.id],
-        'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.');
+        'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. The bar can\'t move that stop from here yet. Nothing was moved.');
       // A stop carrying a limited area add-on is judged for the new day at its place; a limit reached aborts the batch, nothing moves.
       await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: s.id, visit: s, scheduledDate: dateStr, staff: true });
       const committedRows = await applyTrackLifecycleCas(
