@@ -1041,9 +1041,15 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
         /* GATE_REPORT_SIMPLE_WEB: the sizes are set for a letter-size page,
-           too small for a screen. On the web the whole page is scaled up so body
-           text reads at about 15px. is-web only, so the PDF is unchanged. */
-        .service-report-document.is-web .doc-page { zoom: 1.3; }
+           too small for a screen. On the web the whole page is scaled up so the
+           smallest text (9.5px labels) reads at 14px, the customer screen floor
+           (owner sheet 2026-09-03), and body text at about 17px.
+           ServiceReportDocument.web-text-floor.test.js holds the floor. is-web
+           only, so the PDF is unchanged. */
+        .service-report-document.is-web .doc-page { zoom: 1.48; }
+        /* A long link (the products-and-safety URL) wraps instead of running
+           past a 320px phone at that scale. */
+        .service-report-document.is-web a { overflow-wrap: anywhere; }
         /* GATE_REPORT_SIMPLE_WEB: on a phone the web view stacks what the
            letter-size page sets side by side. is-web only, so the PDF is unchanged. */
         @media (max-width: 640px) {
