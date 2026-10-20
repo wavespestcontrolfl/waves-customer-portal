@@ -21,6 +21,7 @@ jest.mock('../config', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   reportSimpleWebLive: jest.fn(() => false),
+  reportGlassWebLive: jest.fn(() => false),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -196,6 +197,63 @@ describe('GET /reports/:token/data simple web report (GATE_REPORT_SIMPLE_WEB)', 
       const body = await res.json();
       expect('simpleWebReport' in body).toBe(false);
       expect(buildReportV1Data.mock.calls[0][3].mode).toBe('live');
+    });
+  });
+});
+
+describe('GET /reports/:token/data glass look (GATE_REPORT_GLASS_WEB)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    gates.reportGlassWebLive.mockReturnValue(false);
+    buildReportV1Data.mockImplementation(async () => payload());
+  });
+
+  test('glass gate off: no glassWeb key', async () => {
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.simpleWebReport).toBe(true);
+      expect('glassWeb' in body).toBe(false);
+    });
+  });
+
+  test('glass gate on, simple web on: glassWeb is true', async () => {
+    gates.reportGlassWebLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.simpleWebReport).toBe(true);
+      expect(body.glassWeb).toBe(true);
+    });
+  });
+
+  test('glass gate on, simple web off: no glassWeb key', async () => {
+    gates.reportSimpleWebLive.mockReturnValue(false);
+    gates.reportGlassWebLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect('simpleWebReport' in body).toBe(false);
+      expect('glassWeb' in body).toBe(false);
+    });
+  });
+
+  test.each(['pdf', 'static', 'sms_preview'])('glass gate on: mode=%s carries no glassWeb key', async (mode) => {
+    gates.reportGlassWebLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl, `?mode=${mode}`);
+      expect('glassWeb' in body).toBe(false);
+    });
+  });
+
+  test('glass gate on: a suppressed (internal-only) report carries no glassWeb key', async () => {
+    gates.reportGlassWebLive.mockReturnValue(true);
+    mockDb({ structured_notes: { typedReportDelivery: 'shadow' } });
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect('glassWeb' in body).toBe(false);
     });
   });
 });
