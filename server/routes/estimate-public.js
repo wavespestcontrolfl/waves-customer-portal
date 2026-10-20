@@ -30157,6 +30157,18 @@ async function composeEstimateDataPayload(estimate, {
           livePricing: proposalBilling?.livePricing || null,
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
+        // GATE_ESTIMATE_MONTHLY_AVERAGE: the inputs the document needs to print
+        // "about $X a month" under each per-application line. Null (key absent)
+        // with the gate off, for any plan that is not purely per application, and
+        // whenever the lines do not reconcile to the stored monthly total, so the
+        // document is byte-identical to today in all of those cases.
+        const monthlyAverage = proposalBilling?.billsPerApplication === true
+          ? require('../services/estimate-monthly-average').monthlyAverageFor({
+            estimate,
+            proposal: proposalForView,
+            bundle: proposalBilling.livePricing?.bundle || estimateDataForIntelligence?.sendSnapshot?.pricingBundle || null,
+          })
+          : null;
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
@@ -30203,6 +30215,7 @@ async function composeEstimateDataPayload(estimate, {
             })),
           })),
           totals: computeProposalTotals(proposalForView),
+          ...(monthlyAverage ? { monthlyAverage: monthlyAverage.inputs } : {}),
           // Structured agreement sections (slice 1A-i) — projected
           // field-by-field like everything above (the stored block is
           // admin-authored and may grow internal fields the token holder
@@ -30504,6 +30517,11 @@ async function composeEstimateDataPayload(estimate, {
       ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload(acceptanceTermsScope) } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
+      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "about $X a month"
+      // under its per-application prices (it derives the figures from the
+      // selected cadence itself, so only the switch rides here). Absent, not
+      // false, with the gate off ⇒ response byte-identical to today.
+      ...(featureGates.isEnabled('estimateMonthlyAverage') ? { monthlyAverageEnabled: true } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical
       // (absent, not false). Draft previews never offer it (a request row

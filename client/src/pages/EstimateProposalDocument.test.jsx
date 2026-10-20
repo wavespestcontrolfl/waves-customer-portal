@@ -934,3 +934,112 @@ describe('Next steps text size', () => {
     expect(sizes(open)).toHaveLength(2);
   });
 });
+
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "about $X a month" under each
+// per-application line, one plan line for two or more services. The server ships
+// proposal.monthlyAverage only with the gate on and a reconciling plan, so an
+// absent key is the gate-off document.
+describe('EstimateProposalDocument — monthly average beside per-application prices', () => {
+  const perAppLine = (description, unitPrice, visitsPerYear) => ({
+    description, quantity: 1, unitPrice, amount: unitPrice, frequency: 'per_application',
+    frequencyLabel: 'Per application', visitsPerYear, taxable: false,
+  });
+  const docData = ({ lines, monthlyAverage, oneTime = 0 }) => ({
+    ...BASE_DATA,
+    estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL' },
+    proposal: {
+      ...BASE_DATA.proposal,
+      enabled: false,
+      synthesized: true,
+      title: 'Service Proposal',
+      buildings: [{
+        name: '123 Palm Way',
+        note: null,
+        lineItems: [
+          ...lines,
+          ...(oneTime ? [{ description: 'WaveGuard setup', quantity: 1, unitPrice: oneTime, amount: oneTime, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false }] : []),
+        ],
+      }],
+      totals: { annualRecurring: 0, monthlyEquivalent: 0, oneTime, totalTax: 0, firstYearTotal: oneTime, hasTax: false, isMultiBuilding: false },
+      ...(monthlyAverage ? { monthlyAverage } : {}),
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  });
+  const single = { lines: [perAppLine('Pest Control — 4 applications/yr', 94, 4)], monthlyAverage: { planMonthly: 31.33, credit: null, bundleDiscountPct: 0, oneTime: null } };
+  const bundle = {
+    lines: [perAppLine('Lawn Care — 9 applications/yr', 56.4, 9), perAppLine('Pest Control — 4 applications/yr', 90, 4)],
+    monthlyAverage: { planMonthly: 72.3, credit: null, bundleDiscountPct: 0.1, oneTime: { amount: 99, setup: true } },
+    oneTime: 99,
+  };
+  const render1 = (data) => render(<EstimateProposalDocument data={data} token="tok-123" />).container.textContent;
+
+  it('single service: the average sits under the line, the context line prints once, no plan line', () => {
+    const { container } = render(<EstimateProposalDocument data={docData(single)} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Pest Control — 4 applications/yr');
+    expect(text).toContain('$94.00');
+    expect(text).toContain('about $31.33 a month');
+    expect(text.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
+    expect(text).not.toContain('Your plan averages');
+  });
+
+  it('multi service: per-service lines add up to the plan line, which is the stored monthly total', () => {
+    const { container } = render(<EstimateProposalDocument data={docData(bundle)} token="tok-123" />);
+    const text = container.textContent;
+    const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
+    expect(perLine).toEqual(['about $42.30 a month', 'about $30.00 a month']);
+    expect(text).toContain('Your plan averages (10% bundle savings included)');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $72.30 a month');
+    const cents = (s) => Math.round(parseFloat(s.match(/\$([\d.,]+)/)[1].replace(/,/g, '')) * 100);
+    expect(perLine.reduce((sum, s) => sum + cents(s), 0)).toBe(7230);
+    // One-time charges stay out of the average and are said so; the combined
+    // roll-ups stay suppressed (AGENTS.md price copy).
+    expect(text).toContain('One-time charges are not in the average.');
+    expect(text).not.toContain('Recurring service (per year)');
+    expect(text).not.toContain('/mo');
+  });
+
+  it('rounding remainder: lines that do not divide evenly still sum to the plan to the cent', () => {
+    const data = docData({
+      lines: [
+        perAppLine('Lawn Care — 9 applications/yr', 47.33, 9),
+        perAppLine('Pest Control — 4 applications/yr', 33.17, 4),
+        perAppLine('Tree & Shrub — 9 applications/yr', 58.37, 9),
+      ],
+      monthlyAverage: { planMonthly: 90.33, credit: null, bundleDiscountPct: 0.15, oneTime: null },
+    });
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
+    expect(perLine).toEqual(['about $35.50 a month', 'about $11.06 a month', 'about $43.77 a month']);
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $90.33 a month');
+  });
+
+  it('a plan credit prints as its own negative line', () => {
+    const data = docData({
+      lines: bundle.lines,
+      monthlyAverage: { planMonthly: 62.3, credit: { label: 'Referral Credit', monthly: 10 }, bundleDiscountPct: 0.1, oneTime: null },
+    });
+    const text = render1(data);
+    expect(text).toContain('Referral Credit');
+    expect(text).toContain('−$10.00 a month');
+    expect(text).toContain('about $62.30 a month');
+  });
+
+  it('gate off (no monthlyAverage from the server): the document is exactly as before', () => {
+    for (const fixture of [{ ...single, monthlyAverage: null }, { ...bundle, monthlyAverage: null }]) {
+      const text = render1(docData(fixture));
+      expect(text).not.toMatch(/a month|Averaged over the year|Your plan averages/);
+    }
+  });
+
+  it('withholds the average when the inputs do not reconcile to the lines', () => {
+    const text = render1(docData({ ...single, monthlyAverage: { planMonthly: 99, credit: null, bundleDiscountPct: 0, oneTime: null } }));
+    expect(text).not.toMatch(/a month|Averaged over the year/);
+  });
+
+  it('a commercial proposal never carries it', () => {
+    const data = docData(single);
+    const text = render1({ ...data, proposal: { ...data.proposal, enabled: true }, cta: { commercialProposal: true } });
+    expect(text).not.toMatch(/Averaged over the year/);
+  });
+});

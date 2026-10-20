@@ -128,6 +128,30 @@ function computeTotals(buildings) {
   };
 }
 
+// GATE_ESTIMATE_MONTHLY_AVERAGE: what the server ships as proposal.monthlyAverage
+// (monthlyAverageFor in server/services/estimate-monthly-average.js) - the
+// plan's monthly (here the sum of the cadences the fixture defaults to), the
+// bundle discount and the one-time lines. The document re-validates it against
+// its own lines, so a fixture that does not reconcile prints nothing new.
+function monthlyAverageInputs(pricing = {}, buildings = []) {
+  const lines = buildings.flatMap((building) => building.lineItems);
+  const recurring = lines.filter((line) => line.frequency !== 'one_time');
+  if (!recurring.length || !recurring.every((line) => line.frequency === 'per_application')) return null;
+  let planMonthly = 0;
+  for (const service of pricing.services || []) {
+    const frequencies = Array.isArray(service.frequencies) ? service.frequencies : [];
+    const cadence = frequencies.find((entry) => entry.key === service.defaultFrequencyKey) || frequencies[0];
+    if (cadence && cadence.quoteRequired !== true && service.isRecurring) planMonthly += Number(cadence.monthly) || 0;
+  }
+  const oneTime = round(lines.filter((line) => line.frequency === 'one_time').reduce((sum, line) => sum + line.amount, 0));
+  return {
+    planMonthly: round(planMonthly),
+    credit: null,
+    bundleDiscountPct: Number(pricing.combinedRecurring?.waveGuardDiscountPct) || 0,
+    oneTime: oneTime > 0 ? { amount: oneTime, setup: true } : null,
+  };
+}
+
 export function synthesizeDocumentProposal(payload = {}) {
   const estimate = payload.estimate || {};
   const recurring = recurringLines(payload.pricing);
@@ -151,6 +175,10 @@ export function synthesizeDocumentProposal(payload = {}) {
     terms: null,
     buildings,
     totals: computeTotals(buildings),
+    ...(() => {
+      const monthlyAverage = monthlyAverageInputs(payload.pricing, buildings);
+      return monthlyAverage ? { monthlyAverage } : {};
+    })(),
   };
 }
 

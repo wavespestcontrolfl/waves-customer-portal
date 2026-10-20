@@ -270,13 +270,13 @@ execute the workflows they describe.
   ruling 2026-09-20 (#4614).
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
-  "$X/yr") appear on any customer-facing estimate surface. Exempt:
-  invoice/prepay previews (the estimate payment section's breakdown boxes,
-  where the prepay box lists the 12-month LIST annual as a line item, never
-  a total), commercial proposals, and true monthly-billed legacy plans.
-  One owner exception: the service-report cross-sell card headline shows
-  the bare per-application amount with no unit; the number is still the
-  per-application amount and "per visit" stays banned there too.
+  "$X/yr") appear on any customer-facing estimate surface. Owner exception
+  2026-10-20 (`GATE_ESTIMATE_MONTHLY_AVERAGE`): the per-application price
+  stays the price; a smaller "about $X a month" average (plus a plan average
+  for 2+ services, = stored monthly total) may sit beneath it; "$X/mo" as
+  the price stays banned. Exempt: prepay previews (12-month LIST
+  annual line item), commercial proposals, monthly-billed legacy plans, and
+  the service-report cross-sell card headline (bare amount, no unit).
 - **Appointment windows start on the hour.** `window_start` is always
   HH:00:00 — flag slot/window creation that can produce :15/:30 starts
   (`admin-leads.js` rejects them at entry, #3056). `window_end` is

@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
-import { fmtMoney } from '../lib/money';
+import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { RATE_REVIEW_TERMS_LINE, copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
+import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, aboutMonth, buildMonthlyAverage, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import {
   glassCtaMicroForKeys,
   glassRowInclusions,
@@ -386,6 +387,31 @@ export default function EstimateProposalDocument({ data, token }) {
     || correctiveWork.some((work) => work.taxable === true)
     || programList.some((program) => program.taxable === true);
   const taxRatePct = Number(totals.taxRate) > 0 ? (Number(totals.taxRate) * 100).toFixed(2) : null;
+  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "about $X a month" under
+  // each per-application line, plus one plan line when there are two or more
+  // services. The server sends the inputs only when the gate is on and the
+  // lines reconcile to the stored monthly total; the shared builder (also used
+  // by the email) then yields per-service averages that add up to the plan
+  // average to the cent. The per-application price stays the price.
+  const monthlyAverage = (() => {
+    const inputs = proposal?.monthlyAverage;
+    if (!inputs || authoredProposal || isCommercial || !quotesPerApp) return null;
+    const lines = buildings.flatMap((b) => (b.lineItems || [])).filter((li) => li.frequency !== 'one_time');
+    if (lines.length === 0 || !lines.every((li) => li.frequency === 'per_application')) return null;
+    const model = buildMonthlyAverage({
+      services: lines.map((li, i) => ({
+        key: String(i),
+        label: li.description,
+        perApplication: li.amount,
+        visits: li.visitsPerYear,
+      })),
+      planMonthly: inputs.planMonthly,
+      credit: inputs.credit || null,
+      bundleDiscountPct: inputs.bundleDiscountPct || 0,
+    });
+    if (!model) return null;
+    return { model, byLine: new Map(lines.map((li, i) => [li, model.services[i]])), oneTime: inputs.oneTime || null };
+  })();
   const showRecurringTotals = !suppressPlanTotals && Number(totals.annualRecurring) > 0;
   const showGrandTotal = !suppressPlanTotals || Number(totals.annualRecurring) <= 0;
   const grandTotalLabel = Number(totals.annualRecurring) > 0 ? 'First-year total' : 'Total';
@@ -564,6 +590,11 @@ export default function EstimateProposalDocument({ data, token }) {
                     <span style={{ minWidth: 0, color: INK }}>
                       {item.description || 'Service'}
                       {showsLineBasis(item) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
+                      {monthlyAverage?.byLine.get(item) ? (
+                        <span data-monthly-average-line="" style={{ display: 'block', color: MUTED, fontVariantNumeric: 'tabular-nums' }}>
+                          {aboutMonth(monthlyAverage.byLine.get(item).monthly)}
+                        </span>
+                      ) : ''}
                     </span>
                     <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
                       {fmtMoney(item.amount)}
@@ -604,6 +635,30 @@ export default function EstimateProposalDocument({ data, token }) {
               </div>
             )}
             <div style={{ marginTop: 8 }}>
+              {monthlyAverage ? (
+                <div data-monthly-average="" style={{ padding: '3px 0 6px', fontSize: 11.5, lineHeight: 1.5 }}>
+                  {monthlyAverage.model.credit ? (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, padding: '3px 0' }}>
+                      <span style={{ color: MUTED }}>{monthlyAverage.model.credit.label}</span>
+                      <span style={{ fontWeight: 700, color: INK, fontVariantNumeric: 'tabular-nums' }}>
+                        {fmtMoneySigned(-monthlyAverage.model.credit.monthly)} a month
+                      </span>
+                    </div>
+                  ) : null}
+                  {monthlyAverage.model.multi ? (
+                    <div data-monthly-average-plan="" style={{ display: 'flex', justifyContent: 'space-between', gap: 14, padding: '3px 0' }}>
+                      <span style={{ color: INK, fontWeight: 700 }}>{monthlyAveragePlanLabel(monthlyAverage.model)}</span>
+                      <span style={{ fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                        {aboutMonth(monthlyAverage.model.planMonthly)}
+                      </span>
+                    </div>
+                  ) : null}
+                  <div style={{ fontSize: 10.5, color: MUTED }}>
+                    {MONTHLY_AVERAGE_CONTEXT}
+                    {monthlyAverage.oneTime ? ' One-time charges are not in the average.' : ''}
+                  </div>
+                </div>
+              ) : null}
               {showRecurringTotals ? (
                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 11.5 }}>
                   <span style={{ color: MUTED }}>Recurring service (per year)</span>

@@ -255,7 +255,7 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-function moneySummary(estimate = {}, { allowTotals = false } = {}) {
+function moneySummary(estimate = {}, { allowTotals = false, average = null } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
   const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
   const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
@@ -269,6 +269,10 @@ function moneySummary(estimate = {}, { allowTotals = false } = {}) {
         ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
         : `$${monthlyTotal.toFixed(2)}/mo`;
     }
+    // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): `average` is the
+    // resolved {priceLine, note} for a plan whose per-application lines
+    // reconcile to the stored monthly total; absent = the line as before.
+    if (average?.priceLine) return average.priceLine;
     return 'Priced per application — full breakdown inside';
   }
   if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
@@ -293,7 +297,7 @@ const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. T
 // preview, the verdict check and the send all use these).
 const emailPdfCopy = () => require('../services/estimate-email-pdf');
 
-function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '' }) {
+function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '', average = null }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
     estimateData: estimate.estimate_data,
@@ -301,12 +305,17 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   return {
     first_name: firstName,
     estimate_url: viewUrl,
-    price_summary: priceLine || moneySummary(estimate, { allowTotals: proposalMode }),
+    price_summary: !proposalMode && average?.priceLine
+      ? moneySummary(estimate, { average })
+      : (priceLine || moneySummary(estimate, { allowTotals: proposalMode })),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
+    // GATE_ESTIMATE_MONTHLY_AVERAGE: the "Averaged over the year ..." line rides
+    // in front of the next-step paragraph (the template has no block for it, and
+    // a template publish is not needed). Absent average = the sentence as before.
     next_step_summary: proposalMode
       ? PROPOSAL_NEXT_STEP_SUMMARY
-      : 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
+      : `${average?.note ? `${average.note} ` : ''}When you are ready, open the estimate and accept it online. We will collect the final setup details after that.`,
     // Only present when the PDF copy rides along (GATE_ESTIMATE_EMAIL_PDF):
     // an absent key renders no block, so a send without it is unchanged.
     ...(pdfNote ? { estimate_pdf_note: pdfNote } : {}),
@@ -900,6 +909,8 @@ async function buildEstimateSendPreview(estimate) {
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
   const priceLine = estimateEmailPriceLine(estimate);
+  // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
+  const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
   const sms = await smsTemplatesRouter.getTemplate('estimate_sent', {
     first_name: firstName, estimate_url: viewUrl,
   }, {}, { noVariants: true, audit: false });
@@ -918,7 +929,7 @@ async function buildEstimateSendPreview(estimate) {
     const pdfNote = pdfCopy ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
     const rendered = EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
-      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote }),
+      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average }),
     });
     // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a
     // schedule built from it). Present only when true, so a send with no PDF
@@ -950,7 +961,7 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null, average = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   // The delivery PDF copy's note, fence and veto handling (estimate-email-pdf.js).
   const pdfPieces = emailPdfCopy().deliverySendPieces(pdf);
@@ -966,7 +977,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         ...(versionId ? { versionId } : {}),
         ...(expectedContentHash ? { expectedContentHash } : {}),
         to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote: pdfPieces.note }),
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote: pdfPieces.note, average }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
@@ -3065,11 +3076,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
+          // GATE_ESTIMATE_MONTHLY_AVERAGE: the same resolution the review
+          // preview ran (null with the gate off or for a commercial proposal).
+          const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
             viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
+            average,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: pdfCopy.attachment ? [pdfCopy.attachment] : proposalAttachments,
             pdf: pdfCopy,
@@ -5824,6 +5839,8 @@ router._internals = {
   estimateDataHasBlockingLeadAutomation,
   estimateMatchesSentOnlyScope,
   sendEstimateEmail,
+  moneySummary,
+  estimateEmailPayload,
   estimateEmailIdempotencyKey,
   smtpFallbackAllowed,
   resolveEstimateStatusPatch,

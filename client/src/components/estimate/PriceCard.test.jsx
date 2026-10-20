@@ -948,3 +948,47 @@ describe('PriceCard — ROWLESS split T&S card renders frequency.palmCount (Code
     expect(screen.getAllByText(/Includes care for your 4 palms/)).toHaveLength(1);
   });
 });
+
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): a second, smaller line under
+// the per-application price. The price stays the price; the line is absent with
+// the gate off (the page passes null).
+describe('PriceCard — monthly average line', () => {
+  const frequency = {
+    key: 'quarterly', monthly: 31.33, annual: 376, perVisit: 94, perTreatment: 94, visitsPerYear: 4,
+    perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: 94, visitsPerYear: 4, monthly: 31.33 }],
+  };
+
+  it('shows "about $X a month" under the per-application price, and the context once when asked', () => {
+    const { container } = render(
+      <PriceCard frequency={frequency} preferPerApplicationPrice monthlyAverageLine="about $31.33 a month" monthlyAverageContext="Averaged over the year. You pay after each application." />,
+    );
+    expect(screen.getAllByText('$94.00').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('/ application').length).toBeGreaterThan(0);
+    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('about $31.33 a month');
+    expect(screen.getByText('Averaged over the year. You pay after each application.')).toBeInTheDocument();
+    // "$X/mo" as the price stays banned.
+    expect(container.textContent).not.toMatch(/\$31\.33\s*\/\s*mo/);
+  });
+
+  it('gate off: nothing extra renders', () => {
+    const { container } = render(<PriceCard frequency={frequency} preferPerApplicationPrice />);
+    expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+    expect(container.textContent).not.toMatch(/a month|Averaged over the year/);
+  });
+
+  it('a card that still bills a flat monthly never says it is paid after each application', () => {
+    const legacy = { ...frequency, key: 'standard', billingFrequencyKey: 'monthly', monthly: 42.3, perTreatment: 56.4, visitsPerYear: 9, perServiceTreatments: [{ displayPrice: 56.4, visitsPerYear: 9, monthly: 42.3 }] };
+    const { container } = render(
+      <PriceCard frequency={legacy} preferPerApplicationPrice monthlyAverageLine="about $42.30 a month" monthlyAverageContext="Averaged over the year." />,
+    );
+    expect(container.textContent).toContain('Billed $42.30/mo');
+    expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+  });
+
+  it('a card without a per-application price (cadence fallback) shows no average line', () => {
+    const { container } = render(
+      <PriceCard frequency={{ key: 'quarterly', monthly: 31.33 }} preferPerApplicationPrice monthlyAverageLine="about $31.33 a month" />,
+    );
+    expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+  });
+});

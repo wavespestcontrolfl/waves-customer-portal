@@ -186,6 +186,39 @@ export function RowInclusions({ items, collapsible = false }) {
   );
 }
 
+// Applications per year for a frequency, only when unambiguous: the entry's own
+// count, else the single visit-bearing treatment row's, else (with no rows at
+// all) the cadence key's. Several rows of differing counts resolve to null
+// rather than advertising one number for all of them. Shared by the card's
+// cadence line and the monthly-average line (GATE_ESTIMATE_MONTHLY_AVERAGE).
+export function perApplicationVisitsForFrequency(frequency) {
+  if (!frequency) return null;
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
+    : [];
+  return Number(frequency.visitsPerYear) > 0
+    ? Number(frequency.visitsPerYear)
+    : (treatmentVisitRows.length === 1
+      ? Number(treatmentVisitRows[0].visitsPerYear)
+      : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
+}
+
+// True when a card that leads with a per-application price still CHARGES a flat
+// monthly (legacy monthly-billed rows with no billedPerApplication flag whose
+// monthly differs from the per-application figure). Such a card shows "Billed
+// $X/mo" and must never also say "you pay after each application".
+export function perApplicationBilledMonthly(frequency, perAppNet) {
+  if (!frequency || perAppNet == null) return false;
+  const billingKey = billingKeyForFrequency(frequency);
+  const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
+  if (frequency.quoteRequired === true || frequency.monthly == null) return false;
+  const cadencePrice = Math.round(Number(frequency.monthly) * intervalMonths * 100) / 100;
+  return intervalMonths === 1
+    && !frequency.billedPerApplication
+    && Math.abs(cadencePrice - perAppNet) >= 0.05;
+}
+
 // Pure per-application derivation shared with the sticky book bar so the bar
 // quotes exactly the figure this card leads with. Returns the net
 // per-application price, or null when no single unambiguous one exists (the
@@ -228,7 +261,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null, noGuarantee = false, guaranteeScope: guaranteeScopeProp = null }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null, noGuarantee = false, guaranteeScope: guaranteeScopeProp = null, monthlyAverageLine = null, monthlyAverageContext = null }) {
   // The estimate's guarantee scope; older callers pass the noGuarantee boolean.
   const inclusionScope = guaranteeScopeProp || (noGuarantee ? 'none' : 'all');
   if (!frequency) return null;
@@ -369,6 +402,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
   const showBilledMonthlyNote = perAppNet != null && intervalMonths === 1
     && !frequency.billedPerApplication
     && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
+  const monthlyAverageShown = !!monthlyAverageLine && perAppNet != null && !showBilledMonthlyNote;
   // Per-application cards show the muted applications-per-year count directly
   // under the price. Originally rowless split-section entries only (codex P2 —
   // no per-row sub-label to carry cadence); extended to glass single-row cards
@@ -513,6 +547,21 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
       {showBilledMonthlyNote ? (
         <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
           Billed {fmtMoney(cadencePrice)}/mo
+        </div>
+      ) : null}
+
+      {/* GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): a second, smaller
+          line under the per-application price. The price above stays the
+          price; this is an average of the year, never "$X/mo" as the price.
+          Absent (null) with the gate off, so the card is unchanged. */}
+      {monthlyAverageShown ? (
+        <div data-monthly-average-line="" style={{ fontSize: 15, fontWeight: 500, color: CUSTOMER_SURFACE.muted, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>
+          {monthlyAverageLine}
+        </div>
+      ) : null}
+      {monthlyAverageContext && monthlyAverageShown ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 4, lineHeight: 1.5 }}>
+          {monthlyAverageContext}
         </div>
       ) : null}
 
