@@ -204,14 +204,16 @@ describe('which service the picker is asked about', () => {
     { id: 4, name: 'Waves Assessment', short_name: 'Waves Assess', service_key: 'lawn_inspection' },
   ];
 
-  test('resolves an exact name, short name or key through the call booking resolver', () => {
+  test('resolves only an exact name, short name or key (no keyword rules)', () => {
     expect(internals.resolveNewVisitService(catalog, 'Quarterly Pest Control Service').id).toBe(1);
     expect(internals.resolveNewVisitService(catalog, 'pest quarterly').id).toBe(1);
     expect(internals.resolveNewVisitService(catalog, 'lawn_care_monthly').id).toBe(2);
   });
 
   test('a missing, unknown, multi-service or generic service is unresolved', () => {
-    for (const text of [null, '', '  ', 'pest control', 'pest and lawn', 'Waves Pest Control Appointment Service', 'Waves Assessment']) {
+    for (const text of [null, '', '  ', 'pest control', 'pest and lawn', 'Waves Pest Control Appointment Service', 'Waves Assessment',
+      // A combined ask never resolves to its first keyword match (pre-push audit P1).
+      'Quarterly Pest Control Service and Monthly Lawn Care Service', 'cockroach control and rodent trapping']) {
       expect(internals.resolveNewVisitService(catalog, text)).toBeNull();
     }
     expect(internals.resolveNewVisitService([], 'Quarterly Pest Control Service')).toBeNull();

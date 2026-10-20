@@ -41,7 +41,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isRealConversation, parseExtraction } = require('./call-held-visits');
-const { loadBookableCallServices, resolveCallBookingCatalogService, isGenericCallCatalogRow } = require('./call-booking-catalog');
+const { loadBookableCallServices, isGenericCallCatalogRow } = require('./call-booking-catalog');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { scrubPans } = require('../utils/pan-scrub');
@@ -328,18 +328,19 @@ async function dropCollidingSlots(slots, {
   return shaped.filter((s) => kept.has(s)).map((s) => s.slot);
 }
 
-// The one catalog service an agreed new visit is for: the judged service text
-// resolved through the call booking path's own resolver (exact name, short name
-// or key, then its keyword rules) over the bookable catalog. A generic row (the
-// anything-appointment, the assessment) is no settled service, and neither is no
-// match: null, so the sweep never asks the picker about work it cannot name.
+// The one catalog service an agreed new visit is for. The prompt lists the
+// bookable catalog names and the model copies ONE exactly, so only an exact
+// match of a name, short name or key counts: no keyword rules, which take the
+// first match and would turn "cockroach control and rodent trapping" into one
+// service (pre-push audit P1). A generic row (the anything-appointment, the
+// assessment) is no settled service either: null, so the sweep never asks the
+// picker about work it cannot name.
 function resolveNewVisitService(catalog, serviceText) {
-  const text = String(serviceText || '').trim();
-  if (!text || !catalog.length) return null;
-  const row = resolveCallBookingCatalogService({
-    extracted: { specific_service_name: text, matched_service: text, requested_service: text }, services: catalog,
-  });
-  return row && !isGenericCallCatalogRow(row) ? row : null;
+  const text = String(serviceText || '').trim().toLowerCase();
+  if (!text) return null;
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const hits = catalog.filter((row) => [row.name, row.short_name, row.service_key].some((v) => v && norm(v) === text));
+  return hits.length === 1 && !isGenericCallCatalogRow(hits[0]) ? hits[0] : null;
 }
 
 // Name and length of the visit the picker is asked about: the moved visit's own
