@@ -119,7 +119,7 @@ async function activeCustomerByPhone(phone) {
 // Consulted only after the holder lookup found nothing: a number that is
 // someone's own account always signs in as that account.
 async function contactCustomerByPhone(phone) {
-  const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
+  const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
   const last10 = normalizePhoneDigits(phone);
   if (last10.length < 10) return null;
   const rows = await db('customers')
@@ -136,6 +136,9 @@ async function contactCustomerByPhone(phone) {
     .orderBy('created_at', 'asc')
     .limit(10);
   for (const row of rows) {
+    // Only a number the holder attested to may log in (customer-contact.js
+    // contactSlotMayLogIn): an inferred, unconsented slot phone is unknown.
+    if (!contactSlotMayLogIn(row, last10)) continue;
     const contact = findServiceContactSlotByPhoneKey(row, last10);
     if (contact) return { customer: row, contact };
   }

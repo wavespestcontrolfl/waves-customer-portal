@@ -173,7 +173,11 @@ function contactLoginLive() {
 // number now the holder's own). Pure apart from the gate read.
 function contactSessionFor(customer, contactKey) {
   if (!contactKey || !contactLoginLive()) return null;
-  const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
+  const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
+  // The holder's attestation covers this number (customer-contact.js
+  // contactSlotMayLogIn): an inferred, still-unconsented slot phone is no
+  // session, and a session dies if its number becomes one.
+  if (!contactSlotMayLogIn(customer, contactKey)) return null;
   return findServiceContactSlotByPhoneKey(customer, contactKey);
 }
 

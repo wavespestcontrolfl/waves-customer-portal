@@ -474,6 +474,20 @@ function findServiceContactSlotByPhoneKey(customer, phoneKey) {
   return null;
 }
 
+// Contact login (GATE_CONTACT_LOGIN): may the person at this slot phone sign
+// in as a contact? Only a number the account holder put there and attested
+// to (service_contacts_consent_at) — the same boundary every text resolver
+// applies. A phone the call pipeline inferred and filed as unconsented
+// (unconsented_slot_phone_keys, #5467) waits for that person's own YES,
+// exactly as their texts do: a plausible-but-wrong inferred number must not
+// become a login to the customer's address, schedule and reports (codex
+// #6363 r4 security P2).
+function contactSlotMayLogIn(customer, phoneKey) {
+  const key = phoneKeyOf(phoneKey);
+  if (!customer || !key) return false;
+  return serviceContactsConsented(customer) && !unconsentedSlotPhoneKeys(customer).has(key);
+}
+
 // True if this customer has a distinct service contact configured (any slot).
 // Used by audit tools + the admin UI to surface a "Service contact: …" chip.
 function hasDistinctServiceContact(customer) {
@@ -499,6 +513,7 @@ module.exports = {
   getServiceContact,
   getServiceContactSmsRecipient,
   getServiceContactSlots,
+  contactSlotMayLogIn,
   findServiceContactSlotByPhoneKey,
   phoneKeyOf,
   isServiceContactRole,

@@ -285,6 +285,29 @@ describe('contact login — who a number signs in as', () => {
     delete process.env.GATE_CANCEL_FLOW_V2;
   });
 
+  test('only a number the holder attested to logs in: an inferred, unconsented slot phone (or an unstamped account) is unknown (codex r4 security)', async () => {
+    // The call pipeline filed this number without the holder's attestation
+    // covering it (#5467): held out of texts until their own YES, and out of login.
+    tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550202'] });
+    await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
+    expect(TwilioService.sendVerificationCode).not.toHaveBeenCalled();
+    expect((await login(CONTACT_PHONE)).status).toBe(401);
+    // The other, attested contact on the row still signs in.
+    expect((await login(TENANT_PHONE)).status).toBe(200);
+    // No attestation on the account at all: no contact logs in.
+    tables.customers[0].service_preferences = null;
+    tables.customers[0].service_contacts_consent_at = null;
+    expect((await login(TENANT_PHONE)).status).toBe(401);
+    expect((await login(HOLDER_PHONE)).status).toBe(200);
+  });
+
+  test('a live contact session ends when its number becomes unconsented (401), like a removed slot', async () => {
+    const { body } = await login(CONTACT_PHONE);
+    expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(200);
+    tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550202'] });
+    expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(401);
+  });
+
   test('gate off: a contact number is unknown at send-code and refused at verify-code; the holder still logs in', async () => {
     delete process.env.GATE_CONTACT_LOGIN;
     await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
