@@ -301,6 +301,80 @@ describe('recoverFenceAbort: an email the fence aborted is requeued or skipped o
   });
 });
 
+describe('the destination must still be the estimate\'s recipient (pre-push audit P0)', () => {
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+  });
+  afterEach(() => build.mockRestore());
+  const open = (extra = {}) => emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup', recipient: 'lead@example.com', ...extra });
+  const handoffCheck = async (o) => { let c; await o.withProviderHandoff(async (_d, b) => { c = b; }); return c; };
+
+  test('first send: the same address passes, in any case and with stray spaces', async () => {
+    readsRow(row(), row({ customer_email: ' Lead@Example.COM ' }));
+    const o = await open();
+    expect(o.attachments).toEqual([ATTACHMENT]);
+    // Fingerprint covers the column too, so compare the recipient rule alone.
+    expect(await emailPdf.handoffBlockReason(ID, null, { recipient: 'lead@example.com' })).toBeNull();
+  });
+
+  test('first send: an address that is not the estimate\'s current one gets no PDF at all', async () => {
+    readsRow(row({ customer_email: 'corrected@example.com' }));
+    expect(await open()).toEqual({ attachments: [], payload: {} });
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('first send: an address corrected after the render blocks the handoff as recipient_changed', async () => {
+    readsRow(row(), row({ customer_email: 'corrected@example.com' }));
+    const check = await handoffCheck(await open());
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'recipient_changed' });
+  });
+
+  test('first send: an estimate that lost its address blocks too', async () => {
+    readsRow(row(), row({ customer_email: null }));
+    const check = await handoffCheck(await open());
+    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'recipient_changed' });
+  });
+
+  test('an aborted send to a superseded address is skipped on purpose, never queued', async () => {
+    const retryRail = require('../services/transactional-email-provider-retry');
+    readsRow(row({ customer_email: 'corrected@example.com' }));
+    const result = { sent: false, aborted: true, boundaryBlocked: true, message: { id: 'm1', send_attempt_token: 'a1', recipient_email_snapshot: 'lead@example.com' } };
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result })).toBe('skipped');
+    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
+  });
+
+  const stored = (extra = {}) => ({
+    id: 'm1', template_key: 'estimate.viewed_followup', estimate_id: ID, has_attachments: true,
+    recipient_email_snapshot: 'lead@example.com', html_snapshot: '<p>x</p>', text_snapshot: 'x', ...extra,
+  });
+
+  test('retry: a corrected address stops the retry before any render, PDF or body-only', async () => {
+    readsRow(row({ customer_email: 'corrected@example.com' }));
+    expect(await emailPdf.prepareRetryPdf(stored())).toEqual({ stopped: 'recipient_changed' });
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('retry: an address corrected while the PDF was being built stops the body-only fallback too', async () => {
+    build.mockResolvedValue(null);
+    readsRow(row(), row(), row({ customer_email: 'corrected@example.com' }));
+    expect(await emailPdf.prepareRetryPdf(stored())).toEqual({ stopped: 'recipient_changed' });
+  });
+
+  test('retry: the rebuilt PDF carries a handoff fence on the row\'s own destination', async () => {
+    readsRow(row(), row(), row({ customer_email: 'corrected@example.com' }));
+    const out = await emailPdf.prepareRetryPdf(stored());
+    expect(out.attachments).toEqual([ATTACHMENT]);
+    await expect(out.boundaryCheck({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'recipient_changed' });
+  });
+});
+
 describe('the provider-retry rail for PDF-bearing rows', () => {
   const BLOCKS = [
     { type: 'paragraph', content: 'Hi {{first_name}},' },
@@ -317,6 +391,7 @@ describe('the provider-retry rail for PDF-bearing rows', () => {
     const withNote = render(pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp);
     return {
       id: 'm1', template_key: 'estimate.viewed_followup', estimate_id: ID, has_attachments: true,
+      recipient_email_snapshot: 'lead@example.com',
       html_snapshot: withNote.html, text_snapshot: withNote.text, ...extra,
     };
   };
@@ -390,15 +465,15 @@ describe('the provider-retry rail for PDF-bearing rows', () => {
     build.mockRestore();
   });
 
-  test('gate off or no estimate id: body-only as well', async () => {
+  test('gate off: body-only as well; no estimate to authorize the address against: stopped', async () => {
+    readsRow(row());
     setGates(false);
     expect((await emailPdf.prepareRetryPdf(stored())).attachments).toEqual([]);
-    setGates(true);
-    const out = await emailPdf.prepareRetryPdf(stored({ estimate_id: null }));
-    expect(out.html).toBe(render('').html);
+    expect(await emailPdf.prepareRetryPdf(stored({ estimate_id: null }))).toEqual({ stopped: 'estimate_missing' });
   });
 
   test('a stored body whose note cannot be removed is unsendable, never sent with a missing-file promise', async () => {
+    readsRow(row());
     setGates(false);
     const plain = render('');
     expect(await emailPdf.prepareRetryPdf(stored({ html_snapshot: plain.html, text_snapshot: plain.text })))

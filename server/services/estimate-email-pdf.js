@@ -111,6 +111,14 @@ function rowFingerprint(row) {
   return canonical(pick);
 }
 
+// The address an email actually goes to must still be the estimate's current
+// recipient: an email correction in the estimate editor does not cancel the
+// old address's queued sends, and the PDF is a permanent copy.
+function sameRecipient(current, destination) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  return !!norm(current) && norm(current) === norm(destination);
+}
+
 function pastExpiry(expiry, now) {
   return !!expiry && new Date(expiry).getTime() <= now.getTime();
 }
@@ -121,9 +129,10 @@ function pastExpiry(expiry, now) {
 // plain "is it still sendable" read). `validThrough` is the date the document
 // advertises when it is newer than the stored row (an extension in flight);
 // `now` is the clock at the handoff.
-async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date() } = {}) {
+async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date(), recipient = null } = {}) {
   const row = await db('estimates').where({ id: estimateId }).first();
   if (!row) return 'estimate_missing';
+  if (recipient && !sameRecipient(row.customer_email, recipient)) return 'recipient_changed';
   if (row.archived_at || !['sent', 'viewed'].includes(row.status)) return 'estimate_not_open';
   if (pastExpiry(validThrough || row.expires_at, now)) return 'estimate_expired';
   if (expectedFingerprint && rowFingerprint(row) !== expectedFingerprint) return 'estimate_changed_since_render';
@@ -142,11 +151,11 @@ async function handoffBlockReason(estimateId, expectedFingerprint, { validThroug
 // sendOne awaits this after its own preparation, right before the request.
 // A veto is a definite non-send (providerBoundaryBlocked); a failed read is a
 // definite non-send too, tagged so the library settles it retryable.
-function pdfBoundaryCheck(estimateId, expectedFingerprint, { validThrough = null, clock = () => new Date() } = {}) {
+function pdfBoundaryCheck(estimateId, expectedFingerprint, { validThrough = null, recipient = null, clock = () => new Date() } = {}) {
   return async () => {
     let reason;
     try {
-      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, now: clock() });
+      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, recipient, now: clock() });
     } catch (err) {
       const unavailable = new Error(`estimate ${estimateId} PDF fence unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;
@@ -186,11 +195,15 @@ function openForPdf(row, effectiveExpiry, now) {
 
 // `validThrough`: the date the document should advertise when the caller
 // knows a newer one than the stored row (an extension in flight).
-async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = null, now = new Date(), forRetry = false }) {
+// `recipient`: the address the email is going to. When given, the PDF is built
+// only if it is still the estimate's current customer_email, and the handoff
+// fence repeats that check right before the request.
+async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = null, now = new Date(), forRetry = false, recipient = null }) {
   try {
     if (!(forRetry ? RETRY_KEY_SET : KEY_SET).has(templateKey) || !pdfGatesOn()) return NONE;
     const fresh = await db('estimates').where({ id: estimateId }).first();
     if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return NONE;
+    if (recipient && !sameRecipient(fresh.customer_email, recipient)) return NONE;
     const pdf = require('./pdf/estimate-doc-pdf');
     const attachment = await pdf.buildEstimateEmailPdfAttachment(fresh, { validThrough: validThrough || fresh.expires_at || null });
     if (!attachment) return NONE;
@@ -199,8 +212,8 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
       attachments: [attachment],
       payload: { estimate_pdf_note: pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp },
       // Pass to sendTemplate: the final fence for the permanent copy.
-      withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint, { validThrough }),
-      boundaryCheck: pdfBoundaryCheck(estimateId, fingerprint, { validThrough }),
+      withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint, { validThrough, recipient }),
+      boundaryCheck: pdfBoundaryCheck(estimateId, fingerprint, { validThrough, recipient }),
     };
   } catch (e) {
     logger.warn(`[estimate-email-pdf] skipped for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
@@ -222,7 +235,7 @@ async function recoverFenceAbort({ estimateId, result }) {
   try {
     let reason = null;
     try {
-      reason = await handoffBlockReason(estimateId, null);
+      reason = await handoffBlockReason(estimateId, null, { recipient: result.message?.recipient_email_snapshot || null });
     } catch { /* unreadable: keep the email, retry it */ }
     if (reason) {
       logger.info(`[estimate-email-pdf] email for estimate ${estimateId} skipped after the PDF fence aborted it: ${reason}`);
@@ -272,11 +285,27 @@ function stripPdfNote(html, text) {
   return null;
 }
 
+// Whether the row's actual destination is still the estimate's recipient:
+// null, or the reason the retry must stop (it never reaches the old address,
+// with or without the PDF).
+async function retryRecipientBlock(message) {
+  if (!message.estimate_id) return 'estimate_missing';
+  const row = await db('estimates').where({ id: message.estimate_id }).first('customer_email');
+  if (!row) return 'estimate_missing';
+  return sameRecipient(row.customer_email, message.recipient_email_snapshot) ? null : 'recipient_changed';
+}
+
 async function prepareRetryPdf(message) {
-  const copy = message.estimate_id
-    ? await openEstimateEmailPdf({ estimateId: message.estimate_id, templateKey: message.template_key, forRetry: true })
-    : NONE;
+  const blocked = await retryRecipientBlock(message);
+  if (blocked) return { stopped: blocked };
+  const copy = await openEstimateEmailPdf({
+    estimateId: message.estimate_id, templateKey: message.template_key, forRetry: true,
+    recipient: message.recipient_email_snapshot,
+  });
   if (copy.attachments.length) return { attachments: copy.attachments, boundaryCheck: copy.boundaryCheck };
+  // Nothing to attach: re-read the recipient before the body-only send.
+  const again = await retryRecipientBlock(message);
+  if (again) return { stopped: again };
   const stripped = stripPdfNote(message.html_snapshot, message.text_snapshot);
   if (!stripped) return { unsendable: true };
   return { attachments: [], html: stripped.html, text: stripped.text };

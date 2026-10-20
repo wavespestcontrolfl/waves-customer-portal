@@ -541,7 +541,7 @@ async function sendDualChannel(est, { sms, email }) {
       // GATE_ESTIMATE_EMAIL_PDF: an allowlisted open-estimate email also
       // carries the PDF copy plus its one-line note. Empty (gate off, other
       // template, estimate no longer open, render failed) = sent as before.
-      const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey });
+      const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         to: est.customer_email,

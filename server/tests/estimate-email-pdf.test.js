@@ -224,7 +224,7 @@ describe('sendDualChannel with the PDF copy', () => {
     db.mockImplementation(() => {
       const b = {};
       b.where = jest.fn(() => b);
-      b.first = jest.fn(async () => ({ ...ESTIMATE, status: 'viewed', archived_at: null, expires_at: new Date(Date.now() + 86400000) }));
+      b.first = jest.fn(async () => ({ ...ESTIMATE, customer_email: 'lead@example.com', status: 'viewed', archived_at: null, expires_at: new Date(Date.now() + 86400000) }));
       return b;
     });
     setGates(true);
@@ -256,6 +256,14 @@ describe('sendDualChannel with the PDF copy', () => {
     build.mockResolvedValue(null);
     await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
     expect(sent()).not.toHaveProperty('withProviderHandoff');
+  });
+
+  test('an address that is not the estimate\'s current one gets the email without the file', async () => {
+    const ok = await _private.sendDualChannel({ ...est, customer_email: 'old@example.com' }, { email: leg('estimate.viewed_followup') });
+    expect(ok).toBe(true);
+    expect(sent()).not.toHaveProperty('attachments');
+    expect(sent().payload).toEqual({ first_name: 'Sam' });
+    expect(build).not.toHaveBeenCalled();
   });
 
   describe('when the PDF fence aborts the email', () => {

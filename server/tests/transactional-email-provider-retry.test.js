@@ -1083,6 +1083,29 @@ describe('provider retries of an open-estimate email that carried the PDF copy (
     }));
   });
 
+  test('a corrected estimate address stops the retry for good, with the admin alert and no send', async () => {
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ stopped: 'recipient_changed' });
+    chain.whereRaw = jest.fn(() => chain);
+    chain.first = jest.fn(async () => null);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed', template_key: 'estimate.viewed_followup', recipient_email_snapshot: 'a@example.com' }]);
+    const result = await retry.retryOne(pdfRow());
+    expect(result).toMatchObject({ sent: false, stopped: true });
+    expect(result.reason).toContain('recipient_changed');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
+  test('an address corrected at the provider handoff stops the retry too (no further slot)', async () => {
+    const veto = Object.assign(new Error('x'), { providerBoundaryBlocked: true, reason: 'recipient_changed' });
+    estimatePdf.prepareRetryPdf.mockResolvedValue({ attachments: [ATTACHMENT], boundaryCheck: jest.fn(async () => { throw veto; }) });
+    sendgrid.sendOne.mockImplementation(async (args) => { await args.providerBoundaryCheck({ database: db }); return { messageId: 'x' }; });
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed', template_key: 'estimate.viewed_followup', recipient_email_snapshot: 'a@example.com' }]);
+    const result = await retry.retryOne(pdfRow());
+    expect(result).toMatchObject({ sent: false, stopped: true });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'rejected' }));
+  });
+
   describe('scheduleRetryAfterBoundaryAbort (a send the PDF fence aborted)', () => {
     const aborted = (extra = {}) => pdfRow({ status: 'failed', provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-pdf', ...extra });
     test('puts the aborted attempt on the first ladder slot, only while nothing is scheduled', async () => {

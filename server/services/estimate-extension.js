@@ -650,7 +650,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         });
         // GATE_ESTIMATE_EMAIL_PDF: the PDF copy rides along (empty = as before).
         const pdfCopy = await require('./estimate-email-pdf').openEstimateEmailPdf({
-          estimateId: estimate.id, templateKey: 'estimate.extended', validThrough: newExpiry,
+          estimateId: estimate.id, templateKey: 'estimate.extended', validThrough: newExpiry, recipient: estimate.customer_email,
         });
         const result = await EmailTemplateLibrary.sendTemplate({
           templateKey: 'estimate.extended',

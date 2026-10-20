@@ -205,7 +205,7 @@ const EstimateAutoRenew = {
                     // direct send (the live automation executor path above
                     // sends without it). Empty = as before.
                     const pdfCopy = await require('./estimate-email-pdf').openEstimateEmailPdf({
-                      estimateId: est.id, templateKey: 'estimate.extension_notice', validThrough: newExpiry,
+                      estimateId: est.id, templateKey: 'estimate.extension_notice', validThrough: newExpiry, recipient: est.customer_email,
                     });
                     const result = await EmailTemplateLibrary.sendTemplate({
                       templateKey: 'estimate.extension_notice',

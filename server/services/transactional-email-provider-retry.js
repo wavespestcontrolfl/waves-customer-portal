@@ -823,6 +823,14 @@ async function holdGateLifecycleRetry(message) {
   return { sent: false, held: true };
 }
 
+// An estimate email whose destination is no longer the estimate's recipient
+// (the address was corrected, or the estimate is gone) never goes out, with or
+// without the PDF: stopped for good, with the admin alert.
+function stopEstimateRecipientRetry(message, reason, rejectedAfterStart) {
+  return stopRetry(message, { status: 'failed', exhaustedAlert: true, rejectedAfterStart,
+    reason: `Estimate email not re-sent (${reason}): the address is no longer the estimate's recipient; retry stopped.` });
+}
+
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
@@ -1039,6 +1047,7 @@ async function retryOne(message) {
       // the stored body with the PDF note removed.
       if (retriesAttachmentCopy(message)) {
         const prepared = await estimatePdfEmail.prepareRetryPdf(message);
+        if (prepared.stopped) return stopEstimateRecipientRetry(message, prepared.stopped, false);
         if (prepared.unsendable) {
           return stopRetry(message, { status: 'failed', exhaustedAlert: true,
             reason: 'The PDF note could not be removed from the stored email; retry stopped.' });
@@ -1075,6 +1084,7 @@ async function retryOne(message) {
       if (state.pdfRefusal) {
         // The estimate changed or was invalidated since the PDF was rendered:
         // definitely unsent. Next slot on the ladder re-checks it.
+        if (state.pdfRefusal.reason === 'recipient_changed') return stopEstimateRecipientRetry(message, 'recipient_changed', true);
         await markRetryFailure(message, state.pdfRefusal, new Date(), { rejectedAfterStart: true });
         return { sent: false, error: state.pdfRefusal };
       }
