@@ -217,25 +217,57 @@ function estimateEmailPdfFilename(estimate) {
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Returns a SendGrid attachment, or null. Never throws.
+// Waits and retries while the render capacity is busy; any other failure throws.
+async function renderWhileNotBusy(estimate, { validThrough, render, sleep, attempts, delayMs }) {
+  const doRender = render || renderEstimateDocumentPdf;
+  const wait = sleep || defaultSleep;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await doRender(estimate, { validThrough });
+    } catch (e) {
+      if (e?.code !== 'estimate_doc_render_busy' || attempt >= attempts) throw e;
+      await wait(delayMs);
+    }
+  }
+}
+
+// A customer-emailed PDF is a disclosure to the customer exactly like the
+// /:token/pdf download. The headless pass renders with a signed pin, which
+// skips the served-disclosure write inside composeEstimateDataPayload, so the
+// evidence must be durable BEFORE the render (the /pdf route's pre-render step,
+// ensureRateReviewTermsEvidenceBeforeRender): an acceptance that follows the
+// emailed document then still freezes the rate-review line the customer
+// received. Returns the row to render and whether the line is withheld because
+// its evidence is unproven. Never throws; fail closed (withhold).
+async function rateReviewEvidenceForEmail(estimate) {
+  try {
+    const billingMod = require('../estimate-proposal-billing');
+    const billing = await billingMod.resolveProposalBillingContext(estimate);
+    return await billingMod.ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
+  } catch (e) {
+    logger.warn(`[estimate-doc-pdf] rate review evidence check failed for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
+    return { estimate, withholdRateReviewTerms: true };
+  }
+}
+
+// Returns a SendGrid attachment, or null. Never throws. When the rate-review
+// evidence cannot be proven durable there is NO attachment: the browser
+// renderer reads the row itself and cannot be told to withhold the line, and
+// there is no pdfkit fallback for this copy, so the email goes out without it.
 async function buildEstimateEmailPdfAttachment(estimate, { validThrough = null, render = null, sleep = null, attempts = EMAIL_PDF_BUSY_ATTEMPTS, delayMs = EMAIL_PDF_BUSY_DELAY_MS } = {}) {
   try {
     if (!estimateEmailPdfEnabled()) return null;
-    const doRender = render || renderEstimateDocumentPdf;
-    const wait = sleep || defaultSleep;
-    let buffer = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        buffer = await doRender(estimate, { validThrough });
-        break;
-      } catch (e) {
-        if (e?.code !== 'estimate_doc_render_busy' || attempt >= attempts) throw e;
-        await wait(delayMs);
-      }
+    const evidence = await rateReviewEvidenceForEmail(estimate);
+    if (evidence.withholdRateReviewTerms) {
+      logger.warn(`[estimate-doc-pdf] email PDF withheld for estimate ${estimate?.id}: rate review evidence unproven`);
+      return null;
     }
+    // The row the evidence step returns: a row that froze under it renders as it is now.
+    const documentEstimate = evidence.estimate || estimate;
+    const buffer = await renderWhileNotBusy(documentEstimate, { validThrough, render, sleep, attempts, delayMs });
     if (!buffer || !buffer.length) return null;
     return {
-      filename: estimateEmailPdfFilename(estimate),
+      filename: estimateEmailPdfFilename(documentEstimate),
       content: Buffer.from(buffer).toString('base64'),
       type: 'application/pdf',
       disposition: 'attachment',

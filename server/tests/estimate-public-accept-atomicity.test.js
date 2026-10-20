@@ -2006,6 +2006,58 @@ sent_at: '2026-09-20T12:00:00.000Z',
     expect(renderedBilling.withholdRateReviewTerms).toBe(true);
   });
 
+  // PR #6343 pre-push P1: the customer-emailed PDF is rendered with a signed
+  // pin, which skips the served-disclosure write inside the data projection,
+  // so the builder writes the evidence itself BEFORE the render.
+  describe('the estimate PDF emailed to the customer records its rate review disclosure', () => {
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const documentData = () => JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    const stampOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'));
+    const build = (render) => require('../services/pdf/estimate-doc-pdf')
+      .buildEstimateEmailPdfAttachment(structuredClone(storedEstimate()), { render, sleep: async () => {} });
+
+    test('the marker is durable before the render, and an acceptance after the email stamps the frozen document', async () => {
+      mockGateState.acceptanceTerms = false;
+      seed({ id: 'est-email-pdf-1', token: 'tok-email-pdf-1-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData() });
+      let markerAtRender;
+      const render = jest.fn(async () => {
+        markerAtRender = JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed;
+        return Buffer.from('%PDF-synthetic');
+      });
+      const attachment = await build(render);
+      expect(attachment).toMatchObject({ type: 'application/pdf' });
+      expect(render).toHaveBeenCalledTimes(1);
+      expect(markerAtRender).toBe(RATE_REVIEW_TERMS_VERSION);
+      expect(stampOps()).toHaveLength(0);
+      // The customer opens nothing else; the plan is accepted after the email.
+      conversionOk();
+      expect((await putAccept('tok-email-pdf-1-x0123456789', {})).status).toBe(200);
+      expect(stampOps()).toHaveLength(1);
+      expect(JSON.parse(storedEstimate().estimate_data).rateReviewDisclosedAtAccept).toBe(true);
+    });
+
+    test('when the evidence write fails there is no attachment, no render, and no marker', async () => {
+      seed({ id: 'est-email-pdf-2', token: 'tok-email-pdf-2-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData() });
+      db.__state.onTable = (table) => { if (table === 'estimates') throw new Error('db down'); };
+      const render = jest.fn(async () => Buffer.from('%PDF-synthetic'));
+      const attachment = await build(render);
+      db.__state.onTable = null;
+      expect(attachment).toBeNull();
+      expect(render).not.toHaveBeenCalled();
+      expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    });
+
+    test('a frozen estimate: nothing is written, and the document renders as the frozen row', async () => {
+      seed({ id: 'est-email-pdf-3', token: 'tok-email-pdf-3-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData() });
+      const render = jest.fn(async () => Buffer.from('%PDF-synthetic'));
+      expect(await build(render)).not.toBeNull();
+      expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    });
+  });
+
   test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {
     const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
     const est = (extra = {}) => ({ id: 'e', monthly_total: 60, annual_total: 720, onetime_total: 0, ...extra });

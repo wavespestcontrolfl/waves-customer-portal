@@ -136,6 +136,60 @@ describe('buildEstimateEmailPdfAttachment', () => {
   });
 });
 
+describe('the emailed PDF records its rate review disclosure first (PR #6343 pre-push P1)', () => {
+  const billingMod = require('../services/estimate-proposal-billing');
+  const bytes = Buffer.from('%PDF-synthetic');
+  const noSleep = jest.fn(async () => {});
+  let resolveBilling;
+  let ensure;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setGates(true);
+    resolveBilling = jest.spyOn(billingMod, 'resolveProposalBillingContext').mockResolvedValue({ livePricing: null });
+    ensure = jest.spyOn(billingMod, 'ensureRateReviewTermsEvidenceBeforeRender').mockImplementation(async (estimate) => ({ estimate, withholdRateReviewTerms: false }));
+  });
+  afterEach(() => { resolveBilling.mockRestore(); ensure.mockRestore(); });
+
+  test('the evidence step runs before the render, with the resolved billing lane, and the render gets the row it returns', async () => {
+    const frozenRow = { ...ESTIMATE, status: 'accepted' };
+    ensure.mockResolvedValue({ estimate: frozenRow, withholdRateReviewTerms: false });
+    const order = [];
+    ensure.mockImplementation(async (estimate) => { order.push('evidence'); return { estimate: frozenRow, withholdRateReviewTerms: false }; });
+    const render = jest.fn(async () => { order.push('render'); return bytes; });
+    const out = await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { validThrough: new Date('2099-01-01T00:00:00Z'), render, sleep: noSleep });
+    expect(out).toMatchObject({ type: 'application/pdf' });
+    expect(order).toEqual(['evidence', 'render']);
+    expect(ensure).toHaveBeenCalledWith(ESTIMATE, { billing: { livePricing: null } });
+    expect(render).toHaveBeenCalledWith(frozenRow, { validThrough: new Date('2099-01-01T00:00:00Z') });
+  });
+
+  test.each([
+    ['the evidence write is unproven', () => ensure.mockResolvedValue({ estimate: ESTIMATE, withholdRateReviewTerms: true })],
+    ['the evidence step throws', () => ensure.mockRejectedValue(new Error('db down'))],
+    ['the billing lane cannot be resolved', () => resolveBilling.mockRejectedValue(new Error('db down'))],
+  ])('no attachment and no render when %s (the browser renderer cannot withhold the line)', async (_label, arrange) => {
+    arrange();
+    const render = jest.fn(async () => bytes);
+    expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render, sleep: noSleep })).toBeNull();
+    expect(render).not.toHaveBeenCalled();
+  });
+
+  test('the follow-up path (openEstimateEmailPdf) gets the same step and sends no file when it withholds', async () => {
+    db.mockReset();
+    const open = { ...ESTIMATE, status: 'sent', archived_at: null, expires_at: new Date(Date.now() + 5 * 86400000) };
+    db.mockImplementation(() => { const b = {}; b.where = jest.fn(() => b); b.first = jest.fn(async () => open); return b; });
+    ensure.mockResolvedValue({ estimate: open, withholdRateReviewTerms: true });
+    expect(await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    expect(ensure).toHaveBeenCalledWith(expect.objectContaining({ id: ESTIMATE.id }), { billing: { livePricing: null } });
+  });
+
+  test('gate off: the evidence step does not run at all', async () => {
+    setGates(false);
+    expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render: jest.fn(), sleep: noSleep })).toBeNull();
+    expect(ensure).not.toHaveBeenCalled();
+  });
+});
+
 describe('openEstimateEmailPdf', () => {
   const ATTACHMENT = { filename: 'Waves-Estimate-EST-2026-0512.pdf', content: 'AA==', type: 'application/pdf', disposition: 'attachment' };
   let build;
