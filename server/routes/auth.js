@@ -154,22 +154,34 @@ function actorPayload(contact) {
   return { kind: 'contact', slot: contact.slot, name: contact.name || '', phone: contact.phone, email: contact.email || '' };
 }
 
-function authCustomerPayload(customer) {
+// The signed-in identity. For a CONTACT session (GATE_CONTACT_LOGIN) that is
+// the contact's own name, phone and email — never the account holder's
+// (codex round 1 on #6363: the login response carried the holder's identity
+// to the contact's device).
+function authCustomerPayload(customer, contact = null) {
+  const [contactFirst, ...contactRest] = String(contact?.name || '').trim().split(/\s+/).filter(Boolean);
   return {
     id: customer.id,
     accountId: customer.account_id,
     profileLabel: customer.profile_label,
     isPrimaryProfile: customer.is_primary_profile,
-    firstName: customer.first_name,
-    lastName: customer.last_name,
-    email: customer.email,
-    phone: customer.phone,
+    firstName: contact ? (contactFirst || '') : customer.first_name,
+    lastName: contact ? contactRest.join(' ') : customer.last_name,
+    email: contact ? (contact.email || '') : customer.email,
+    phone: contact ? contact.phone : customer.phone,
     tier: customer.waveguard_tier,
   };
 }
 
 function accountIdForCustomer(customer) {
   return customer?.account_id || customer?.id || null;
+}
+
+// A contact session's property entry: the row's label and address only — no
+// holder name, no rate (the switcher labels by profileLabel / address).
+function contactPropertyPayload(customer) {
+  const { firstName, lastName, monthlyRate, ...entry } = propertyPayload(customer);
+  return entry;
 }
 
 function propertyPayload(customer) {
@@ -442,10 +454,10 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     res.json({
       token,
       refreshToken,
-      customer: authCustomerPayload(customer),
+      customer: authCustomerPayload(customer, contact),
       actor: actorPayload(contact),
       // A contact session lists only the row it belongs to (no switcher).
-      properties: contact ? [propertyPayload(customer)] : await accountPropertiesForCustomer(customer),
+      properties: contact ? [contactPropertyPayload(customer)] : await accountPropertiesForCustomer(customer),
     });
   } catch (err) {
     next(err);
@@ -530,16 +542,8 @@ router.get('/me', authenticate, async (req, res, next) => {
   // choices live on /notifications/contact-preferences).
   if (req.contactSession) {
     const contact = req.contactSession;
-    const [contactFirst, ...contactRest] = String(contact.name || '').trim().split(/\s+/).filter(Boolean);
     return res.json({
-      id: customer.id,
-      accountId: customer.account_id,
-      profileLabel: customer.profile_label,
-      isPrimaryProfile: customer.is_primary_profile,
-      firstName: contactFirst || '',
-      lastName: contactRest.join(' '),
-      email: contact.email || '',
-      phone: contact.phone,
+      ...authCustomerPayload(customer, contact),
       address: {
         line1: customer.address_line1,
         line2: customer.address_line2,
@@ -669,7 +673,7 @@ router.get('/properties', authenticate, async (req, res, next) => {
     // profiles, no saved-property list (a switch mints credentials the
     // contact may not hold).
     if (req.contactSession) {
-      return res.json({ properties: [propertyPayload(req.customer)] });
+      return res.json({ properties: [contactPropertyPayload(req.customer)] });
     }
     // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
     // customer-wide, /auth/me reports the scope disabled) — it keeps the

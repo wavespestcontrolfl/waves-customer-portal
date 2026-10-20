@@ -231,6 +231,11 @@ describe('contact login — who a number signs in as', () => {
     expect(res.status).toBe(200);
     expect(res.body.customer.id).toBe('cust-holder');
     expect(res.body.actor).toEqual({ kind: 'contact', slot: 1, name: 'Sam Spouse', phone: CONTACT_PHONE, email: 'sam@example.com' });
+    // The login response's identity is the CONTACT's, never the holder's
+    // (codex round 1): the holder's name, number and email stay off the
+    // contact's device.
+    expect(res.body.customer).toMatchObject({ firstName: 'Sam', lastName: 'Spouse', phone: CONTACT_PHONE, email: 'sam@example.com' });
+    expect(JSON.stringify(res.body)).not.toMatch(/Pat|Owner|pat@example\.com|9415550101/);
     expect(res.body.properties.map((p) => p.id)).toEqual(['cust-holder']);
   });
 
@@ -308,6 +313,8 @@ describe('contact session — route allow-list', () => {
       expect(res.body.propertyScope).toEqual({ enabled: false, propertyId: null, closed: false });
     } else if (path.startsWith('/api/auth/properties')) {
       expect(res.body.properties.map((p) => p.id)).toEqual(['cust-holder']);
+      // Label + address only: no holder name, no rate.
+      expect(JSON.stringify(res.body)).not.toMatch(/Pat|Owner|120/);
     } else {
       expect(res.body).toEqual({ ok: true, contact: 1, id: 'cust-holder' });
     }
