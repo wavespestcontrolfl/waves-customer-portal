@@ -33,6 +33,10 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+// Contact session (GATE_CONTACT_LOGIN): a contact is view-only, so its
+// schedule payloads carry no action bearer (reschedule / calendar tokens,
+// the re-service page, the overlay handoff).
+const { contactSchedulePayload, contactNextPayload } = require('../services/contact-session-projection');
 const {
   accountPropertyIds,
   accountSavedProperties,
@@ -277,7 +281,7 @@ router.get('/', async (req, res, next) => {
     }
 
 
-    res.json({
+    const payload = {
       // The selection this read was actually scoped to (GATE_APP_PROPERTY_SCOPE):
       // the client compares it with what it shows and re-reads the property
       // list on a mismatch (a house retired mid-session, a gate flip) instead
@@ -369,7 +373,8 @@ router.get('/', async (req, res, next) => {
           ? (groupedCalendarUrl(s, calendarVerdictById.get(String(s.id))) ? calendarVerdictById.get(String(s.id)).endsAt.toISOString() : null)
           : calendarExpiresAtFor(s),
       })),
-    });
+    };
+    res.json(req.contactSession ? contactSchedulePayload(payload) : payload);
   } catch (err) {
     next(err);
   }
@@ -869,7 +874,7 @@ router.get('/next', async (req, res, next) => {
     const nextCalVerdict = nextGroupedVerdict === 'unknown' ? { blocked: true, endsAt: null }
       : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
-    res.json({
+    const payload = {
       propertyScope: resolvedScopePayload(scope),
       next: {
         id: nextService.id,
@@ -895,7 +900,8 @@ router.get('/next', async (req, res, next) => {
         // absent, payload byte-identical to before this lane.
         ...(await appPrepPhotosField(nextService, req.customer?.active === true)),
       },
-    });
+    };
+    res.json(req.contactSession ? contactNextPayload(payload) : payload);
   } catch (err) {
     next(err);
   }

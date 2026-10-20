@@ -1,0 +1,81 @@
+'use strict';
+
+// Contact session (GATE_CONTACT_LOGIN) response projections: what an
+// on-location contact's OWN session may read off the account holder's row,
+// applied by the routes CONTACT_SESSION_ROUTES admits (middleware/auth.js).
+//
+// Two rules (codex #6363 r2 P2, both):
+//  1. The report rule for contacts (customer-contact.js
+//     slotWithheldFromReports — a tenant, or an occupant on a
+//     property-manager account) also decides whether the contact's session
+//     may read report artifacts: the report links/tokens, the reviewed
+//     notes, products and photos. Fail closed: a secondary profile whose
+//     account role cannot be read counts as managed.
+//  2. A contact is view-only (owner ruling): no schedule payload may carry an
+//     action bearer — the per-visit /reschedule and /calendar.ics tokens, the
+//     self-serve re-service page, the overlay handoff.
+
+// Does the report rule withhold from this request's contact? A holder
+// session is never withheld.
+async function contactSessionReportsWithheld(req) {
+  if (!req.contactSession) return false;
+  const { withAccountPrimaryContact, slotWithheldFromReports } = require('./customer-contact');
+  const row = await withAccountPrimaryContact(req.customer);
+  return slotWithheldFromReports(row, req.contactSession);
+}
+
+// A service-history row (portal-service-history.js) or service detail
+// (routes/services.js) with every report artifact withheld. Only keys the
+// payload already carries are rewritten, so the two shapes share one rule.
+const WITHHELD_REPORT_ARTIFACTS = {
+  notes: null,
+  products: [],
+  photos: [],
+  hasPhotos: false,
+  photoCount: 0,
+  reportUrl: null,
+  reportPdfUrl: null,
+  reportToken: null,
+  reportGeneratedAt: null,
+  reportViewedAt: null,
+  reportAvailable: false,
+  projectReportPortalAttached: false,
+};
+function withholdReportArtifacts(service) {
+  if (!service) return service;
+  const out = { ...service };
+  for (const [key, value] of Object.entries(WITHHELD_REPORT_ARTIFACTS)) {
+    if (key in out) out[key] = value;
+  }
+  return out;
+}
+
+// An upcoming-visit entry with its action bearers removed.
+function withoutVisitBearers(visit) {
+  if (!visit) return visit;
+  return { ...visit, rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null };
+}
+
+// The GET /api/schedule payload for a contact: no re-service card, no
+// overlay handoff, no per-visit bearer.
+function contactSchedulePayload(payload) {
+  return {
+    ...payload,
+    reservice: null,
+    overlayHandoff: false,
+    upcoming: (payload.upcoming || []).map(withoutVisitBearers),
+  };
+}
+
+// The GET /api/schedule/next payload for a contact.
+function contactNextPayload(payload) {
+  return { ...payload, next: withoutVisitBearers(payload.next) };
+}
+
+module.exports = {
+  contactSessionReportsWithheld,
+  withholdReportArtifacts,
+  contactSchedulePayload,
+  contactNextPayload,
+  _test: { WITHHELD_REPORT_ARTIFACTS },
+};

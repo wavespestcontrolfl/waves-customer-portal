@@ -22,6 +22,10 @@ const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const applicationLimits = require('../services/application-limits');
 const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+// Contact session (GATE_CONTACT_LOGIN): a contact the report rule withholds
+// from (a tenant, an occupant on a managed account) reads the visit list and
+// detail without report artifacts — the same verdict /api/documents applies.
+const { contactSessionReportsWithheld, withholdReportArtifacts } = require('../services/contact-session-projection');
 
 router.use(authenticate);
 
@@ -46,7 +50,8 @@ router.get('/', async (req, res, next) => {
     const { limit, offset, type, propertyScoped } = value;
     const scope = propertyScoped ? await resolveSessionScope(req) : null;
 
-    const { services: enriched, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
+    const { services: listed, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
+    const enriched = await contactSessionReportsWithheld(req) ? listed.map(withholdReportArtifacts) : listed;
 
     res.json({
       // The selection this read was scoped to (propertyScoped only): Home
@@ -85,7 +90,10 @@ router.get('/:id', async (req, res, next) => {
     }
 
     const structuredNotes = parseJsonObject(service.structured_notes);
-    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes);
+    // Notes, products and photos are withheld from the customer surface for
+    // an internal-only completion, and from a contact session the report
+    // rule withholds from (one verdict, no product/photo reads either way).
+    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes) || await contactSessionReportsWithheld(req);
 
     const products = suppressCustomerArtifacts
       ? []

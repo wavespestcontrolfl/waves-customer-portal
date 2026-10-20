@@ -571,18 +571,10 @@ async function redirectToStoredDocument(doc, res) {
   }
 }
 
-// =========================================================================
-// Contact session (GATE_CONTACT_LOGIN): the report rule for on-location
-// contacts (customer-contact.js slotWithheldFromReports — a tenant, or an
-// occupant on a property-manager account) also decides what the contact's
-// OWN session may read. Fail closed: a secondary profile whose account role
-// cannot be read counts as managed, so the contact sees nothing.
-async function contactReportsWithheld(req) {
-  if (!req.contactSession) return false;
-  const { withAccountPrimaryContact, slotWithheldFromReports } = require('../services/customer-contact');
-  const row = await withAccountPrimaryContact(req.customer);
-  return slotWithheldFromReports(row, req.contactSession);
-}
+// Contact session (GATE_CONTACT_LOGIN): the report rule decides what the
+// contact's OWN session may read (services/contact-session-projection.js —
+// the same verdict GET /api/services applies).
+const { contactSessionReportsWithheld: contactReportsWithheld } = require('../services/contact-session-projection');
 
 // =========================================================================
 // GET /api/documents — all documents for authenticated customer
