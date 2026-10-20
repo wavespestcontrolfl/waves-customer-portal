@@ -362,6 +362,9 @@ export default function ProjectReportDocument({ data }) {
           .project-report-document .doc-keep { break-inside: avoid; page-break-inside: avoid; }
           .project-report-document .doc-keep-with-next { break-after: avoid-page; page-break-after: avoid; }
         }
+        /* A long link (the products-and-safety URL) wraps instead of running
+           past a 320px phone, as on the service report's web view. */
+        .project-report-document a { overflow-wrap: anywhere; }
         @media (max-width: 640px) {
           .project-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
           .project-report-document.is-web .doc-letterhead,
