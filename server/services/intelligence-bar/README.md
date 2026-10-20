@@ -60,6 +60,37 @@ that no tool can prove: when a response has a free-text field, the row must decl
 `ticket`, `passcode`, `password`, `pwd`, `bearer`, ...) come from the same name list as the credential
 fields (`utils/credential-fields.js`); `code` is left out on purpose because it is too common.
 
+**Core screens, projections and accepted signals (owner 2026-10-13: "access to everything").** The reviewed list
+includes the record screens the owner uses most: the customer list, a customer's timeline, texts and calls, estimates,
+cards on file, collection holds and deposit credit; the schedule list (one day is `from=to=date`, a week is a seven-day
+range), the dispatch board, one visit, one technician and the dispatch alerts; the estimate list; and the invoice list
+(by `customer_id`), one invoice and its recipients; and the leads list, one lead (with its activities and calls) and the
+lead overview and by-source aggregates (the leads router no longer runs DDL on a request since #6325, e457629744; the
+consultation-link read mints a link and stays out). Three row fields make that safe, none of them touches a route handler:
+- `acceptSignals`: the scan locks a route that reads a table or field that can hold a credential, a signed link, or opens a
+  transaction. A row may accept such a signal by exact name, only `credential_*`, `signed_url:*` and `write:transaction`
+  (the generator rejects any other name, and a real write inside a transaction raises its own `write:*` signal, which stays
+  a hard lock). The accepted names are part of the row's fingerprint (`signals`), so a new signal in the chain makes the
+  row stale. The reviewer accepts a signal only after reading what the response carries.
+- `omit`: response key paths that never reach the model (`customer.stripe_customer_id`, `estimates.token` through an
+  array, `payments.*.card_token`, `**.stripe_charge_id` at any depth; `utils/response-projection.js`). Applied to the parsed
+  answer before the credential and secret passes and before truncation, validated by the generator, copied into the catalog
+  entry; the answer's note lists the key names left out. It is covered by the review: the row is only admitted while its
+  handler-chain hash matches. Used for pay and claim tokens, Stripe payment and charge ids, receipt links, signed photo URLs
+  and duplicate or internal fields. Gate codes in their own field are returned (earlier owner decision).
+- `keywords`: plain-language phrases `find_admin_reads` matches ("texts with this customer", "unpaid invoices"); they weigh
+  like path words.
+Left out, with the reason: the Customer 360 payload (`GET /admin/customers/:id`: its chain reaches the estimate pricing
+engine, 150 unresolved callees and effect-named calls), `GET /admin/customers/:id/properties` (it creates the primary property on read), the
+schedule day and week views (an outside weather call and writes), the invoice followup, the all-customer communications log
+(applicant threads) and unbounded lists. A long list is cut by the existing truncation, and the note names the endpoint's own
+query filters. The timeline and texts reads do not offer a paging cursor, because a query value is cut at 200 characters;
+narrow with `type`, `search`, `channel` and `limit`.
+Free text on these rows is withheld exactly as on every other row: a note-like key name by the default, plus the keys a name
+would not catch declared as `note` in the row's `freeText` (`leadSourceDetail`, the lead `service_interest` and `extracted_data`,
+the newest-message `preview`, the estimate agent draft `reasoning`, `assumptions` and `uncertainty`). A row never opts into
+`content`, so invoice line item descriptions, message bodies and call transcripts show only their length.
+
 **Read taint.** After a general read, owner-direct edits need cards for the rest of the thread. The
 server's thread record is authoritative: whenever owner-direct is on and the request has a thread id, one
 indexed lookup (`threads.hasUntrustedRead`: the thread row plus an EXISTS over its turns) decides, whether or

@@ -407,6 +407,7 @@ router.get('/sql', async (req, res) => { res.json(await db.raw('select * from ne
 module.exports = router;
 `;
 const NO_REVIEW = { exclude: new Map(), reviewed: new Map() };
+const ACCEPTABLE = /^(credential_[a-z]+:.+|signed_url:.+|write:transaction)$/;
 
 
 describe('the handler scan and the reviewed row', () => {
@@ -467,6 +468,58 @@ module.exports = router;
       const reviewed = { exclude: new Map(), reviewed: new Map([[`GET /admin/fx${routePath}`, row]]) };
       expect({ routePath, safe: judgeRoute(entry, reviewed, []).safe }).toEqual({ routePath, safe: false });
     }
+  });
+
+  // Core screens: a row may accept, by exact name, the credential_*, signed_url:* and
+  // write:transaction signals it read; nothing else is ever accepted.
+  describe('accepted signals', () => {
+    const entryFor = (file, routePath) => ({ full: `/admin/fx${routePath}`, route: routerRoutes(path.join(FIXTURE_DIR, file)).routes.find(r => r.path === routePath) });
+    const judgeWith = (file, routePath, extra) => {
+      const entry = entryFor(file, routePath);
+      const bare = judgeRoute(entry, NO_REVIEW, []);
+      const row = rowFor(bare, extra);
+      return { bare, verdict: judgeRoute(entry, { exclude: new Map(), reviewed: new Map([[`GET /admin/fx${routePath}`, row]]) }, []) };
+    };
+    const credentialSignals = bare => bare.signals.filter(signal => /^(credential_|signed_url)/.test(signal));
+
+    test('a row that names the credential signals of its chain admits it; a row that does not, does not', () => {
+      for (const [file, routePath] of [['fx-router-cred.js', '/column-select'], ['fx-router-cred.js', '/whole-row'], ['fx-router-cred.js', '/link']]) {
+        const bare = judgeRoute(entryFor(file, routePath), NO_REVIEW, []);
+        expect({ routePath, safe: bare.safe }).toEqual({ routePath, safe: false });
+        const { verdict } = judgeWith(file, routePath, { acceptSignals: credentialSignals(bare) });
+        expect({ routePath, safe: verdict.safe }).toEqual({ routePath, safe: true });
+        // naming only some of the signals is not enough
+        const partial = judgeWith(file, routePath, { acceptSignals: credentialSignals(bare).slice(0, 0).concat(['credential_table:nothing']) });
+        expect({ routePath, safe: partial.verdict.safe }).toEqual({ routePath, safe: false });
+      }
+    });
+
+    test('signed_url signals can be accepted too (the signed-link pass and the row\'s omit handle the response)', () => {
+      const bare = judgeRoute(entryFor('fx-router.js', '/signed'), NO_REVIEW, []);
+      expect(bare.signals.some(signal => signal.startsWith('signed_url:'))).toBe(true);
+      const { verdict } = judgeWith('fx-router.js', '/signed', { acceptSignals: bare.signals.filter(signal => ACCEPTABLE.test(signal)) });
+      expect(verdict.safe).toBe(true);
+    });
+
+    test('a write, DDL or an outside call can never be accepted, by validation or by the scan', () => {
+      for (const signal of ['write:update', 'write:insert', 'write:sql_text', 'outside:fetch', 'outside_service:stripe', 'response:header', 'no_json_response', 'writes_process_state']) {
+        expect(() => validateReviewedRow({ endpoint: '/admin/payers', scope: 'broad', acceptSignals: [signal] })).toThrow(/acceptSignals may hold only/);
+      }
+      // a hand-built row that skips validation still cannot lift the lock
+      const entry = entryFor('fx-router.js', '/inline-writes');
+      const bare = judgeRoute(entry, NO_REVIEW, []);
+      const reviewed = { exclude: new Map(), reviewed: new Map([['GET /admin/fx/inline-writes', rowFor(bare, { acceptSignals: bare.signals })]]) };
+      expect(judgeRoute(entry, reviewed, []).safe).toBe(false);
+    });
+
+    test('acceptSignals must be a non-empty list of distinct names', () => {
+      const base = { endpoint: '/admin/payers', scope: 'broad' };
+      expect(() => validateReviewedRow({ ...base, acceptSignals: ['credential_table:customers'] })).not.toThrow();
+      expect(() => validateReviewedRow({ ...base, acceptSignals: ['write:transaction', 'signed_url:getSignedUrl'] })).not.toThrow();
+      for (const bad of [[], 'credential_table:x', ['credential_table:x', 'credential_table:x'], [3]]) {
+        expect(() => validateReviewedRow({ ...base, acceptSignals: bad })).toThrow(/acceptSignals/);
+      }
+    });
   });
 
   test('the query keys a handler reads are collected: dot, bracket, destructuring and an alias', () => {
@@ -634,9 +687,44 @@ module.exports = router;
   });
 });
 
-test('the endpoints that run middleware DDL or return credentials are not in the catalog', () => {
+test('the endpoints that run middleware DDL, mint links or return credentials are not in the catalog', () => {
   const endpoints = committed.entries.map(e => e.endpoint);
   expect(endpoints.filter(e => /^\/admin\/(health|equipment-maintenance)(\/|$)/.test(e))).toEqual([]);
-  expect(endpoints).not.toContain('/admin/customers/:id/estimates-summary');
+  // estimates-summary returns the estimate bearer tokens, so it is admitted only with the token omitted from the answer.
+  expect(committed.entries.find(entry => entry.endpoint === '/admin/customers/:id/estimates-summary').omit).toContain('estimates.token');
   expect(endpoints).not.toContain('/admin/newsletter/subscribers');
+  // The leads router no longer runs DDL on a request (e457629744, #6325), so the leads reads are admitted: the list, one lead and two analytics aggregates.
+  expect(endpoints).toEqual(expect.arrayContaining(['/admin/leads', '/admin/leads/:id', '/admin/leads/analytics/overview', '/admin/leads/analytics/by-source']));
+  // The consultation-link read mints a link and stays out.
+  expect(endpoints.filter(e => /consultation-link/.test(e))).toEqual([]);
+});
+
+describe('the response projection and the finder keywords of a row', () => {
+  const base = { endpoint: '/admin/payers', scope: 'broad' };
+  test('omit is a list of response key paths, validated by the generator', () => {
+    expect(() => validateReviewedRow({ ...base, omit: ['estimates.token', 'customer.stripe_customer_id', '**.stripe_charge_id', 'payments.*.card_token'] })).not.toThrow();
+    for (const bad of [[], 'token', ['a b'], ['token', 'token'], ['a.*'], ['**'], ['**.a.b'], ['a..b'], [3], ['.token'], new Array(61).fill(0).map((_, i) => `k${i}`)]) {
+      expect(() => validateReviewedRow({ ...base, omit: bad })).toThrow(/omit/);
+    }
+  });
+  test('keywords are short lower-case phrases', () => {
+    expect(() => validateReviewedRow({ ...base, keywords: ['customer profile', 'texts with this customer'] })).not.toThrow();
+    for (const bad of [[], 'profile', ['Profile'], ['a;b'], ['x', 'x'], new Array(17).fill(0).map((_, i) => `phrase ${i}`)]) {
+      expect(() => validateReviewedRow({ ...base, keywords: bad })).toThrow(/keywords/);
+    }
+  });
+  test('the committed entries carry exactly their row\'s omit and keywords', () => {
+    const rows = new Map(JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed.map(row => [row.endpoint, row]));
+    for (const entry of committed.entries) {
+      const row = rows.get(entry.endpoint);
+      expect({ endpoint: entry.endpoint, omit: entry.omit, keywords: entry.keywords }).toEqual({ endpoint: entry.endpoint, omit: row.omit, keywords: row.keywords });
+    }
+    expect(committed.entries.filter(entry => entry.omit).length).toBeGreaterThanOrEqual(5);
+  });
+  test('every accepted signal in a committed row is one the scan reports for it', () => {
+    const rows = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed;
+    for (const row of rows.filter(item => item.acceptSignals)) {
+      expect({ endpoint: row.endpoint, stray: row.acceptSignals.filter(signal => !row.signals.includes(signal)) }).toEqual({ endpoint: row.endpoint, stray: [] });
+    }
+  });
 });
