@@ -561,6 +561,7 @@ const LANES = [
   // ── High-stakes reasoner ──
   L('ib_admin', 'Intelligence Bar · admin', 'routes/admin-intelligence-bar.js', 'reason', E('INTELLIGENCE_BAR_MODEL', T('FLAGSHIP'))),
   L('ib_tech', 'Intelligence Bar · tech context', 'routes/admin-intelligence-bar.js', 'reason', E('INTELLIGENCE_BAR_TECH_MODEL', T('FLAGSHIP'), { live: true }), null, { note: 'read-only tools, low max_tokens' }),
+  L('ib_admin_backup', 'Intelligence Bar · OpenAI backup', 'intelligence-bar/openai-tool-adapter.js', 'reason', E('INTELLIGENCE_BAR_BACKUP_MODEL', P('highStakes', 'fallback')), null, { note: 'only when the Claude call fails with a provider error; dark behind GATE_IB_OPENAI_BACKUP' }),
   L('ib_tools', 'IB email / SMS / procurement tools', 'intelligence-bar/email-tools.js, intelligence-bar/comms-tools.js, intelligence-bar/procurement-tools.js', 'reason', T('FLAGSHIP')),
   L('commercial_proposal', 'Commercial proposal brief', 'estimator-engine/commercial-proposal.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('signal_detector', 'Customer signal detector', 'customer-intelligence/signal-detector.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
@@ -798,6 +799,7 @@ const LANE_AREA = {
   ads_advisor: 'content',
   ib_admin: 'ib',
   ib_tech: 'ib',
+  ib_admin_backup: 'ib',
   ib_tools: 'ib',
   chart_builder_image: 'ib',
   chart_builder_sql: 'ib',
@@ -966,6 +968,7 @@ const LANE_DESCRIBE = {
   ads_advisor: 'Daily Google Ads advice',
   ib_admin: 'The admin command bar',
   ib_tech: 'The tech command bar',
+  ib_admin_backup: 'The admin command bar, answered by the OpenAI backup model',
   ib_tools: 'Command-bar email, SMS and procurement tools',
   chart_builder_image: 'Chart builder: reads a chart image',
   chart_builder_sql: 'Chart builder: writes the SQL and chart',

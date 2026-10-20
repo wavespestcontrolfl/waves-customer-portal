@@ -4985,6 +4985,15 @@ function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
 }
 
+// GATE_IB_OPENAI_BACKUP read at CALL time — strict `=== 'true'`, dark. When the
+// Intelligence Bar's Anthropic call fails with a provider error (usage limit,
+// auth, overloaded, 5xx, timeout), the request finishes on OpenAI with tool
+// calling (services/intelligence-bar/openai-tool-adapter.js). Off = no
+// fallback, today's behavior. Kill: unset.
+function ibOpenaiBackupLive() {
+  return process.env.GATE_IB_OPENAI_BACKUP === 'true';
+}
+
 // GATE_IB_BILLING_MODE_EDIT read at CALL time — strict `=== 'true'`, dark.
 // The Intelligence Bar's update_customer billing type + per-application fee
 // edit (services/intelligence-bar/billing-mode-change.js). Kill: unset.
@@ -6734,6 +6743,8 @@ module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
 module.exports.ibGeneralReadLive = ibGeneralReadLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
 module.exports.ibToolSearchLive = ibToolSearchLive;
+// GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
+module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.
