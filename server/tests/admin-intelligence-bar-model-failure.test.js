@@ -379,8 +379,13 @@ describe('the standing bell closes when the model answers again', () => {
       await expect(ModelFailure.closeFailureBellOnRecovery()).resolves.toBe(2);
       expect(chain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['ib:model-failure']);
       expect(mockMarkAdminDone).toHaveBeenCalledWith([11, 12], expect.objectContaining({ by: 'ib-model-recovered' }));
-      await expect(ModelFailure.closeFailureBellOnRecovery()).resolves.toBe(0);
+      // Inside a minute this process does not ask again; after a minute it does
+      // (another replica may have rung), and it finds the row with no rows left.
+      await expect(ModelFailure.closeFailureBellOnRecovery({ now: Date.now() + 1000 })).resolves.toBe(0);
       expect(select).toHaveBeenCalledTimes(1);
+      select.mockResolvedValueOnce([]);
+      await expect(ModelFailure.closeFailureBellOnRecovery({ now: Date.now() + 61000 })).resolves.toBe(0);
+      expect(select).toHaveBeenCalledTimes(2);
     } finally {
       db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
     }
@@ -394,5 +399,33 @@ describe('gap reader classifies ib-model rows as system faults', () => {
     const gap = toGap({ id: 1, source: 'ib-model', kind: 'blocked', domain: null, summary: 's', attempted: 'a', closest_tool: null, occurrences: 2, status: 'open', first_seen_at: new Date(), last_seen_at: new Date() });
     expect(gap.system_fault).toBe(true);
     expect(gap.quoted_words).toBeUndefined();
+  });
+});
+
+describe('round 2 fixes (#6368)', () => {
+  test('the failed ask and the failure answer join the returned history', async () => {
+    mockMessagesCreate.mockRejectedValueOnce(limitError());
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, {
+        prompt: 'move the Tuesday visit to Friday', context: 'customers',
+        conversationHistory: [{ role: 'user', content: 'earlier ask' }, { role: 'assistant', content: 'earlier answer' }],
+      });
+      const history = body.conversationHistory;
+      expect(history.slice(0, 2).map((t) => t.content)).toEqual(['earlier ask', 'earlier answer']);
+      expect(history[2].role).toBe('user');
+      expect(history[2].content).toContain('move the Tuesday visit to Friday');
+      expect(history[3].role).toBe('assistant');
+      expect(history[3].content).toContain('The AI model did not answer this request');
+    });
+  });
+
+  test('a middle round that succeeds does not close the bell; only a finished answer does', async () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
+    const callSite = src.indexOf('.catch(err => { throw ModelFailure.tagModelCallError(err); });');
+    const close = src.indexOf('ModelFailure.closeFailureBellOnRecovery()');
+    expect(callSite).toBeGreaterThan(0);
+    expect(close).toBeGreaterThan(callSite);
+    // The close sits after the loop, beside the final send, not next to the model call.
+    expect(src.slice(callSite, close)).toMatch(/const payload = \{/);
   });
 });

@@ -3409,6 +3409,7 @@ async function runQuery(req, res, next) {
   const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
   let activeTask = null;
   let requestPendingProposals = []; // the catch keeps cards minted before a model failure
+  let failureTurn = null; // the catch keeps the asked turn in the returned history
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
     const priorThread = UUID_RE.test(String(req.body.thread_id || ''))
@@ -3424,6 +3425,15 @@ async function runQuery(req, res, next) {
     const historyBase = Array.isArray(priorReply?.conversationHistory) ? priorReply.conversationHistory : conversationHistory;
     const imageTainted = images.length > 0 || hasImageTaintedHistory(historyBase);
     const piiTaintedHistory = hasPiiTaintedHistory(historyBase);
+    // Kept for a model-failure reply, so "try that again" still has the ask.
+    // PII-marked on purpose: the tools that ran are unknown at that point.
+    failureTurn = {
+      historyBase,
+      imageTainted,
+      userTurn: appendTaintMarker(appendTaintMarker(continuing ? CONTINUATION_TURN
+        : (images.length ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]` : prompt),
+      imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER),
+    };
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -3725,8 +3735,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
         // Tagged here so the catch below can tell a failed MODEL call from any other error.
         .catch(err => { throw ModelFailure.tagModelCallError(err); });
-      // A model answer clears a standing "model not answering" bell (no-op unless one may be open).
-      if (ibModelFailureNoticeLive()) ModelFailure.closeFailureBellOnRecovery().catch(() => {});
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
@@ -4218,6 +4226,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
+    // The request finished on a model answer: a standing "model not answering"
+    // bell is cleared here, never after a middle round a later round may still fail.
+    if (ibModelFailureNoticeLive()) ModelFailure.closeFailureBellOnRecovery().catch(() => {});
     if (activeTask) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
         state: payload.taskState, response: payload, messages: currentMessages,
@@ -4232,7 +4243,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // tag is set only around messages.create) is answered plainly, recorded as a
     // gap and rung once an hour. Anything else, or gate off, is today's path.
     if (ibModelFailureNoticeLive() && ModelFailure.isModelCallError(err) && !res.headersSent
-        && await answerModelFailure(req, res, { err, activeTask, pendingProposals: requestPendingProposals })) return;
+        && await answerModelFailure(req, res, { err, activeTask, pendingProposals: requestPendingProposals, failureTurn })) return;
     if (activeTask) {
       try { await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'outcome_unknown' }); }
       catch { /* Existing action receipts remain authoritative. */ }
@@ -4247,14 +4258,20 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 // waits, outcome_unknown when a change was saved or may have run (its receipts
 // stay the authority). Returns false, having answered nothing, when it could
 // not finish; the caller then takes the ordinary error path.
-async function answerModelFailure(req, res, { err, activeTask, pendingProposals = [] }) {
+async function answerModelFailure(req, res, { err, activeTask, pendingProposals = [], failureTurn = null }) {
   try {
     const actorId = getAdminActorId(req);
     const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId });
     logger.error(`[intelligence-bar] Query failed, model call (code=${handled.code})`);
+    const priorHistory = Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-8) : [];
     const payload = {
-      conversationHistory: Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-8) : [],
       ...(activeTask?.response || {}),
+      // The asked turn and this answer join the history, as on a normal reply.
+      conversationHistory: failureTurn && typeof failureTurn.userTurn === 'string' && failureTurn.userTurn.trim()
+        ? [...(Array.isArray(failureTurn.historyBase) ? failureTurn.historyBase : priorHistory).slice(-8),
+          { role: 'user', content: failureTurn.userTurn },
+          { role: 'assistant', content: appendTaintMarker(appendTaintMarker(handled.answer, failureTurn.imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER) }]
+        : (activeTask?.response?.conversationHistory || priorHistory),
       response: handled.answer,
       toolCalls: [],
       structuredData: null,

@@ -208,13 +208,17 @@ async function handleModelFailure({ err, activeTask, actorId }) {
   };
 }
 
-// The standing bell says "done when the model answers". The first successful
-// model call after a failure (or after a restart, when this process cannot know)
-// marks any open ib:model-failure row done. One query per failure, not per call.
+// The standing bell says "done when the model answers". A request that ends on
+// a model answer marks any open ib:model-failure row done. The bell row is
+// shared by every replica, so this checks it directly: right away after this
+// process saw a failure, otherwise at most once a minute per process.
+const RECOVERY_CHECK_MS = 60 * 1000;
 let bellMayBeOpen = true;
-async function closeFailureBellOnRecovery() {
-  if (!bellMayBeOpen) return 0;
+let lastRecoveryCheckAt = 0;
+async function closeFailureBellOnRecovery({ now = Date.now() } = {}) {
+  if (!bellMayBeOpen && now - lastRecoveryCheckAt < RECOVERY_CHECK_MS) return 0;
   bellMayBeOpen = false;
+  lastRecoveryCheckAt = now;
   try {
     const db = require('../../models/db');
     const rows = await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
