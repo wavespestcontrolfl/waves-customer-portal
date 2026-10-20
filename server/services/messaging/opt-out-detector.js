@@ -62,7 +62,7 @@ const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
 const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like|say|says|said|tell|tells|told)\b/i;
 const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|asap|already|just)\b/gi;
 const REQUEST_CONTEXT_AFTER = /\b(?:(?:keep|leave)\s+(?:it|them)\s+(?:that\s+way|like\s+that|off)|(?:stay|stays|remain|remains)\s+that\s+way|(?:want|prefer|like)\s+it\s+(?:that\s+way|like\s+that))\b/i;
-const STOP_LANGUAGE = /(?<!\b(?:don'?t|do\s+not|never|not|won'?t|can'?t|didn'?t|doesn'?t)\s+)\b(?:stop(?!\s+(?:by|over|in|at|back))|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
+const STOP_LANGUAGE = /(?<!\b(?:don'?t|do\s+not|never|not|won'?t|can'?t|didn'?t|doesn'?t)\s+)\b(?:stop(?!\s+(?:by|over|in|at|back)\b)|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
 
 function sentencesOf(body) {
   const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;]+[.!?;]*/g) || [];
