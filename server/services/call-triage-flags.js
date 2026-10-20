@@ -913,18 +913,16 @@ const ADDRESS_UNVERIFIED_PEERS = ['address_unverifiable', 'missing_service_addre
 // The 2026-10-19 audit rule, kept out of dropUnneededCallCards' complexity.
 // `dropped` is what the rules before it already dropped.
 function duplicateAddressCards(list, dropped) {
-  const out = [];
-  // address_unverified is a third copy of the same ask as address_unverifiable
-  // and missing_service_address (30 filed beside 54 and 53, 3 and 7 closed).
-  // One address card per call: it drops whenever another of the two still
-  // files on this call. A card an earlier rule already dropped does not
-  // count, so the call never ends with none. The routing verdict keeps the
-  // flag, so nothing that blocks or allows a booking changes.
-  if (list.includes('address_unverified')
-      && ADDRESS_UNVERIFIED_PEERS.some((f) => list.includes(f) && !dropped.has(f))) {
-    out.push('address_unverified');
-  }
-  return out;
+  // address_unverified, address_unverifiable and missing_service_address are
+  // the same ask on one call (30 filed beside 54 and 53, 3 and 7 closed). One
+  // address card per call, and the survivor is address_unverified: it is the
+  // only one that carries the near-miss address candidates
+  // (addressRecoveryPayload) staff act on (Codex #6347 r1). When an earlier
+  // rule already dropped it, the peers stay, so the call never ends with none.
+  // The routing verdict keeps every flag: nothing that blocks or allows a
+  // booking changes.
+  if (!list.includes('address_unverified') || dropped.has('address_unverified')) return [];
+  return ADDRESS_UNVERIFIED_PEERS.filter((f) => list.includes(f));
 }
 
 function dropUnneededCallCards(flags, extraction, options) {
@@ -1036,7 +1034,9 @@ const SLOT_TEXT_FIELDS = [
 ];
 function schedulingCarriesASlot(scheduling) {
   const s = scheduling || {};
-  if (SLOT_TEXT_FIELDS.some((k) => String(s[k] ?? '').trim() !== '')) return true;
+  // 'unspecified' is the schema's "no preference" sentinel, not a discussed time (Codex #6347 r1).
+  const said = (k) => { const v = String(s[k] ?? '').trim().toLowerCase(); return v !== '' && v !== 'unspecified'; };
+  if (SLOT_TEXT_FIELDS.some(said)) return true;
   if (s.agreed_slot_words && typeof s.agreed_slot_words === 'object') return true;
   if (Array.isArray(s.blackout_dates) && s.blackout_dates.length > 0) return true;
   return s.agent_committed_booking === true

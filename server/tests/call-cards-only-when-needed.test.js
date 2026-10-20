@@ -332,14 +332,18 @@ describe('dropUnneededCallCards: one address card per call', () => {
   const stated = ext({ status: 'requested', intent: 'new_service' });
   stated.property = { service_address: { street_line_1: '1234 Sample Palm Dr' } };
 
-  test('address_unverified drops when address_unverifiable or missing_service_address is also filed', () => {
+  test('address_unverified is the survivor: its peers drop (it alone carries the recovery candidates, Codex #6347 r1)', () => {
     let r = dropUnneededCallCards(['address_unverified', 'address_unverifiable'], stated);
-    expect(r.flags).toEqual(['address_unverifiable']);
-    expect(r.dropped).toEqual(['address_unverified']);
+    expect(r.flags).toEqual(['address_unverified']);
+    expect(r.dropped).toEqual(['address_unverifiable']);
     r = dropUnneededCallCards(['address_unverified', 'missing_service_address'], ext({ status: 'requested', intent: 'new_service' }));
-    expect(r.flags).toEqual(['missing_service_address']);
+    expect(r.flags).toEqual(['address_unverified']);
     r = dropUnneededCallCards(['address_unverified', 'address_unverifiable', 'missing_service_address'], stated);
-    expect(r.flags).toEqual(['address_unverifiable', 'missing_service_address']);
+    expect(r.flags).toEqual(['address_unverified']);
+  });
+
+  test('without address_unverified the peers keep their cards', () => {
+    expect(dropUnneededCallCards(['address_unverifiable'], stated).flags).toEqual(['address_unverifiable']);
   });
 
   test('address_unverified stays when it is the only address card', () => {
@@ -348,7 +352,7 @@ describe('dropUnneededCallCards: one address card per call', () => {
       .toEqual(['address_unverified', 'out_of_service_area', 'low_confidence_address']);
   });
 
-  test('it stays when the other address card is itself dropped (the call never ends with none)', () => {
+  test('with no ask and no street, the no-ask rule still leaves address_unverified as the one card', () => {
     // No ask and no street: both peers drop under the no-ask rule; address_unverified is then the call's one card.
     const noAsk = ext({ status: 'none', intent: null });
     const r = dropUnneededCallCards(['address_unverified', 'address_unverifiable', 'missing_service_address'], noAsk);
@@ -360,5 +364,12 @@ describe('dropUnneededCallCards: one address card per call', () => {
     const flags = ['address_unverified', 'address_unverifiable'];
     dropUnneededCallCards(flags, stated);
     expect(flags).toEqual(['address_unverified', 'address_unverifiable']);
+  });
+
+  test("not_confirmed: 'unspecified' time of day is no time at all (Codex #6347 r1)", () => {
+    const { schedulingCarriesASlot } = require('../services/call-triage-flags');
+    expect(schedulingCarriesASlot({ preferred_time_of_day: 'unspecified' })).toBe(false);
+    expect(schedulingCarriesASlot({ preferred_time_of_day: 'morning' })).toBe(true);
+    expect(schedulingCarriesASlot({ preferred_time_of_day: 'any' })).toBe(true);
   });
 });
