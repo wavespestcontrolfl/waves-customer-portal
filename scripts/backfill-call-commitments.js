@@ -45,9 +45,14 @@ const { parseETDateTime, etDateString } = require('../server/utils/datetime-et')
 const DEFAULT_LIMIT = 100;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Model outcomes that mean the replay did not get an answer.
+// Terminal statuses after which the pipeline still runs the commitments step
+// (customer/lead creation failures finish the call, then record promises;
+// Codex #6346 r2). Spam and voicemail never do.
+const SETTLED_TWO_PARTY_STATUSES = ['processed', 'customer_creation_failed', 'lead_creation_failed'];
 const FAILED_SKIPS = new Set(['model_failed', 'parse_failed', 'schema_failed', 'no_provider']);
 const MIN_TRANSCRIPT_CHARS = 40; // mirrors extractCommitmentsWithModel's own floor
 
+const { runAsReplay } = require('../server/services/llm-dispatch-metrics');
 const id8 = (id) => String(id).slice(0, 8);
 
 function parseArgs(argv) {
@@ -55,12 +60,15 @@ function parseArgs(argv) {
     const i = argv.indexOf(flag);
     return i >= 0 ? argv[i + 1] : null;
   };
-  const limit = Number.parseInt(val('--limit'), 10);
+  // The default applies only when --limit is absent; a supplied value must be a
+  // whole positive integer, so a typo never widens a paid replay (Codex #6346 r2).
+  const raw = argv.includes('--limit') ? String(val('--limit') ?? '') : null;
+  if (raw !== null && !/^[1-9]\d*$/.test(raw)) throw new Error('--limit must be a positive whole number');
   return {
     from: val('--from'),
     to: val('--to'),
     apply: argv.includes('--apply'),
-    limit: Number.isFinite(limit) && limit > 0 ? limit : DEFAULT_LIMIT,
+    limit: raw === null ? DEFAULT_LIMIT : Number(raw),
   };
 }
 
@@ -93,7 +101,7 @@ function candidateQuery(dbh, { start, end, limit }) {
     .modify((q) => whereNotSandboxCall(q, 'c.source'))
     .where('c.created_at', '>=', start)
     .where('c.created_at', '<', end)
-    .where('c.processing_status', 'processed')
+    .whereIn('c.processing_status', SETTLED_TWO_PARTY_STATUSES)
     .whereNull('c.processing_token')
     .whereRaw("COALESCE(c.call_outcome, '') <> 'voicemail'")
     .whereRaw("COALESCE(c.answered_by, '') <> 'voicemail'")
@@ -115,7 +123,7 @@ const findCandidates = (dbh, args) => candidateQuery(dbh, args);
 // The step is the pipeline's own unless a test injects one.
 async function runPipelineStep(dbh, id, { recordCommitmentsStep = require('../server/services/call-recording-processor').recordCommitmentsStep } = {}) {
   const call = await dbh('call_log').where({ id }).first();
-  if (!call || call.processing_status !== 'processed' || call.processing_token || !call.transcription) return { ran: false, reason: 'not_eligible_now' };
+  if (!call || !SETTLED_TWO_PARTY_STATUSES.includes(call.processing_status) || call.processing_token || !call.transcription) return { ran: false, reason: 'not_eligible_now' };
   const already = await dbh('call_commitments').where({ call_log_id: id }).first('id');
   if (already) return { ran: false, reason: 'row_exists_now' };
   const v2Result = call.v2_extraction_status === 'valid' && call.ai_extraction_enriched
@@ -167,7 +175,8 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
   }
   for (const c of candidates) {
     try {
-      const out = await step(dbh, c.id);
+      // Replay traffic, kept out of the live policy's fallback/failure rates (Codex #6346 r2).
+      const out = await runAsReplay(() => step(dbh, c.id), 'call_commitments');
       if (!out.ran) {
         const outcome = out.failed ? 'failed' : 'skipped';
         totals[outcome] += 1;
@@ -190,10 +199,13 @@ module.exports = { parseArgs, etRange, candidateQuery, findCandidates, runPipeli
 
 if (require.main === module) {
   const db = require('../server/models/db');
-  const opts = parseArgs(process.argv.slice(2));
-  run({ ...opts, dbh: db })
+  let failed = 0;
+  Promise.resolve()
+    .then(() => run({ ...parseArgs(process.argv.slice(2)), dbh: db }))
+    .then((totals) => { failed = totals?.failed || 0; })
     .then(() => db.destroy())
-    .then(() => process.exit(0))
+    // An incomplete apply is not a success (Codex #6346 r2).
+    .then(() => process.exit(failed > 0 ? 2 : 0))
     .catch((err) => {
       console.error(`backfill failed (code ${err?.code || 'n/a'}): ${String(err?.message || err).split('\n')[0].slice(0, 200)}`);
       process.exit(1);

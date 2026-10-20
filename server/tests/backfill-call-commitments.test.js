@@ -10,6 +10,12 @@ describe('backfill-call-commitments', () => {
     expect(backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18', '--apply', '--limit', '5'])).toMatchObject({ apply: true, limit: 5 });
   });
 
+  test('parseArgs: a supplied --limit must be a positive whole number (Codex #6346 r2)', () => {
+    for (const bad of [['--limit'], ['--limit', '0'], ['--limit', '-3'], ['--limit', '5x'], ['--limit', '2.5']]) {
+      expect(() => backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18', '--apply', ...bad])).toThrow(/positive whole number/);
+    }
+  });
+
   test('etRange: inclusive ET calendar dates become [start, end) instants', () => {
     const { start, end } = backfill.etRange('2026-10-15', '2026-10-18');
     expect(start.toISOString()).toBe('2026-10-15T04:00:00.000Z'); // EDT
@@ -24,7 +30,8 @@ describe('backfill-call-commitments', () => {
   test('the candidate query keeps processed two-party calls with a transcript and no commitment row', () => {
     const db = knex({ client: 'pg' });
     const sql = backfill.candidateQuery(db, { start: new Date('2026-10-15T04:00:00Z'), end: new Date('2026-10-19T04:00:00Z'), limit: 7 }).toString();
-    expect(sql).toMatch(/"c"\."processing_status" = 'processed'/);
+    // Customer/lead creation failures still run the commitments step in the pipeline (Codex #6346 r2).
+    expect(sql).toMatch(/"c"\."processing_status" in \('processed', 'customer_creation_failed', 'lead_creation_failed'\)/);
     expect(sql).toMatch(/"c"\."processing_token" is null/);
     expect(sql).toMatch(/COALESCE\(c\.call_outcome, ''\) <> 'voicemail'/);
     expect(sql).toMatch(/COALESCE\(c\.answered_by, ''\) <> 'voicemail'/);
