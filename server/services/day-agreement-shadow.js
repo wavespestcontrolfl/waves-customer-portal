@@ -449,10 +449,28 @@ async function decideMoment(conn, src, index, agreement, ctx) {
 
 // All the rows for one source: a skip without a model call when it has no
 // customer or no text, otherwise one row for each moment the model listed.
+// A sender can start a model judgment at most SENDER_QUOTA times a day: each
+// new inbound text is a new source, so without a ceiling a linked phone could
+// keep paying for deep-model calls (Codex security review, #6350 r6). Counted
+// from the '#0' row every judged source writes.
+const SENDER_QUOTA = 3;
+async function senderOverQuota(conn, digits, now) {
+  if (!digits) return false;
+  const row = await conn('day_agreement_decisions')
+    .where('source_kind', 'sms').where('phone_digits', digits)
+    .where('source_key', 'like', '%#0')
+    // Rate-limited rows did not judge anything, so they do not count.
+    .where((q) => q.whereNull('skip_reason').orWhereNot('skip_reason', 'sender_rate_limited'))
+    .where('created_at', '>=', new Date(now.getTime() - 24 * HOUR_MS))
+    .count({ n: '*' }).first();
+  return Number(row?.n || 0) >= SENDER_QUOTA;
+}
+
 async function processSource(conn, src, ctx) {
   if (!src.customerId) return { rows: [skipRow(src, 0, 'no_customer')] };
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
   if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };
+  if (src.kind === 'sms' && await senderOverQuota(conn, src.phoneDigits, ctx.now)) return { rows: [skipRow(src, 0, 'sender_rate_limited')] };
   const lines = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
   // A failed read throws (the source stays unjudged and is retried next tick); the
   // legacy empty list would record every agreement as service_unresolved for good.
