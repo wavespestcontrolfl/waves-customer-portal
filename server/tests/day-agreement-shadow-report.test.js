@@ -42,6 +42,11 @@ describe('classifyOutcome', () => {
     expect(report.classifyOutcome(decision(), [visit({ d: '2040-05-01', created_at: late })]).outcome).toBe('nothing');
   });
 
+  test('a move is scored on the named visit only: another new booking on that day is not the move', () => {
+    const move = decision({ verdict: 'would_move', from_visit_id: 'v-1', from_day: '2040-03-16' });
+    expect(report.classifyOutcome(move, [visit({ d: '2040-03-16', created_at: before }), visit({ id: 'v-2' })]).outcome).toBe('nothing');
+  });
+
   test('one agreement judged again from a later thread snapshot counts once', () => {
     const d1 = decision({ id: 'a1', verdict: 'would_book', customer_id: 'c-1' });
     const d2 = decision({ id: 'a2', verdict: 'would_book', customer_id: 'c-1' });

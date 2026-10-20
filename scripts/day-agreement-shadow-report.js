@@ -67,7 +67,8 @@ function classifyOutcome(decision, visits) {
   // this agreement's outcome (pre-push audit).
   const created = live.filter((v) => !v.recurring_parent_id && ms(v.created_at) > agreed && ms(v.created_at) <= agreed + OBSERVE_MS);
   const movedHere = live.filter((v) => decision.from_visit_id && v.id === decision.from_visit_id && v.d === decision.target_date);
-  const touched = [...created, ...movedHere];
+  // A move is scored only on the visit it named; a new visit only on new bookings.
+  const touched = decision.from_visit_id ? movedHere : created;
   const onDay = touched.filter((v) => v.d === decision.target_date);
   if (onDay.length) {
     const sameHour = onDay.some((v) => hhmm(v.window_start) !== null && hhmm(v.window_start) === hhmm(decision.chosen_window_start));
