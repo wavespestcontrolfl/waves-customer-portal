@@ -276,6 +276,9 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     lastVisit,
     // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
     ...(require('../config/feature-gates').fastCompleteWrapUpLive() && { wrapUp: true }),
+    // GATE_ONE_TAP_REPORT: the sheet reads no note for products (its "fill from the note" tap goes); the note's mic
+    // stays. Gate off = no key at all.
+    ...(require('../config/feature-gates').oneTapReportLive() && { oneTap: true }),
   };
 }
 

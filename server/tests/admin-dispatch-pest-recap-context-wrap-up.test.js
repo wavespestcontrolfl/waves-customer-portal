@@ -143,6 +143,18 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     expect(res.body).toEqual(oneTime);
   });
 
+  test.each([
+    ['the pest re-service', { isRecurring: false, serviceKey: 'pest_re_service' }],
+    ['a free callback under a regular key', { isRecurring: false, isCallback: true, serviceKey: 'pest_general_quarterly' }],
+  ])('gate on, %s (a re-service): oneTap is true', async (_label, visit) => {
+    process.env.GATE_ONE_TAP_REPORT = 'true';
+    const reservice = { ...CONTEXT, service: { id: 'visit-1', ...visit } };
+    PestRecap.buildRecapContext.mockResolvedValue(reservice);
+    const res = await invoke('get', CONTEXT_PATH, { params });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ...reservice, oneTap: true });
+  });
+
   test('gate on: a refused context carries no oneTap', async () => {
     process.env.GATE_ONE_TAP_REPORT = 'true';
     PestRecap.buildRecapContext.mockResolvedValue({ ok: false, reason: 'not_found' });
