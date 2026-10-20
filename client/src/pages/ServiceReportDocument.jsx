@@ -1050,9 +1050,11 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         /* A long link (the products-and-safety URL) wraps instead of running
            past a 320px phone at that scale. */
         .service-report-document.is-web a { overflow-wrap: anywhere; }
-        /* GATE_REPORT_SIMPLE_WEB: on a phone the web view stacks what the
-           letter-size page sets side by side. is-web only, so the PDF is unchanged. */
-        @media (max-width: 640px) {
+        /* GATE_REPORT_SIMPLE_WEB: on a phone or a narrow tablet the web view
+           stacks what the letter-size page sets side by side. A media query
+           sees the unzoomed viewport, so the breakpoint is 640px of page width
+           times the 1.48 zoom (947px). is-web only, so the PDF is unchanged. */
+        @media (max-width: 947px) {
           .service-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
           .service-report-document.is-web .doc-letterhead,
           .service-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 8px !important; }
