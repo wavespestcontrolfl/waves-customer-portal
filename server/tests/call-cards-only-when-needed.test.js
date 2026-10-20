@@ -7,7 +7,6 @@ const {
   callMakesNoServiceAsk,
   callEndedWithNothingToDo,
   noActionCallCards,
-  noSlotDiscussedCards,
   spelledEmailSettled,
 } = require('../services/call-triage-flags');
 
@@ -257,76 +256,6 @@ describe('spelledEmailSettled', () => {
   });
 });
 
-// 2026-10-19 call audit: not_confirmed filed on calls where no day or time was ever discussed.
-describe('noSlotDiscussedCards: a requested visit on an existing service with no slot', () => {
-  const recall = (over = {}) => ({
-    recommended_disposition: 'callback_task_created',
-    meta: { is_voicemail: false },
-    scheduling: { status: 'requested' },
-    service_request: { service_intent: 'follow_up_existing_service', quote_requested: false, quote_promised: false },
-    ...over,
-  });
-
-  test('a re-treat or callback call with no slot files no not_confirmed card', () => {
-    expect(noSlotDiscussedCards(recall())).toEqual(['not_confirmed']);
-    expect(noSlotDiscussedCards(recall({ service_request: { service_intent: 'complaint_or_callback' } }))).toEqual(['not_confirmed']);
-    // Empty slot fields read as no slot.
-    expect(noSlotDiscussedCards(recall({ scheduling: {
-      status: 'requested', confirmed_start_at: null, requested_date_range_start: '', preferred_time_of_day: null,
-      agent_committed_booking: false, caller_accepted_slot: false, follow_up_mentioned: false, blackout_dates: [],
-    } }))).toEqual(['not_confirmed']);
-  });
-
-  test('it rides noActionCallCards (the call processor already applies that list), with or without the no-action verdict', () => {
-    expect(noActionCallCards(recall())).toEqual(['not_confirmed']);
-    // Both rules agree: no duplicate code, and the no-action address cards still follow their own rule.
-    const both = recall({ recommended_disposition: 'no_action_needed', service_request: { service_intent: 'follow_up_existing_service', urgency: 'no_appointment_needed' } });
-    expect(noActionCallCards(both).filter((c) => c === 'not_confirmed')).toHaveLength(1);
-    expect(noActionCallCards(both)).toContain('missing_service_address');
-  });
-
-  test('any slot the extraction carries keeps the card', () => {
-    const slots = [
-      { confirmed_start_at: '2026-10-21T10:00:00-04:00' },
-      { proposed_start_at: '2026-10-21T10:00:00-04:00' },
-      { requested_date_range_start: '2026-10-21' },
-      { requested_date_range_end: '2026-10-23' },
-      { preferred_time_of_day: 'morning' },
-      { callback_window_start: '14:00' },
-      { callback_window_end: '16:00' },
-      { follow_up_start_at: '2026-10-28T09:00:00-04:00' },
-      { selected_day_words: 'Thursday' },
-      { moved_appointment_date: '2026-10-22' },
-      { agreed_slot_words: { day: 'Thursday', hour: 'two', period: 'pm' } },
-      { blackout_dates: ['2026-10-24'] },
-      { agent_committed_booking: true },
-      { caller_accepted_slot: true },
-      { staff_accepted_proposed_slot: true },
-      { follow_up_mentioned: true },
-    ];
-    for (const slot of slots) {
-      expect(noSlotDiscussedCards(recall({ scheduling: { status: 'requested', ...slot } }))).toEqual([]);
-    }
-  });
-
-  test('stays filed in every other shape (when in doubt the card stays)', () => {
-    // Offered, ambiguous, confirmed, change requests, no status: a time was talked about or the call is not this shape.
-    for (const status of ['offered', 'ambiguous', 'confirmed', 'reschedule_requested', 'canceled', 'none', undefined]) {
-      expect(noSlotDiscussedCards(recall({ scheduling: { status } }))).toEqual([]);
-    }
-    // A new-service ask with no day is real work for the office.
-    for (const service_intent of ['active_infestation_treatment', 'preventative_one_time', 'recurring_membership_inquiry', 'inspection_only', 'quote_only', 'cancellation_request', null, undefined]) {
-      expect(noSlotDiscussedCards(recall({ service_request: { service_intent } }))).toEqual([]);
-    }
-    expect(noSlotDiscussedCards(recall({ service_request: { service_intent: 'follow_up_existing_service', quote_promised: true } }))).toEqual([]);
-    expect(noSlotDiscussedCards(recall({ service_request: { service_intent: 'follow_up_existing_service', quote_requested: true } }))).toEqual([]);
-    expect(noSlotDiscussedCards(recall({ meta: { is_voicemail: true } }))).toEqual([]);
-    expect(noSlotDiscussedCards(recall({ recommended_disposition: 'booked' }))).toEqual([]);
-    expect(noSlotDiscussedCards(null)).toEqual([]);
-    expect(noActionCallCards(recall({ scheduling: { status: 'requested', preferred_time_of_day: 'morning' } }))).toEqual([]);
-  });
-});
-
 // 2026-10-19 call audit: address_unverified filed beside the other address cards.
 describe('dropUnneededCallCards: one address card per call', () => {
   const stated = ext({ status: 'requested', intent: 'new_service' });
@@ -364,12 +293,5 @@ describe('dropUnneededCallCards: one address card per call', () => {
     const flags = ['address_unverified', 'address_unverifiable'];
     dropUnneededCallCards(flags, stated);
     expect(flags).toEqual(['address_unverified', 'address_unverifiable']);
-  });
-
-  test("not_confirmed: 'unspecified' time of day is no time at all (Codex #6347 r1)", () => {
-    const { schedulingCarriesASlot } = require('../services/call-triage-flags');
-    expect(schedulingCarriesASlot({ preferred_time_of_day: 'unspecified' })).toBe(false);
-    expect(schedulingCarriesASlot({ preferred_time_of_day: 'morning' })).toBe(true);
-    expect(schedulingCarriesASlot({ preferred_time_of_day: 'any' })).toBe(true);
   });
 });

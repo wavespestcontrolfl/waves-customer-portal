@@ -1013,56 +1013,11 @@ function callEndedWithNothingToDo(extraction) {
   return extraction.service_request?.quote_promised !== true;
 }
 
-// 6. A call about an existing service where no day or time was ever discussed
-//    (2026-10-19 call audit, calls fde5a1ce and 9868cfbe: a re-treat and a
-//    callback call; 32 not_confirmed cards filed in 30 days, 1 closed).
-//    "not_confirmed" says a time was talked about and never pinned down. Here
-//    scheduling.status reads 'requested' only because the caller wants the
-//    service again, and the extraction carries no slot of any kind: no
-//    proposed, agreed, accepted or committed time, no requested date range or
-//    part of day, no callback window, no follow-up, no promised quote, not a
-//    voicemail. The card would name a conversation that never happened.
-//    Narrow on purpose (when in doubt the card stays): only an existing-
-//    service intent (follow_up_existing_service, complaint_or_callback), only
-//    status 'requested'. A new-service ask with no day keeps its card.
-//    Codes only: the routing verdict and every flag are untouched.
-const NO_SLOT_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback']);
-const SLOT_TEXT_FIELDS = [
-  'confirmed_start_at', 'proposed_start_at', 'requested_date_range_start', 'requested_date_range_end',
-  'preferred_time_of_day', 'callback_window_start', 'callback_window_end', 'follow_up_start_at',
-  'selected_day_words', 'moved_appointment_date',
-];
-function schedulingCarriesASlot(scheduling) {
-  const s = scheduling || {};
-  // 'unspecified' is the schema's "no preference" sentinel, not a discussed time (Codex #6347 r1).
-  const said = (k) => { const v = String(s[k] ?? '').trim().toLowerCase(); return v !== '' && v !== 'unspecified'; };
-  if (SLOT_TEXT_FIELDS.some(said)) return true;
-  if (s.agreed_slot_words && typeof s.agreed_slot_words === 'object') return true;
-  if (Array.isArray(s.blackout_dates) && s.blackout_dates.length > 0) return true;
-  return s.agent_committed_booking === true
-    || s.caller_accepted_slot === true
-    || s.staff_accepted_proposed_slot === true
-    || s.follow_up_mentioned === true;
-}
-
-function noSlotDiscussedCards(extraction) {
-  if (!extraction || extraction.meta?.is_voicemail === true) return [];
-  const scheduling = extraction.scheduling || {};
-  if (scheduling.status !== 'requested') return [];
-  const sr = extraction.service_request || {};
-  if (!NO_SLOT_INTENTS.has(sr.service_intent)) return [];
-  if (sr.quote_promised === true || sr.quote_requested === true) return [];
-  if (extraction.recommended_disposition === 'booked') return [];
-  if (schedulingCarriesASlot(scheduling)) return [];
-  return ['not_confirmed'];
-}
 
 function noActionCallCards(extraction, { canonicalStreet } = {}) {
-  const noSlot = noSlotDiscussedCards(extraction);
-  if (!callEndedWithNothingToDo(extraction)) return noSlot;
+  if (!callEndedWithNothingToDo(extraction)) return [];
   const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
-  const cards = statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
-  return [...new Set([...cards, ...noSlot])];
+  return statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
 }
 
 function hasCanonicalWriteBlock(flags) {
@@ -3548,8 +3503,6 @@ module.exports = {
   dropUnneededCallCards,
   callEndedWithNothingToDo,
   noActionCallCards,
-  noSlotDiscussedCards,
-  schedulingCarriesASlot,
   CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
