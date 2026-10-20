@@ -153,11 +153,21 @@ function averageText(parts) {
 async function reviewedAverageStale(reviewedMessages, loadRow) {
   const reviewedEmail = reviewedMessages?.email;
   if (!reviewedEmail || reviewedEmail.provider === 'smtp') return false;
-  const stored = reviewedEmail.monthlyAverage ?? null;
   // Gate off and nothing recorded: nothing to compute, nothing changed.
-  if (stored === null && !gateOn()) return false;
+  if ((reviewedEmail.monthlyAverage ?? null) === null && !gateOn()) return false;
   // Through module.exports so a test can pin the resolution without a billing fixture.
-  return stored !== averageText(await module.exports.emailAverageParts(await loadRow()));
+  return averageDiffersFromReview(reviewedMessages, await module.exports.emailAverageParts(await loadRow()));
 }
 
-module.exports = { monthlyAverageFor, emailAverageParts, averageText, reviewedAverageStale, gateOn };
+/**
+ * The exact-copy comparison: does the average the email is about to carry
+ * (already resolved, `parts`) differ from the one the review recorded? Used at
+ * the email build itself, the last point before the provider handoff.
+ */
+function averageDiffersFromReview(reviewedMessages, parts) {
+  const reviewedEmail = reviewedMessages?.email;
+  if (!reviewedEmail || reviewedEmail.provider === 'smtp') return false;
+  return (reviewedEmail.monthlyAverage ?? null) !== averageText(parts);
+}
+
+module.exports = { monthlyAverageFor, emailAverageParts, averageText, reviewedAverageStale, averageDiffersFromReview, gateOn };

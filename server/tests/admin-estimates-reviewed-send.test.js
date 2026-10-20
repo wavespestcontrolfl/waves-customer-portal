@@ -2234,6 +2234,25 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('an edit that lands between the early check and the email build fails the email channel stale; nothing reaches the provider', async () => {
+      const edited = { ...PARTS, priceLine: '$94.00 per application · about $35.00 a month' };
+      // Call 1 is the early (pre-claim) check, call 2 the email build: the price changes in between.
+      averageService.emailAverageParts.mockReset();
+      averageService.emailAverageParts.mockResolvedValueOnce(PARTS).mockResolvedValue(edited);
+      let result;
+      let thrown;
+      try {
+        result = await router.sendEstimateNow(structuredClone(row), 'email', {
+          callerPreClaimed: false, reviewedMessages: { sms: null, email: { provider: 'sendgrid', monthlyAverage: TEXT } },
+        });
+      } catch (err) { thrown = err; }
+      expect(averageService.emailAverageParts).toHaveBeenCalledTimes(2);
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+      const channel = result?.channels?.email || thrown?.channels?.email || thrown?.result?.channels?.email;
+      expect(channel).toMatchObject({ ok: false, error: expect.stringContaining('monthly average changed before delivery') });
+      expect(channel.uncertain).toBeFalsy();
+    });
+
     test('an old review with no recorded average means "none": a send that would now add one is stale', async () => {
       await expect(router.sendEstimateNow(structuredClone(row), 'both', {
         callerPreClaimed: false, reviewedMessages: { sms: 'x', email: { provider: 'sendgrid' } },

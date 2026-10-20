@@ -255,6 +255,8 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
+const REVIEW_STALE_MESSAGE = 'The saved offer, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
+
 function moneySummary(estimate = {}, { allowTotals = false, average = null } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
   const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
@@ -2827,7 +2829,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     });
     if (invalidatedNow) {
       if (invalidatedNow === 'saved_offer_changed') {
-        throw Object.assign(new Error('The saved offer, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+        throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
       }
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
@@ -3093,7 +3095,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // with, so a price edit that landed during the send never ships a
           // stale average. The review preview resolves from the row it read.
           // Null with the gate off or for a commercial proposal.
-          const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(freshEstimate);
+          const averageService = require('../services/estimate-monthly-average');
+          const average = proposalMode ? null : await averageService.emailAverageParts(freshEstimate);
+          // The early check (before the claim) stops the text too; this one covers an edit that landed between
+          // it and this build: the copy handed to the provider must be the copy the office reviewed. A mismatch
+          // fails the email channel (operator-visible, nothing dispatched, so not uncertain).
+          if (averageService.averageDiffersFromReview(options.reviewedMessages, average)) {
+            throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+          }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
