@@ -49,9 +49,11 @@ const OPT_OUT_PATTERNS = [
 //     "were sent" is not evidence ("I said no texts yesterday", "I asked that no messages were
 //     sent to me" are requests);
 //   - "that day" just after it, with a receiving verb (got, received, saw, heard) earlier in the
-//     sentence ("I had said no texts that day" is a request).
-// None of these counts after "if", "unless", "rather", "wish" or "prefer" earlier in the sentence
-// ("I would prefer it if I received no texts" is a request). A strong request word anywhere in the
+//     same clause ("I had said no texts that day" is a request).
+// None of these counts after a conditional or request word earlier in the sentence ("if",
+// "unless", "rather", "wish", "prefer", "want", "need", "ask", "request", "like"): "I would prefer
+// it if I received no texts" and "I got your confirmation, but I want no texts that day" are
+// requests. A strong request word anywhere in the
 // sentence ("please", "anymore", "from now on") keeps it a stop request. Sentences end at . ! ? ;
 // or a line break; a comma does not end one. "No more texts" stays a stop request anywhere
 // (OPT_OUT_PATTERNS above).
@@ -60,7 +62,7 @@ const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|the
 const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
-const CONDITIONAL_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred)\b/i;
+const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like)\b/i;
 const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|it|asap|already|just)\b/gi;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 
@@ -77,8 +79,9 @@ function noTextsKind(text) {
   const isRequest = matches.some((match) => {
     const before = text.slice(0, match.index);
     const after = text.slice(match.index + match[0].length);
-    const reportsPastText = !CONDITIONAL_EARLIER.test(before) && (PAST_REPORT_JUST_BEFORE.test(before)
-      || PAST_ARRIVAL_AFTER.test(after) || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(before)));
+    const sameClause = before.split(',').pop();
+    const reportsPastText = !REQUEST_CONTEXT_EARLIER.test(before) && (PAST_REPORT_JUST_BEFORE.test(before)
+      || PAST_ARRIVAL_AFTER.test(after) || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(sameClause)));
     return !reportsPastText;
   });
   return isRequest ? 'request' : 'report';
