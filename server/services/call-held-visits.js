@@ -179,6 +179,9 @@ function moveDayOnlyFrom(call, extraction, dateET, todayET) {
     !!call.customer_id,
     sched.status === 'reschedule_requested',
     noExplicitRefusal(sched),
+    // A timed reschedule is never "time not set", even when its commitment flags are missing
+    // and agreedMoveSlot returned no slot (Codex #6345 r1): it stays with the reschedule card.
+    !String(sched.confirmed_start_at || '').trim() && !String(sched.proposed_start_at || '').trim(),
     sched.requested_date_range_start === dateET && (sched.requested_date_range_end || dateET) === dateET,
     ISO_DATE.test(String(from || '')) && from !== dateET,
     call.processing_status === 'processed',
@@ -225,7 +228,7 @@ function clearedByBooking({ call, kind, slot, moved, movedFrom }, bookedRows, { 
   if (moved && movesAVisitOnFile({ call }, bookedRows)) return true;
   // A day-only move needs a live visit of the customer on the old day: once it is moved,
   // cancelled or rescheduled there is nothing left to move.
-  if (kind === 'move_day_only' && !visitToMove(call, movedFrom, bookedRows)) return true;
+  if (kind === 'move_day_only' && !visitsToMove(call, movedFrom, bookedRows).length) return true;
   const sameName = namesakes.get(call.id);
   // The call's own customer has a live visit that day. A confirmed promise has a time, so the
   // visit must sit inside the watchdog's window tolerance (rowClearsSlot): a morning lawn visit
@@ -236,12 +239,22 @@ function clearedByBooking({ call, kind, slot, moved, movedFrom }, bookedRows, { 
   return bookedRows.some((row) => rowCarriesCall(row, call) || ownOnDay(row) || namesake(row));
 }
 
-// The live visit a day-only move would move: the call's customer's, on the old day. First by
-// window start when there are several, so the link is stable.
-function visitToMove(call, movedFrom, bookedRows) {
+// A visit that can still be moved: on the calendar and not started or done. A completed (or
+// on-site) visit on the old day means the move is moot (Codex #6345 r1).
+const MOVABLE_STATUSES = new Set(['pending', 'confirmed']);
+const isMovable = (status) => status == null || MOVABLE_STATUSES.has(status);
+
+// The movable visits a day-only move could mean: the call's customer's, on the old day.
+function visitsToMove(call, movedFrom, bookedRows) {
   return bookedRows
-    .filter((row) => row.customer_id === call.customer_id && isLive(row.status) && row.sched_date === movedFrom && !rowCarriesCall(row, call))
-    .sort((a, b) => String(a.window_start || '').localeCompare(String(b.window_start || '')))[0] || null;
+    .filter((row) => row.customer_id === call.customer_id && isMovable(row.status) && row.sched_date === movedFrom && !rowCarriesCall(row, call));
+}
+
+// The one visit the row links to, only when it is unambiguous: with two movable visits on the
+// old day the call did not say which, so the row falls back to the day link (Codex #6345 r1).
+function visitToMove(call, movedFrom, bookedRows) {
+  const visits = visitsToMove(call, movedFrom, bookedRows);
+  return visits.length === 1 ? visits[0] : null;
 }
 
 // Who the row is for: the linked customer's name on file, else the name given on the call.

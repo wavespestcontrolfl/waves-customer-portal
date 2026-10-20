@@ -390,6 +390,22 @@ describe('a move to a day with no time (move_day_only)', () => {
     });
   });
 
+  it('a timed reschedule with unset commitment flags is never a "time not set" move (Codex #6345 r1)', () => {
+    const sched = { agent_committed_booking: null, caller_accepted_slot: null };
+    expect(run([moveCall({}, { ...sched, confirmed_start_at: '2026-10-14T14:00:00Z' })], [oldVisit()])).toEqual([]);
+    expect(run([moveCall({}, { ...sched, proposed_start_at: '2026-10-14T14:00:00Z' })], [oldVisit()])).toEqual([]);
+  });
+
+  it('a completed or on-site old-day visit clears the move (Codex #6345 r1)', () => {
+    expect(run([moveCall()], [oldVisit({ status: 'completed' })])).toEqual([]);
+    expect(run([moveCall()], [oldVisit({ status: 'on_site' })])).toEqual([]);
+  });
+
+  it('two movable visits on the old day keep the row but link to the day, not a visit (Codex #6345 r1)', () => {
+    const [row] = run([moveCall()], [oldVisit(), oldVisit({ id: 'visit-old-2', window_start: '13:00:00' })]);
+    expect(row).toMatchObject({ kind: 'move_day_only', from_date_et: FROM, from_visit_id: null });
+  });
+
   it('is not held on the old day or any other day', () => {
     expect(run([moveCall()], [oldVisit()], [], { dateET: FROM })).toEqual([]);
     expect(run([moveCall()], [oldVisit()], [], { dateET: '2026-10-15' })).toEqual([]);
@@ -460,7 +476,7 @@ describe('a move to a day with no time (move_day_only)', () => {
     it('holds with a legacy visit that has no status, and with several visits on the old day', () => {
       expect(run([moveCall()], [oldVisit({ status: null })])).toHaveLength(1);
       const [row] = run([moveCall()], [oldVisit({ id: 'visit-pm', window_start: '14:00:00' }), oldVisit({ id: 'visit-am', window_start: '08:00:00' })]);
-      expect(row.from_visit_id).toBe('visit-am');
+      expect(row.from_visit_id).toBeNull(); // ambiguous: the row links to the old day
     });
 
     it('when the customer has a live visit on the target day, at any time', () => {
