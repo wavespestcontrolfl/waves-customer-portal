@@ -369,7 +369,9 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       // A second failure after a paid judgment records the source, so the model is not paid for again.
       const dispatch2 = answering(agreement());
       await sweep({ dispatch: dispatch2, findSlots: jest.fn(async () => { throw new Error('picker down'); }) });
-      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'slot_lookup_failed' })]);
+      // ...stamped with the judging model, so the customer's daily quota counts this paid judgment.
+      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'slot_lookup_failed', model: 'stub-model' })]);
+      expect(await shadow._internals.customerOverQuota(trx, customerId, NOW)).toBe(false);
       await sweep({ dispatch: dispatch2, findSlots: jest.fn() });
       expect(dispatch2).toHaveBeenCalledTimes(1);
       await trx('day_agreement_decisions').delete();
@@ -804,6 +806,63 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       // The quiet period still applies: a delivered Waves text 10 minutes ago ends it.
       await offer('Great, see you then', 10);
       expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+    });
+
+    test('"Tuesday?" then a delivered Waves "see you then" then a day-less "Thanks" is a candidate; the same rules apply to the answer', async () => {
+      const customerId = await customer();
+      await text(customerId, 'Can you come Tuesday?', 120);
+      const thanks = await text(customerId, 'Thanks', 45);
+      // No Waves text after the proposal yet.
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+      const answer = (body, minutesAgo, opts = {}) => text(customerId, body, minutesAgo, { direction: 'outbound', ...opts });
+      // Not an answer: undelivered, push-only, recruiting, or sent BEFORE the proposal.
+      const notAnswers = [
+        await answer('Yes, see you then', 100, { status: 'scheduled' }),
+        await answer('Yes, see you then', 100, { status: 'failed' }),
+        await answer('Yes, see you then', 100, { type: 'job_interview' }),
+        await answer('Yes, see you then', 130),
+      ];
+      const push = await answer('Yes, see you then', 100);
+      await trx('sms_log').where({ id: push }).update({ from_phone: 'push' });
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+      await trx('sms_log').whereIn('id', [...notAnswers, push]).delete();
+      await answer('Yes, see you then', 100);
+      expect((await shadow._internals.loadSmsCandidates(trx, NOW)).map((r) => r.id)).toEqual([thanks]);
+      // The proposal must be inside the 3 hours before the reply, and a day-less customer text is not a proposal.
+      await trx('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: thanks }).update({ message_body: 'ok great', created_at: ago(120) });
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+      await trx('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: thanks }).update({ message_body: 'Can you come Tuesday?', created_at: ago(45 + 181) });
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+    });
+
+    test('a day-less reply to a proposal reaches the model with the whole exchange, and the quiet rule still holds', async () => {
+      const customerId = await customer();
+      await text(customerId, 'Can you come Tuesday?', 120);
+      await text(customerId, 'Yes, see you then', 100, { direction: 'outbound' });
+      await text(customerId, 'Thanks', 45);
+      const dispatch = answering(agreement({ act: false, kind: null, day: null, blockers: ['no_day_agreed'] }));
+      await sweep({ dispatch });
+      expect(dispatch.mock.calls[0][1].text).toMatch(/CUSTOMER: Can you come Tuesday\?[\s\S]*WAVES \(manual\): Yes, see you then[\s\S]*CUSTOMER: Thanks/);
+      await trx('day_agreement_decisions').delete();
+      await text(customerId, 'See you', 10, { direction: 'outbound' });
+      expect(await shadow._internals.loadSmsCandidates(trx, NOW)).toEqual([]);
+    });
+
+    test('fields outside their vocabulary are stored as null, on an act:false moment too, and an out-of-range confidence is an unusable answer', async () => {
+      const customerId = await customer();
+      await call(customerId);
+      await sweep({
+        dispatch: answering(agreement({
+          act: false, kind: 'cancel', day: 'Wednesday', from_day: '2040-02-30', daypart: 'whenever', blockers: ['no_day_agreed'],
+        })),
+        findSlots: jest.fn(),
+      });
+      const [row] = await decisions();
+      expect(row.judged).toMatchObject({ kind: null, day: null, from_day: null, daypart: null });
+      expect(row.target_date).toBeNull();
+      // validateAnswer is the dispatcher's hook: confidence 1.7 rejects the leg.
+      expect(shadow._internals.validateAnswer({ json: { agreements: [agreement({ confidence: 1.7 })] } })).toBe('confidence_out_of_range');
+      expect(shadow._internals.validateAnswer({ json: { agreements: [agreement({ daypart: 'whenever' })] } })).toBe('daypart_invalid');
     });
 
     test('the offer admits the thread to the model, which sees the offer and the reply', async () => {

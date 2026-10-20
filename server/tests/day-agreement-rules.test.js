@@ -52,9 +52,6 @@ describe('decideAgreement: every rule records its own skip reason', () => {
     ['day_not_after_today', { agreement: agreement({ day: TODAY }) }],
     ['day_not_after_today', { agreement: agreement({ day: '2040-03-10' }) }],
     ['no_customer', { customerId: null }],
-    ['daypart_unreadable', { agreement: agreement({ daypart: 'whenever' }) }],
-    ['daypart_unreadable', { agreement: agreement({ daypart: 'after 24:00' }) }],
-    ['daypart_unreadable', { agreement: agreement({ daypart: 'before 12:75' }) }],
   ];
   test.each(cases)('%s', (reason, over) => {
     expect(decide(over)).toMatchObject({ pass: false, reason });
@@ -185,6 +182,40 @@ describe('the SMS day-word prefilter', () => {
 });
 
 describe('unusableReason and normalizeAgreement', () => {
+  test('a stored field is held to its vocabulary before it is persisted, on an act:false object too', () => {
+    const a = rules.normalizeAgreement(agreement({
+      act: false, kind: 'cancel', day: '2040-02-30', from_day: 'Monday', daypart: 'whenever',
+    }));
+    expect(a).toMatchObject({ kind: null, day: null, from_day: null, daypart: null });
+    const ok = rules.normalizeAgreement(agreement({ kind: ' Move ', day: ' 2040-03-14 ', from_day: '2040-03-16', daypart: ' After 13:00 ' }));
+    expect(ok).toMatchObject({ kind: 'move', day: '2040-03-14', from_day: '2040-03-16', daypart: 'after 13:00' });
+    for (const daypart of ['any', 'morning', 'afternoon', 'evening', 'before 11:00']) {
+      expect(rules.normalizeAgreement(agreement({ daypart })).daypart).toBe(daypart);
+    }
+    for (const daypart of ['after 24:00', 'before 12:75', 'after one', '', null, undefined, 7]) {
+      expect(rules.normalizeAgreement(agreement({ daypart })).daypart).toBeNull();
+    }
+  });
+
+  test('an act:true object with an unknown kind, an unreal day or from_day, or an unparseable daypart is an unusable answer (the backup gets a turn), never a silent "any"', () => {
+    expect(rules.unusableReason([agreement({ daypart: 'whenever' })])).toBe('daypart_invalid');
+    expect(rules.unusableReason([agreement({ daypart: 'after 24:00' })])).toBe('daypart_invalid');
+    expect(rules.unusableReason([agreement({ kind: 'move', from_day: 'Monday' })])).toBe('from_day_invalid');
+    expect(rules.unusableReason([agreement({ kind: 'move', from_day: '2040-03-16', daypart: 'before 12:00' })])).toBeNull();
+    // act:false objects are stored with the bad fields nulled and are accepted.
+    expect(rules.unusableReason([agreement({ act: false, daypart: 'whenever', from_day: 'x', kind: 'cancel' })])).toBeNull();
+  });
+
+  test('a confidence outside 0..1 is an unusable answer, not clamped', () => {
+    for (const confidence of [1.5, -0.1, 7, Number.NaN, 'high', null, undefined]) {
+      expect(rules.unusableReason([agreement({ confidence })])).toBe('confidence_out_of_range');
+      expect(rules.unusableReason([agreement({ act: false, confidence })])).toBe('confidence_out_of_range');
+    }
+    for (const confidence of [0, 0.5, 1]) expect(rules.unusableReason([agreement({ confidence })])).toBeNull();
+    // One bad object makes the whole answer unusable.
+    expect(rules.unusableReason([agreement(), agreement({ confidence: 2 })])).toBe('confidence_out_of_range');
+  });
+
   test('an answer with no agreements is unusable', () => {
     expect(rules.unusableReason([])).toBe('no_agreements');
     expect(rules.unusableReason(undefined)).toBe('no_agreements');

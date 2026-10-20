@@ -68,7 +68,7 @@ describe('candidate SQL (compile only)', () => {
     expect(sql).toContain("d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0'");
     // The quiet probe counts only what the thread counts: inbound texts and Waves texts that
     // went out; scheduled, reserved or failed rows are not activity.
-    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$11 and \("m"\."direction" = \$12 or "m"\."status" in \(\$13, \$14, \$15\)\)/);
+    expect(sql).toMatch(/NOT EXISTS \(\(select 1 from "sms_log" as "m" where "m"\."created_at" > \$19 and \("m"\."direction" = \$20 or "m"\."status" in \(\$21, \$22, \$23\)\)/);
     expect(sql).toContain("right(regexp_replace(m.to_phone, '\\D', '', 'g'), 10) = l.digits");
     expect(sql).toContain("COALESCE(m.metadata->>'review_ask_reservation', 'false')");
     expect(sql).toContain("COALESCE(m.status, '') IN ('canceled', 'cancelled')");
@@ -76,9 +76,15 @@ describe('candidate SQL (compile only)', () => {
     expect(sql).toMatch(/\(l\.message_body ~\* \$4 OR EXISTS \(\(select 1 from "sms_log" as "w" where "w"\."direction" = \$5 and "w"\."status" in \(\$6, \$7, \$8\)/);
     expect(sql).toContain("w.created_at < l.created_at AND w.created_at >= l.created_at - interval '3 hours'");
     expect(sql).toContain('w.message_body ~* $10');
+    // The customer's own earlier day-word proposal, answered by a delivered Waves text before the day-less reply.
+    expect(sql).toContain("EXISTS ((select 1 from \"sms_log\" as \"p\" where \"p\".\"direction\" = $11".replace(/\\"/g, '"'));
+    expect(sql).toContain("p.created_at < l.created_at AND p.created_at >= l.created_at - interval '3 hours'");
+    expect(sql).toContain('p.message_body ~* $13');
+    expect(sql).toContain('w.created_at > p.created_at AND w.created_at < l.created_at');
     expect(bindings).toEqual([
       'inbound', new Date(NOW.getTime() - 3 * 3600 * 1000), 'job\\_%', rules.DAY_WORD_PATTERN,
       'outbound', 'sent', 'delivered', 'read', 'job\\_%', rules.DAY_WORD_PATTERN,
+      'inbound', 'job\\_%', rules.DAY_WORD_PATTERN, 'outbound', 'sent', 'delivered', 'read', 'job\\_%',
       new Date(NOW.getTime() - 30 * 60 * 1000), 'inbound', 'sent', 'delivered', 'read', 'job\\_%', internals.BATCH.sms,
     ]);
   });
@@ -87,7 +93,7 @@ describe('candidate SQL (compile only)', () => {
     const { sql } = internals.smsCandidatesQuery(pg, NOW).toSQL().toNative();
     expect(sql).toContain("COALESCE(m.from_phone, '') <> 'push' AND COALESCE(m.metadata->>'channel', '') <> 'push'");
     expect(sql).toContain("COALESCE(w.from_phone, '') <> 'push' AND COALESCE(w.metadata->>'channel', '') <> 'push'");
-    expect(sql.match(/not like \$/g)).toHaveLength(3); // the candidate inner query, the offer probe and the quiet probe
+    expect(sql.match(/not like \$/g)).toHaveLength(5); // the candidate inner query, the offer probe, both proposal probe legs and the quiet probe
   });
 
   test('calls: voicemail, spam and the scheduling status are tested in SQL before the scan limit', () => {
@@ -155,6 +161,18 @@ describe('the judge, through the real fallback chain', () => {
     const out = await internals.judge(parts, {});
     expect(out).toMatchObject({ ok: true });
     expect(out.agreements[0].blockers).toEqual(['no_day_agreed']);
+  });
+
+  test('a confidence outside 0..1 fails its leg (the schema carries no numeric bounds) and the backup gets a turn', async () => {
+    const high = answer([{ ...JSON.parse(good).agreements[0], confidence: 1.7 }]);
+    mockAnthropicCreate.mockResolvedValue(claude(high));
+    fetchSpy.mockResolvedValue(openai(good));
+    expect(await internals.judge(parts, {})).toMatchObject({ ok: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(mockAnthropicCreate.mock.calls[0][0].output_config.format.schema)).not.toMatch(/"minimum"|"maximum"/);
+    mockAnthropicCreate.mockResolvedValue(claude(high));
+    fetchSpy.mockResolvedValue(openai(high));
+    expect(await internals.judge(parts, {})).toMatchObject({ ok: false, transient: false });
   });
 
   test('both legs unusable: not transient, so the sweep records judge_unusable and never asks again', async () => {

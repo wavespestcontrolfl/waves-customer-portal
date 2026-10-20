@@ -190,16 +190,39 @@ function offerProbe(conn) {
   return excludeUnresolvedSendReservations(probe, 'w');
 }
 
+// "Tuesday?" from the customer, a delivered Waves "Yes, see you then", then the
+// customer's "Thanks": the day word is in the customer's OWN earlier text and a
+// delivered Waves text came after it. Within the same 3 hours, with the offer
+// probe's delivered, push, recruiting and reservation rules.
+function proposalProbe(conn) {
+  const reply = conn('sms_log as w').select(conn.raw('1'))
+    .where('w.direction', 'outbound')
+    .whereIn('w.status', DELIVERED_STATUSES)
+    .whereRaw(notPushSql('w'))
+    .modify((q) => excludeRecruitingSmsLog(q, 'w.message_type'))
+    .whereRaw(`${last10('w.to_phone')} = l.digits`)
+    .whereRaw('w.created_at > p.created_at AND w.created_at < l.created_at');
+  const probe = conn('sms_log as p').select(conn.raw('1'))
+    .where('p.direction', 'inbound')
+    .modify((q) => excludeRecruitingSmsLog(q, 'p.message_type'))
+    .whereRaw(`${last10('p.from_phone')} = l.digits`)
+    .whereRaw(`p.created_at < l.created_at AND p.created_at >= l.created_at - interval '${RECENT_MS / HOUR_MS} hours'`)
+    .whereRaw('p.message_body ~* ?', [rules.DAY_WORD_PATTERN])
+    .whereExists(excludeUnresolvedSendReservations(reply, 'w'));
+  return excludeUnresolvedSendReservations(probe, 'p');
+}
+
 // What makes the latest inbound text per phone (`l`) a candidate: a real phone, a day
-// word in the text itself or in a delivered Waves offer just before it, not judged
+// word in the text itself, in a delivered Waves offer just before it, or in the
+// customer's own earlier proposal that a delivered Waves text then answered, not judged
 // yet, and a thread quiet for QUIET_MS. One definition for the scan and the recheck.
 function smsEligibility(conn, now) {
   return {
     sql: `length(l.digits) = 10
-      AND (l.message_body ~* ? OR EXISTS (?))
+      AND (l.message_body ~* ? OR EXISTS (?) OR EXISTS (?))
       AND NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'sms:' || l.digits || ':' || l.id::text || '#0')
       AND NOT EXISTS (?)`,
-    bindings: [rules.DAY_WORD_PATTERN, offerProbe(conn), quietProbe(conn, new Date(now.getTime() - QUIET_MS))],
+    bindings: [rules.DAY_WORD_PATTERN, offerProbe(conn), proposalProbe(conn), quietProbe(conn, new Date(now.getTime() - QUIET_MS))],
   };
 }
 
@@ -600,6 +623,7 @@ async function processSource(conn, src, ctx) {
   const judged = await judge(parts, ctx.deps);
   if (!judged.ok) return judged.transient ? { transient: true } : { rows: [skipRow(src, 0, 'judge_unusable')] };
   src.modelCalled = true;
+  src.judgedModel = judged.model;
   const rows = [];
   // An agreement the model repeated is recorded once (Codex #6350 r11).
   const seen = new Set();
@@ -636,7 +660,8 @@ async function recordAfterRepeatedFailure(conn, src, tally) {
   if (tries < MAX_TRIES_AFTER_JUDGE) return;
   FAILED_AFTER_JUDGE.delete(src.key);
   try {
-    await record(conn, [skipRow(src, 0, 'slot_lookup_failed')]);
+    // Stamped with the judging model, so the customer's daily quota counts this paid judgment.
+    await record(conn, [skipRow(src, 0, 'slot_lookup_failed', { model: src.judgedModel || null })]);
     tally.skip += 1;
   } catch (err) {
     logger.error(`[day-agreement] could not record a repeated failure (${err.code || err.name || 'error'})`);
@@ -700,6 +725,7 @@ module.exports = {
     hasSeveralProperties,
     dropCollidingSlots,
     processSource,
+    customerOverQuota,
     decideMoment,
     callSource,
     messageLine,

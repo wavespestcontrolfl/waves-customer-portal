@@ -60,19 +60,24 @@ function safeReason(text) {
     .slice(0, REASON_MAX_CHARS);
 }
 
-// One model object into the shape the rules and the table use. Vocabulary
-// slips fail soft (a bad kind or day is caught by the rules, not here).
+// One model object into the shape the rules and the table use. Every stored field
+// is held to its vocabulary BEFORE it is persisted, on an act:false object too: a
+// kind outside the enum, a day that is not a real YYYY-MM-DD date and a daypart
+// that is not a parseable form are stored as null. (An act:true object with one of
+// those is an unusable answer; see unusableReason.)
 function normalizeAgreement(raw) {
   const a = raw && typeof raw === 'object' ? raw : {};
   const text = (v) => (isString(v) ? v.trim() : null);
+  const lower = (v) => (isString(v) ? v.trim().toLowerCase() : null);
+  const day = (v) => (validDay(v) ? v.trim() : null);
   const confidence = Number(a.confidence);
   return {
     at: text(a.at),
     act: a.act === true,
-    kind: isString(a.kind) ? a.kind.trim().toLowerCase() : null,
-    day: text(a.day),
-    from_day: text(a.from_day),
-    daypart: isString(a.daypart) ? a.daypart.trim().toLowerCase() : null,
+    kind: KINDS.includes(lower(a.kind)) ? lower(a.kind) : null,
+    day: day(a.day),
+    from_day: day(a.from_day),
+    daypart: parseDaypart(lower(a.daypart)) && lower(a.daypart) ? lower(a.daypart) : null,
     // Scrubbed like the reason: the service text is stored too (Codex #6350 r8).
     service: text(a.service) ? safeReason(text(a.service)).slice(0, 60) : null,
     // Only the prompt's own blocker words are stored: a free-text blocker could
@@ -84,16 +89,22 @@ function normalizeAgreement(raw) {
   };
 }
 
-// The answer must be usable to be accepted: an act:true object needs a known
-// kind and a real day. Returns a short code, or null. An unusable answer fails
-// its leg in dispatchWithFallback so the backup model gets a turn.
+// The answer must be usable to be accepted. Returns a short code, or null. An
+// unusable answer fails its leg in dispatchWithFallback so the backup model gets
+// a turn. Unusable: a confidence outside 0..1 (enforced here, never in the schema:
+// Anthropic rejects numeric bounds), and an act:true object with an unknown kind,
+// an unreal day, an unreal from_day or an unparseable daypart.
 function unusableReason(agreements) {
   if (!Array.isArray(agreements) || !agreements.length) return 'no_agreements';
   for (const raw of agreements) {
+    const confidence = raw?.confidence;
+    if (typeof confidence !== 'number' || !(confidence >= 0 && confidence <= 1)) return 'confidence_out_of_range';
+    if (raw?.act !== true) continue;
     const a = normalizeAgreement(raw);
-    if (!a.act) continue;
     if (!KINDS.includes(a.kind)) return 'kind_invalid';
     if (!validDay(a.day)) return 'day_invalid';
+    if (isString(raw.from_day) && !a.from_day) return 'from_day_invalid';
+    if (isString(raw.daypart) && !a.daypart) return 'daypart_invalid';
   }
   return null;
 }
@@ -150,7 +161,6 @@ const RULES = [
   ['no_customer', ({ customerId }) => !customerId],
   ['stale_moment', ({ agreedAt, now, kind }) => !agreedAt || agreedAt.getTime() > now.getTime() + 300000
     || now.getTime() - agreedAt.getTime() > MAX_AGE_MS[kind]],
-  ['daypart_unreadable', ({ a }) => parseDaypart(a.daypart) === null],
   ['staff_already_acted', ({ visitsOnDay, agreedAt }) => visitsOnDay.some((v) => isLive(v)
     && (after(v.created_at, agreedAt) || after(v.updated_at, agreedAt)))],
   ['move_target_unclear', ({ a }) => a.kind === 'move' && !validDay(a.from_day)],

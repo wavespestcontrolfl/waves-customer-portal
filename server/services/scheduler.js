@@ -4219,6 +4219,12 @@ function initScheduledJobs() {
         if (result?.judged || result?.errors || result?.transient) {
           logger.info(`[day-agreement] sweep: ${JSON.stringify(result)}`);
         }
+        // An incomplete sweep (a model outage, a source that failed) is a failed run in
+        // job health, not a quiet success. The lock is released and the failure recorded
+        // by runExclusive; counts only, no message text.
+        if (result?.transient > 0 || result?.errors > 0) {
+          throw Object.assign(new Error(`day-agreement sweep incomplete: ${result.errors || 0} error(s), ${result.transient || 0} transient`), { code: 'SWEEP_INCOMPLETE' });
+        }
       });
     } catch (err) {
       logger.error(`[day-agreement] sweep tick failed (${err.code || err.name || 'error'})`);
