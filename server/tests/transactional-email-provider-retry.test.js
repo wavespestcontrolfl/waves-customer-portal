@@ -1083,6 +1083,29 @@ describe('provider retries of an open-estimate email that carried the PDF copy (
     }));
   });
 
+  describe('scheduleRetryAfterBoundaryAbort (a send the PDF fence aborted)', () => {
+    const aborted = (extra = {}) => pdfRow({ status: 'failed', provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-pdf', ...extra });
+    test('puts the aborted attempt on the first ladder slot, only while nothing is scheduled', async () => {
+      chain.whereNull = jest.fn(() => chain);
+      chain.returning = jest.fn(async () => [{ id: 'message-1' }]);
+      const now = new Date('2026-10-19T12:00:00Z');
+      expect(await retry.scheduleRetryAfterBoundaryAbort(aborted(), now)).toEqual({ id: 'message-1' });
+      expect(chain.where).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'message-1', status: 'failed', send_attempt_token: 'attempt-pdf', provider_handoff_phase: 'rejected',
+      }));
+      expect(chain.whereNull).toHaveBeenCalledWith('provider_retry_next_at');
+      expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+        provider_retry_next_at: new Date(now.getTime() + 10 * 60 * 1000), provider_retry_exhausted_at: null,
+      }));
+    });
+    test('a row the rail does not retry, one with no token, or an exhausted ladder is left alone', async () => {
+      expect(await retry.scheduleRetryAfterBoundaryAbort(aborted({ template_key: 'estimate.proposal_delivery' }))).toBeNull();
+      expect(await retry.scheduleRetryAfterBoundaryAbort(aborted({ send_attempt_token: null }))).toBeNull();
+      expect(await retry.scheduleRetryAfterBoundaryAbort(aborted({ provider_retry_count: retry.MAX_RETRIES }))).toBeNull();
+      expect(chain.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('other attachment-free rows never touch the PDF rebuild', async () => {
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
     await retry.retryOne(message({ send_attempt_token: 'attempt-plain', html_snapshot: '<p>x</p>', text_snapshot: 'x' }));

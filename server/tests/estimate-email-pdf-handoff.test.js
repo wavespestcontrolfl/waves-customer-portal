@@ -13,6 +13,7 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
+jest.mock('../services/transactional-email-provider-retry', () => ({ scheduleRetryAfterBoundaryAbort: jest.fn(async () => ({ id: 'm1' })) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
   estimateOffCustomerSurface: jest.fn(() => false),
   callSideBlockForEstimateData: jest.fn(async () => null),
@@ -149,6 +150,154 @@ describe('the provider-boundary fence on a PDF-bearing send', () => {
       const src = fs.readFileSync(path.join(root, file), 'utf8');
       expect(src).toMatch(/attachments: pdfCopy\.attachments, withProviderHandoff: pdfCopy\.withProviderHandoff/);
     }
+  });
+});
+
+describe('what the fence hashes (codex #6343 r2)', () => {
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+  });
+  afterEach(() => build.mockRestore());
+
+  const content = { proposal: { buildings: [{ name: 'Main house', lineItems: [{ label: 'Quarterly pest', price: 59 }] }], terms: 'Authored terms' }, lead_id: 'lead-1', lead_linkage: 'sid' };
+  const withData = (data) => row({ estimate_data: { ...data, estimatorEngine: { callLogId: 'call-1' } } });
+  async function fenceAgainst(rendered, atHandoff) {
+    readsRow(rendered, atHandoff);
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await open.withProviderHandoff(async (_d, boundary) => { check = boundary; });
+    return check({ database: db });
+  }
+
+  test.each([
+    ['a view stamp', { viewedMonthlyTotal: 59 }],
+    ['a delivery receipt', { deliveryState: { lastDeliveredAt: '2026-10-19T10:00:00Z' }, sendSnapshot: { scope: {} } }],
+    ['a charge job stamp', { prepayAutoChargeJob: { released_for_visit_id: 'v1' } }],
+    ['rate-review terms served', { rateReviewTermsServed: { at: '2026-10-19' } }],
+    ['a manual send receipt', { manualSendAttempts: [{ key: 'k' }] }],
+  ])('%s does not trip the fence', async (_label, stamp) => {
+    await expect(fenceAgainst(withData(content), withData({ ...content, ...stamp }))).resolves.toEqual({ ok: true });
+  });
+
+  test('an engine delivery claim and key order do not trip it either', async () => {
+    const reordered = { lead_linkage: 'sid', lead_id: 'lead-1', proposal: { terms: 'Authored terms', buildings: content.proposal.buildings } };
+    const handoff = row({ estimate_data: { ...reordered, estimatorEngine: { callLogId: 'call-1', delivering_at: '2026-10-19T10:00:00Z', delivering_token: 't' } } });
+    await expect(fenceAgainst(withData(content), handoff)).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['a line-item price edit', { proposal: { ...content.proposal, buildings: [{ name: 'Main house', lineItems: [{ label: 'Quarterly pest', price: 69 }] }] } }],
+    ['an added building', { proposal: { ...content.proposal, buildings: [...content.proposal.buildings, { name: 'Guest house', lineItems: [] }] } }],
+    ['edited authored terms', { proposal: { ...content.proposal, terms: 'New terms' } }],
+    ['a content key no one has heard of yet', { inclusions: ['New inclusion'] }],
+  ])('%s blocks the handoff', async (_label, edit) => {
+    await expect(fenceAgainst(withData(content), withData({ ...content, ...edit })))
+      .rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+});
+
+describe('the expiry check at the fence (codex #6343 r2)', () => {
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+    jest.useFakeTimers({ now: new Date('2026-10-19T12:00:00Z') });
+  });
+  afterEach(() => { jest.useRealTimers(); build.mockRestore(); });
+
+  const fence = async (opts, rows) => {
+    readsRow(...rows);
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup', ...opts });
+    let check;
+    await open.withProviderHandoff(async (_d, boundary) => { check = boundary; });
+    return check;
+  };
+
+  test('an estimate that expires between the render and the handoff is blocked', async () => {
+    const expiring = row({ expires_at: new Date('2026-10-19T12:00:30Z') });
+    const check = await fence({}, [expiring, expiring]);
+    jest.setSystemTime(new Date('2026-10-19T12:01:00Z'));
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_expired' });
+  });
+
+  test('still inside the window at the handoff passes', async () => {
+    const expiring = row({ expires_at: new Date('2026-10-19T12:00:30Z') });
+    const check = await fence({}, [expiring, expiring]);
+    jest.setSystemTime(new Date('2026-10-19T12:00:10Z'));
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+
+  test('an extension in flight is judged by its new date, not the stored one', async () => {
+    const stored = row({ expires_at: new Date('2026-10-19T12:00:30Z') });
+    const check = await fence({ validThrough: new Date('2026-10-26T12:00:00Z') }, [stored, stored]);
+    jest.setSystemTime(new Date('2026-10-19T12:05:00Z'));
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+});
+
+describe('recoverFenceAbort: an email the fence aborted is requeued or skipped on purpose (codex #6343 r2)', () => {
+  const retryRail = require('../services/transactional-email-provider-retry');
+  const aborted = (extra = {}) => ({ sent: false, aborted: true, boundaryBlocked: true, message: { id: 'm1', send_attempt_token: 'a1' }, ...extra });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    retryRail.scheduleRetryAfterBoundaryAbort.mockResolvedValue({ id: 'm1' });
+  });
+
+  test('the estimate is still sendable (it only changed): the email goes on the retry rail', async () => {
+    readsRow(row());
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('scheduled');
+    expect(retryRail.scheduleRetryAfterBoundaryAbort).toHaveBeenCalledWith({ id: 'm1', send_attempt_token: 'a1' });
+  });
+
+  test('the fence could not read: the email goes on the retry rail', async () => {
+    readsRow(row());
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted({ boundaryBlocked: undefined, boundaryCheckFailed: true }) })).toBe('scheduled');
+  });
+
+  test('a fresh read that fails still keeps the email (retried, not dropped)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('scheduled');
+  });
+
+  test.each([
+    ['accepted', row({ status: 'accepted' })],
+    ['archived', row({ archived_at: new Date() })],
+    ['expired', row({ expires_at: new Date(Date.now() - 1000) })],
+  ])('a %s estimate is skipped on purpose, nothing queued', async (_label, closed) => {
+    readsRow(closed);
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('skipped');
+    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
+  });
+
+  test('an invalidated estimate is skipped on purpose', async () => {
+    readsRow(row());
+    claimSql.estimateOffCustomerSurface.mockReturnValue(true);
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('skipped');
+    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [{ sent: true }], [{ sent: false, aborted: true, reason: 'annual_offer_withheld' }], [undefined],
+  ])('any other result is left alone: %j', async (result) => {
+    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result })).toBe('none');
+    expect(db).not.toHaveBeenCalled();
+    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
   });
 });
 

@@ -24,6 +24,7 @@
 //    rebuilds the PDF (or drops the note) through prepareRetryPdf below.
 // ============================================================
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
@@ -51,16 +52,29 @@ const RETRY_KEY_SET = new Set([...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS, 'estimate.de
 const NONE = Object.freeze({ attachments: [], payload: {} });
 
 // Identity + pricing columns the document prints (the annual guard's
-// fingerprint list, plus the link token and the printed expiry). estimate_data
-// is not hashed whole: views and charge jobs stamp unrelated keys into it all
-// day. The call-derived changes that matter live in the markers the fence
-// reads, and in the three linkage keys added below.
+// fingerprint list, plus the link token and the printed expiry).
 const FENCE_COLUMNS = [
   'customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone',
   'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total',
   'show_one_time_option', 'bill_by_invoice', 'waveguard_tier', 'service_interest', 'category',
   'source', 'token', 'expires_at',
 ];
+
+// estimate_data keys that are bookkeeping, not document content: the writers
+// stamp them all day (view counting, delivery and send receipts, charge jobs,
+// accept-time setup, lead-handoff witnesses, rate-review terms served, the
+// estimator engine's claim and marker object). Everything else in
+// estimate_data is hashed, so a content key added later is covered by default
+// (an exclusion list, not an inclusion list). The engine object is judged by
+// the markers the fence reads; only its callLogId stays in the hash.
+const BOOKKEEPING_KEYS = new Set([
+  'estimatorEngine', 'viewedMonthlyTotal', 'prepayAutoChargeJob', 'deliveryState', 'sendSnapshot',
+  'manualSendAttempts', 'rateReviewTermsServed', 'rateReviewDisclosedAtAccept', 'pricingAuthorityAtLock',
+  'acceptedRecurringCardSetupIntentId', 'acceptedRecurringCardSkipEnrollment', 'acceptedSetupFeeAmount',
+  'leadServiceHandoffAttempt', 'leadServiceHandoffAt', 'leadServiceRevertPending', 'reportCtaMint',
+  'retiredBySentEstimate', 'automation', 'assessment_exception', 'scheduled_service_id',
+  'addressUnverifiedClearedBy', 'addressUnverifiedFlag',
+]);
 
 function parseData(row) {
   const raw = row?.estimate_data;
@@ -69,26 +83,50 @@ function parseData(row) {
   try { return JSON.parse(raw) || {}; } catch { return null; }
 }
 
+// Key-sorted JSON so the same content always hashes the same.
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function contentProjection(data) {
+  const out = {};
+  for (const [k, v] of Object.entries(data || {})) {
+    if (!BOOKKEEPING_KEYS.has(k)) out[k] = v;
+  }
+  out.__callLogId = data?.estimatorEngine?.callLogId || null;
+  return out;
+}
+
 function rowFingerprint(row) {
-  const data = parseData(row) || {};
   const pick = {};
   for (const c of FENCE_COLUMNS) {
     const v = row?.[c];
     pick[c] = v instanceof Date ? v.toISOString() : (v === undefined ? null : v);
   }
-  pick.lead_id = data.lead_id || null;
-  pick.lead_linkage = data.lead_linkage || null;
-  pick.call_log_id = data.estimatorEngine?.callLogId || null;
-  return JSON.stringify(pick);
+  pick.__data = crypto.createHash('sha256').update(canonical(contentProjection(parseData(row) || {}))).digest('hex');
+  return canonical(pick);
+}
+
+function pastExpiry(expiry, now) {
+  return !!expiry && new Date(expiry).getTime() <= now.getTime();
 }
 
 // Why the row may no longer go out with a PDF, or null. Same verdicts the
 // manual sender repeats right before its handoff.
-async function handoffBlockReason(estimateId, expectedFingerprint) {
+// `expectedFingerprint` null = skip the unchanged-since-render comparison (a
+// plain "is it still sendable" read). `validThrough` is the date the document
+// advertises when it is newer than the stored row (an extension in flight);
+// `now` is the clock at the handoff.
+async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date() } = {}) {
   const row = await db('estimates').where({ id: estimateId }).first();
   if (!row) return 'estimate_missing';
   if (row.archived_at || !['sent', 'viewed'].includes(row.status)) return 'estimate_not_open';
-  if (rowFingerprint(row) !== expectedFingerprint) return 'estimate_changed_since_render';
+  if (pastExpiry(validThrough || row.expires_at, now)) return 'estimate_expired';
+  if (expectedFingerprint && rowFingerprint(row) !== expectedFingerprint) return 'estimate_changed_since_render';
   const data = parseData(row);
   if (data === null) return 'estimate_data_unreadable';
   const { estimateOffCustomerSurface, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
@@ -104,11 +142,11 @@ async function handoffBlockReason(estimateId, expectedFingerprint) {
 // sendOne awaits this after its own preparation, right before the request.
 // A veto is a definite non-send (providerBoundaryBlocked); a failed read is a
 // definite non-send too, tagged so the library settles it retryable.
-function pdfBoundaryCheck(estimateId, expectedFingerprint) {
+function pdfBoundaryCheck(estimateId, expectedFingerprint, { validThrough = null, clock = () => new Date() } = {}) {
   return async () => {
     let reason;
     try {
-      reason = await handoffBlockReason(estimateId, expectedFingerprint);
+      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, now: clock() });
     } catch (err) {
       const unavailable = new Error(`estimate ${estimateId} PDF fence unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;
@@ -126,25 +164,33 @@ function pdfBoundaryCheck(estimateId, expectedFingerprint) {
 }
 
 // For sendTemplate({ withProviderHandoff }).
-function pdfProviderHandoff(estimateId, expectedFingerprint) {
-  const check = pdfBoundaryCheck(estimateId, expectedFingerprint);
+function pdfProviderHandoff(estimateId, expectedFingerprint, opts) {
+  const check = pdfBoundaryCheck(estimateId, expectedFingerprint, opts);
   return async (dispatch) => {
     await dispatch(undefined, check);
     return { ok: true };
   };
 }
 
+function pdfGatesOn() {
+  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
+}
+
+// A PDF goes only on an estimate that is open right now: has its link token,
+// sent or viewed, not archived, not past the date the document advertises.
+function openForPdf(row, effectiveExpiry, now) {
+  if (!row || !row.token) return false;
+  if (!['sent', 'viewed'].includes(row.status) || row.archived_at) return false;
+  return !pastExpiry(effectiveExpiry, now);
+}
+
 // `validThrough`: the date the document should advertise when the caller
 // knows a newer one than the stored row (an extension in flight).
 async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = null, now = new Date(), forRetry = false }) {
   try {
-    if (!(forRetry ? RETRY_KEY_SET : KEY_SET).has(templateKey)) return NONE;
-    if (!featureGates.isEnabled('estimateEmailPdf') || !featureGates.isEnabled('estimateDocPdf')) return NONE;
+    if (!(forRetry ? RETRY_KEY_SET : KEY_SET).has(templateKey) || !pdfGatesOn()) return NONE;
     const fresh = await db('estimates').where({ id: estimateId }).first();
-    if (!fresh || !fresh.token) return NONE;
-    if (!['sent', 'viewed'].includes(fresh.status) || fresh.archived_at) return NONE;
-    const effectiveExpiry = validThrough || fresh.expires_at;
-    if (effectiveExpiry && new Date(effectiveExpiry).getTime() <= now.getTime()) return NONE;
+    if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return NONE;
     const pdf = require('./pdf/estimate-doc-pdf');
     const attachment = await pdf.buildEstimateEmailPdfAttachment(fresh, { validThrough: validThrough || fresh.expires_at || null });
     if (!attachment) return NONE;
@@ -153,12 +199,40 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
       attachments: [attachment],
       payload: { estimate_pdf_note: pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp },
       // Pass to sendTemplate: the final fence for the permanent copy.
-      withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint),
-      boundaryCheck: pdfBoundaryCheck(estimateId, fingerprint),
+      withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint, { validThrough }),
+      boundaryCheck: pdfBoundaryCheck(estimateId, fingerprint, { validThrough }),
     };
   } catch (e) {
     logger.warn(`[estimate-email-pdf] skipped for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
     return NONE;
+  }
+}
+
+// The fence aborted a PDF-bearing send before any provider request (the
+// result of sendTemplate: aborted + boundaryBlocked / boundaryCheckFailed).
+// The row is failed with no retry scheduled, so without this the email is
+// lost. Decide on a fresh read: an estimate that is closed, expired,
+// archived or invalidated is skipped on purpose (its link serves nothing and
+// the offer is gone); an estimate still sendable, or one whose read fails, is
+// put on the provider-retry rail, which rebuilds the PDF behind the same
+// fence or sends the body without the PDF note. Returns 'scheduled',
+// 'skipped' or 'none'. Never throws.
+async function recoverFenceAbort({ estimateId, result }) {
+  if (!result?.aborted || !(result.boundaryBlocked || result.boundaryCheckFailed)) return 'none';
+  try {
+    let reason = null;
+    try {
+      reason = await handoffBlockReason(estimateId, null);
+    } catch { /* unreadable: keep the email, retry it */ }
+    if (reason) {
+      logger.info(`[estimate-email-pdf] email for estimate ${estimateId} skipped after the PDF fence aborted it: ${reason}`);
+      return 'skipped';
+    }
+    const scheduled = await require('./transactional-email-provider-retry').scheduleRetryAfterBoundaryAbort(result.message);
+    return scheduled ? 'scheduled' : 'none';
+  } catch (e) {
+    logger.warn(`[estimate-email-pdf] could not requeue the email for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
+    return 'none';
   }
 }
 
@@ -210,6 +284,7 @@ async function prepareRetryPdf(message) {
 
 module.exports = {
   openEstimateEmailPdf,
+  recoverFenceAbort,
   ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS,
   ESTIMATE_PDF_RETRY_TEMPLATE_KEYS,
   isRetryTemplate,

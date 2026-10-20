@@ -36,7 +36,7 @@ const {
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
-const { openEstimateEmailPdf } = require("./estimate-email-pdf");
+const { openEstimateEmailPdf, recoverFenceAbort } = require("./estimate-email-pdf");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -526,6 +526,7 @@ async function sendDualChannel(est, { sms, email }) {
       return false;
     }
   }
+  const smsLegDone = attempted;
   if (est.customer_email && email?.templateKey) {
     // Optional lifecycle suffix (codex 2736 r10): a stage that can
     // legitimately re-fire for the same estimate (an expiring reminder
@@ -567,6 +568,12 @@ async function sendDualChannel(est, { sms, email }) {
         attempted = true;
       } else if (result?.sent) {
         attempted = true;
+      } else if (smsLegDone) {
+        // The text went out but the PDF fence aborted the email before any
+        // provider request: the stage stays claimed, so requeue the email on
+        // the retry rail (or skip it on purpose when the estimate is closed).
+        // With no text sent, the released stage re-runs the whole touch.
+        await recoverFenceAbort({ estimateId: est.id, result });
       }
     } catch (e) {
       const message = EmailTemplateLibrary.redactEmailAddresses(e.message);

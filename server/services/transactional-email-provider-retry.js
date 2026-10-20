@@ -84,6 +84,24 @@ function retryStateForProviderBlock(message, now = new Date()) {
   };
 }
 
+// A PDF-bearing send the provider-boundary fence aborted before any request
+// (estimate-email-pdf.js recoverFenceAbort): the row is failed with no retry
+// scheduled, so put it on the first slot of the ladder. Only the exact aborted
+// attempt (token + rejected phase) and only while nothing is scheduled.
+async function scheduleRetryAfterBoundaryAbort(message, now = new Date()) {
+  if (!message?.id || !message.send_attempt_token || !isTransactionalRetryEligible(message)) return null;
+  const retryCount = Math.max(0, Number(message.provider_retry_count || 0));
+  if (retryCount >= MAX_RETRIES) return null;
+  const [row] = await db('email_messages')
+    .where({ id: message.id, status: 'failed', send_attempt_token: message.send_attempt_token,
+      provider_handoff_phase: HANDOFF_PHASE_REJECTED, provider_handoff_attempt_token: message.send_attempt_token })
+    .whereNull('provider_retry_next_at')
+    .update({ provider_retry_next_at: new Date(now.getTime() + RETRY_DELAYS_MS[retryCount]),
+      provider_retry_exhausted_at: null, updated_at: now })
+    .returning('*');
+  return row || null;
+}
+
 async function activeSuppressionForMessage(message) {
   const loaded = message.template_key
     ? await emailTemplates.loadTemplateByKey(message.template_key)
@@ -1122,6 +1140,7 @@ module.exports = {
   alertIfProviderRetriesExhausted,
   recoverStaleClaims,
   claimDueRetries,
+  scheduleRetryAfterBoundaryAbort,
   markRetryFailure,
   markRetryHeld,
   REPLACED_RECIPIENT_CATEGORY,

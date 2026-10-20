@@ -677,6 +677,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         } else if (result?.deduped) {
           emailResult = { sent: false, reason: 'deduped' };
         } else {
+          // A PDF fence abort leaves a failed row nobody retries: requeue it
+          // (or skip on purpose when the estimate is closed).
+          await require('./estimate-email-pdf').recoverFenceAbort({ estimateId: estimate.id, result });
           emailResult = { sent: false, reason: result?.reason || 'blocked' };
         }
       }

@@ -222,6 +222,9 @@ const EstimateAutoRenew = {
                       logger.warn(`[est-auto-renew] Email suppressed for estimate ${est.id}: ${result.reason || 'suppressed'}`);
                       sentWithTemplateLibrary = true;
                     } else if (result.aborted) {
+                      // A PDF fence abort leaves a failed row nobody retries:
+                      // requeue it (or skip on purpose when the estimate is closed).
+                      await require('./estimate-email-pdf').recoverFenceAbort({ estimateId: est.id, result });
                       // Pre-push audit P1: a pre-dispatch abort (the annual
                       // guard's own lookup threw, most likely) is a real
                       // failure, never a handled/deduped outcome. It must NOT
