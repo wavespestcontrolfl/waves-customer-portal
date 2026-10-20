@@ -43,14 +43,15 @@ const OPT_OUT_PATTERNS = [
 // confirmation but no text that day" unsubscribed the customer twice). A request is never in the
 // past tense, so only past-tense evidence counts: a past receiving or reporting word just before
 // it ("got no text", "there was no message", "have had no texts"), a past arrival word just after
-// it ("no text came", "no text messages arrived", "no text yesterday"), or "that day" after it
+// it ("no text came", "no text messages arrived", "no texts went out"; a time word alone is not
+// delivery evidence: "I said no texts yesterday" is a request), or "that day" after it
 // with a past receiving word earlier in the sentence. A strong request word anywhere in the
 // sentence ("please", "anymore", "from now on") keeps it a stop request. Sentences end at . ! ? ;
 // or a line break; a comma does not end one. "No more texts" stays a stop request anywhere
 // (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:text\s+messages?|texts?|messages?|sms)\b/gi;
 const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
-const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out|(?:was|were|got)\s+sent|yesterday|last\s+(?:night|week|time))\b/i;
+const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out|(?:was|were|got)\s+sent)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard|had|was|were)\b/i;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
