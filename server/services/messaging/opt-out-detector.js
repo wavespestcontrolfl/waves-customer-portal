@@ -43,25 +43,23 @@ const OPT_OUT_PATTERNS = [
 // confirmation but no text that day" unsubscribed the customer twice). The evidence:
 //   - a receiving or reporting word just before it ("got no text", "there was no message",
 //     "there's been no text", "have had no texts"; a bare "been" or "was" is not one);
-//   - an arrival verb just after it ("no text came", "no text messages arrived"; a time word or
-//     "were sent" is not one);
+//   - an arrival or delivery word just after it ("no text came", "no text was received", "no
+//     messages were delivered"; a time word alone is not one);
 //   - "that day" just after it, with a receiving verb (got, received, saw, heard) earlier in the
 //     same comma clause.
 // No evidence counts after a conditional, request or speech word earlier in the sentence (if,
 // unless, rather, wish, prefer, want, need, ask, request, like, say, tell): "I would prefer it if I
-// received no texts" and "I received your confirmation but I said no texts that day" are requests.
-// A strong request word in the sentence ("please", "anymore", "from now on") keeps it a request.
+// received no texts" and "I asked that no messages were sent to me" are requests.
 // Sentences end at . ! ? or ; (a line break or a comma does not end one: "No\ntexts please" is a
 // request). "No more texts" stays a stop request anywhere (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:text\s+messages?|texts?|messages?|sms)\b/gi;
 const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|there(?:'s|\s+has|\s+have)\s+been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
-const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out)\b/i;
+const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out|(?:was|were|got|(?:has|have|had)\s+been)\s+(?:sent|received|delivered)|received|delivered)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
 const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like|say|says|said|tell|tells|told)\b/i;
-const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|it|asap|already|just)\b/gi;
-const STOP_LANGUAGE = /\b(?:stop(?!\s+(?:by|over|in|at|back))|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
-const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
+const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|asap|already|just)\b/gi;
+const STOP_LANGUAGE = /(?<!\b(?:don'?t|do\s+not|never|not|won'?t|can'?t|didn'?t|doesn'?t)\s+)\b(?:stop(?!\s+(?:by|over|in|at|back))|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
 
 function sentencesOf(body) {
   const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;]+[.!?;]*/g) || [];
@@ -72,7 +70,6 @@ function sentencesOf(body) {
 function noTextsKind(text) {
   const matches = [...text.matchAll(NO_TEXTS)];
   if (!matches.length) return null;
-  if (STRONG_REQUEST.test(text)) return 'request';
   const isRequest = matches.some((match) => {
     const before = text.slice(0, match.index);
     const after = text.slice(match.index + match[0].length);
@@ -89,9 +86,10 @@ function asksForNoTexts(body) {
   const kinds = sentences.map(noTextsKind);
   if (kinds.includes('request')) return true;
   // A missing-text report is exempt, but not when the message also says stop: explicit stop
-  // language anywhere ("I got no text. Stop contacting me"; "stop by" is a visit, not stop
-  // language), or a clause that is a plain opt-out keyword with polite words around it ("I got no
-  // text. Cancel please"). The exact-keyword check above only reads a whole message.
+  // language anywhere ("I got no text. Stop contacting me"; "stop by" is a visit and "don't stop"
+  // is the opposite), or a clause that is a plain opt-out keyword with polite words around it
+  // ("I got no text. Cancel please"; "Cancel it" names a visit, not texts). The exact-keyword
+  // check above only reads a whole message.
   if (!kinds.includes('report')) return false;
   if (STOP_LANGUAGE.test(body)) return true;
   return String(body || '').split(/[.!?;,\n\r]+/).some((clause) => {
