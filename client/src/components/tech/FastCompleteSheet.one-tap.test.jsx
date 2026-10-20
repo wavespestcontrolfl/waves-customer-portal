@@ -3,7 +3,8 @@
 // pest report sheet, whose context says `oneTap: true`,
 //  - the report is written in the background when the tech taps the 1-5 rating;
 //  - the note is not read for products (its facts are still read);
-//  - a product at 0 in stock still holds, as without the gate (the server refuses a pest deduction below zero);
+//  - a product at 0 in stock still holds, as without the gate, unless the context also says stockAdvisory
+//    (GATE_PEST_STOCK_ADVISORY: FastCompleteSheet.report-flow.test.jsx);
 //  - the trace is optional: typed feet cover a perimeter spray with no saved trace.
 // A re-service gets the same sheet (the server sends the key for a recurring series or
 // a re-service only). Every lane, typed, station and prepare path, a first cleanout that
@@ -154,8 +155,8 @@ describe('one-tap: the rating tap starts the writer', () => {
 });
 
 describe('one-tap: a product at 0 in stock', () => {
-  // /complete refuses a pest deduction below zero (only a WaveGuard lawn completion may go negative), so the
-  // one-tap report keeps the hold: letting it through would only move the refusal to the last tap.
+  // Without GATE_PEST_STOCK_ADVISORY, /complete refuses a pest deduction below zero (only a WaveGuard lawn completion
+  // may go negative), so the one-tap report keeps the hold: letting it through would only move the refusal to the last tap.
   test.each([['gate on', { oneTap: true }], ['gate off', {}]])('%s: the hold stays, and nothing says the visit can still go', async (_label, context) => {
     const request = makeRequest({ products: NO_STOCK, context });
     await openSheet(request);
@@ -168,6 +169,18 @@ describe('one-tap: a product at 0 in stock', () => {
     // The rating tap's write waits on the same hold.
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(reportCalls(request)).toHaveLength(0);
+  });
+
+  test('with stockAdvisory too (GATE_PEST_STOCK_ADVISORY): each product at 0 gets its own line and one Check stock, and the rating tap writes', async () => {
+    const twoOut = () => CATALOG.map((p) => (p.id === 'surfactant' ? p : { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' }));
+    const request = makeRequest({ products: twoOut, context: { oneTap: true, stockAdvisory: true } });
+    await openSheet(request);
+    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.getByText('Atticus Talak 7.9 F shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Check stock' })).toHaveLength(1);
+    writeNote();
+    tapRating();
+    await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
   });
 });
 

@@ -592,6 +592,16 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
+// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): a pest visit's completion treats stock as advisory too,
+// by the server's own service line (as WaveGuard lawn above); the pest sheet's context reads the same answer, so the
+// sheet never lets through what /complete refuses.
+function isPestStockAdvisoryCompletion(svc) {
+  return require('../config/feature-gates').pestStockAdvisoryLive() && detectServiceLine(svc?.service_type) === 'pest';
+}
+
+// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing.
+const isStockAdvisoryCompletion = (svc) => isWaveGuardLawnCompletion(svc) || isPestStockAdvisoryCompletion(svc);
+
 // Plan/approval-engine block messages predate the advisory policy and can
 // still phrase conditions as approval mandates ("manager review is required
 // before applying it", "requires manager approval"). Advisory records must
@@ -1658,12 +1668,14 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
-  // allowNegative is passed ONLY for WaveGuard lawn completions, whose
-  // closeout treats inventory as advisory (owner directive 2026-08-03): the
-  // deduction proceeds, inventory_on_hand goes negative, and the
-  // movement/snapshot below record the insufficient-stock state for audit.
+  // allowNegative is passed ONLY for an advisory-stock completion
+  // (isStockAdvisoryCompletion): a WaveGuard lawn closeout (owner directive
+  // 2026-08-03) or, under GATE_PEST_STOCK_ADVISORY, a pest visit (owner
+  // 2026-10-20). The deduction proceeds, inventory_on_hand goes negative, and
+  // the movement/snapshot below record the insufficient-stock state for audit
+  // (a pest shortfall also alerts the office: notifyOfficeOfStockShortfalls).
   // Every other completion keeps the hard failure — this shared helper runs
-  // for pest/tree-shrub/nonmember visits too, which have no advisory lane to
+  // for tree-shrub/nonmember visits too, which have no advisory lane to
   // record the shortfall (codex P1 r1 on #3179).
   if (insufficient && !allowNegative) {
     const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
@@ -2144,6 +2156,62 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       if (!created) logger.error(`[dispatch] application-limit finding bell NOT recorded for record ${record.id} (admin alert returned null)`);
     } catch (err) {
       logger.error(`[dispatch] application-limit finding notification failed (non-blocking): ${err.message}`);
+    }
+  }
+}
+
+// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): one office alert for each product this pest visit took
+// below zero, raised after the record is saved and never blocking. The key is the product's, and only an OPEN row
+// dedupes (dedupeOpenOnly): a retry, a resume or the next visit that overdraws it again finds the standing alert and
+// does not ring; a restock or count back to zero or above closes it (inventory-operations.js), and a person may mark
+// it done, so the next shortfall rings fresh. Each product's check and alert run in one transaction under the
+// product's row lock, the lock a restock or count takes before it closes the alert: a restock can never land between
+// the read and the insert (it would leave a stale open alert that hides the next real one), and a product already
+// back to zero or above gets none. Called after the record's transaction has committed, so no lock is held here.
+async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
+  const { raiseAdminAlert, breaksAlertRules, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+  const { stockShortfallKey } = require('../services/inventory-operations');
+  let notes = record?.structured_notes || {};
+  if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = {}; } }
+  const shortfalls = (Array.isArray(notes.inventoryDeductions) ? notes.inventoryDeductions : [])
+    .filter((deduction) => deduction?.status === 'deducted_insufficient_stock' && deduction.productId);
+  for (const deduction of shortfalls) {
+    try {
+      const fullName = deduction.productName || 'A product';
+      // The headline and the one-sentence why carry a short name; the detail keeps it whole. A name the alert rules
+      // refuse (a code, a bracket, a second sentence) falls back to plain words.
+      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
+      const namedWhy = `${name} went below zero in stock after a pest visit.`;
+      const plain = breaksAlertRules(`restock ${name}`) || breaksAlertRules(namedWhy) || namedWhy.length > MAX_WHY_CHARS;
+      const dedupeKey = stockShortfallKey(deduction.productId);
+      const unit = String(deduction.inventoryUnit || '').replace(/_/g, ' ');
+      const created = await database.transaction(async (trx) => {
+        const product = await trx('products_catalog').where({ id: deduction.productId }).forUpdate().first('inventory_on_hand');
+        if (!(product?.inventory_on_hand != null && Number(product.inventory_on_hand) < 0)) return 'not_below_zero';
+        return raiseAdminAlert('inventory', {
+          area: 'Inventory',
+          action: plain ? 'restock a product' : `restock ${name}`,
+          why: plain ? 'A product went below zero in stock after a pest visit.' : namedWhy,
+          severity: 'needs-you',
+          who: 'person',
+          link: `/admin/inventory?tab=products&search=${encodeURIComponent(fullName)}&productId=${deduction.productId}`,
+          subject: { type: 'check', id: dedupeKey },
+          doneWhen: 'stock_restocked',
+        }, {
+          bell: true,
+          dedupeKey,
+          dedupeOpenOnly: true,
+          trx,
+          detail: `${fullName} went to ${deduction.stockAfter} ${unit} on hand after a pest visit used ${deduction.deductedAmount} ${unit}. Restock it, or fix the count if the shelf has more.`,
+          metadata: {
+            productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id,
+            stockAfter: deduction.stockAfter, inventoryUnit: deduction.inventoryUnit, dedupeKey,
+          },
+        });
+      });
+      if (!created) logger.error(`[dispatch] stock shortfall alert NOT recorded for record ${record.id} (admin alert returned null)`);
+    } catch (err) {
+      logger.error(`[dispatch] stock shortfall alert failed (non-blocking): ${err.message}`);
     }
   }
 }
@@ -8191,9 +8259,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
-              // Advisory inventory posture is scoped to WaveGuard lawn — the
-              // only closeout that records the shortfall as an advisory.
-              allowNegative: isWaveGuardLawnCompletion(svc),
+              // Advisory inventory posture: WaveGuard lawn, and a pest visit
+              // under GATE_PEST_STOCK_ADVISORY (isStockAdvisoryCompletion).
+              allowNegative: isStockAdvisoryCompletion(svc),
             });
             inventoryDeductions.push(deduction);
           }
@@ -9453,6 +9521,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
       }
     }
+
+    // GATE_PEST_STOCK_ADVISORY: the office alert for each product this pest visit took below zero. Never blocks.
+    // Decided from the committed record, not the live gate: a pest record holds a shortfall only when the gate was on
+    // at its save, so a resume (or a packet's effects phase) after the gate is turned off still alerts the office.
+    if (record?.id && detectServiceLine(svc?.service_type) === 'pest') await notifyOfficeOfStockShortfalls({ svc, record });
 
     // An area add-on row recorded above the add-on's governed rate (protocols.json area_addon): the same
     // flag and office notification, and the same rule: the work is done, so it never blocks.
@@ -15878,5 +15951,8 @@ module.exports.inferServiceReportApplicationMethod = inferServiceReportApplicati
 module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
+module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
+module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
+module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

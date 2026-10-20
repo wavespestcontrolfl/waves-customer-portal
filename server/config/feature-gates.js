@@ -6748,12 +6748,23 @@ module.exports.fastCompleteWrapUpLive = fastCompleteWrapUpLive;
 
 // GATE_ONE_TAP_REPORT read at CALL time, strict `=== 'true'`, dark in every environment.
 // On, the recurring pest report sheet starts its AI writer on the 1-5 rating tap, makes the trace optional
-// (typed feet cover it), reads no AI note for products and lets a 0-in-stock product through. Off = today's sheet.
+// (typed feet cover it) and reads no AI note for products. Off = today's sheet. (A 0-in-stock product on a pest
+// visit is GATE_PEST_STOCK_ADVISORY's.)
 function oneTapReportLive() {
   return process.env.GATE_ONE_TAP_REPORT === 'true';
 }
 // GATE_ONE_TAP_REPORT reader, on its own line so gate PRs never conflict.
 module.exports.oneTapReportLive = oneTapReportLive;
+
+// GATE_PEST_STOCK_ADVISORY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-20,
+// "dont block"). On, a pest visit's completion may take a product's stock below zero (recorded on the visit, as a
+// WaveGuard lawn completion's is) instead of refusing, the pest sheet lets a 0-in-stock product through, and the
+// office gets one alert per product. Off = /complete refuses a pest deduction below zero, as before.
+function pestStockAdvisoryLive() {
+  return process.env.GATE_PEST_STOCK_ADVISORY === 'true';
+}
+// GATE_PEST_STOCK_ADVISORY reader, on its own line so gate PRs never conflict.
+module.exports.pestStockAdvisoryLive = pestStockAdvisoryLive;
 // GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
 module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
 
