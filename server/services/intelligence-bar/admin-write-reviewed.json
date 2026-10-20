@@ -1,0 +1,505 @@
+{
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin edit (owner ruling 2026-10-12: a general EDIT tool is allowed for a reviewed allow-list of small internal edits only; owner login only; always a confirm card; its own gate). A PUT or PATCH endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against (signals, unresolved callees, the tables written, and a hash of the handler text and of every followed function body and same-file constant), so any edit to that chain drops the endpoint from the regenerated catalog until it is reviewed again. body is the allow-list of fields an edit may carry (type, size, enum); the tool refuses any other field and never drops one. required lists fields that must be present. waive maps one scan signal (an effect_call or credential_field that the deny rules would stop) to the reason a person read it and found it harmless; the hard signals (outside calls, messaging or payment modules, signed or customer links, file responses, deletes, DDL, raw SQL writes, bulk inserts) can never be waived. writes must equal the tables the code writes, and none may be a money, message or queue table. scope: customer (scopeParam is the customer id), visit (scopeParam is a visit id; the tool binds the visit to its customer) or broad. noSend is the line the card shows about what the edit does NOT do. beforeRead (optional) names a reviewed READ endpoint that supplies the current values for the card. rejected lists candidates a person read and kept out, with the reason; it changes nothing at run time.",
+  "reviewed": [
+    {
+      "method": "PUT",
+      "endpoint": "/admin/sms-templates/:id",
+      "label": "Text message template: name and wording",
+      "scope": "broad",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "body": {
+          "type": "string",
+          "maxLength": 1600
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [],
+      "reviewed": "Handler read end to end (admin-sms-templates.js PUT /:id) with validateTemplateBody, extractTemplatePlaceholders and the keep-list checks it calls: loads the template row, validates the new body (required placeholders, the STOP line on first-contact texts, no double braces), then one UPDATE of sms_templates (body, name, updated_at). is_active and trigger_event_key are left off the allow-list: they switch a text on or off.",
+      "reason": "Changes the stored wording of one SMS template. The handler runs the same validator the Templates screen runs. No send, queue, schedule or customer lookup is in the chain; the only write is one UPDATE of sms_templates.",
+      "noSend": "Changes template wording only. No text is sent or queued now; later texts of this kind use the new wording.",
+      "writes": [
+        "sms_templates"
+      ],
+      "signals": [
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-sms-templates.js#db.update"
+      ],
+      "hash": "d96d19699dcef913403982375e9139d3"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/email-templates/:key",
+      "label": "Email template: name and description",
+      "scope": "broad",
+      "params": {
+        "key": "text"
+      },
+      "body": {
+        "name": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [],
+      "reviewed": "Handler read end to end (admin-email-templates.js PUT /:key) with normalizeTemplateInput, cleanString and assertOneOf: locks the template row, merges the body onto the stored row (every other column is re-written with its own stored value) and UPDATEs email_templates. Status, mode, send stream, audience, legal class, sender and reply-to addresses and variable lists are left off the allow-list.",
+      "reason": "Renames or re-describes one email template. The other columns are re-saved unchanged by the handler's merge. No send or queue is in the chain; the only write is one UPDATE of email_templates.",
+      "noSend": "Changes the template's name or description only. No email is sent or queued; the template's status, sender and wording are not touched.",
+      "writes": [
+        "email_templates"
+      ],
+      "signals": [
+        "write:transaction",
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-email-templates.js#db.transaction",
+        "routes/admin-email-templates.js#trx.forUpdate",
+        "routes/admin-email-templates.js#trx.update"
+      ],
+      "hash": "11ced712d4d5683f9cf9ffd7dbf60a1e"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/email-templates/versions/:id",
+      "label": "Email template draft: subject, preview text and wording",
+      "scope": "broad",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "subject": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "previewText": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "textBody": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "blocks": {
+          "type": "array",
+          "maxItems": 60,
+          "maxJson": 20000
+        }
+      },
+      "required": [],
+      "reviewed": "Handler read end to end (admin-email-templates.js PUT /versions/:id) with EmailTemplates.loadVersion, normalizeBlocks and validationFor: refuses an ACTIVE version (400 'Create a draft before editing an active version'), so only a draft version is edited; one UPDATE of email_template_versions (subject, preview_text, blocks, text_body, updated_at); then renders a validation report with no send.",
+      "reason": "Edits the wording of a draft email template version. An active (live) version is refused by the handler; publishing a draft is a different endpoint that is not on the list. The only write is one UPDATE of email_template_versions.",
+      "noSend": "Edits a DRAFT version only (the handler refuses an active one). No email is sent or queued, and nothing is published.",
+      "writes": [
+        "email_template_versions"
+      ],
+      "signals": [
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-email-templates.js#db.update"
+      ],
+      "hash": "79fe5a6e0ee2825eb82998367f75231c"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/email-templates/fixtures/:id",
+      "label": "Email template preview data: name and sample values",
+      "scope": "broad",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "payload": {
+          "type": "object",
+          "maxJson": 8000
+        }
+      },
+      "required": [],
+      "reviewed": "Handler read end to end (admin-email-templates.js PUT /fixtures/:id) with loadFixtureById, requireJsonObject and cleanString: one transaction, UPDATE of email_template_fixtures (name, payload, updated_at). is_default is left off the allow-list (it clears the other fixtures' default flag).",
+      "reason": "Changes the sample values a template preview renders with. Fixtures are preview data only; nothing reads them at send time. The only writes are UPDATEs of email_template_fixtures.",
+      "noSend": "Changes preview sample data only. No email is sent, queued or rendered for a customer.",
+      "writes": [
+        "email_template_fixtures"
+      ],
+      "signals": [
+        "write:transaction",
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-email-templates.js#db.transaction",
+        "routes/admin-email-templates.js#trx.returning",
+        "routes/admin-email-templates.js#trx.update"
+      ],
+      "hash": "f8a4f64298c7a0446439d0555bd4610b"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/automations/steps/:id",
+      "label": "Email automation step: subject and wording",
+      "scope": "broad",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "subject": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "previewText": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "htmlBody": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "textBody": {
+          "type": "string",
+          "maxLength": 5000
+        }
+      },
+      "required": [],
+      "reviewed": "Handler read end to end (admin-automations.js PUT /steps/:id): loads the step, then one UPDATE of automation_steps in which each field falls back to its stored value. Delay, order, enabled, sender and reply-to are left off the allow-list (they change when or from where a step sends).",
+      "reason": "Changes the subject or wording of one step in an email automation. The handler writes only automation_steps. It does not enroll, schedule, send or queue anything.",
+      "noSend": "Changes the step's wording only. No email is sent or queued now; emails that step sends later use the new wording.",
+      "writes": [
+        "automation_steps"
+      ],
+      "signals": [
+        "credential_table:automation_steps",
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-automations.js#db.update"
+      ],
+      "hash": "1f1ad18c9ab50b2af2d12cdea8a812d5"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/timetracking/entries/:id",
+      "label": "Timesheet entry: times, type, notes and reason",
+      "scope": "broad",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "clock_in": {
+          "type": "datetime"
+        },
+        "clock_out": {
+          "type": "datetime"
+        },
+        "entry_type": {
+          "type": "string",
+          "maxLength": 20,
+          "enum": [
+            "shift",
+            "job",
+            "break",
+            "drive",
+            "admin_time"
+          ]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "edit_reason": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "edit_reason"
+      ],
+      "reviewed": "Handler and timeTracking.adminEditEntry read end to end, with assertEntryMutable, the week locks, resolveDisputedDailyStatuses and recomputeEntryMutationSummaries: refuses an active, voided or APPROVED entry, a day or week already approved; keeps the originals on the first edit; recomputes the day and week summaries (time_entries, time_entry_daily_summary, time_weekly_summary). The summary recompute clears the technician's weekly sign-off column so the week needs re-signing; no signature value is read or returned. No pay rate, pay run, message or outside call is in the chain.",
+      "reason": "Corrects one technician timesheet entry the way the Time Tracking screen does, with a required reason. An approved entry, day or week is refused by the handler. Only time_entries and the day and week summaries are written.",
+      "noSend": "Changes one time entry and recomputes its day and week totals. No message is sent. An approved week is refused. It does not change a pay rate or run payroll.",
+      "waive": {
+        "credential_field:tech_signature": "The summary recompute sets the weekly tech_signature column to null so the week needs a new sign-off; the chain reads no signature value and the bar never returns the response body."
+      },
+      "writes": [
+        "time_entries",
+        "time_entry_daily_summary",
+        "time_weekly_summary"
+      ],
+      "signals": [
+        "credential_field:tech_signature",
+        "write:insert",
+        "write:onConflict",
+        "write:transaction",
+        "write:update"
+      ],
+      "unresolved": [
+        "services/time-tracking.js#db.transaction",
+        "services/time-tracking.js#trx.forUpdate",
+        "services/time-tracking.js#trx.insert",
+        "services/time-tracking.js#trx.merge",
+        "services/time-tracking.js#trx.onConflict",
+        "services/time-tracking.js#trx.returning",
+        "services/time-tracking.js#trx.update"
+      ],
+      "hash": "6b932ad788330f4ee4b60667756aad46"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/customers/:id/notification-prefs",
+      "label": "Customer text and report preferences",
+      "scope": "customer",
+      "scopeParam": "id",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "autoFlipEnRoute": {
+          "type": "boolean"
+        },
+        "paymentConfirmationSms": {
+          "type": "boolean"
+        },
+        "appointmentNotifyPrimary": {
+          "type": "boolean"
+        },
+        "serviceReportNotifyPrimary": {
+          "type": "boolean"
+        },
+        "serviceReportNotifyBilling": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "reviewed": "Handler read end to end (admin-customers.js PUT /:id/notification-prefs) with adminNotificationPrefsDbUpdates, createDefaultCustomerRows (inserts the default property_preferences and notification_prefs rows only when missing, marketing flags NULL), lockAssignedCustomerEmails (advisory lock keys for the emails in the update; the allow-list carries none) and noteHolderSetNotifyPrimary (stamps caller_choice_at on the customer's recipient_optin row): one transaction, UPDATE of notification_prefs. Nothing is sent. billingEmail and billingContactName are left off the allow-list: they change who receives invoices.",
+      "reason": "Flips one customer's text and report preference flags. The handler only updates notification_prefs (and creates the default rows if missing). It sends no confirmation and no text. Marketing flags and the billing recipient are not on the list.",
+      "noSend": "Changes which texts and reports this customer gets later. Nothing is sent now, and no opt-in or opt-out message goes out.",
+      "waive": {
+        "effect_call:lockAssignedCustomerEmails": "Takes advisory lock keys for any email columns in the update; the allow-list carries no email field, so it locks nothing. It reads and writes no row and sends nothing.",
+        "effect_call:noteHolderSetNotifyPrimary": "One UPDATE of recipient_optin.caller_choice_at for the customer when a caller was demoted; it records the choice and sends nothing."
+      },
+      "writes": [
+        "notification_prefs",
+        "property_preferences",
+        "recipient_optin"
+      ],
+      "signals": [
+        "effect_call:createDefaultCustomerRows",
+        "effect_call:lockAssignedCustomerEmails",
+        "effect_call:noteHolderSetNotifyPrimary",
+        "write:insert",
+        "write:onConflict",
+        "write:transaction",
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-customers.js#db.transaction",
+        "routes/admin-customers.js#trx.forUpdate",
+        "routes/admin-customers.js#trx.update",
+        "services/customer-default-rows.js#dbc",
+        "services/customer-default-rows.js#dbc.ignore",
+        "services/customer-default-rows.js#dbc.insert",
+        "services/customer-default-rows.js#dbc.onConflict",
+        "services/recipient-optin.js#<dynamic>",
+        "services/recipient-optin.js#update"
+      ],
+      "hash": "d07db34fd9db2942bfb8941c693a4e39"
+    },
+    {
+      "method": "PATCH",
+      "endpoint": "/admin/dispatch/:serviceId/note",
+      "label": "Appointment note (staff only)",
+      "scope": "visit",
+      "scopeParam": "serviceId",
+      "params": {
+        "serviceId": "uuid"
+      },
+      "body": {
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "notes"
+      ],
+      "reviewed": "Handler read end to end (admin-dispatch.js PATCH /:serviceId/note) with lockOwnedLiveVisit (technician-visit-scope.js): one transaction, locks the visit row (an admin is unscoped), one UPDATE of scheduled_services (notes, updated_at). The note is capped at 2000 characters by the handler. No status change, reminder, confirmation or text is in the chain.",
+      "reason": "Saves the staff-facing note on one appointment, as the Schedule screen's note box does. The handler writes only scheduled_services.notes and updated_at.",
+      "noSend": "Saves the staff note on one visit. The visit's date, time, status and price are not touched, and no reminder or text is sent.",
+      "writes": [
+        "scheduled_services"
+      ],
+      "signals": [
+        "credential_table:scheduled_services",
+        "effect_call:lockOwnedLiveVisit",
+        "write:transaction",
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-dispatch.js#db.transaction",
+        "routes/admin-dispatch.js#trx.returning",
+        "routes/admin-dispatch.js#trx.update",
+        "services/technician-visit-scope.js#trx.forUpdate"
+      ],
+      "hash": "468339ec441daa3749e3102e45d58186"
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/inventory/service-usage/:id",
+      "label": "Product use per service: note",
+      "scope": "broad",
+      "params": {
+        "id": "uuid"
+      },
+      "body": {
+        "notes": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "notes"
+      ],
+      "reviewed": "Handler read end to end (admin-inventory.js PUT /service-usage/:id): builds an update from the named fields and runs one UPDATE of service_product_usage. The unresolved rateReview.guard and weatherReview.guard entries come from router.use('/:id/label-review', ...) wildcard matching and apply to the label-review paths only, not to this route. Service type, product, amount, unit, per-1000 sq ft rate and primary flag are left off the allow-list: they change stock and cost math.",
+      "reason": "Edits the note on one product-use mapping. The only write is one UPDATE of service_product_usage, and only the notes column is on the allow-list. No price, stock count or catalog row is touched.",
+      "noSend": "Changes the note on one product-use row. No stock count, price or cost changes, and nothing is sent.",
+      "writes": [
+        "service_product_usage"
+      ],
+      "signals": [
+        "write:update"
+      ],
+      "unresolved": [
+        "routes/admin-inventory.js#db.update",
+        "routes/admin-inventory.js#rateReview.guard",
+        "routes/admin-inventory.js#weatherReview.guard"
+      ],
+      "hash": "99b710b4bc6ffa521595bbe142faa7a3"
+    }
+  ],
+  "rejected": [
+    {
+      "method": "PUT",
+      "endpoint": "/admin/customers/:id",
+      "reason": "Chain calls Google (geocoding key) and SendGrid, re-sends the double opt-in email on an email change, and carries contact, address, tier and rate fields. Not a pure column update."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/leads/:id",
+      "reason": "A status change settles funnel rows with a DELETE (lead-estimate-link) and writes attribution; the body also carries phone, email, address, monthly and initial service values and the WaveGuard tier. Needs a split (notes and follow-up only) before it can be reviewed."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/customers/:id/property-preferences",
+      "reason": "Gate and lockbox codes (credentials), sod holds, irrigation re-confirmation and the irrigation weekly email modules are in the chain."
+    },
+    {
+      "method": "PATCH",
+      "endpoint": "/admin/customers/:id/properties/:propertyId",
+      "reason": "Address text (always a card) and the property-linking service with hashing and locks; not batch 1."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/customers/:id/stage",
+      "reason": "A stage change can wind billing down (churn guard), cancels plans and raises health alerts; touches invoices and visits."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/schedule/blackout-dates/weekly",
+      "reason": "Chain deletes rows, calls the route optimizer and Google (fetch), raises dispatch alerts, re-runs route repair and invalidates estimates."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/call-recordings/calls/:id/customer",
+      "reason": "Chain deletes timeline rows, runs raw SQL writes, settles commitments and re-homes the voice message (conversations)."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/call-recordings/calls/:id/disposition",
+      "reason": "Chain deletes rows and runs DDL (alterTable) before the update."
+    },
+    {
+      "method": "PATCH",
+      "endpoint": "/admin/call-recordings/commitments/:id",
+      "reason": "A state machine (confirm, dismiss, fulfill, reopen) that runs callback cards, reschedule-link promises and SMS operational actions."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/inventory/:id",
+      "reason": "Product price and cost fields, pricing cache invalidation and the admin alert module are in the chain."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/inventory/:productId/pricing",
+      "reason": "Catalog and vendor prices (money)."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/inventory/vendors/:id",
+      "reason": "Vendor credential key in the chain."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/sms-templates/:templateKey/variants/:variantKey",
+      "reason": "No screen calls it, so the capabilities census has no line for it; a row needs a census line."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/job-forms/templates/:id",
+      "reason": "Not in the capabilities census."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/automations/templates/:key",
+      "reason": "The enabled flag switches an automation on, smsTemplate picks the message it sends, and asmGroup is the unsubscribe group."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/email-templates/automations/:key",
+      "reason": "Publishing an automation: sets the template, the send rules and the published stamp."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/csr/follow-up-tasks/:id",
+      "reason": "Completing a task stamps action_verified; a task state change, not a field edit; not on the owner list."
+    },
+    {
+      "method": "PATCH",
+      "endpoint": "/admin/dispatch/:serviceId/time-on-site",
+      "reason": "Rewrites service records, the cached report PDF and job costing (money)."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/timetracking/documents/:id",
+      "reason": "Controlled staff documents (sign-off records), not a timesheet field."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/requests/:id",
+      "reason": "Customer request handling reaches the SMS and email senders."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/kb/:id",
+      "reason": "Knowledge base article; not on the owner list."
+    },
+    {
+      "method": "PUT",
+      "endpoint": "/admin/gbp/locations/:id",
+      "reason": "Writes to Google Business Profile (outside service)."
+    }
+  ]
+}

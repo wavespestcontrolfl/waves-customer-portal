@@ -84,8 +84,11 @@ beforeAll(() => {
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
+  // propose_admin_edit is dark behind GATE_IB_GENERAL_EDIT (and owner login only); off, its preview refuses.
+  process.env.GATE_IB_GENERAL_EDIT = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_GENERAL_EDIT;
   delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
@@ -176,6 +179,10 @@ const WRITE_TWO_STEP = [
   'accept_estimate',
   'send_invoice',
   'update_lead_contact',
+  // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
+  // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
+  // PUT or PATCH after a confirm card.
+  'propose_admin_edit',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -345,6 +352,9 @@ const READ_ONLY = [
   // admin-read-tools.js (GATE_IB_GENERAL_READ, owner ruling 2026-10-12): a catalog search and
   // one loopback GET to a reviewed admin endpoint. Reads only, owner login only (FULL_ACCESS_READ_TOOL_NAMES).
   'find_admin_reads', 'read_admin_data',
+  // admin-write-tools.js (GATE_IB_GENERAL_EDIT, owner ruling 2026-10-12): the finder over the
+  // reviewed edit list. Reads only, owner login only (FULL_ACCESS_READ_TOOL_NAMES).
+  'find_admin_edits',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
@@ -733,6 +743,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
     }],
+    // propose_admin_edit validates the body against a reviewed catalog row (a template's wording here,
+    // which needs no seeded record) and writes nothing until confirmed; the full allow-list behavior is
+    // covered by ib-admin-write-tools.test.js. It runs for the owner login with a bearer on the context.
+    ['admin-write-tools', 'executeAdminWriteTool', 'propose_admin_edit', {
+      method: 'PUT', endpoint: '/admin/sms-templates/:id', params: { id: '00000000-0000-0000-0000-00000000f201' }, body: { name: 'Synthetic template name' },
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -995,7 +1011,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       global.fetch = fetchMock;
     }
     let result;
-    try { result = await executor(toolName, input); } finally {
+    const ownerContext = toolName === 'propose_admin_edit'
+      ? { fullAccess: true, isAdmin: true, staffAuthorization: 'Bearer synthetic-owner-token-0000' } : undefined;
+    try { result = await executor(toolName, input, ownerContext); } finally {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
@@ -1147,6 +1165,7 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
     // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice']);
+    // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'propose_admin_edit']);
   });
 });

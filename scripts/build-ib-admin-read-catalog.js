@@ -358,7 +358,7 @@ function middlewareFor(route, uses) {
 }
 
 // Every GET (or catch-all) registration in a router file, by receiver.
-function routerRoutes(file) {
+function routerRoutes(file, methods = ['get', 'all']) {
   const info = parseFile(file);
   const routes = [];
   const opaque = [];
@@ -368,15 +368,15 @@ function routerRoutes(file) {
     const callee = node.callee;
     const method = callee.property.name;
     if (['use', 'param'].includes(method)) collectRouterMiddleware(node, info, uses);
-    if (callee.object.type === 'Identifier' && info.routers.has(callee.object.name) && ['get', 'all'].includes(method)) {
+    if (callee.object.type === 'Identifier' && info.routers.has(callee.object.name) && methods.includes(method)) {
       const paths = routePaths(node.arguments[0]);
       if (!paths) { opaque.push({ line: node.loc.start.line, why: 'dynamic route path' }); return; }
-      for (const p of paths) routes.push({ recv: callee.object.name, path: p, args: node.arguments.slice(1), all: method === 'all', line: node.loc.start.line, info });
+      for (const p of paths) routes.push({ recv: callee.object.name, path: p, method, args: node.arguments.slice(1), all: method === 'all', line: node.loc.start.line, info });
     }
-    if (method === 'get' && callee.object.type === 'CallExpression' && callee.object.callee.property?.name === 'route' && info.routers.has(callee.object.callee.object.name)) {
+    if (methods.includes(method) && callee.object.type === 'CallExpression' && callee.object.callee.property?.name === 'route' && info.routers.has(callee.object.callee.object.name)) {
       const paths = routePaths(callee.object.arguments[0]);
       if (!paths) { opaque.push({ line: node.loc.start.line, why: 'dynamic route path' }); return; }
-      for (const p of paths) routes.push({ recv: callee.object.callee.object.name, path: p, args: node.arguments, all: false, line: node.loc.start.line, info });
+      for (const p of paths) routes.push({ recv: callee.object.callee.object.name, path: p, method, args: node.arguments, all: false, line: node.loc.start.line, info });
     }
   });
   routes.forEach((route) => { route.middleware = middlewareFor(route, uses); });
@@ -388,12 +388,12 @@ function joinPath(prefix, routePath) {
   return `/${parts.map(part => part.replace(/\(.*\)$/, '')).join('/')}`;
 }
 
-function routeTable() {
+function routeTable(methods = ['get', 'all']) {
   const { mounts, inline } = mountedRouters();
   const table = [];
   const opaqueMounts = [];
   for (const mount of mounts) {
-    const { routes, opaque } = routerRoutes(mount.file);
+    const { routes, opaque } = routerRoutes(mount.file, methods);
     const info = parseFile(mount.file);
     const receivers = mount.member ? receiversFor(info, mount.member) : null;
     for (const route of routes) {
@@ -403,7 +403,7 @@ function routeTable() {
     }
     if (opaque.length) opaqueMounts.push(mount.prefix);
   }
-  for (const route of inline) {
+  for (const route of methods.includes('get') ? inline : []) {
     table.push({ full: joinPath(route.path, ''), file: 'server/index.js', line: route.line, mountLine: route.line, route: { args: route.args, info: route.info, path: '' } });
   }
   return { table, opaqueMounts };
@@ -1391,4 +1391,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { validateReviewedRow, resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };
+module.exports = { followedSources, blockedFor, matchRoutes, nameParams, uniqueParamNames, censusGets, labelFor, validateReviewedRow, resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };

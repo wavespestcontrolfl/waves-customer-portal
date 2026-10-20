@@ -16,6 +16,7 @@ const { ibAcceptEstimateLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
+const { adminWriteLive } = require('./admin-write-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -73,6 +74,7 @@ const MODULES = [
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
+  ['admin-write-tools', 'ADMIN_WRITE_TOOLS', 'executeAdminWriteTool'],
   ['address-tools', 'ADDRESS_TOOLS', 'executeAddressTool'],
 ];
 
@@ -136,6 +138,8 @@ const GATED_ACTIONS = {
   accept_estimate: () => ibAcceptEstimateLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
+  find_admin_edits: () => adminWriteLive(),
+  propose_admin_edit: () => adminWriteLive(),
 };
 
 function allowed(action, { role, context, fullAccess } = {}) {

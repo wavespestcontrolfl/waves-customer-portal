@@ -13,6 +13,43 @@ writer or an arbitrary HTTP/SQL executor for writes. Call the same authoritative
 operation as the corresponding portal action, including its route-owned
 validation and effects where those need extraction.
 
+Writes have one exception, narrower than the read one (owner ruling 2026-10-12: "a
+general EDIT tool is allowed for a reviewed allow-list of small internal edits only
+... owner login only, ALWAYS a confirm card, its own gate"). `find_admin_edits` and
+`propose_admin_edit` (`admin-write-tools.js`, `GATE_IB_GENERAL_EDIT`, which needs
+`GATE_IB_PLATFORM`; owner login only, never owner-direct) edit through
+`admin-write-catalog.json`, a **hand-reviewed list that grows by review**, built by
+`npm run ib:write-catalog` from `admin-write-reviewed.json`. This is still no
+arbitrary executor: the model passes a catalog method and pattern, the path
+parameter values and a body, never a URL, and every field of the body must be on
+the row's allow-list (a field the row does not list is refused, not dropped). A row
+exists only after a person read the PUT or PATCH handler and every function it
+calls; it carries the scan fingerprint (signals, unresolved callees, the tables the
+chain writes, a content hash of the chain), so a changed handler drops the endpoint
+until it is reviewed again, and the byte-for-byte catalog test fails in the PR that
+changed it. The generator's rules for a write (`server/utils/admin-write-rules.js`)
+are stricter than the read ones and a reviewer cannot override them: PUT or PATCH
+only; no delete, bulk, send, money, settings, user or credential word in the path;
+no outside call, no messaging, payment or alerting module, no signed or
+customer-facing link, no delete, DDL, raw SQL write or bulk insert in the chain; no
+money, message or queue table written (a call named like a sender, a charge or a
+delete, and a credential field, need a waiver with a reason in the row). To add an
+edit: read the handler chain end to end, run `npm run ib:write-catalog --
+--fingerprint PUT /admin/...`, write the row (body allow-list, scope, `writes`,
+`noSend` line, `reason`) and regenerate; list a candidate you read and kept out in
+`rejected`. The card is the contract: it shows every field (the current value too
+when the row names a reviewed read in `beforeRead`), an ADDRESS CHANGE line when a
+field looks like address text, and pins the row's digest, the filled path, the
+exact body and the customer binding (`_version`, stored as `_approved_edit_pin`). On
+Confirm the route re-runs the preview (it must equal the card), the executor
+rebuilds the plan and refuses with `preview_changed` unless it still equals the
+pin, then sends exactly the carded body as a loopback PUT or PATCH with the
+confirming request's own bearer token and the `X-IB-Admin-Read` log-redaction
+marker, so every middleware and the handler's own checks apply as on the screen. The
+token is carried only on the action context. The handler's response body is never
+returned (a receipt of endpoint, record ids and field names): a 4xx answer is a
+refusal, a 5xx, timeout or transport error is `outcome_unknown`.
+
 Reads have one exception (owner ruling 2026-10-12: "The Intelligence Bar may read
 what any admin screen reads, on the owner login, behind a gate"). `find_admin_reads`
 and `read_admin_data` (`admin-read-tools.js`, `GATE_IB_GENERAL_READ`, which needs `GATE_IB_PLATFORM`; owner login

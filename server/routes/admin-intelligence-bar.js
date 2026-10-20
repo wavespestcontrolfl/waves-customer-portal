@@ -927,6 +927,8 @@ const PINNED_DISPLAY_BUILDERS = {
       corrected_to: preview.after_correction_text,
     }
     : null),
+  // propose_admin_edit (GATE_IB_GENERAL_EDIT): the record, each field's before and after.
+  propose_admin_edit: (params, preview) => require('../services/intelligence-bar/admin-write-tools').displayParams(preview),
   // send_invoice: the card names the invoice, the customer, the
   // money and who is contacted; the full lines are curated in authorization-contract.js.
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
@@ -1253,7 +1255,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // lets ActionRegistry.execute's own allowed() check pass for an outside-
     // service write proposed by the full-access owner, and correctly refuse
     // one from anyone else even if a forged tool_use reached this far.
-    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
+    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization });
     // A stock write's failed preview is judged by the stock layer below (it
     // may offer a "choose the product" card instead).
     if (isToolFailure(preview) && !STOCK_WRITE_TOOL_NAMES.has(toolUse.name)) {
@@ -1272,6 +1274,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
     }
+    // propose_admin_edit: the confirmed run must rebuild exactly the plan the card showed.
+    if (toolUse.name === 'propose_admin_edit' && preview?._version) params._approved_edit_pin = preview._version;
     if (toolUse.name === 'update_lead_contact' && preview?.lead_id) {
       // Pin the resolved lead: a lead_name proposal must never re-resolve to
       // a different row at Confirm (the preview fingerprint also binds it).
@@ -4730,7 +4734,7 @@ async function commitPendingAction(req, { id, contractHash }) {
         const livePreview = await executeApprovedTool(action.tool_name, { ...execParams }, techContextForExecution(req), {
           isAdmin: req.techRole === 'admin',
           technicianId: req.technicianId || req.technician?.id || null,
-          fullAccess: ibFullAccess(req),
+          fullAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization,
           confirmed: false,
         });
         if (isToolFailure(livePreview) || AuthorizationContract.previewFingerprint(livePreview) !== approvedTwoStep) {
@@ -4835,7 +4839,7 @@ async function commitPendingAction(req, { id, contractHash }) {
       operationId: action.id,
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
-      fullAccess: ibFullAccess(req),
+      fullAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization,
       confirmed: true,
       ...(approvedAgentEstimateFingerprint
         ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }

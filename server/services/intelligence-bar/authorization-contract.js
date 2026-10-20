@@ -129,6 +129,9 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 // send_invoice: its card lines come from its own preview
 // (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
+// propose_admin_edit (owner ruling 2026-10-12): its card lines come from its own
+// preview (admin-write-tools.js cardLines), never the generic dump.
+CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -193,6 +196,7 @@ const ACTION_LABELS = {
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
+  propose_admin_edit: 'Edit an admin record',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -822,6 +826,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'send_invoice' && preview?.preview === true) {
     // Lines flagged `more` (every invoice line past the first few) ride in full under "Show more".
     for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
+  // propose_admin_edit: the edit, each field's before and after, and what it does not do.
+  if (toolName === 'propose_admin_edit' && preview?.preview === true) {
+    for (const line of require('./admin-write-tools').cardLines(preview)) {
       if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
       else push(line.kind, line.text);
     }

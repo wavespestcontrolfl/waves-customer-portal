@@ -142,8 +142,10 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
 // free-form INPUT can hold a name, phone number or email: the operator types
 // what to look for. Their parameters stay out of logs and telemetry anyway.
 //   find_admin_reads  the `query` words ("Smith autopay", "941-555-0100")
+//   find_admin_edits  the same, for the reviewed edit list
 const SCOPE_NONE_PII_TOOL_NAMES = new Set([
   'find_admin_reads',
+  'find_admin_edits',
 ]);
 
 const { READ_SCOPES, WRITE_SCOPES, toolsWithScope } = require('./scope-policy');

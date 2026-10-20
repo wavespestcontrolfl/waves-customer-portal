@@ -2022,5 +2022,21 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "find_admin_edits": {
+    "module": "admin-write-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "propose_admin_edit": {
+    "module": "admin-write-tools.js",
+    "domain": "ops",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
   }
 }

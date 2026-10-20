@@ -381,6 +381,20 @@ async function readAdminData(input, actionContext) {
   return fetchAdminRead(built.entry, built.path, built.search, authorization, built.paramIndexes);
 }
 
+// One reviewed catalog read for the general edit card (admin-write-tools.js):
+// the current values an edit is about to replace. Same path rules, same
+// loopback GET, same redaction as read_admin_data; the caller names a catalog
+// endpoint and its parameters, never a URL. Returns the shaped answer
+// ({ status, data, ... }) or a refusal ({ error, code }).
+async function readCatalogEndpoint(endpoint, params, authorization) {
+  if (typeof authorization !== 'string' || !BEARER_RE.test(authorization)) {
+    return refusal('This read needs the logged-in owner session, which is missing', 'permission_denied');
+  }
+  const built = buildRequestPath(endpoint, { params });
+  if (built.refusal) return built.refusal;
+  return fetchAdminRead(built.entry, built.path, built.search, authorization, built.paramIndexes);
+}
+
 async function executeAdminReadTool(name, input, actionContext = {}) {
   if (![ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL].includes(name)) {
     return refusal('Capability is not implemented', 'capability_unimplemented');
@@ -395,6 +409,6 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
 }
 
 module.exports = {
-  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding,
+  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding, readCatalogEndpoint, wordsOf, stem, STOPWORDS,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
 };
