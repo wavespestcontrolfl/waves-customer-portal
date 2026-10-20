@@ -42,6 +42,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { parseETDateTime, etDateString, etParts, addETDays, etWallClockOccurrences } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
+const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -1220,6 +1221,8 @@ function normalizeRow(row) {
 //                 it stays a HINT and the status is left open, so the office
 //                 confirms it with "Mark done".
 const ASSOCIATION_WINDOW_DAYS = 14;
+// send_estimate association candidates vetted for a service-line match (audit 2026-10-19): bounded, handoff order.
+const ASSOCIATION_CANDIDATE_LIMIT = 25;
 
 function contactPhoneOf(call) {
   return String(call?.direction || "").startsWith("outbound") ? call?.to_phone : call?.from_phone;
@@ -1830,7 +1833,11 @@ async function completedVisit(conn, { after, until, customerId }) {
 // send_estimate's association lookup, shared with kind 'other': an estimate
 // handed off to the same customer after the call (or, for an unlinked call,
 // an unlinked estimate on the caller's phone).
-async function estimateSentTo(conn, { after, until, phone, customerId }) {
+//
+// `accept(row)` (optional) vets a candidate for the promise being judged: the
+// first accepted estimate in handoff order wins, so a rejected one does not hide
+// a later estimate in the window. Bounded by ASSOCIATION_CANDIDATE_LIMIT.
+async function estimateSentTo(conn, { after, until, phone, customerId }, accept = null) {
   const estQ = handedOffWithin(conn("estimates"), after, until);
   if (customerId) {
     // A lead can acquire its customer before its estimate does. Reuse the
@@ -1844,6 +1851,11 @@ async function estimateSentTo(conn, { after, until, phone, customerId }) {
     estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
   } else {
     return null;
+  }
+  if (accept) {
+    const rows = await estQ.orderByRaw(handoffOrder(conn, after, until)).limit(ASSOCIATION_CANDIDATE_LIMIT).select(...HANDOFF_COLS(conn), "service_interest", "estimate_data");
+    const est = rows.find(accept);
+    return est ? { id: est.id, at: witnessAt(est, after) } : null;
   }
   const est = await estQ.orderByRaw(handoffOrder(conn, after, until)).first(...HANDOFF_COLS(conn));
   return est ? { id: est.id, at: witnessAt(est, after) } : null;
@@ -2316,7 +2328,7 @@ async function customerLeftProof(conn, commitment, call) {
 // mint (a hint: never direct, and never closes either — the lead's estimate
 // is not necessarily this customer's), handed off once associations count,
 // within the association window for a promise the portal can close.
-async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated }, probe) {
+async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated }, probe, accept = null) {
   const { after } = associated;
   const until = associationCloses(commitment) ? associated.until : null;
   // A REUSED earlier call's lead — reached through the lead_id /
@@ -2339,27 +2351,48 @@ async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated 
   const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedIds.has(id)), ...reused.map((l) => String(l.id))])];
   const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
   if (reusedEstimateIds.length || reusedLeadIds.length) {
-    const onReused = await handedOffWithin(conn("estimates")
+    const reusedQ = handedOffWithin(conn("estimates")
       .where(function linkedToLeads() {
         if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
         if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
       }), after, until)
-      .orderByRaw(handoffOrder(conn, after, until))
-      .first(...HANDOFF_COLS(conn));
+      .orderByRaw(handoffOrder(conn, after, until));
+    // Same service-line vetting as estimateSentTo (audit 2026-10-19).
+    const onReused = accept
+      ? (await reusedQ.limit(ASSOCIATION_CANDIDATE_LIMIT).select(...HANDOFF_COLS(conn), "service_interest", "estimate_data")).find(accept)
+      : await reusedQ.first(...HANDOFF_COLS(conn));
     if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call", hint_only: true };
   }
   return null;
 }
 
 async function resolveSendEstimate(ctx) {
-  const { conn, call, after, phone, customerId, associated } = ctx;
+  const { conn, call, commitment, after, phone, customerId, associated } = ctx;
   // Direct: the shared primitive above (estimator stamp; lead FK or
   // public-quote mirror on a lead this call minted).
   const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
   const direct = (await directEstimatesSentAfter(conn, [probe])).get("call");
   if (direct) return direct;
+  // Association is "some estimate reached this customer", so it must be for the
+  // service line the caller asked about (audit 2026-10-19, calls 5f7d3fc9 +
+  // 8d1e8e2c: a LAWN quote asked, a Pest Control estimate sent 4 days later
+  // closed the promise and no follow-up alert fired). Only the association
+  // paths are vetted; the direct proofs above are exact. Fail-safe: only a clear
+  // conflict rejects an estimate, so an unknown line on either side keeps
+  // today's behavior. A rejected estimate is skipped, not fatal: a later one
+  // that matches still closes the promise.
+  // The ask comes from the extraction that FILED this promise
+  // (askedLinesForPromise); the one-hour pager applies the same check.
+  let asked;
+  const vet = async () => {
+    if (asked === undefined) {
+      const row = await conn("call_log").where({ id: call.id }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b)).first(...ASK_CALL_COLUMNS);
+      asked = askedLinesForPromise(commitment, row);
+    }
+    return asked.length ? (row) => estimateMatchesAsk(asked, row) : null;
+  };
   return associationProof(ctx, [
-    () => reusedLeadEstimate(ctx, probe),
+    async () => reusedLeadEstimate(ctx, probe, await vet()),
     // An estimate linked only through estimates.customer_phone still keeps
     // the promise (commercial proposals store the phone with a NULL
     // customer_id, so a same-customer lookup misses them). Mirror the
@@ -2370,7 +2403,7 @@ async function resolveSendEstimate(ctx) {
     // promise. A visit booked or done is NOT proof of an estimate sent
     // (owner audit 2026-10-05): the estimate itself is the only witness.
     async () => {
-      const est = await estimateSentTo(conn, associated);
+      const est = await estimateSentTo(conn, associated, await vet());
       return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     },
   ]);
