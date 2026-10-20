@@ -38,9 +38,8 @@
 const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
+const { anthropicMaxTokens } = require('./llm/anthropic-wire');
 const { parseETDateTime, etDateString, etParts, addETDays, etWallClockOccurrences } = require('../utils/datetime-et');
-const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
 const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
@@ -55,9 +54,6 @@ function parseDueAt(value) {
   const d = parseETDateTime(value);
   return d instanceof Date && !Number.isNaN(d.getTime()) ? d : NaN;
 }
-
-let Anthropic = null;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const WAVES_KINDS = Object.freeze([
   'send_estimate', 'send_appointment_confirmation', 'callback', 'send_report',
@@ -795,43 +791,101 @@ function groundModelCommitments(items, transcript, reference = null) {
   return { kept, droppedUngrounded, droppedLowConfidence, droppedMismatched, malformedDueAt };
 }
 
+// The model pass rides the shared cross-provider chain (TEXT_POLICIES.highStakes:
+// Anthropic FLAGSHIP first, OpenAI Sol backup — both resolved through the
+// models registry). 2026-10-19 call audit: the Anthropic monthly limit was hit
+// on 10-15 and every request returned 400 for four days, so 18 of 20 calls with
+// a spoken staff promise got no row. A provider outage, a missing key or an
+// unusable (unparseable / schema-failing) answer now moves to the backup leg.
+// The adapters write the call ledger themselves (one row per leg, the rejected
+// leg flipped by the chain's validate hook), so nothing here wraps a second
+// ledger entry around a leg.
+const COMMITMENTS_POLICY = () => MODELS.TEXT_POLICIES.highStakes;
+// Each leg gets its own MODEL_TIMEOUT_MS; the chain budget is two legs' worth.
+// The pass runs after finalization (no claim held), so the longer worst case
+// does not stretch a claim (see utils/claim-ceiling.js).
+// The reply cap is the exact wire cap the Anthropic-only pass sent (2000,
+// raised to the model's thinking floor), so the OpenAI leg gets the same
+// headroom for reasoning plus the JSON instead of a tight 2000.
+const commitmentsReplyTokens = () => anthropicMaxTokens(MODELS.FLAGSHIP, 2000);
+
 async function extractCommitmentsWithModel(transcript, { callStartedAt = null, client = null } = {}) {
   if (!transcript || String(transcript).length < 40) return { items: [], skipped: 'transcript_too_short' };
-  const anthropic = client || ((Anthropic && process.env.ANTHROPIC_API_KEY) ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null);
-  if (!anthropic) return { items: [], skipped: 'no_provider' };
+  const { dispatchWithFallback } = require('./llm/call');
   const startedAt = Date.now();
   // No sampling controls on the request (current Anthropic models 400 on
-  // them). maxRetries 0 because the pipeline has its own retry lanes — a
-  // claim-holding pass must not sit through the SDK's per-attempt timeouts.
-  const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
-    model: MODELS.FLAGSHIP,
-    ...anthropicEffortConfig(MODELS.FLAGSHIP),
-    max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
-    messages: [{ role: 'user', content: buildCommitmentsPrompt({ transcript, callStartedAt }) }],
-  }, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }), { laneId: 'call_commitments' });
-  const text = (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-  let parsed;
-  try {
-    parsed = parseLooseJsonObject(text);
-  } catch (err) {
-    ledgerCallRejected(response, 'invalid_json');
-    return { items: [], skipped: 'parse_failed', error: err.message, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
+  // them). The adapter sets maxRetries 0 whenever a budget is supplied — the
+  // pipeline has its own retry lanes, and a pass must not sit through the
+  // SDK's per-attempt timeouts.
+  let accepted = null;
+  let lastRejection = null;
+  const result = await dispatchWithFallback(COMMITMENTS_POLICY(), {
+    text: buildCommitmentsPrompt({ transcript, callStartedAt }),
+    jsonMode: false,
+    maxTokens: commitmentsReplyTokens(),
+    timeoutMs: MODEL_TIMEOUT_MS * 2,
+    laneId: 'call_commitments',
+    ...(client ? { anthropicClient: client } : {}),
+  }, {
+    reserveFallbackBudget: true,
+    maxAttemptMs: MODEL_TIMEOUT_MS,
+    hardDeadline: true,
+    // An answer that is not usable JSON for this schema fails ITS leg (the
+    // chain flips that leg's ledger row) and the backup gets a turn.
+    validate: (leg, route) => {
+      let parsed;
+      try {
+        parsed = parseLooseJsonObject(leg.text);
+      } catch (err) {
+        lastRejection = { code: 'parse_failed', model: route.model, error: err.message };
+        return 'invalid_json';
+      }
+      normalizeModelOutput(parsed, transcript);
+      const validate = getValidator();
+      if (!validate(parsed)) {
+        // Paths and keywords only — never the model text (it quotes the caller).
+        const why = (validate.errors || []).slice(0, 3).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
+        logger.warn(`[call-commitments] model output failed schema (${(validate.errors || []).length} error(s)): ${why}`);
+        lastRejection = { code: 'schema_failed', model: route.model, errors: validate.errors };
+        return 'schema_invalid';
+      }
+      // Claims returned but every one discarded (ungrounded, below the
+      // confidence floor, wrong party) is an answer that produced nothing
+      // usable: it fails this leg so the backup gets a turn (Codex #6346 r3).
+      // An empty commitments array stays a successful "nothing promised"
+      // (Codex r7 on #4884).
+      const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
+      if (parsed.commitments.length && !grounded.kept.length) {
+        lastRejection = { code: 'all_dropped', model: route.model, grounded };
+        return 'invalid_output';
+      }
+      accepted = grounded;
+      return null;
+    },
+  });
+  if (!result.ok) {
+    // Unusable answers from every leg that answered: the same skipped
+    // outcomes the single-provider pass reported.
+    // Every leg dropped all its claims: an answer with nothing usable, as before.
+    // Only when EVERY leg answered and dropped everything; a provider, parse
+    // or schema failure on any leg keeps the failure (Codex #6346 r4).
+    const everyLegAnswered = (result.failures || []).every((f) => f.reason === 'invalid_output');
+    if (lastRejection?.code === 'all_dropped' && everyLegAnswered) return commitmentsResult(lastRejection.grounded, lastRejection.model, startedAt);
+    if (lastRejection && lastRejection.code !== 'all_dropped') {
+      const { code, ...detail } = lastRejection;
+      return { items: [], skipped: code, ...detail, ms: Date.now() - startedAt };
+    }
+    const reasons = (result.failures || []).map((f) => `${f.provider}:${f.reason}`);
+    if (reasons.length && (result.failures || []).every((f) => f.reason === 'no_key')) return { items: [], skipped: 'no_provider' };
+    // Reason codes only, never provider text. The caller reports a throw as
+    // skipped 'model_failed' and keeps the deterministic seeds.
+    throw new Error(`all_providers_failed${reasons.length ? ` (${reasons.join(', ')})` : ''}`);
   }
-  normalizeModelOutput(parsed, transcript);
-  const validate = getValidator();
-  if (!validate(parsed)) {
-    // Paths and keywords only — never the model text (it quotes the caller).
-    const why = (validate.errors || []).slice(0, 3).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
-    ledgerCallRejected(response, 'schema_invalid');
-    logger.warn(`[call-commitments] model output failed schema (${(validate.errors || []).length} error(s)): ${why}`);
-    return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
-  }
-  const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
-  // Claims returned but every one discarded (ungrounded, below the confidence
-  // floor, wrong party) is an answer that produced nothing usable; an empty
-  // commitments array stays a successful "nothing promised" (Codex r7 on #4884).
-  if (Array.isArray(parsed.commitments) && parsed.commitments.length && !grounded.kept.length) ledgerCallRejected(response, 'invalid_output');
-  return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
+  return commitmentsResult(accepted, result.model, startedAt);
+}
+
+function commitmentsResult(grounded, model, startedAt) {
+  return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model, ms: Date.now() - startedAt };
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────
@@ -1113,6 +1167,7 @@ async function recordCallCommitments({
   procGeneration = null,
   modelClient = null,
   runModel = true,
+  historicalReplay,
 } = {}) {
   const summary = { seeds: 0, model: 0, written: 0, dropped: 0, ownershipLost: false, skipped: null };
   try {
@@ -1139,7 +1194,14 @@ async function recordCallCommitments({
       modelItems = model.items || [];
       summary.model = modelItems.length;
     }
-    const items = [...seeds, ...modelItems].map((item) => ({
+    // A historical replay (the commitments backfill) never records a promise
+    // whose open row a live worker would act on: a send_reschedule_link row
+    // created days after its call reads as post-activation and would text the
+    // customer a stale link (Codex #6346 r4 P1). The caller lists those calls.
+    const replayOmits = (item) => historicalReplay && item.kind === 'send_reschedule_link';
+    const omitted = [...seeds, ...modelItems].filter(replayOmits);
+    summary.omittedLinkPromises = omitted.length;
+    const items = [...seeds, ...modelItems].filter((item) => !replayOmits(item)).map((item) => ({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));

@@ -10199,7 +10199,7 @@ function isTechFollowUpCall(call) {
 // Seeds from the V2 extraction plus one bounded model pass; a human-touched
 // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never blocks
 // the call.
-async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration }) {
+async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, historicalReplay = false }) {
   if (!transcription || extracted?.is_spam || !isEnabled('callCommitments')) return;
   try {
     const commitmentsStartedAt = Date.now();
@@ -10211,12 +10211,18 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         transcript: transcription,
         v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
         procGeneration,
+        historicalReplay,
       });
       logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
+      // The pipeline ignores the summary; the commitments backfill reads it to
+      // tell a failed replay from a call where nothing was promised.
+      return commitmentSummary;
     }
   } catch (err) {
     logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+    return { error: err.message };
   }
+  return null;
 }
 
 // Reschedule apply — when a matched existing customer's call moved a visit
