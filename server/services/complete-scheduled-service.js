@@ -9523,7 +9523,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
 
     // GATE_PEST_STOCK_ADVISORY: the office alert for each product this pest visit took below zero. Never blocks.
-    if (record?.id && isPestStockAdvisoryCompletion(svc)) await notifyOfficeOfStockShortfalls({ svc, record });
+    // Decided from the committed record, not the live gate: a pest record holds a shortfall only when the gate was on
+    // at its save, so a resume (or a packet's effects phase) after the gate is turned off still alerts the office.
+    if (record?.id && detectServiceLine(svc?.service_type) === 'pest') await notifyOfficeOfStockShortfalls({ svc, record });
 
     // An area add-on row recorded above the add-on's governed rate (protocols.json area_addon): the same
     // flag and office notification, and the same rule: the work is done, so it never blocks.

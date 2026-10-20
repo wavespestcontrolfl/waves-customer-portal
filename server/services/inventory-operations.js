@@ -32,7 +32,8 @@ const stockShortfallKey = (productId) => `stock-shortfall:${productId}`;
 
 // A movement that brings the count back to zero or above closes that alert (docs/admin-notifications.md, "Clear
 // yourself"); with none open it updates nothing. In a savepoint, so a failed close is logged and never rolls back
-// the stock it follows.
+// the stock it follows. Every write that can raise a count calls it: adjustStock, a restock request's receive, and
+// the Products table's inline stock edit (routes/admin-inventory.js PUT /:id).
 async function clearStockShortfallAlert(trx, productId, stockAfter, unit) {
   if (!(Number(stockAfter) >= 0)) return;
   try {
@@ -509,4 +510,5 @@ async function updateRestockRequest(requestId, raw, options = {}) {
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,
   previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct,
-  lockCatalogCreate, findActiveProductByExactName, findAliasByNormalizedName, createProductAlias, stockShortfallKey };
+  lockCatalogCreate, findActiveProductByExactName, findAliasByNormalizedName, createProductAlias, stockShortfallKey,
+  clearStockShortfallAlert };

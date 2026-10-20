@@ -4338,7 +4338,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
   // GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): the fixture is a pest visit, so its packet takes the
   // stock below zero instead of refusing, the record keeps the shortfall, and the office gets one alert for the product.
-  test('a pest packet takes the stock below zero under GATE_PEST_STOCK_ADVISORY and alerts the office once', async () => {
+  // The alert is decided from the committed record, so it still rings when the gate is off by the effects phase (a
+  // record saved before a redeploy that turned the gate off; codex r1 on #6355).
+  test('a pest packet takes the stock below zero under GATE_PEST_STOCK_ADVISORY and alerts the office once, gate off by the effects phase or not', async () => {
     const savedGate = process.env.GATE_PEST_STOCK_ADVISORY;
     const alertKey = `stock-shortfall:${fixture.productId}`;
     process.env.GATE_PEST_STOCK_ADVISORY = 'true';
@@ -4353,6 +4355,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
       expect(records.flatMap((row) => row.structured_notes.inventoryDeductions || []).map((d) => d.status).sort())
         .toEqual(['deducted', 'deducted_insufficient_stock']);
+      delete process.env.GATE_PEST_STOCK_ADVISORY;
       await runVisitCompletionPacketMemberEffects(saved.body.packetId);
       const alerts = await mockPg('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [alertKey]);
       expect(alerts).toHaveLength(1);

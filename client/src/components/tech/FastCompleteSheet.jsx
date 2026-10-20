@@ -934,7 +934,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         onSubmit={submit}
         coverProps={picker.coverProps}
       >
-        <StockNotices rows={stockNotices} checking={checkingStock} locked={locked} onCheck={checkStock} />
+        <StockNotices rows={stockNotices} checking={checkingStock} locked={locked} disabled={voiceMicPending} onCheck={checkStock} />
         {stockRow && !locked && (
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} disabled={voiceMicPending} onClick={checkStock}>Check stock</Button>
         )}
@@ -1216,8 +1216,9 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
 }
 
 // The lines for the products at 0 in stock while the stock is advisory (none holds the send; the office gets an alert
-// for each), one each, and Check stock for a count the office has fixed since.
-function StockNotices({ rows, checking, locked, onCheck }) {
+// for each), one each, and Check stock for a count the office has fixed since (`disabled` while a voice capture runs:
+// another tap would drop its words).
+function StockNotices({ rows, checking, locked, onCheck, disabled }) {
   if (!rows.length) return null;
   return (
     <>
@@ -1226,7 +1227,7 @@ function StockNotices({ rows, checking, locked, onCheck }) {
           {`${row.name} shows 0 in stock. You can still send. The office will restock it.`}
         </p>
       ))}
-      {!locked && <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checking} onClick={onCheck}>Check stock</Button>}
+      {!locked && <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checking} disabled={disabled} onClick={onCheck}>Check stock</Button>}
     </>
   );
 }
