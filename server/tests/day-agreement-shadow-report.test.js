@@ -29,7 +29,19 @@ describe('classifyOutcome', () => {
   });
 
   test('a visit moved onto the agreed day after the agreement counts as staff acting', () => {
-    expect(report.classifyOutcome(decision({ verdict: 'would_move' }), [visit({ created_at: before })]).outcome).toBe('staff_acted_on_day');
+    expect(report.classifyOutcome(decision({ verdict: 'would_move', from_visit_id: 'v-1' }), [visit({ created_at: before })]).outcome).toBe('staff_acted_on_day');
+  });
+
+  test('a visit only UPDATED after the agreement (completed as planned) is not a staff booking (pre-push audit)', () => {
+    expect(report.classifyOutcome(decision(), [visit({ created_at: before, status: 'completed' })]).outcome).toBe('nothing');
+  });
+
+  test('one agreement judged again from a later thread snapshot counts once', () => {
+    const d1 = decision({ id: 'a1', verdict: 'would_book', customer_id: 'c-1' });
+    const d2 = decision({ id: 'a2', verdict: 'would_book', customer_id: 'c-1' });
+    const r = report.summarize([d1, d2], () => []);
+    expect(r.wouldTotal).toBe(1);
+    expect(r.duplicates).toBe(1);
   });
 
   test('staff booked a different day: a new visit on another day, or the moved visit now sits elsewhere', () => {

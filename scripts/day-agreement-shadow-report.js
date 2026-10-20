@@ -56,7 +56,13 @@ function parseArgs(argv) {
 function classifyOutcome(decision, visits) {
   const agreed = ms(decision.agreed_at);
   const live = visits.filter((v) => !DEAD_STATUSES.includes(String(v.status || '').toLowerCase()));
-  const touched = live.filter((v) => ms(v.created_at) > agreed || ms(v.updated_at) > agreed);
+  // Staff action is direct evidence only (pre-push audit): a visit CREATED
+  // after the agreement, or the very visit a move named now sitting on the
+  // target day. A bare updated_at also moves on a status change (a visit
+  // completed as planned), so it is never read as a booking or a move.
+  const created = live.filter((v) => ms(v.created_at) > agreed);
+  const movedHere = live.filter((v) => decision.from_visit_id && v.id === decision.from_visit_id && v.d === decision.target_date);
+  const touched = [...created, ...movedHere];
   const onDay = touched.filter((v) => v.d === decision.target_date);
   if (onDay.length) {
     const sameHour = onDay.some((v) => hhmm(v.window_start) !== null && hhmm(v.window_start) === hhmm(decision.chosen_window_start));
@@ -81,7 +87,13 @@ function summarize(decisions, visitsOf) {
     total: decisions.length, byVerdict: {}, skipReasons: {}, wouldOutcomes: {}, sameHour: 0, wouldTotal: 0,
     missedOpportunities: {}, rows: [],
   };
+  // One agreement can be judged again from a later snapshot of the same text
+  // thread ("See you Tuesday"): count each customer + day + kind once (pre-push audit).
+  const seen = new Set();
   for (const d of decisions) {
+    const wouldKey = (d.verdict === 'would_book' || d.verdict === 'would_move') ? `${d.customer_id}|${d.target_date}|${d.verdict}` : null;
+    if (wouldKey && seen.has(wouldKey)) { report.duplicates = (report.duplicates || 0) + 1; continue; }
+    if (wouldKey) seen.add(wouldKey);
     bump(report.byVerdict, d.verdict);
     if (d.verdict === 'skip') bump(report.skipReasons, d.skip_reason);
     const wouldAct = d.verdict === 'would_book' || d.verdict === 'would_move';
