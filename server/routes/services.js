@@ -25,7 +25,7 @@ const { resolveSessionScope, resolvedScopePayload } = require('../services/accou
 // Contact session (GATE_CONTACT_LOGIN): a contact the report rule withholds
 // from (a tenant, an occupant on a managed account) reads the visit list and
 // detail without report artifacts — the same verdict /api/documents applies.
-const { contactSessionReportsWithheld, withholdReportArtifacts } = require('../services/contact-session-projection');
+const { contactSessionReportsWithheld, withholdReportArtifacts, contactSafeReportLinks } = require('../services/contact-session-projection');
 
 router.use(authenticate);
 
@@ -51,7 +51,13 @@ router.get('/', async (req, res, next) => {
     const scope = propertyScoped ? await resolveSessionScope(req) : null;
 
     const { services: listed, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
-    const enriched = await contactSessionReportsWithheld(req) ? listed.map(withholdReportArtifacts) : listed;
+    // A contact the rule withholds from gets no artifact; an allowed contact
+    // gets the visit without the public report bearers (the authenticated
+    // contact-safe PDF route carries the report).
+    const projectRow = await contactSessionReportsWithheld(req)
+      ? withholdReportArtifacts
+      : (req.contactSession ? contactSafeReportLinks : null);
+    const enriched = projectRow ? listed.map(projectRow) : listed;
 
     res.json({
       // The selection this read was scoped to (propertyScoped only): Home

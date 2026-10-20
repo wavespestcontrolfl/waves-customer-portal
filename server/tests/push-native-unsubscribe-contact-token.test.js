@@ -29,7 +29,7 @@ function wire() {
     q.whereIn = (col, vals) => { q.filters.push([col, vals]); return q; };
     q.andWhere = (obj) => { q.filters.push(obj); return q; };
     q.whereNull = (col) => { q.filters.push(['null', col]); return q; };
-    q.where = () => q;
+    q.where = (obj) => { if (obj && typeof obj === 'object') q.filters.push(obj); return q; };
     q.select = async () => (table === 'customers' ? [{ id: 'cust-1' }, { id: 'cust-2' }] : []);
     q.catch = () => q;
     q.update = async (patch) => { updates.push({ table, filters: q.filters, patch }); return 1; };
@@ -62,13 +62,14 @@ test('a contact without a device token is refused and nothing is deactivated', a
   expect(updates).toEqual([]);
 });
 
-test('a contact presenting its token releases exactly that token (account-scoped, as any device does)', async () => {
+test('a contact presenting its token releases exactly that token wherever it is held — the holder registration it is clearing may sit under ANOTHER account (codex r7 P1)', async () => {
   mockSession.contact = { slot: 1, phoneKey: '9415550202' };
   const res = await post({ token: 'apns-device-1' });
   expect(res.status).toBe(200);
   expect(res.body).toEqual({ ok: true, deactivated: 1 });
   expect(updates).toHaveLength(1);
-  expect(updates[0].filters).toEqual(expect.arrayContaining([['customer_id', ['cust-1', 'cust-2']], { device_token: 'apns-device-1' }]));
+  expect(updates[0].filters).toEqual(expect.arrayContaining([{ device_token: 'apns-device-1' }]));
+  expect(updates[0].filters.some((f) => Array.isArray(f) && f[0] === 'customer_id')).toBe(false);
 });
 
 test('the holder keeps the token-less "all my devices" form', async () => {

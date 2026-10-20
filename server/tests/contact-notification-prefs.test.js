@@ -179,6 +179,36 @@ describe('contactDeclinesChannel (single-recipient resolvers: review outreach)',
   });
 });
 
+describe('rerouteForContactEmailOptOut (deferred sends: automation steps, queued template runs)', () => {
+  const wireCustomer = (customer) => {
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      const c = { where: () => c, first: async () => customer, catch: () => c };
+      return c;
+    });
+  };
+
+  test('the slot-1 contact\'s address with their email off moves to the holder; holds when the holder has none', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
+    wireCustomer(CUSTOMER);
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'Sam@Example.com')).toEqual({ email: 'pat@example.com', rerouted: true });
+    wireCustomer({ ...CUSTOMER, email: '' });
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: null, rerouted: true });
+  });
+
+  test('passes through: the holder\'s own address, an unmatched address, a contact with email on, and the gate off', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
+    wireCustomer(CUSTOMER);
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'pat@example.com')).toEqual({ email: 'pat@example.com', rerouted: false });
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'other@example.com')).toEqual({ email: 'other@example.com', rerouted: false });
+    rows = [];
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam@example.com', rerouted: false });
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam@example.com', rerouted: false });
+  });
+});
+
 describe('pruneContactNotificationPrefs (holder contact save)', () => {
   test('deletes the rows of phones no longer in a slot and keeps the survivors', async () => {
     rows = [

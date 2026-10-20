@@ -1971,6 +1971,15 @@ async function withPrepSendLock(run, fn) {
 // row, or { skipReason } when the page belongs to another guide; rethrows a
 // send failure for executeRun's retry / fail decision.
 async function dispatchRun(run, automation, executionPayload, payloadFingerprint = null) {
+  // Dispatch-time recheck (codex #6363 r7 P1): a run addressed to the
+  // customer's slot-1 on-location contact follows that contact's email
+  // switch — off since the run was queued means the holder gets it, or the
+  // run is skipped when the holder has no address.
+  if (run.recipient_type === 'customer' && run.recipient_id) {
+    const reroute = await require('./contact-notification-prefs').rerouteForContactEmailOptOut(run.recipient_id, run.recipient_email);
+    if (reroute.rerouted && !reroute.email) return { skipReason: 'on-location contact turned email off; no account holder email' };
+    if (reroute.rerouted) run = { ...run, recipient_email: reroute.email };
+  }
   const prepClaim = await claimPrepPageForRun(run);
   if (!prepClaim.owned) return { skipReason: prepClaim.delivered ? 'prep guide already delivered for this visit' : 'prep page owned by another guide' };
   let prepDispatched = false;

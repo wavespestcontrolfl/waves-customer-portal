@@ -657,6 +657,25 @@ async function resolveConsultationBlock(step, enrollment, recipient) {
   return buildConsultationEmailBlock({ leadId, recipientEmail: recipient });
 }
 
+// The address a step goes to: the enrollment's, unless it is the slot-1
+// on-location contact's and that contact has turned their email off since
+// enqueue (contact-notification-prefs.js rerouteForContactEmailOptOut) —
+// then the account holder's, or a blocked send + cancelled enrollment when
+// the holder has none. Test sends are never re-pointed.
+async function stepRecipientAfterContactOptOut(enrollment, step, testRecipient) {
+  const recipient = testRecipient || enrollment.email;
+  if (testRecipient || !enrollment.customer_id) return { recipient };
+  const reroute = await require('./contact-notification-prefs').rerouteForContactEmailOptOut(enrollment.customer_id, recipient);
+  if (!reroute.rerouted) return { recipient };
+  if (reroute.email) return { recipient: reroute.email };
+  const sendRow = await db('automation_step_sends').insert({
+    enrollment_id: enrollment.id, step_id: step.id, step_order: step.step_order, email: recipient, status: 'queued',
+  }).returning('*').then((rows) => rows[0]);
+  const blocked = await blockSendAndCancelEnrollment({ enrollment, sendId: sendRow.id,
+    reason: 'The on-location contact turned email off and the account holder has no email address', cancelReason: 'email_suppressed' });
+  return { blocked };
+}
+
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
@@ -688,7 +707,13 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const subject = substitute(step.subject || `(${template.name})`, personal);
   const asmGroupId = automationAsmGroupId(template);
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
-  const recipient = testRecipient || enrollment.email;
+  // Dispatch-time recheck (codex #6363 r7 P1): an enrollment addressed to
+  // the slot-1 on-location contact follows that contact's email switch — off
+  // since enqueue means the step goes to the account holder, or is blocked
+  // when the holder has no address. Test sends are never re-pointed.
+  const routed = await stepRecipientAfterContactOptOut(enrollment, step, testRecipient);
+  if (routed.blocked) return routed.blocked;
+  const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
   const { html, text } = renderAutomationStepContent({
     template,

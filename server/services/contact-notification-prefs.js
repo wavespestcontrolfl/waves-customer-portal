@@ -217,6 +217,29 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
   return !contactAllows(row, null, channel);
 }
 
+// Dispatch-time recheck for a DEFERRED email (an automation step, a queued
+// template run) whose address was resolved when it was enqueued: when that
+// address is the slot-1 contact's and the contact has since turned their
+// email off, the mail goes to the account holder instead — or nowhere when
+// the holder has no address (codex #6363 r7 P1). Returns the address to use
+// (null = hold) and whether it moved. Holder / unmatched addresses pass
+// through; gate off = pass-through.
+async function rerouteForContactEmailOptOut(customerId, email, { dbh = db } = {}) {
+  const current = String(email || '').trim().toLowerCase();
+  if (!contactPrefsLive() || !customerId || !current) return { email: email || null, rerouted: false };
+  const customer = await dbh('customers').where({ id: customerId }).first().catch(() => null);
+  if (!customer) return { email, rerouted: false };
+  const slotEmail = String(customer.service_contact_email || '').trim().toLowerCase();
+  if (!slotEmail || slotEmail !== current) return { email, rerouted: false };
+  const declines = await contactDeclinesChannel(customer.id, { phone: customer.service_contact_phone, role: 'service_contact' }, 'email', { dbh });
+  if (!declines) return { email, rerouted: false };
+  const holderCandidate = String(customer.email || '').trim().toLowerCase();
+  const holderEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(holderCandidate) ? holderCandidate : null;
+  if (holderEmail === current) return { email, rerouted: false };
+  logger.info(`[contact-prefs] slot-1 contact declined email on ${customer.id} — ${holderEmail ? 'rerouting to the account holder' : 'holding (no holder email)'}`);
+  return { email: holderEmail, rerouted: true };
+}
+
 // The holder's contact save rewrote the slots: drop the rows of phones that
 // no longer occupy one, and clear the email-only delivery choices of a kept
 // phone whose slot no longer carries an email (an "email only" choice with
@@ -269,6 +292,7 @@ module.exports = {
   declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
   contactDeclinesChannel,
+  rerouteForContactEmailOptOut,
   pruneContactNotificationPrefs,
   upsertContactNotificationPrefs,
 };

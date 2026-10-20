@@ -549,10 +549,12 @@ class AppointmentTagger {
         return { queued: false, reason: 'not_queued' };
       }
 
-      const { resolveProjectEmailRecipient } = require('./project-email');
+      // Send-aware: a slot-1 contact who turned their email off is skipped
+      // for the holder (codex #6363 r7 P1); each step rechecks at dispatch.
+      const { resolveProjectEmailRecipientForSend } = require('./project-email');
       const customer = await db('customers').where({ id: service.customer_id }).first();
       const recipient = customer
-        ? resolveProjectEmailRecipient(customer)
+        ? await resolveProjectEmailRecipientForSend(customer)
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${templateKey} sequence enrollment skipped for service ${service.id}`);
@@ -689,12 +691,12 @@ class AppointmentTagger {
     try {
       // Route like the other prep/project emails: service contact first (the
       // on-site person who actually does the prep), then primary contact.
-      const { resolveProjectEmailRecipient } = require('./project-email');
+      const { resolveProjectEmailRecipientForSend } = require('./project-email');
       const customer = service.customer_id
         ? await db('customers').where({ id: service.customer_id }).first()
         : null;
       const recipient = customer
-        ? resolveProjectEmailRecipient(customer)
+        ? await resolveProjectEmailRecipientForSend(customer)
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);

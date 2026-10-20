@@ -4354,6 +4354,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // A contact-slot rewrite from the admin editor is the same identity
+          // mutation as the portal's contact save (codex #6363 r7 P2): a
+          // removed phone's own notification choices and portal sessions go
+          // with it, a kept phone that lost its email loses its email-only
+          // choices. Contact login, GATE_CONTACT_LOGIN.
+          if (SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => Object.prototype.hasOwnProperty.call(updates, field))) {
+            const slotsAfter = require('../services/customer-contact').getServiceContactSlots(lockedAfter)
+              .filter((slot) => slot.phone || slot.email).map((slot) => ({ phone: slot.phone, email: slot.email }));
+            await require('../services/contact-notification-prefs').pruneContactNotificationPrefs(trx, req.params.id, slotsAfter);
+            await require('../middleware/auth').revokeRemovedContactRefreshSessions(trx, req.params.id, slotsAfter.map((slot) => slot.phone));
+          }
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
           // account. Only an ACTUAL change (the editor posts the whole form).

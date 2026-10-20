@@ -131,10 +131,12 @@ async function contactCustomerByPhone(phone) {
       }
     })
     // NULLS LAST: a legacy row with no flag must never outrank a primary
-    // profile (Postgres sorts NULL first on DESC; codex #6363 r3 P2).
+    // profile (Postgres sorts NULL first on DESC; codex #6363 r3 P2). No
+    // LIMIT: the eligibility test below runs in JS, and a number reused
+    // across many rows (a property manager's) must not have its one
+    // eligible row cut off by a cap on the ineligible ones (codex r7 P2).
     .orderBy('is_primary_profile', 'desc', 'last')
-    .orderBy('created_at', 'asc')
-    .limit(10);
+    .orderBy('created_at', 'asc');
   for (const row of rows) {
     // Only a number the holder attested to may log in (customer-contact.js
     // contactSlotMayLogIn): an inferred, unconsented slot phone is unknown.

@@ -58,6 +58,26 @@ function withholdReportArtifacts(service) {
   return out;
 }
 
+// A service-history row for a contact the report rule ALLOWS: the visit's
+// notes, products and photos stay, but the public report bearers go — the
+// /report/:token page and /api/reports/:token PDF render the holder's
+// identity (and a project report its billing links), the same exposure
+// /api/documents and /api/tracking already remove (codex #6363 r7 P1). The
+// report reaches the contact through the authenticated, contact-safe PDF
+// route only; a project completion's report has no such route, so it is
+// not offered.
+function contactSafeReportLinks(service) {
+  if (!service) return service;
+  const out = { ...service };
+  const project = service.isProjectCompletion === true;
+  if ('reportUrl' in out) out.reportUrl = null;
+  if ('reportToken' in out) out.reportToken = null;
+  if ('projectReportPortalAttached' in out) out.projectReportPortalAttached = false;
+  if ('reportPdfUrl' in out) out.reportPdfUrl = !project && service.reportAvailable !== false ? `/api/documents/service-report/${service.id}` : null;
+  if ('reportAvailable' in out) out.reportAvailable = !project && service.reportAvailable !== false;
+  return out;
+}
+
 // The customer row the service-report PDF (routes/documents.js
 // generateServiceReportPDF) renders for a contact's own download: addressed
 // to the contact, the serviced property's facts kept, the holder's name,
@@ -110,6 +130,7 @@ function contactNextPayload(payload) {
 module.exports = {
   contactSessionReportsWithheld,
   withholdReportArtifacts,
+  contactSafeReportLinks,
   contactSafeReportCustomer,
   withoutTrackBearers,
   contactSchedulePayload,

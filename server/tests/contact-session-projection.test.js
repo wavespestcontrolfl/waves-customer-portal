@@ -99,6 +99,16 @@ describe('pure projections', () => {
     expect(JSON.stringify(projection.withholdReportArtifacts(row))).not.toContain('tok');
   });
 
+  test('contactSafeReportLinks: the public /report and /api/reports bearers go, the authed PDF route stays; a project completion offers no report', () => {
+    const row = { id: 'svc-1', notes: 'kept', reportUrl: '/report/t', reportPdfUrl: '/api/reports/t', reportToken: 't', reportAvailable: true, projectReportPortalAttached: false };
+    expect(projection.contactSafeReportLinks(row)).toEqual({ ...row, reportUrl: null, reportPdfUrl: '/api/documents/service-report/svc-1', reportToken: null });
+    expect(projection.contactSafeReportLinks({ ...row, reportAvailable: false, reportUrl: null, reportPdfUrl: null, reportToken: null }))
+      .toMatchObject({ reportPdfUrl: null, reportAvailable: false });
+    expect(projection.contactSafeReportLinks({ ...row, isProjectCompletion: true, projectReportPortalAttached: true, reportUrl: '/report/project/p' }))
+      .toMatchObject({ reportUrl: null, reportPdfUrl: null, reportToken: null, reportAvailable: false, projectReportPortalAttached: false });
+    expect(projection.contactSafeReportLinks({ id: 'x', date: '2026-10-01' })).toEqual({ id: 'x', date: '2026-10-01' });
+  });
+
   test('contactSafeReportCustomer addresses the PDF to the contact and withholds the holder\'s name, phone, email and plan', () => {
     const holder = { id: 'c', first_name: 'Pat', last_name: 'Owner', phone: '+19415550101', email: 'pat@example.com', waveguard_tier: 'gold', monthly_rate: '120.00',
       address_line1: '1 Gulf Dr', city: 'Bradenton', state: 'FL', zip: '34205', lawn_type: 'St. Augustine', property_sqft: 8000 };
@@ -204,13 +214,16 @@ describe('GET /services for a contact session', () => {
     });
   }
 
-  test('an occupant the rule allows reads list and detail exactly as the holder does', async () => {
+  test('an occupant the rule allows reads the visits and detail, with the public report bearers replaced by the contact-safe PDF route (codex r7 P1)', async () => {
     mockSession.contact = OCCUPANT;
     listPortalServiceHistory.mockResolvedValue({ services: listed, total: 1 });
     wireDetail();
     await withServer(async (get) => {
       const list = await get('/services');
-      expect(list.body.services).toEqual(listed);
+      expect(list.body.services[0]).toEqual({
+        ...listed[0], reportUrl: null, reportToken: null, reportPdfUrl: '/api/documents/service-report/svc-1', reportAvailable: true,
+      });
+      expect(JSON.stringify(list.body)).not.toMatch(/rpt-1/);
       const detail = await get('/services/svc-1');
       expect(detail.body).toMatchObject({ id: 'svc-1', notes: 'Treated the lanai perimeter.' });
       expect(detail.body.products).toHaveLength(1);
