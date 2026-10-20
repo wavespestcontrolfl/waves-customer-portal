@@ -859,11 +859,9 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   if (!result.ok) {
     // Unusable answers from every leg that answered: the same skipped
     // outcomes the single-provider pass reported.
-    if (lastRejection?.code === 'parse_failed') {
-      return { items: [], skipped: 'parse_failed', error: lastRejection.error, model: lastRejection.model, ms: Date.now() - startedAt };
-    }
-    if (lastRejection?.code === 'schema_failed') {
-      return { items: [], skipped: 'schema_failed', errors: lastRejection.errors, model: lastRejection.model, ms: Date.now() - startedAt };
+    if (lastRejection) {
+      const { code, ...detail } = lastRejection;
+      return { items: [], skipped: code, ...detail, ms: Date.now() - startedAt };
     }
     const reasons = (result.failures || []).map((f) => `${f.provider}:${f.reason}`);
     if (reasons.length && (result.failures || []).every((f) => f.reason === 'no_key')) return { items: [], skipped: 'no_provider' };

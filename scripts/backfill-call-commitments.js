@@ -44,6 +44,8 @@ const { parseETDateTime, etDateString } = require('../server/utils/datetime-et')
 
 const DEFAULT_LIMIT = 100;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Model outcomes that mean the replay did not get an answer.
+const FAILED_SKIPS = new Set(['model_failed', 'parse_failed', 'schema_failed', 'no_provider']);
 const MIN_TRANSCRIPT_CHARS = 40; // mirrors extractCommitmentsWithModel's own floor
 
 const id8 = (id) => String(id).slice(0, 8);
@@ -64,8 +66,16 @@ function parseArgs(argv) {
 
 // [start, end) in UTC instants for inclusive ET dates. The end is the ET
 // midnight after `to`, found by reading the next calendar day as ET.
+// A real calendar date only: 2026-00-01 or 2026-02-30 would normalize to
+// another day and replay calls outside the approved range (Codex #6346 r1).
+function realDate(d) {
+  if (!DATE_RE.test(String(d))) return false;
+  const t = new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)));
+  return t.toISOString().slice(0, 10) === d;
+}
+
 function etRange(from, to) {
-  if (!DATE_RE.test(String(from)) || !DATE_RE.test(String(to))) throw new Error('--from and --to must be ET dates (YYYY-MM-DD)');
+  if (!realDate(from) || !realDate(to)) throw new Error('--from and --to must be real ET dates (YYYY-MM-DD)');
   const start = parseETDateTime(`${from}T00:00:00`);
   const next = new Date(Date.UTC(+to.slice(0, 4), +to.slice(5, 7) - 1, +to.slice(8, 10) + 1));
   const nextDay = next.toISOString().slice(0, 10);
@@ -110,7 +120,7 @@ async function runPipelineStep(dbh, id, { recordCommitmentsStep }) {
   const v2Result = call.v2_extraction_status === 'valid' && call.ai_extraction_enriched
     ? { status: 'valid', extraction: call.ai_extraction_enriched }
     : null;
-  await recordCommitmentsStep({
+  const summary = await recordCommitmentsStep({
     call,
     callSid: call.twilio_call_sid || null,
     transcription: call.transcription,
@@ -118,6 +128,14 @@ async function runPipelineStep(dbh, id, { recordCommitmentsStep }) {
     v2Result,
     procGeneration: call.processing_generation ?? null,
   });
+  // A provider/model failure, a write error or a lost claim is a FAILED replay,
+  // never "nothing promised" (Codex #6346 r1). A step that did not run at all
+  // (gate off, spam) returns null.
+  const failure = !summary ? 'step_did_not_run'
+    : summary.error ? 'write_failed'
+      : summary.ownershipLost ? 'superseded'
+        : FAILED_SKIPS.has(summary.skipped) ? summary.skipped : null;
+  if (failure) return { ran: false, failed: true, reason: failure };
   const rows = await dbh('call_commitments').where({ call_log_id: id }).count({ n: '*' }).first();
   return { ran: true, rows: Number(rows?.n || 0) };
 }
@@ -150,6 +168,11 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
   for (const c of candidates) {
     try {
       const out = await step(dbh, c.id, deps);
+      if (out.failed) {
+        totals.failed += 1;
+        log(`  failed     ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${out.reason}`);
+        continue;
+      }
       if (!out.ran) {
         totals.skipped += 1;
         log(`  skipped    ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${out.reason}`);

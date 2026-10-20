@@ -10213,10 +10213,15 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         procGeneration,
       });
       logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
+      // The pipeline ignores the summary; the commitments backfill reads it to
+      // tell a failed replay from a call where nothing was promised.
+      return commitmentSummary;
     }
   } catch (err) {
     logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+    return { error: err.message };
   }
+  return null;
 }
 
 // Reschedule apply — when a matched existing customer's call moved a visit
