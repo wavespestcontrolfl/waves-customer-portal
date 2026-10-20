@@ -25449,6 +25449,10 @@ CallRecordingProcessor.closeParentOnCallbackSpam = closeParentOnCallbackSpam;
 CallRecordingProcessor.reopenParentOnCallbackCorrected = reopenParentOnCallbackCorrected;
 CallRecordingProcessor.settleParentForCallbackVerdict = settleParentForCallbackVerdict;
 CallRecordingProcessor.reconcileCorrectedCallbackVerdicts = reconcileCorrectedCallbackVerdicts;
+// The commitments backfill (scripts/backfill-call-commitments.js) replays this
+// exact post-finalization step; it was never exported, so every replay threw
+// "recordCommitmentsStep is not a function" (first apply 2026-10-20, 0 written).
+CallRecordingProcessor.recordCommitmentsStep = recordCommitmentsStep;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.
