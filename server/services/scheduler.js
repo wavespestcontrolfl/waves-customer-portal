@@ -4201,6 +4201,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Day-only agreement shadow (owner 2026-10-20, PR 1 of 2).
+  // Reads recent two-party calls and quiet text threads where only a DAY was
+  // agreed for a visit (or a move), asks the model what the office should do,
+  // and records what the agent WOULD do in day_agreement_decisions. SHADOW
+  // ONLY: books nothing, moves nothing, texts no one. Dark behind
+  // GATE_DAY_AGREEMENT_SHADOW, checked before the lock so an off gate leaves
+  // no job_health row. runExclusive: overlapping deploy instances would judge
+  // the same source twice (the unique source_key would drop the second row
+  // after a second model call was already paid for).
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    if (!isEnabled('dayAgreementShadow')) return;
+    try {
+      await runExclusive('day-agreement-shadow', async () => {
+        const result = await require('./day-agreement-shadow').runDayAgreementShadow();
+        if (result?.judged || result?.errors || result?.transient) {
+          logger.info(`[day-agreement] sweep: ${JSON.stringify(result)}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[day-agreement] sweep tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :30, 5AM-6PM — Auto-dispatch rain pass. The 4:10 run above
   // cannot see rain (it never moves a visit inside 72 hours; the hourly
   // forecast is good for 3 dates), so this reads the booked outdoor visits

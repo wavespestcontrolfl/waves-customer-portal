@@ -396,4 +396,4 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
   return computeHeldVisits(calls, bookedRows, triageRows, { dateET, namesakes, customerNames, now });
 }
 
-module.exports = { computeHeldVisits, listHeldVisits, heldCandidates };
+module.exports = { computeHeldVisits, listHeldVisits, heldCandidates, isRealConversation, parseExtraction };
