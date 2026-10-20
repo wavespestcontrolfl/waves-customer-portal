@@ -189,14 +189,17 @@ function contactSessionFor(customer, contactKey) {
 // a session the client reads as dead and not an admission.
 async function contactFamilyRevocation(familyId) {
   if (!familyId) return null;
-  let revoked;
+  // A family is alive while it has an unrevoked row: a rotation consumes the
+  // old row (a profile switch also revokes it) and inserts the live one; the
+  // contact's removal (or a replay) revokes every row, so none is left.
+  let live;
   try {
-    revoked = await db(REFRESH_TABLE).where({ family_id: familyId }).whereNotNull('revoked_at').first('family_id');
+    live = await db(REFRESH_TABLE).where({ family_id: familyId }).whereNull('revoked_at').first('family_id');
   } catch (err) {
     logger.warn(`[auth] contact family check failed: ${err.message}`);
     return { status: 503, body: { error: 'Sign-in is temporarily unavailable. Please try again.', code: 'CONTACT_SESSION_UNAVAILABLE' } };
   }
-  return revoked ? { status: 401, body: { error: 'Customer not found or inactive' } } : null;
+  return live ? null : { status: 401, body: { error: 'Customer not found or inactive' } };
 }
 
 // The slot admission plus the family check, for the access-token path.
