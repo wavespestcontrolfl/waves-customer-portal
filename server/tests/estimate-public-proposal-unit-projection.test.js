@@ -287,6 +287,29 @@ describe('GET /:token/data — proposal line projection', () => {
     }
   });
 
+  test('a re-send of an expired estimate renders open: the signed pin\'s valid-through date decides expiry (#6343 pre-push P1)', async () => {
+    const { signEstimateDocPin } = require('../services/pdf/estimate-doc-pdf');
+    const past = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const renewed = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    dbRows.estimates = { ...estimateRow(), id: 'est-expired-resend', status: 'expired', expires_at: past };
+    await withServer(async (baseUrl) => {
+      const pinned = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf&dpin=${encodeURIComponent(signEstimateDocPin('unitprojectiontoken', { validThrough: renewed }))}`);
+      expect(pinned.status).toBe(200);
+      const body = await pinned.json();
+      expect(body.cta.terminalState).not.toBe('expired');
+      expect(body.estimate.expiresAt).toBe(renewed);
+      // A pin whose own date has passed still renders expired.
+      const stale = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf&dpin=${encodeURIComponent(signEstimateDocPin('unitprojectiontoken', { validThrough: past }))}`);
+      expect((await stale.json()).cta.terminalState).toBe('expired');
+    });
+    // Accepted stays accepted whatever the pin says.
+    dbRows.estimates = { ...estimateRow(), id: 'est-accepted-pin', status: 'accepted', expires_at: past };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf&dpin=${encodeURIComponent(signEstimateDocPin('unitprojectiontoken', { validThrough: renewed }))}`);
+      expect((await res.json()).cta.terminalState).toBe('accepted');
+    });
+  });
+
   test('document mode: a row that freezes between the read and the evidence write restarts the payload from the frozen row (pre-push Codex on #5434)', async () => {
     dbRows.estimates = {
       ...estimateRow(),

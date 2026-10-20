@@ -29895,7 +29895,16 @@ async function composeEstimateDataPayload(estimate, {
     }
 
     const terminalState = (() => {
-      if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
+      if (['accepted', 'declined'].includes(estimate.status)) return estimate.status;
+      // A SIGNED render pin carrying a valid-through date is the send path
+      // re-sending this offer (the new deadline persists only after the
+      // attachment is built — estimate-doc-pdf.js). The document must judge
+      // expiry by that date, or a re-sent expired estimate would print as
+      // expired beside its renewed valid-through line (#6343 pre-push P1).
+      if (docRenderPin?.validThrough) {
+        return new Date(docRenderPin.validThrough) < new Date() ? 'expired' : null;
+      }
+      if (estimate.status === 'expired') return 'expired';
       // The CTA/activity state follows THIS property's own offer deadline,
       // which is exactly what expires_at now holds (#4309 round 7). Group-link
       // viewability never softens it: a reachable group of expired cards still
