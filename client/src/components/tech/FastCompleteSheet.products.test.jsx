@@ -81,13 +81,13 @@ const CONTEXT_SERVICE = {
 const SERVICE = { id: 'svc-1', customerName: 'Pat Jones', serviceType: 'Pest Re-Service', address: '123 Main St', timeLabel: '2:00 PM' };
 
 // `products` may be a function: each context read then gets its current rows.
-function makeRequest({ products = CATALOG, commonProducts = COMMON } = {}) {
+function makeRequest({ products = CATALOG, commonProducts = COMMON, stockAdvisory = false } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
     if (path.split('?')[0].endsWith('/pest-recap/context')) {
       const rows = typeof products === 'function' ? products() : products;
-      return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null };
+      return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
     }
     if (path.endsWith('/tech-rating-allowed')) return { allowed: false };
     if (path.endsWith('/tech-tips')) return { available: false };
@@ -283,6 +283,18 @@ describe('FastCompleteSheet + Other product picker', () => {
 
     const body = await completeBody(request);
     expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', targets: ['Ants'] });
+  });
+
+  // GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): /complete takes the stock below zero instead.
+  test('stockAdvisory: a house-mix stock at zero holds nothing; the line says the office will restock it', async () => {
+    const request = makeRequest({ products: CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_on_hand: '0.0000' } : p)), stockAdvisory: true });
+    await openSheet(request);
+    fillVisit();
+    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.queryByText(/Update inventory or remove it/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
+    const body = await completeBody(request);
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
   });
 
   test('a stock the amount can\'t be counted against is flagged but never holds Complete', async () => {

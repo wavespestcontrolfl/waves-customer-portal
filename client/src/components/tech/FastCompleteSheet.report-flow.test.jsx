@@ -259,6 +259,23 @@ describe('the visit step', () => {
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
 
+  // GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): the context says /complete takes this visit's stock
+  // below zero, so nothing holds, a line names each product at 0, and the office gets the alert (server side).
+  test('stockAdvisory: a stock at zero holds nothing, the line shows on both steps, and the visit goes out', async () => {
+    const products = () => CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' } : p));
+    const request = makeRequest({ products, context: { stockAdvisory: true } });
+    await openSheet(request);
+    const line = 'Taurus SC shows 0 in stock. You can still send. The office will restock it.';
+    expect(screen.getByText(line)).toBeTruthy();
+    expect(screen.queryByText(/Update inventory or remove it/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
+    await generate();
+    expect(screen.getByText(line)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')).toHaveLength(1);
+  });
+
   test('the tracker reads the server\'s scale labels', async () => {
     await openSheet(makeRequest({ rating: { allowed: true, scaleLabels: ['None', 'Barely', 'Some', 'Moderate', 'A lot', 'Severe'] } }));
     expect(screen.getByRole('button', { name: '5, severe' })).toBeTruthy();

@@ -163,3 +163,44 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     expect(missing.body).toEqual({ error: 'not_found' });
   });
 });
+
+describe('GET pest-recap/context carries the pest stock advisory (GATE_PEST_STOCK_ADVISORY)', () => {
+  const saved = process.env.GATE_PEST_STOCK_ADVISORY;
+  const savedOneTap = process.env.GATE_ONE_TAP_REPORT;
+  const savedWrap = process.env.GATE_FAST_COMPLETE_WRAP_UP;
+  const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1', serviceType: 'Quarterly Pest Control' }, products: [] };
+  beforeEach(() => {
+    delete process.env.GATE_ONE_TAP_REPORT;
+    delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+    mockDbCurrent = dbWithOwner('tech-1');
+    PestRecap.buildRecapContext.mockReset().mockResolvedValue(CONTEXT);
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_PEST_STOCK_ADVISORY; else process.env.GATE_PEST_STOCK_ADVISORY = saved;
+    if (savedOneTap === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = savedOneTap;
+    if (savedWrap === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = savedWrap;
+    mockDbCurrent = null;
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no stockAdvisory key, the context exactly as before', async (value) => {
+    if (value === undefined) delete process.env.GATE_PEST_STOCK_ADVISORY; else process.env.GATE_PEST_STOCK_ADVISORY = value;
+    const res = await invoke('get', CONTEXT_PATH, { params });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(CONTEXT);
+  });
+
+  test('gate on (exactly true), a pest visit: stockAdvisory is true, on any pest sheet (not only one-tap)', async () => {
+    process.env.GATE_PEST_STOCK_ADVISORY = 'true';
+    const res = await invoke('get', CONTEXT_PATH, { params });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ...CONTEXT, stockAdvisory: true });
+  });
+
+  test('gate on, a visit /complete still refuses below zero (mosquito): no stockAdvisory key', async () => {
+    process.env.GATE_PEST_STOCK_ADVISORY = 'true';
+    const mosquito = { ...CONTEXT, service: { id: 'visit-1', serviceType: 'Mosquito Control' } };
+    PestRecap.buildRecapContext.mockResolvedValue(mosquito);
+    const res = await invoke('get', CONTEXT_PATH, { params });
+    expect(res.body).toEqual(mosquito);
+  });
+});

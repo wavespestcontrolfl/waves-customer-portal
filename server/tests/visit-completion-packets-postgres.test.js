@@ -4336,6 +4336,33 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
   });
 
+  // GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): the fixture is a pest visit, so its packet takes the
+  // stock below zero instead of refusing, the record keeps the shortfall, and the office gets one alert for the product.
+  test('a pest packet takes the stock below zero under GATE_PEST_STOCK_ADVISORY and alerts the office once', async () => {
+    const savedGate = process.env.GATE_PEST_STOCK_ADVISORY;
+    const alertKey = `stock-shortfall:${fixture.productId}`;
+    process.env.GATE_PEST_STOCK_ADVISORY = 'true';
+    try {
+      await mockPg('products_catalog').where({ id: fixture.productId }).update({ inventory_on_hand: 1 });
+      const input = submission();
+      for (const item of input.items) item.body.products = [{ productId: fixture.productId, totalAmount: 1, amountUnit: 'oz',
+        applicationMethod: 'bait_placement', areaValue: 1000, areaUnit: 'sqft' }];
+      const saved = await saveVisitCompletionPacket(input);
+      expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+      expect(Number((await mockPg('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand)).toBe(-1);
+      const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
+      expect(records.flatMap((row) => row.structured_notes.inventoryDeductions || []).map((d) => d.status).sort())
+        .toEqual(['deducted', 'deducted_insufficient_stock']);
+      await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+      const alerts = await mockPg('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [alertKey]);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].metadata).toMatchObject({ productId: fixture.productId, stockAfter: -1, doneWhen: 'stock_restocked' });
+    } finally {
+      await mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [alertKey]).del();
+      if (savedGate === undefined) delete process.env.GATE_PEST_STOCK_ADVISORY; else process.env.GATE_PEST_STOCK_ADVISORY = savedGate;
+    }
+  });
+
   test.each([1, 2])('automatic grouping ignores an open version-%s visit after the closeout gate changes', async (previousVersion) => {
     const groups = require('../services/visit-groups');
     jest.replaceProperty(require('../config/feature-gates').gates, 'visitGroups', true);
