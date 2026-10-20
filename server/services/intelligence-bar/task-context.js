@@ -1084,7 +1084,7 @@ function sameNameNote(context) {
   if (picked.length === 1) {
     return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${picked[0].city ? `, ${picked[0].city}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
   }
-  return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the ${Math.min(rows.length, 4)} best matches, most recent last_visit first, each as "Full Name, City" (add the last visit date when two share a city), and ask which one in one short line.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
+  return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the ${Math.min(rows.length, 4)} best matches, most recent last_visit first, each as "Full Name, City", and ask which one in one short line. When two of them share a city, a button cannot tell them apart: leave those out of the buttons and ask for their phone number or email instead.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
 }
 
 // A sender block inside a customer-scoped task may only target the task
