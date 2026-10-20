@@ -2116,3 +2116,83 @@ describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / s
     expect(filedAgainstProperty(filed({ ...snap, zip: null, city: null }), { ...noZip, city: null })).toBe(false);
   });
 });
+
+// 2026-10-19 call audit (calls fcc1aa1c, 08c56b2a, b0c32964, 714b22a8): the
+// overlap / out-of-hours note stayed open on visits that were already done.
+describe('visit_passed (booking_time_conflict / booking_out_of_hours on a done visit)', () => {
+  const TODAY = '2026-07-31';
+  const slotCard = (code, payload = {}, over = {}) => item({
+    id: 'n1', reason_code: code, call_log_id: 'call-1', severity: 'advisory',
+    payload: { flag: code, scheduled_service_id: 'v1', ...payload }, ...over,
+  });
+  const visit = (over = {}) => ({ id: 'v1', status: 'completed', scheduled_date: '2026-07-20', source_call_log_id: 'call-1', ...over });
+  const chainable = (rows) => {
+    const c = { leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c, select: async () => rows };
+    return c;
+  };
+  const connWith = (rows) => (table) => (table === 'scheduled_services' ? chainable(rows) : chainable([]));
+  const evidenceOf = async (card, rows) => (await loadEvidence(connWith(rows), [card], { ignoreGate: true, now: NOW })).get('n1');
+
+  test('the rule wiring: the evidence flag resolves both codes with visit_passed', () => {
+    for (const code of ['booking_time_conflict', 'booking_out_of_hours']) {
+      expect(classifyTriageItem(slotCard(code), evidenceFor('n1', { slot_note_visit_done: true }), { now: NOW }))
+        .toEqual({ action: 'resolve', rule: 'visit_passed' });
+      expect(classifyTriageItem(slotCard(code), noBookings, { now: NOW })).toBeNull();
+    }
+    // Never for another code, and never for a claimed card.
+    expect(classifyTriageItem(item({ id: 'n1', reason_code: 'unassigned_auto_booking' }), evidenceFor('n1', { slot_note_visit_done: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(slotCard('booking_time_conflict', {}, { status: 'in_progress' }), evidenceFor('n1', { slot_note_visit_done: true }), { now: NOW })).toBeNull();
+  });
+
+  test('a completed visit of this call closes the card', async () => {
+    expect((await evidenceOf(slotCard('booking_time_conflict'), [visit({ scheduled_date: '2026-08-20' })]))?.slot_note_visit_done).toBe(true);
+  });
+
+  test('a live visit whose day has passed closes the card; today or later keeps it', async () => {
+    for (const status of ['pending', 'confirmed', 'en_route', 'on_site']) {
+      expect((await evidenceOf(slotCard('booking_out_of_hours'), [visit({ status, scheduled_date: '2026-07-30' })]))?.slot_note_visit_done).toBe(true);
+    }
+    expect(await evidenceOf(slotCard('booking_out_of_hours'), [visit({ status: 'confirmed', scheduled_date: TODAY })])).toBeUndefined();
+    expect(await evidenceOf(slotCard('booking_out_of_hours'), [visit({ status: 'confirmed', scheduled_date: '2026-08-05' })])).toBeUndefined();
+  });
+
+  test('a cancelled, rescheduled, skipped or no-show visit proves nothing, even in the past', async () => {
+    for (const status of ['cancelled', 'rescheduled', 'skipped', 'no_show']) {
+      expect(await evidenceOf(slotCard('booking_time_conflict'), [visit({ status, scheduled_date: '2026-07-01' })])).toBeUndefined();
+    }
+  });
+
+  test('a visit from another call, a missing visit, or a card that names no visit keeps the card', async () => {
+    expect(await evidenceOf(slotCard('booking_time_conflict'), [visit({ source_call_log_id: 'call-9' })])).toBeUndefined();
+    expect(await evidenceOf(slotCard('booking_time_conflict'), [visit({ source_call_log_id: null })])).toBeUndefined();
+    expect(await evidenceOf(slotCard('booking_time_conflict'), [])).toBeUndefined();
+    expect(await evidenceOf(slotCard('booking_time_conflict', { scheduled_service_id: null }), [visit()])).toBeUndefined();
+  });
+
+  test('a card that also records a follow-up visit closes only when the follow-up is done too', async () => {
+    const card = slotCard('booking_time_conflict', { follow_up: { scheduled_service_id: 'v2' } });
+    const followUp = (over = {}) => ({ id: 'v2', status: 'confirmed', scheduled_date: '2026-08-14', source_call_log_id: 'call-1', ...over });
+    expect(await evidenceOf(card, [visit(), followUp()])).toBeUndefined();
+    expect((await evidenceOf(card, [visit(), followUp({ scheduled_date: '2026-07-28' })]))?.slot_note_visit_done).toBe(true);
+    expect(await evidenceOf(card, [visit()])).toBeUndefined();
+  });
+
+  test('the stored payload may be a JSON string', async () => {
+    const card = slotCard('booking_time_conflict');
+    card.payload = JSON.stringify({ flag: 'booking_time_conflict', scheduled_service_id: 'v1' });
+    expect((await evidenceOf(card, [visit()]))?.slot_note_visit_done).toBe(true);
+  });
+
+  test('the evidence gate off: no lookup, no evidence', async () => {
+    const conn = jest.fn(() => { throw new Error('no db access expected'); });
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('triageAutoResolveEvidence')) return;
+    const map = await loadEvidence(conn, [slotCard('booking_time_conflict')], { now: NOW });
+    expect(map.size).toBe(0);
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('the note carries the rule name', () => {
+    expect(RULE_NOTES.visit_passed).toMatch(/^Auto-resolved/);
+  });
+});
