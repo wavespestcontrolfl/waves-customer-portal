@@ -10,6 +10,7 @@
  */
 
 const MIN_CONFIDENCE = 0.7;
+const BLOCKER_WORDS = new Set(require('./prompts/day-agreement-v1').BLOCKERS);
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const KINDS = ['new_visit', 'move'];
 // A moved visit must be one the office can move: not started, not finished.
@@ -72,8 +73,11 @@ function normalizeAgreement(raw) {
     day: text(a.day),
     from_day: text(a.from_day),
     daypart: isString(a.daypart) ? a.daypart.trim().toLowerCase() : null,
-    service: text(a.service) ? text(a.service).slice(0, 60) : null,
-    blockers: (Array.isArray(a.blockers) ? a.blockers : []).filter(isString).map((b) => b.trim().slice(0, 40)).slice(0, 8),
+    // Scrubbed like the reason: the service text is stored too (Codex #6350 r8).
+    service: text(a.service) ? safeReason(text(a.service)).slice(0, 60) : null,
+    // Only the prompt's own blocker words are kept: a free-text blocker could
+    // carry customer data into the stored judgment (Codex #6350 r8).
+    blockers: (Array.isArray(a.blockers) ? a.blockers : []).filter(isString).map((b) => b.trim().toLowerCase()).filter((b) => BLOCKER_WORDS.has(b)).slice(0, 8),
     confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0,
     reason: safeReason(a.reason),
   };

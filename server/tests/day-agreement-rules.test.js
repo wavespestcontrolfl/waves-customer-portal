@@ -225,3 +225,15 @@ describe('unusableReason and normalizeAgreement', () => {
     expect(rules.safeReason('Staff offered Wednesday 2040-03-14 morning and the customer agreed')).toBe('Staff offered Wednesday 2040-03-14 morning and the customer agreed');
   });
 });
+
+describe('stored judgment fields are scrubbed (Codex #6350 r8)', () => {
+  const rules = require('../services/day-agreement-rules');
+  test('only the prompt blocker words survive, and the service text is masked like the reason', () => {
+    const a = rules.normalizeAgreement({
+      at: '2040-03-12T10:30', act: false, kind: 'new_visit', day: null, from_day: null, daypart: 'any',
+      service: '123 Palm Tree Dr pest', blockers: ['exact_time_agreed', 'gate code 4417 at 99 Main St'], confidence: 0.4, reason: 'x',
+    });
+    expect(a.blockers).toEqual(['exact_time_agreed']);
+    expect(a.service).not.toMatch(/123|Palm Tree/);
+  });
+});

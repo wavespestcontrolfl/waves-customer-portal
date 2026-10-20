@@ -218,8 +218,11 @@ async function threadLines(conn, customerId, digits, now) {
     // A Waves text counts only once it went out: a scheduled or failed row was
     // never seen by the customer, so it is no staff word (pre-push audit P1).
     .where((q) => q.where('direction', 'inbound').orWhereIn('status', DELIVERED_STATUSES))
+    // This phone only, in SQL before the limit, so another number on the same
+    // customer never crowds the thread out (Codex #6350 r8).
+    .whereRaw(`(${last10('from_phone')} = ? OR ${last10('to_phone')} = ?)`, [digits, digits])
     .orderBy('created_at', 'desc').orderBy('id', 'desc')
-    .limit(200)
+    .limit(THREAD_MESSAGES * 2)
     .select('direction', 'from_phone', 'to_phone', 'message_type', 'message_body', 'created_at');
   const thread = rows
     .filter((r) => digitsOf(r.direction === 'inbound' ? r.from_phone : r.to_phone) === digits)
@@ -412,12 +415,9 @@ async function placeVisit(conn, src, { a, fromVisit, catalog }, deps) {
   if (!fromVisit && await hasSeveralProperties(conn, src.customerId)) return { reason: 'property_ambiguous' };
   const service = fromVisit ? null : resolveNewVisitService(catalog, a.service);
   if (!fromVisit && !service) return { reason: 'service_unresolved' };
-  try {
-    return await pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit, service }, deps);
-  } catch (err) {
-    logger.error(`[day-agreement] slot lookup failed (${err.code || err.name || 'error'})`);
-    return { reason: 'slot_lookup_failed' };
-  }
+  // A picker or collision-query failure propagates, like a catalog failure: the
+  // source stays unjudged and the next tick retries it (Codex #6350 r8).
+  return pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit, service }, deps);
 }
 
 async function decideMoment(conn, src, index, agreement, ctx) {
@@ -460,7 +460,9 @@ async function customerOverQuota(conn, customerId, now) {
   const row = await conn('day_agreement_decisions')
     .where('customer_id', customerId)
     .where('source_key', 'like', '%#0')
-    .where((q) => q.whereNull('skip_reason').orWhereNot('skip_reason', 'judge_rate_limited'))
+    // Only a source the model judged counts (a model is stamped on its rows, or
+    // every model answer was unusable); pre-model skips judged nothing (Codex #6350 r8).
+    .where((q) => q.whereNotNull('model').orWhere('skip_reason', 'judge_unusable'))
     .where('created_at', '>=', new Date(now.getTime() - 24 * HOUR_MS))
     .count({ n: '*' }).first();
   return Number(row?.n || 0) >= CUSTOMER_QUOTA;

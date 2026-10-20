@@ -353,7 +353,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'day_not_after_today' })]);
     });
 
-    test('no slot in the daypart is a no_slot skip; a picker that throws is recorded, not retried', async () => {
+    test('no slot in the daypart is a no_slot skip; a picker that throws leaves the source unjudged for the next tick (Codex #6350 r8)', async () => {
       const customerId = await customer();
       await call(customerId);
       const target = dayPlus(2);
@@ -361,8 +361,12 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'no_slot', target_date: expect.anything() })]);
 
       await trx('day_agreement_decisions').delete();
-      await sweep({ dispatch: answering(agreement()), findSlots: jest.fn(async () => { throw new Error('picker down'); }) });
-      expect(await decisions()).toEqual([expect.objectContaining({ skip_reason: 'slot_lookup_failed' })]);
+      const down = await sweep({ dispatch: answering(agreement()), findSlots: jest.fn(async () => { throw new Error('picker down'); }) });
+      expect(down).toMatchObject({ errors: 1 });
+      expect(await decisions()).toEqual([]);
+      // The picker recovers: the next sweep judges the source.
+      await sweep({ dispatch: answering(agreement()), findSlots: jest.fn(async () => ({ slots: [slot(target, '09:00')] })) });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
     });
 
     test('a visit with NO technician that occupies the window blocks that slot (the mirror collision guard), so the next free hour is chosen', async () => {
@@ -575,7 +579,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       for (let i = 0; i < 4; i += 1) {
         await trx('day_agreement_decisions').insert({
           source_kind: 'sms', source_key: `sms:9415550142:${randomUUID()}#0`, phone_digits: '9415550142', customer_id: customerId,
-          verdict: 'skip', skip_reason: 'model_no_act', created_at: ago(60 * (i + 1)),
+          verdict: 'skip', skip_reason: 'model_no_act', model: 'stub-model', created_at: ago(60 * (i + 1)),
         });
       }
       await text(customerId, 'Wednesday works', 45);
@@ -588,6 +592,32 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await sweep({ dispatch, findSlots: jest.fn() });
       expect(dispatch).not.toHaveBeenCalled();
       expect(await trx('day_agreement_decisions').where({ skip_reason: 'judge_rate_limited' })).toHaveLength(2);
+    });
+
+    test('pre-model skips (no customer, too long) never count toward the quota (Codex #6350 r8)', async () => {
+      const customerId = await customer();
+      for (let i = 0; i < 4; i += 1) {
+        await trx('day_agreement_decisions').insert({
+          source_kind: 'sms', source_key: `sms:9415550142:${randomUUID()}#0`, phone_digits: '9415550142', customer_id: customerId,
+          verdict: 'skip', skip_reason: 'message_too_long', created_at: ago(60 * (i + 1)),
+        });
+      }
+      await text(customerId, 'Wednesday works', 45);
+      const dispatch = answering(agreement());
+      await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00')] })) });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    test('the thread is read for this phone only, so another number on the customer never crowds it out (Codex #6350 r8)', async () => {
+      const customerId = await customer();
+      await text(customerId, 'We can come Wednesday morning.', 300, { direction: 'outbound' });
+      for (let i = 0; i < 120; i += 1) await text(customerId, `other number ${i}`, 200 - i, { direction: 'outbound', to: '+19415550100' , status: 'sent' }).then((id) => trx('sms_log').where({ id }).update({ to_phone: '+19415559999' }));
+      await text(customerId, 'Wednesday works', 45);
+      const dispatch = answering(agreement({ daypart: 'morning' }));
+      await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00')] })) });
+      const prompt = dispatch.mock.calls[0][1].text;
+      expect(prompt).toContain('We can come Wednesday morning.');
+      expect(prompt).not.toContain('other number');
     });
 
     test('which threads are candidates: day word, 3 hour window, 30 quiet minutes either way, latest inbound only', async () => {
