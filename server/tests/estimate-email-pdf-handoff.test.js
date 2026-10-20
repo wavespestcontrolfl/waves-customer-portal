@@ -420,12 +420,14 @@ describe('a sibling unarchived during the render vetoes the handoff (codex #6343
 
   test('follow-up: ungrouped at render, grouped at the handoff', async () => {
     readsRow(row(), row());
-    group.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    // The render-time eligibility read is the real check (no group id on the
+    // row → ungrouped); the spy answers only the handoff's group read.
+    group.mockResolvedValue(true);
     const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
     expect(o.attachments).toEqual([ATTACHMENT]);
     let check;
     await o.withProviderHandoff(async (_d, b) => { check = b; });
-    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_grouped' });
   });
 
   test('follow-up: still ungrouped at the handoff passes', async () => {
@@ -437,14 +439,16 @@ describe('a sibling unarchived during the render vetoes the handoff (codex #6343
     await expect(check({ database: db })).resolves.toEqual({ ok: true });
   });
 
-  test('delivery: ungrouped when the fence is built, grouped at the handoff', async () => {
+  // r10: the fence never records a group verdict as its baseline, so a group
+  // that already formed before the fence was built is refused too.
+  test('delivery: a group present at the handoff is refused whenever it formed', async () => {
     const draft = () => row({ status: 'sending' });
-    group.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    group.mockResolvedValue(true);
     const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
     let check;
     await fence.withProviderHandoff(async (_d, b) => { check = b; });
     readsRow(draft());
-    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_grouped' });
   });
 
   test('delivery: the same ungrouped state at both ends passes', async () => {

@@ -137,13 +137,12 @@ async function linkedAppointmentState(row) {
   };
 }
 
-// What the fence compares: the estimates row's content, the linked appointment
-// state, and whether the estimate is in a multi-property group (a sibling
-// unarchived during the render makes the document one property's of a group:
-// codex #6343 r9).
+// What the fence compares: the estimates row's content and the linked
+// appointment state. Group membership is NOT part of it: a grouped estimate is
+// never a valid baseline (codex #6343 r10), so handoffBlockReason refuses any
+// grouped estimate outright instead of comparing against a captured verdict.
 async function fullFingerprint(row, opts) {
-  const grouped = await module.exports.estimateInMultiPropertyGroup(row);
-  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}|group:${grouped}`;
+  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}`;
 }
 
 // The address an email actually goes to must still be the estimate's current
@@ -197,6 +196,9 @@ async function handoffBlockReason(estimateId, expectedFingerprint, { validThroug
   const stateBlock = rowStateBlock(row, { validThrough, now, delivery });
   if (stateBlock) return stateBlock;
   if (expectedFingerprint && (await fullFingerprint(row, { omitExpiry: delivery })) !== expectedFingerprint) return 'estimate_changed_since_render';
+  // A one-property PDF must never go out for a multi-property group, whenever
+  // the group formed (r6 exclusion; r9/r10 sibling unarchived mid-render).
+  if (expectedFingerprint && await module.exports.estimateInMultiPropertyGroup(row)) return 'estimate_grouped';
   const data = parseData(row);
   if (data === null) return 'estimate_data_unreadable';
   return callSideBlock(row, data);
