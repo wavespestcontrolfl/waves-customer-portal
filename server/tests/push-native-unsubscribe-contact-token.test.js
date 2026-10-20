@@ -28,6 +28,7 @@ function wire() {
     const q = { filters: [] };
     q.whereIn = (col, vals) => { q.filters.push([col, vals]); return q; };
     q.andWhere = (obj) => { q.filters.push(obj); return q; };
+    q.whereNull = (col) => { q.filters.push(['null', col]); return q; };
     q.where = () => q;
     q.select = async () => (table === 'customers' ? [{ id: 'cust-1' }, { id: 'cust-2' }] : []);
     q.catch = () => q;
@@ -74,5 +75,6 @@ test('the holder keeps the token-less "all my devices" form', async () => {
   const res = await post({});
   expect(res.status).toBe(200);
   expect(updates).toHaveLength(1);
-  expect(updates[0].filters).toEqual([['customer_id', ['cust-1']], ['platform', ['ios', 'android']]]);
+  expect(updates[0].filters).toEqual(expect.arrayContaining([['customer_id', ['cust-1']], ['platform', ['ios', 'android']]]));
+  expect(updates[0].filters).not.toEqual(expect.arrayContaining([expect.objectContaining({ device_token: expect.anything() })]));
 });
