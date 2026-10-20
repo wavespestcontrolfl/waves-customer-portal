@@ -25,7 +25,8 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibModelFailureNoticeLive } = require('../config/feature-gates');
+const ModelFailure = require('../services/intelligence-bar/model-failure');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -2573,7 +2574,7 @@ ANALYSIS STYLE:
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
-You are the embedded SEO operator for Waves Pest Control & Lawn Care (wavespestcontrol.com). The site is a static Astro build on Cloudflare Pages serving pest control, lawn care, mosquito, termite, tree & shrub, and rodent services across Southwest Florida (Manatee, Sarasota, Charlotte counties). USDA Zones 9b–10a.
+You are the embedded SEO operator for Waves Pest Control (wavespestcontrol.com). The site is a static Astro build on Cloudflare Pages serving pest control, lawn care, mosquito, termite, tree & shrub, and rodent services across Southwest Florida (Manatee, Sarasota, Charlotte counties). USDA Zones 9b–10a.
 
 You think like a commercially aware SEO operator inside a 5-person field service company, not an outside consultant. The owner (Waves) runs all SEO/content personally using AI tooling — time is the most expensive resource. Prioritize actions that improve traffic, rankings, leads, authority, and revenue. No generic advice.
 
@@ -3329,10 +3330,10 @@ async function liveTeamPrompt() {
   }
 }
 
-const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
+const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
 
 BUSINESS CONTEXT:
-- Waves Pest Control & Lawn Care serves Southwest Florida (Manatee, Sarasota, Charlotte counties)
+- Waves Pest Control serves Southwest Florida (Manatee, Sarasota, Charlotte counties)
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
@@ -3719,7 +3720,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         tools,
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
         messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
-      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
+      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
+        // Tagged here so the catch below can tell a failed MODEL call from any other error.
+        .catch(err => { throw ModelFailure.tagModelCallError(err); });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
@@ -4221,12 +4224,50 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     res.json(payload);
 
   } catch (err) {
+    // GATE_IB_MODEL_FAILURE_NOTICE (read at call time): a failed MODEL call (the
+    // tag is set only around messages.create) is answered plainly, recorded as a
+    // gap and rung once an hour. Anything else, or gate off, is today's path.
+    if (ibModelFailureNoticeLive() && ModelFailure.isModelCallError(err) && !res.headersSent
+        && await answerModelFailure(req, res, { err, activeTask })) return;
     if (activeTask) {
       try { await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'outcome_unknown' }); }
       catch { /* Existing action receipts remain authoritative. */ }
     }
     logger.error(`[intelligence-bar] Query failed (code=${err.code || 'unknown'})`);
     next(err);
+  }
+}
+
+// The plain reply for a failed model call. The task keeps a state that stays
+// true: failed (resumable) when nothing ran, awaiting_approval when a card
+// waits, outcome_unknown when a change was saved or may have run (its receipts
+// stay the authority). Returns false, having answered nothing, when it could
+// not finish; the caller then takes the ordinary error path.
+async function answerModelFailure(req, res, { err, activeTask }) {
+  try {
+    const actorId = getAdminActorId(req);
+    const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId });
+    logger.error(`[intelligence-bar] Query failed, model call (code=${handled.code})`);
+    const payload = {
+      conversationHistory: Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-8) : [],
+      ...(activeTask?.response || {}),
+      response: handled.answer,
+      toolCalls: [],
+      structuredData: null,
+      pendingActions: [],
+      modelFailure: { code: handled.code },
+    };
+    if (!activeTask) {
+      res.json(payload);
+      return true;
+    }
+    await IbTasks.checkpoint(activeTask.id, actorId, { runnerToken: activeTask.runner_token, state: handled.taskState, response: payload });
+    const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
+    res.json(await IbTasks.snapshot(savedTask, actorId));
+    return true;
+  } catch (failure) {
+    logger.warn(`[intelligence-bar] model failure notice not delivered (code=${failure?.code || failure?.name || 'error'})`);
+    return false;
   }
 }
 
