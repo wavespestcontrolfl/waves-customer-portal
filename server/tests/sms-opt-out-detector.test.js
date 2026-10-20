@@ -76,6 +76,7 @@ describe('SMS opt-out detector', () => {
     'I would prefer it if I received no texts',
     "I'd rather I got no texts",
     'I wish I got no texts',
+    'My preference has been no texts',
     'no more texts',
     'Please, no more messages.',
     'No more text messages',
@@ -94,6 +95,7 @@ describe('SMS opt-out detector', () => {
     'We have had no texts since Monday',
     'No text came',
     'No text messages arrived',
+    "There's been no text all week",
     'I got no text that day. Please call me.',
   ])('"no text" that reports a missing text in the past tense is not opt_out: %s', (body) => {
     expect(detectSmsOptCommand(body)).toEqual({ action: null });

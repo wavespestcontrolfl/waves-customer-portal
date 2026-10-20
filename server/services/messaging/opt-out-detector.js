@@ -43,7 +43,8 @@ const OPT_OUT_PATTERNS = [
 // confirmation but no text that day" unsubscribed the customer twice). A request is never a past
 // report, so only past-tense evidence counts:
 //   - a past receiving or reporting word just before it ("got no text", "there was no message",
-//     "have had no texts");
+//     "there's been no text", "have had no texts"); a bare "been" is not one ("My preference has
+//     been no texts" is a request);
 //   - a delivery verb just after it ("no text came", "no text messages arrived"); a time word alone
 //     is not evidence ("I said no texts yesterday" is a request);
 //   - "that day" just after it, with a past receiving word earlier in the sentence.
@@ -53,7 +54,7 @@ const OPT_OUT_PATTERNS = [
 // or a line break; a comma does not end one. "No more texts" stays a stop request anywhere
 // (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:text\s+messages?|texts?|messages?|sms)\b/gi;
-const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
+const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|there(?:'s|\s+has|\s+have)\s+been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
 const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out|(?:was|were|got)\s+sent)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard|had|was|were)\b/i;
