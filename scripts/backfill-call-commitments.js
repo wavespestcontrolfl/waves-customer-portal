@@ -112,7 +112,8 @@ const findCandidates = (dbh, args) => candidateQuery(dbh, args);
 // The pipeline's own post-finalization step, fed the way processRecording
 // feeds it: the stored (already scrubbed) transcription, the valid V2
 // extraction if there is one, and the call's current processing_generation.
-async function runPipelineStep(dbh, id, { recordCommitmentsStep }) {
+// The step is the pipeline's own unless a test injects one.
+async function runPipelineStep(dbh, id, { recordCommitmentsStep = require('../server/services/call-recording-processor').recordCommitmentsStep } = {}) {
   const call = await dbh('call_log').where({ id }).first();
   if (!call || call.processing_status !== 'processed' || call.processing_token || !call.transcription) return { ran: false, reason: 'not_eligible_now' };
   const already = await dbh('call_commitments').where({ call_log_id: id }).first('id');
@@ -164,10 +165,9 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
     totals.failed = candidates.length;
     return totals;
   }
-  const deps = step === runPipelineStep ? { recordCommitmentsStep: require('../server/services/call-recording-processor').recordCommitmentsStep } : {};
   for (const c of candidates) {
     try {
-      const out = await step(dbh, c.id, deps);
+      const out = await step(dbh, c.id);
       if (!out.ran) {
         const outcome = out.failed ? 'failed' : 'skipped';
         totals[outcome] += 1;
