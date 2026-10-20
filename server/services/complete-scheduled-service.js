@@ -599,12 +599,8 @@ function isPestStockAdvisoryCompletion(svc) {
   return require('../config/feature-gates').pestStockAdvisoryLive() && detectServiceLine(svc?.service_type) === 'pest';
 }
 
-// GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20, "make lawn and tree & shrub work the same as pest"): a lawn or tree &
-// shrub visit's completion treats stock as advisory too, by the server's own service line; the lawn and tree & shrub
-// sheets' contexts read the same answer. Palm, mosquito, termite and rodent keep the hard refusal.
-function isLawnTsStockAdvisoryCompletion(svc) {
-  return require('../config/feature-gates').lawnTsStockAdvisoryLive() && ['lawn', 'tree_shrub'].includes(detectServiceLine(svc?.service_type));
-}
+// GATE_LAWN_TS_STOCK_ADVISORY: a lawn or tree & shrub visit (services/stock-advisory.js).
+const { isLawnTsStockAdvisoryCompletion } = require('./stock-advisory');
 
 // A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing.
 const isStockAdvisoryCompletion = (svc) => isWaveGuardLawnCompletion(svc) || isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
