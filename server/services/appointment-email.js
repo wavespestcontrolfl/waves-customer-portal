@@ -195,8 +195,9 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
   // skipConsentGate: the consent artifact attests to receiving TEXTS; email
   // routing follows notification prefs alone (see the recipient spec in
   // tests/appointment-email-recipients.test.js).
+  let declinedByContact = false;
   for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
-    if (declinedSlotRoles.has(c.role)) continue;
+    if (declinedSlotRoles.has(c.role)) { declinedByContact = true; continue; }
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
     if (ownEmail) add(ownEmail, c.name);
     else add(primary.email, primary.name);
@@ -205,12 +206,14 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
   for (const slot of getServiceContactSlots(customer)) {
-    if (declinedSlotRoles.has(slot.role)) continue;
+    if (declinedSlotRoles.has(slot.role)) { declinedByContact = true; continue; }
     add(slot.email, slot.name);
   }
   // Last resort: the primary customer email (e.g. email-only customer with no
-  // appointment phone contacts at all).
-  if (!recipients.length) {
+  // appointment phone contacts at all). Never when a contact's OWN decline
+  // emptied the list: that would reroute the notice to a holder who turned
+  // their appointment notices off (codex #6363 r2 P2).
+  if (!recipients.length && !declinedByContact) {
     add(primary.email, primary.name);
   }
   return recipients;

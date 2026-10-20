@@ -574,7 +574,7 @@ async function redirectToStoredDocument(doc, res) {
 // Contact session (GATE_CONTACT_LOGIN): the report rule decides what the
 // contact's OWN session may read (services/contact-session-projection.js —
 // the same verdict GET /api/services applies).
-const { contactSessionReportsWithheld: contactReportsWithheld } = require('../services/contact-session-projection');
+const { contactSessionReportsWithheld: contactReportsWithheld, contactSafeReportCustomer } = require('../services/contact-session-projection');
 
 // =========================================================================
 // GET /api/documents — all documents for authenticated customer
@@ -934,8 +934,9 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
 
     // Get invoice total if available. The column is `total` — the old
     // `total_amount` select threw on every request and the .catch() silently
-    // dropped the invoice block from the PDF.
-    const invoice = await db('invoices')
+    // dropped the invoice block from the PDF. Never for a contact session:
+    // the invoice is the holder's (codex #6363 r2 P1).
+    const invoice = req.contactSession ? null : await db('invoices')
       .where({ customer_id: req.customerId })
       .where('service_date', service.service_date)
       .select('total as total_amount', 'status', 'id')
@@ -948,7 +949,11 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
     // must not diverge from the /report/:token preview after a customer,
     // technician, or catalog edit.
     const frozen = applyReportIdentitySnapshotToLegacyPdf({ customer: req.customer, service, products });
-    generateServiceReportPDF(frozen.customer, frozen.service, frozen.products, res, { compliance, invoice, credentialText });
+    // A contact's copy is addressed to the contact and carries the property
+    // facts only — never the holder's name, phone, email or plan (the same
+    // projection the contact's own session reads; codex #6363 r2 P1).
+    const pdfCustomer = req.contactSession ? contactSafeReportCustomer(frozen.customer, req.contactSession) : frozen.customer;
+    generateServiceReportPDF(pdfCustomer, frozen.service, frozen.products, res, { compliance, invoice, credentialText });
   } catch (err) {
     next(err);
   }

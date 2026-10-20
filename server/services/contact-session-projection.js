@@ -50,6 +50,24 @@ function withholdReportArtifacts(service) {
   return out;
 }
 
+// The customer row the service-report PDF (routes/documents.js
+// generateServiceReportPDF) renders for a contact's own download: addressed
+// to the contact, the serviced property's facts kept, the holder's name,
+// phone, email and plan withheld (the same fields the contact's /auth/me
+// projection leaves out).
+function contactSafeReportCustomer(customer, contact) {
+  const [first = '', ...rest] = String(contact?.name || '').trim().split(/\s+/).filter(Boolean);
+  return {
+    ...customer,
+    first_name: first,
+    last_name: rest.join(' '),
+    phone: contact?.phone || '',
+    email: contact?.email || '',
+    waveguard_tier: null,
+    monthly_rate: null,
+  };
+}
+
 // An upcoming-visit entry with its action bearers removed.
 function withoutVisitBearers(visit) {
   if (!visit) return visit;
@@ -75,6 +93,7 @@ function contactNextPayload(payload) {
 module.exports = {
   contactSessionReportsWithheld,
   withholdReportArtifacts,
+  contactSafeReportCustomer,
   contactSchedulePayload,
   contactNextPayload,
   _test: { WITHHELD_REPORT_ARTIFACTS },

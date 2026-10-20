@@ -4,6 +4,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-06-16T00:00:00.000Z' } })),
 }));
+// The contact's OWN email declines (contact login, GATE_CONTACT_LOGIN): empty
+// unless a test says otherwise.
+const mockDeclinedRoles = new Set();
+jest.mock('../services/contact-notification-prefs', () => ({
+  declinedEmailSlotRoles: jest.fn(async () => mockDeclinedRoles),
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
@@ -106,6 +112,26 @@ describe('appointment email recipient resolution (fan-out to appointment contact
       customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
     });
     expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to)).toEqual(['sue@service.com']);
+  });
+
+  test('a contact\'s own decline never reroutes the notice to a holder who turned appointment notices off (codex #6363 r2)', async () => {
+    mockDeclinedRoles.add('service_contact');
+    try {
+      mockDb({
+        customer: {
+          id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+          service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+        },
+        prefs: { appointment_notify_primary: false },
+      });
+      const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+        customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+      });
+      expect(res.ok).toBe(false);
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      mockDeclinedRoles.clear();
+    }
   });
 
   test('falls back to the primary email when the service contact has no email', async () => {

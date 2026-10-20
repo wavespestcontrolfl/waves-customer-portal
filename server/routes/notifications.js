@@ -1272,6 +1272,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           ...legacyConsentUpdates,
           updated_at: new Date(),
         });
+        // Same prune as the list save: a replaced slot-1 person's own choices
+        // (and attestation) go with them (codex #6363 r2 P2).
+        await require('../services/contact-notification-prefs')
+          .pruneContactNotificationPrefs(trx, req.params.customerId, postSave.map((c) => c.phone));
       });
       if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
       // Same events as the list save — the legacy shape must not be a

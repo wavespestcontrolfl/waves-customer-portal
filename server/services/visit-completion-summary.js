@@ -744,11 +744,13 @@ async function summaryEmailSuppressed(email, database = db) {
 
 // The customer's Email Messages kill switch and the Service Complete Report
 // toggle both apply; the SMS leg honors the latter through the sender policy.
-async function summaryEmailRecipients(customer, prefs) {
+// Reads run on the caller's handle: a held handoff (claimDispatchThroughHandoff,
+// summaryRetryAuthorized) must never acquire a second pool connection.
+async function summaryEmailRecipients(customer, prefs, database = db) {
   if (prefs?.email_enabled === false || prefs?.service_completed === false) return [];
   // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
   return require('./contact-notification-prefs')
-    .filterReportEmailRecipientsByContactPrefs(getServiceReportEmailRecipients(customer, prefs), customer);
+    .filterReportEmailRecipientsByContactPrefs(getServiceReportEmailRecipients(customer, prefs), customer, { dbh: database });
 }
 
 // One recipient's dispatch through the library and the locked handoff.
@@ -775,7 +777,7 @@ async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, r
       // before dispatch, which the library records as a pre-provider abort.
       withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
         kind: 'completion_email', token: claim.token, email: recipient.email, pendingRef: queued?.id || null,
-        authorized: async (current, currentPrefs, trx) => summaryEmailRecipients(current, currentPrefs)
+        authorized: async (current, currentPrefs, trx) => (await summaryEmailRecipients(current, currentPrefs, trx))
           .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
           && !(await summaryEmailSuppressed(recipient.email, trx)),
         dispatch: async (_trx, onProviderStart) => { await onProviderStart(); dispatched = true; await handoff(); return { ok: true }; } }),
@@ -831,7 +833,7 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
   if (abandoned) await abandoned();
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
-  const recipients = visible ? await summaryEmailRecipients(customer, prefs) : [];
+  const recipients = visible ? await summaryEmailRecipients(customer, prefs, database) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
     const { messages } = await summaryEmailEvidence(scope, database);
@@ -955,7 +957,7 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
   if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
-  const current = (await summaryEmailRecipients(customer, prefs)).some((recipient) => recipient.email.toLowerCase() === email);
+  const current = (await summaryEmailRecipients(customer, prefs, database)).some((recipient) => recipient.email.toLowerCase() === email);
   if (!current) return { ok: false, reason: 'visit_summary_recipient_changed' };
   if (await summaryEmailSuppressed(String(destination || email).trim().toLowerCase(), database)) {
     return { ok: false, reason: 'visit_summary_recipient_suppressed' };

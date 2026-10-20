@@ -4491,6 +4491,23 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
       setLocked((prev) => ({ ...prev, [lockKey]: false }));
     }
   };
+  // Ticking the statement IS the attestation (codex #6363 r2 P2): it is
+  // recorded at once — and confirms a pending opt-in ask — rather than riding
+  // on a later preference change that the already-on defaults may never make.
+  const attest = async (checked) => {
+    setConsentChecked(checked);
+    if (!checked || locked.consent) return;
+    setLocked((prev) => ({ ...prev, consent: true }));
+    try {
+      setData(await api.updateContactNotificationPrefs({ consentAttested: true }));
+    } catch (err) {
+      setConsentChecked(false);
+      showCustomerAlert(err?.message || 'Could not record your consent. Please try again.');
+      console.error(err);
+    } finally {
+      setLocked((prev) => ({ ...prev, consent: false }));
+    }
+  };
 
   if (failed && !data) {
     return (
@@ -4525,6 +4542,15 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
           </div>
           <GoldSwitch on={prefs.smsEnabled !== false} disabled={!!locked.smsEnabled} onChange={() => save('smsEnabled', { smsEnabled: prefs.smsEnabled === false })} label="Text messages" />
         </div>
+        {data.emailAvailable && (
+          <div data-reminder-row="" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', padding: '12px 0', borderBottom: '1px solid #E7E2D7', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
+              <GlassTile name="mail" size={34} />
+              <NotificationLabelDisclosure label="Email messages" description="Off stops every email to your address, including notices with no setting of their own; texts are unaffected." />
+            </div>
+            <GoldSwitch on={prefs.emailEnabled !== false} disabled={!!locked.emailEnabled} onChange={() => save('emailEnabled', { emailEnabled: prefs.emailEnabled === false })} label="Email messages" />
+          </div>
+        )}
         {rows.map((p, i) => {
           const holderOff = accountOff[p.key] === true;
           const isOn = !holderOff && prefs[p.key] !== false;
@@ -4557,7 +4583,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
         })}
         {!attested && (
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 0 4px', borderTop: '1px solid #E7E2D7', fontSize: 14, lineHeight: 1.5, color: B.glassNavy, cursor: 'pointer' }}>
-            <input type="checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} style={{ width: 20, height: 20, marginTop: 2, flexShrink: 0 }} />
+            <input type="checkbox" checked={consentChecked} disabled={!!locked.consent} onChange={(e) => attest(e.target.checked)} style={{ width: 20, height: 20, marginTop: 2, flexShrink: 0 }} />
             <span>
               I agree to receive service text messages from Waves Pest Control{phone ? ` at ${phone}` : ''} about this property. Message and data rates may apply. Reply STOP to opt out.
               {data.smsOptin === 'pending' && ' We also sent you a text asking you to confirm; agreeing here confirms it.'}

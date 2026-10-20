@@ -99,6 +99,14 @@ describe('pure projections', () => {
     expect(JSON.stringify(projection.withholdReportArtifacts(row))).not.toContain('tok');
   });
 
+  test('contactSafeReportCustomer addresses the PDF to the contact and withholds the holder\'s name, phone, email and plan', () => {
+    const holder = { id: 'c', first_name: 'Pat', last_name: 'Owner', phone: '+19415550101', email: 'pat@example.com', waveguard_tier: 'gold', monthly_rate: '120.00',
+      address_line1: '1 Gulf Dr', city: 'Bradenton', state: 'FL', zip: '34205', lawn_type: 'St. Augustine', property_sqft: 8000 };
+    const out = projection.contactSafeReportCustomer(holder, { name: 'Sam Spouse', phone: '+19415550202', email: null });
+    expect(out).toEqual({ ...holder, first_name: 'Sam', last_name: 'Spouse', phone: '+19415550202', email: '', waveguard_tier: null, monthly_rate: null });
+    expect(JSON.stringify(out)).not.toMatch(/Pat|Owner|0101|pat@|gold|120/);
+  });
+
   test('contactSchedulePayload / contactNextPayload drop every bearer and the re-service card', () => {
     const out = projection.contactSchedulePayload({
       hasCancellableWork: true, reservice: { url: '/reservice/rt', lanes: ['pest'] }, overlayHandoff: true,

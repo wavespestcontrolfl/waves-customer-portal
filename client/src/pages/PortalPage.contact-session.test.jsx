@@ -149,7 +149,7 @@ describe('ContactNotificationCard', () => {
     expect(alerts.showCustomerAlert).not.toHaveBeenCalled();
   });
 
-  it('turning texts ON needs the consent statement; once ticked the save carries consentAttested and the statement disappears', async () => {
+  it('turning texts ON needs the consent statement; ticking it records the attestation at once and the statement disappears', async () => {
     api.getContactNotificationPrefs.mockResolvedValue({ ...contactPrefs(), preferences: { ...contactPrefs().preferences, smsEnabled: false } });
     await renderSchedule(contactCustomer);
     await screen.findByTestId('contact-notification-card');
@@ -158,10 +158,37 @@ describe('ContactNotificationCard', () => {
     expect(alerts.showCustomerAlert).toHaveBeenCalledWith(expect.stringMatching(/consent statement/i));
     // The pending opt-in text is mentioned in the statement.
     expect(screen.getByText(/agreeing here confirms it/i)).toBeInTheDocument();
+    // The tick itself is the attestation (codex r2): recorded without waiting
+    // for a preference change the already-on defaults may never make.
     fireEvent.click(screen.getByRole('checkbox'));
-    fireEvent.click(screen.getByRole('switch', { name: 'Text messages' }));
-    await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenCalledWith({ smsEnabled: true, consentAttested: true }));
+    await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenCalledWith({ consentAttested: true }));
     await waitFor(() => expect(screen.queryByRole('checkbox')).not.toBeInTheDocument());
+    // The card now shows the server's answer (texts on), and a later save
+    // carries no second attestation.
+    expect(screen.getByRole('switch', { name: 'Text messages' })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('switch', { name: 'Text messages' }));
+    await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenLastCalledWith({ smsEnabled: false }));
+  });
+
+  it('a failed attestation un-ticks the statement and says so', async () => {
+    api.updateContactNotificationPrefs.mockRejectedValueOnce(new Error('offline'));
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    fireEvent.click(screen.getByRole('checkbox'));
+    await waitFor(() => expect(alerts.showCustomerAlert).toHaveBeenCalledWith('offline'));
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it('the Email messages master switch writes emailEnabled, and is absent with no address on file', async () => {
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    fireEvent.click(screen.getByRole('switch', { name: 'Email messages' }));
+    await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenCalledWith({ emailEnabled: false }));
+    cleanup();
+    api.getContactNotificationPrefs.mockResolvedValue({ ...contactPrefs(), emailAvailable: false });
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    expect(screen.queryByRole('switch', { name: 'Email messages' })).not.toBeInTheDocument();
   });
 
   it('a contact the report rule withholds from sees no Service reports row, and a note instead', async () => {

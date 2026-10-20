@@ -36,6 +36,9 @@ jest.mock("../services/customer-contact", () => ({
 jest.mock("../services/recipient-optin", () => ({
   filterRecipientsByOptin: jest.fn(async (contacts) => contacts),
 }));
+jest.mock("../services/contact-notification-prefs", () => ({
+  filterContactsByOwnPrefs: jest.fn(async (contacts) => contacts),
+}));
 jest.mock("../services/messaging/send-customer-message", () => ({
   sendCustomerMessage: jest.fn(),
 }));
@@ -118,6 +121,30 @@ test("plain transient provider failure stays a retryable miss (guard released)",
   const res = await TwilioService.sendTechArrived("cust-1", "Adam");
   expect(res.success).toBe(false);
   expect(res.suppressed).toBeUndefined();
+});
+
+// Two ways the recipient list can come back empty, two verdicts (codex #6363
+// r2 P2): the opt-in HOLD is transient (a YES mid-job restores the leg), so
+// the miss stays retryable; a contact's OWN opt-out is a standing preference,
+// so the arrival is handled and the guard stays stamped.
+test("the only recipient opted OUT of arrival texts: handled (suppressed), never a retryable miss", async () => {
+  const { filterContactsByOwnPrefs } = require("../services/contact-notification-prefs");
+  getAppointmentContacts.mockReturnValue([{ phone: "+15550002222", name: "Sam Q", role: "service_contact" }]);
+  filterContactsByOwnPrefs.mockResolvedValueOnce([]);
+  const res = await TwilioService.sendTechArrived("cust-1", "Adam");
+  expect(res.success).toBe(false);
+  expect(res.suppressed).toBe(true);
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+test("contrast: the opt-in hold emptying the list stays a retryable miss with the email fallback", async () => {
+  const { filterRecipientsByOptin } = require("../services/recipient-optin");
+  getAppointmentContacts.mockReturnValue([{ phone: "+15550002222", name: "Sam Q", role: "service_contact" }]);
+  filterRecipientsByOptin.mockResolvedValueOnce([]);
+  const res = await TwilioService.sendTechArrived("cust-1", "Adam");
+  expect(res.success).toBe(false);
+  expect(res.suppressed).toBeUndefined();
+  expect(res.emailSent).toBe(true);
 });
 
 // The visit id rides to the push sink so an App-delivered arrival push

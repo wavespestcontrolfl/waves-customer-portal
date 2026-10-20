@@ -2262,9 +2262,14 @@ const TwilioService = {
     // notice; #2956 codex r5).
     const { filterRecipientsByOptin } = require("./recipient-optin");
     const unfilteredContacts = getAppointmentContacts(customer, prefs);
-    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
+    const optedInContacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow
+    // further. A list THIS filter empties is a standing preference, not the
+    // transient opt-in hold: heldAllSms below keys off the opt-in filter
+    // alone, so an opted-out contact reads as handled, never retried
+    // (codex #6363 r2 P2).
     const contacts = await require("./contact-notification-prefs").filterContactsByOwnPrefs(
-      await filterRecipientsByOptin(unfilteredContacts, customer.id), customer.id, "tech_arrived", { channel: "sms" },
+      optedInContacts, customer.id, "tech_arrived", { channel: "sms" },
     );
     if (channel === "sms" && !contacts.length && !unfilteredContacts.length) {
       return { success: false, suppressed: true, reason: "no_contacts" };
@@ -2350,7 +2355,7 @@ const TwilioService = {
       // by a durable call_sms_cleared_at stamp, not a reply), and an
       // accepted email under it IS the notice, not a retry candidate — see
       // callbackNumberHoldActive on ctx and ARRIVAL_DELIVERY.sms below.
-      heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
+      heldAllSms: smsAllowed && !optedInContacts.length && unfilteredContacts.length > 0,
       callbackNumberHoldActive,
       // Round 7 P2: the App leg a callback-number hold must NOT suppress.
       appLegUnderHold: callbackNumberHoldActive && channel === "push" && !!arrivalHolderDigits

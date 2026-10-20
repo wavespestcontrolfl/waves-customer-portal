@@ -269,4 +269,18 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
       expect.objectContaining({ phone_key: '9415550303' }),
     ]);
   });
+
+  test('the legacy single-contact save (serviceContact) prunes the replaced slot-1 person too, keeping slot 2/3 survivors (codex r2)', async () => {
+    tables.service_contact_notification_prefs.push(
+      { customer_id: 'cust-1', phone_key: '9415550202', tech_en_route: false, consent_attested_at: '2026-10-20T00:00:00Z' },
+      { customer_id: 'cust-1', phone_key: '9415550303', tech_en_route: false },
+    );
+    mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
+    const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContact: { firstName: 'Nora', lastName: 'New', phone: '+19415550404', email: '' },
+      serviceContactsConsent: true,
+    });
+    expect(res.status).toBe(200);
+    expect(tables.service_contact_notification_prefs.map((r) => r.phone_key)).toEqual(['9415550303']);
+  });
 });
