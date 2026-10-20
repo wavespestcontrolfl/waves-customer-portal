@@ -7,7 +7,6 @@ const NotificationService = require('./notification-service');
 const billingReplay = require('./billing-email-provider-replay');
 const billingReservation = require('./billing-email-reservation');
 const { isSenderRenderedEmail, SENDER_RENDERED_TEMPLATES, alertFinalNoticeMissed } = require('./billing-email-no-replay');
-const estimatePdfEmail = require('./estimate-email-pdf');
 
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -37,16 +36,8 @@ function isProviderBlockedEvent(ev) {
   return event === 'blocked' || (event === 'bounce' && type === 'blocked');
 }
 
-// A stored attachment is not kept, so an attachment-bearing row is normally
-// off this rail. The open-estimate emails that carry the estimate PDF copy
-// (GATE_ESTIMATE_EMAIL_PDF) are the exception: retryOne resends the stored body
-// without the PDF note and without the file, never a rebuilt PDF.
-function retriesAttachmentCopy(message) {
-  return !!message?.has_attachments && estimatePdfEmail.isRetryTemplate(message.template_key);
-}
-
 function isTransactionalRetryEligible(message) {
-  if (!message || (message.has_attachments && !retriesAttachmentCopy(message))) return false;
+  if (!message || message.has_attachments) return false;
   if (isSenderRenderedEmail(message)) return false;
   if (String(message.recipient_type || '').toLowerCase() === 'test') return false;
   // Applicant emails (recruiting-comms.js) have no email_templates row and
@@ -84,24 +75,6 @@ function retryStateForProviderBlock(message, now = new Date()) {
   };
 }
 
-// A PDF-bearing send the provider-boundary fence aborted before any request
-// (estimate-email-pdf.js recoverFenceAbort): the row is failed with no retry
-// scheduled, so put it on the first slot of the ladder. Only the exact aborted
-// attempt (token + rejected phase) and only while nothing is scheduled.
-async function scheduleRetryAfterBoundaryAbort(message, now = new Date()) {
-  if (!message?.id || !message.send_attempt_token || !isTransactionalRetryEligible(message)) return null;
-  const retryCount = Math.max(0, Number(message.provider_retry_count || 0));
-  if (retryCount >= MAX_RETRIES) return null;
-  const [row] = await db('email_messages')
-    .where({ id: message.id, status: 'failed', send_attempt_token: message.send_attempt_token,
-      provider_handoff_phase: HANDOFF_PHASE_REJECTED, provider_handoff_attempt_token: message.send_attempt_token })
-    .whereNull('provider_retry_next_at')
-    .update({ provider_retry_next_at: new Date(now.getTime() + RETRY_DELAYS_MS[retryCount]),
-      provider_retry_exhausted_at: null, updated_at: now })
-    .returning('*');
-  return row || null;
-}
-
 async function activeSuppressionForMessage(message) {
   const loaded = message.template_key
     ? await emailTemplates.loadTemplateByKey(message.template_key)
@@ -117,10 +90,7 @@ async function activeSuppressionForMessage(message) {
 async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
   return db.transaction(async (trx) => {
     const rows = await retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED])
-      .where({ status: 'failed' })
-      .where((q) => q.where({ has_attachments: false })
-        .orWhere((pdf) => pdf.where({ has_attachments: true })
-          .whereIn('template_key', estimatePdfEmail.ESTIMATE_PDF_RETRY_TEMPLATE_KEYS)))
+      .where({ status: 'failed', has_attachments: false })
       .whereNotNull('provider_retry_next_at')
       .where('provider_retry_next_at', '<=', now)
       .where('provider_retry_count', '<', MAX_RETRIES)
@@ -823,14 +793,6 @@ async function holdGateLifecycleRetry(message) {
   return { sent: false, held: true };
 }
 
-// An estimate email whose estimate is no longer the one the row was written for (the address
-// was corrected, or it is closed, expired, archived, invalidated or gone) never goes out, not
-// even as a body-only resend: stopped for good, with the admin alert.
-function stopEstimateEmailRetry(message, reason) {
-  return stopRetry(message, { status: 'failed', exhaustedAlert: true,
-    reason: `Estimate email not re-sent (${reason}); retry stopped.` });
-}
-
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
@@ -932,10 +894,8 @@ async function retryOne(message) {
         fromName: message.from_name_snapshot,
         replyTo: message.reply_to_snapshot,
         subject: message.subject_snapshot,
-        // An estimate PDF-copy row goes without its PDF note and without the file
-        // (state.body): the stored copy never promises a file the attempt does not carry.
-        html: state.body?.html ?? message.html_snapshot,
-        text: state.body?.text ?? message.text_snapshot,
+        html: message.html_snapshot,
+        text: message.text_snapshot,
         categories: asArray(message.categories),
         asmGroupId,
         customArgs: {
@@ -1039,18 +999,6 @@ async function retryOne(message) {
       // SendGrid, exactly as a fresh send does (payment-lifecycle-email.js): the retry waits.
       const holdOutcome = await holdGateLifecycleRetry(message);
       if (holdOutcome) return holdOutcome;
-      // An open-estimate email that carried the PDF copy goes back as its stored body
-      // with the PDF note removed and no attachment (the rail never rebuilds a PDF),
-      // and only while the estimate is still the one it was written for.
-      if (retriesAttachmentCopy(message)) {
-        const prepared = await estimatePdfEmail.prepareRetryBody(message);
-        if (prepared.stopped) return stopEstimateEmailRetry(message, prepared.stopped);
-        if (prepared.unsendable) {
-          return stopRetry(message, { status: 'failed', exhaustedAlert: true,
-            reason: 'The PDF note could not be removed from the stored email; retry stopped.' });
-        }
-        state.body = prepared;
-      }
       // The same hold, read again as sendOne's FINAL boundary check (after the block-clear and
       // marker awaits and SendGrid's own request preparation, right before the fetch): a dispute
       // committed since the read above still stops the stored copy. A WAIT, never a spent retry.
@@ -1130,7 +1078,6 @@ module.exports = {
   alertIfProviderRetriesExhausted,
   recoverStaleClaims,
   claimDueRetries,
-  scheduleRetryAfterBoundaryAbort,
   markRetryFailure,
   markRetryHeld,
   REPLACED_RECIPIENT_CATEGORY,

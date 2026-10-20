@@ -2047,7 +2047,6 @@ module.exports = {
   isMarketingSend,
   GLOBAL_SUPPRESSION_TYPES,
   renderTemplate,
-  renderBlocks,
   renderVersion,
   loadTemplateByKey,
   templateContentHash,

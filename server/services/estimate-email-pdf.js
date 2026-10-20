@@ -20,9 +20,9 @@
 //    provider boundary (pdfProviderHandoff): the row must be unchanged since
 //    the render and not invalidated / call-side blocked. A failed fence skips
 //    the send, as the manual sender does (estimateInvalidatedJustBeforeHandoff).
-//  - A failed PDF-bearing send is retried by the provider-retry rail, which
-//    never rebuilds a PDF: it resends the stored body without the PDF note
-//    (prepareRetryBody below).
+//  - A PDF-bearing row (has_attachments) is NOT on the provider-retry rail,
+//    as on main: a failed one is retried by the follow-up sweep re-running
+//    the whole touch through every check above (see sendDualChannel).
 // ============================================================
 
 const crypto = require('crypto');
@@ -46,11 +46,6 @@ const ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS = Object.freeze([
   'estimate.extension_notice',
 ]);
 const KEY_SET = new Set(ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS);
-// The delivery email builds its own PDF (admin-estimates.js) but its row is
-// retried by the same rail (as a body without the note), so the rail's
-// allowlist adds it.
-const RETRY_KEY_SET = new Set([...ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS, 'estimate.delivery']);
-
 const NONE = Object.freeze({ attachments: [], payload: {} });
 
 // Identity + pricing columns the document prints (the annual guard's
@@ -223,92 +218,9 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
   }
 }
 
-// The fence aborted a PDF-bearing send before any provider request (the
-// result of sendTemplate: aborted + boundaryBlocked / boundaryCheckFailed).
-// The row is failed with no retry scheduled, so without this the email is
-// lost. Decide on a fresh read: an estimate that is closed, expired,
-// archived or invalidated is skipped on purpose (its link serves nothing and
-// the offer is gone); an estimate still sendable, or one whose read fails, is
-// put on the provider-retry rail, which sends the stored body without the PDF
-// note. Returns 'scheduled',
-// 'skipped' or 'none'. Never throws.
-async function recoverFenceAbort({ estimateId, result }) {
-  if (!result?.aborted || !(result.boundaryBlocked || result.boundaryCheckFailed)) return 'none';
-  try {
-    let reason = null;
-    try {
-      reason = await handoffBlockReason(estimateId, null, { recipient: result.message?.recipient_email_snapshot || null });
-    } catch { /* unreadable: keep the email, retry it */ }
-    if (reason) {
-      logger.info(`[estimate-email-pdf] email for estimate ${estimateId} skipped after the PDF fence aborted it: ${reason}`);
-      return 'skipped';
-    }
-    const scheduled = await require('./transactional-email-provider-retry').scheduleRetryAfterBoundaryAbort(result.message);
-    return scheduled ? 'scheduled' : 'none';
-  } catch (e) {
-    logger.warn(`[estimate-email-pdf] could not requeue the email for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
-    return 'none';
-  }
-}
-
-// ---- Provider-retry rail --------------------------------------------------
-// The rail NEVER rebuilds a PDF. A PDF-copy row (has_attachments = true; the
-// attachment itself is not stored) is retried as its stored body with no
-// attachment, so the PDF can never disagree with the body's prices and the
-// rail never renders a permanent copy. Before that body-only resend the
-// estimate must still be the one the row was written for: same recipient,
-// still open, not expired, not invalidated or call-blocked. Then:
-//   note in both bodies, removable   the stored body with the note removed
-//   note in neither body             the stored body unchanged (a template
-//                                    that never got the note block carried
-//                                    no attachment claim)
-//   note in only one body            stopped (cannot be removed cleanly)
-// prepareRetryBody returns { stopped: reason } | { unsendable: true } |
-// { attachments: [], html, text }.
-const ESTIMATE_PDF_RETRY_TEMPLATE_KEYS = Object.freeze([...RETRY_KEY_SET]);
-
-function isRetryTemplate(templateKey) {
-  return RETRY_KEY_SET.has(templateKey);
-}
-
-function stripPdfNote(html, text) {
-  const { renderBlocks } = require('./email-template-library');
-  const pdf = require('./pdf/estimate-doc-pdf');
-  for (const note of Object.values(pdf.ESTIMATE_EMAIL_PDF_NOTES)) {
-    const textHas = typeof text === 'string' && text.includes(note);
-    const frag = renderBlocks([{ type: 'small_note', content: '{{estimate_pdf_note}}' }], { estimate_pdf_note: note });
-    const htmlHas = typeof html === 'string' && frag.bodyHtml && html.includes(frag.bodyHtml);
-    if (!textHas && !htmlHas) continue;
-    if (!textHas || !htmlHas) return null;
-    // renderBlocks joins its parts with a newline: drop the fragment with one.
-    const nextHtml = html.includes(`\n${frag.bodyHtml}`) ? html.replace(`\n${frag.bodyHtml}`, '')
-      : html.includes(`${frag.bodyHtml}\n`) ? html.replace(`${frag.bodyHtml}\n`, '')
-        : html.replace(frag.bodyHtml, '');
-    const nextText = text.includes(`${note}\n\n`) ? text.replace(`${note}\n\n`, '')
-      : text.includes(`\n\n${note}`) ? text.replace(`\n\n${note}`, '')
-        : text.replace(note, '');
-    return { html: nextHtml, text: nextText, removed: true };
-  }
-  return { html, text, removed: false };
-}
-
-async function prepareRetryBody(message) {
-  if (!message.estimate_id) return { stopped: 'estimate_missing' };
-  const blocked = await handoffBlockReason(message.estimate_id, null, { recipient: message.recipient_email_snapshot });
-  if (blocked) return { stopped: blocked };
-  const stripped = stripPdfNote(message.html_snapshot, message.text_snapshot);
-  if (!stripped) return { unsendable: true };
-  return { attachments: [], html: stripped.html, text: stripped.text };
-}
-
 module.exports = {
   openEstimateEmailPdf,
-  recoverFenceAbort,
   ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS,
-  ESTIMATE_PDF_RETRY_TEMPLATE_KEYS,
-  isRetryTemplate,
-  prepareRetryBody,
-  stripPdfNote,
   rowFingerprint,
   handoffBlockReason,
 };

@@ -11,7 +11,6 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   billingEmailDetailsLive: () => false,
 }));
-jest.mock('../services/transactional-email-provider-retry', () => ({ scheduleRetryAfterBoundaryAbort: jest.fn(async () => ({ id: 'm1' })) }));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
   estimateOffCustomerSurface: jest.fn(() => false),
@@ -266,34 +265,13 @@ describe('sendDualChannel with the PDF copy', () => {
     expect(build).not.toHaveBeenCalled();
   });
 
-  describe('when the PDF fence aborts the email', () => {
-    const retryRail = require('../services/transactional-email-provider-retry');
-    const withPhone = { ...est, customer_phone: '+19415550100' };
-    const abort = { sent: false, aborted: true, boundaryBlocked: true, message: { id: 'm1', send_attempt_token: 'a1' } };
-    beforeEach(() => { EmailTemplateLibrary.sendTemplate.mockResolvedValue(abort); });
-
-    test('after a sent text the email is requeued on the retry rail and the stage stays claimed', async () => {
-      const ok = await _private.sendDualChannel(withPhone, { sms: 'text body', email: leg('estimate.viewed_followup') });
-      expect(ok).toBe(true);
-      expect(retryRail.scheduleRetryAfterBoundaryAbort).toHaveBeenCalledWith(abort.message);
-    });
-
-    test('after a sent text, a closed estimate skips the email on purpose', async () => {
-      // Open when the PDF was rendered; accepted by the time the fence aborted.
-      EmailTemplateLibrary.sendTemplate.mockImplementation(async () => {
-        db.mockImplementation(() => { const b = {}; b.where = jest.fn(() => b); b.first = jest.fn(async () => ({ ...ESTIMATE, status: 'accepted' })); return b; });
-        return abort;
-      });
-      const ok = await _private.sendDualChannel(withPhone, { sms: 'text body', email: leg('estimate.viewed_followup') });
-      expect(ok).toBe(true);
-      expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
-    });
-
-    test('with no text sent the stage is released for a whole new attempt and nothing is queued twice', async () => {
-      const ok = await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
-      expect(ok).toBe(false);
-      expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
-    });
+  test('a fence abort with no text sent leaves the stage unattempted, so the claim is released for the next sweep', async () => {
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: false, aborted: true, boundaryBlocked: true, message: { id: 'm1' } });
+    expect(await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') })).toBe(false);
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: false, aborted: true, boundaryCheckFailed: true, message: { id: 'm1' } });
+    expect(await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') })).toBe(false);
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('SendGrid 400'));
+    expect(await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') })).toBe(false);
   });
 
   test('gate off: the send is exactly as before (no attachments key, same payload)', async () => {

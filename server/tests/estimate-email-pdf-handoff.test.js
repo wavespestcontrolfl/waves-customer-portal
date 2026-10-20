@@ -1,6 +1,6 @@
 // GATE_ESTIMATE_EMAIL_PDF, codex #6343 round 1: the permanent PDF copy needs
 // (a) a final fence at the provider boundary, (b) a provider retry that
-// resends the stored body without the PDF note (it never rebuilds a PDF), (c) no PDF note in admin test sends.
+// is out of scope (PDF rows are not on the retry rail), (c) no PDF note in admin test sends.
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
@@ -13,7 +13,6 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
-jest.mock('../services/transactional-email-provider-retry', () => ({ scheduleRetryAfterBoundaryAbort: jest.fn(async () => ({ id: 'm1' })) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
   estimateOffCustomerSurface: jest.fn(() => false),
   callSideBlockForEstimateData: jest.fn(async () => null),
@@ -27,7 +26,6 @@ const claimSql = require('../utils/estimate-claim-sql');
 const persistence = require('../services/admin-estimate-persistence');
 const pdf = require('../services/pdf/estimate-doc-pdf');
 const emailPdf = require('../services/estimate-email-pdf');
-const library = require('../services/email-template-library');
 
 const ID = '8f1c2d3e-aaaa-bbbb-cccc-1234567890ab';
 const ATTACHMENT = { filename: 'Waves-Estimate-EST-1.pdf', content: 'AA==', type: 'application/pdf', disposition: 'attachment' };
@@ -247,60 +245,6 @@ describe('the expiry check at the fence (codex #6343 r2)', () => {
   });
 });
 
-describe('recoverFenceAbort: an email the fence aborted is requeued or skipped on purpose (codex #6343 r2)', () => {
-  const retryRail = require('../services/transactional-email-provider-retry');
-  const aborted = (extra = {}) => ({ sent: false, aborted: true, boundaryBlocked: true, message: { id: 'm1', send_attempt_token: 'a1' }, ...extra });
-  beforeEach(() => {
-    jest.clearAllMocks();
-    db.mockReset();
-    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
-    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
-    persistence.staleCallLinkageReason.mockResolvedValue(null);
-    retryRail.scheduleRetryAfterBoundaryAbort.mockResolvedValue({ id: 'm1' });
-  });
-
-  test('the estimate is still sendable (it only changed): the email goes on the retry rail', async () => {
-    readsRow(row());
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('scheduled');
-    expect(retryRail.scheduleRetryAfterBoundaryAbort).toHaveBeenCalledWith({ id: 'm1', send_attempt_token: 'a1' });
-  });
-
-  test('the fence could not read: the email goes on the retry rail', async () => {
-    readsRow(row());
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted({ boundaryBlocked: undefined, boundaryCheckFailed: true }) })).toBe('scheduled');
-  });
-
-  test('a fresh read that fails still keeps the email (retried, not dropped)', async () => {
-    db.mockImplementation(() => { throw new Error('db down'); });
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('scheduled');
-  });
-
-  test.each([
-    ['accepted', row({ status: 'accepted' })],
-    ['archived', row({ archived_at: new Date() })],
-    ['expired', row({ expires_at: new Date(Date.now() - 1000) })],
-  ])('a %s estimate is skipped on purpose, nothing queued', async (_label, closed) => {
-    readsRow(closed);
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('skipped');
-    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
-  });
-
-  test('an invalidated estimate is skipped on purpose', async () => {
-    readsRow(row());
-    claimSql.estimateOffCustomerSurface.mockReturnValue(true);
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result: aborted() })).toBe('skipped');
-    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
-  });
-
-  test.each([
-    [{ sent: true }], [{ sent: false, aborted: true, reason: 'annual_offer_withheld' }], [undefined],
-  ])('any other result is left alone: %j', async (result) => {
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result })).toBe('none');
-    expect(db).not.toHaveBeenCalled();
-    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
-  });
-});
-
 describe('the destination must still be the estimate\'s recipient (pre-push audit P0)', () => {
   let build;
   beforeEach(() => {
@@ -340,139 +284,5 @@ describe('the destination must still be the estimate\'s recipient (pre-push audi
     readsRow(row(), row({ customer_email: null }));
     const check = await handoffCheck(await open());
     await expect(check({ database: db })).rejects.toMatchObject({ reason: 'recipient_changed' });
-  });
-
-  test('an aborted send to a superseded address is skipped on purpose, never queued', async () => {
-    const retryRail = require('../services/transactional-email-provider-retry');
-    readsRow(row({ customer_email: 'corrected@example.com' }));
-    const result = { sent: false, aborted: true, boundaryBlocked: true, message: { id: 'm1', send_attempt_token: 'a1', recipient_email_snapshot: 'lead@example.com' } };
-    expect(await emailPdf.recoverFenceAbort({ estimateId: ID, result })).toBe('skipped');
-    expect(retryRail.scheduleRetryAfterBoundaryAbort).not.toHaveBeenCalled();
-  });
-
-  const stored = (extra = {}) => ({
-    id: 'm1', template_key: 'estimate.viewed_followup', estimate_id: ID, has_attachments: true,
-    recipient_email_snapshot: 'lead@example.com', html_snapshot: '<p>x</p>', text_snapshot: 'x', ...extra,
-  });
-
-  test('retry: a corrected address stops the retry, with no render and no body-only resend', async () => {
-    readsRow(row({ customer_email: 'corrected@example.com' }));
-    expect(await emailPdf.prepareRetryBody(stored())).toEqual({ stopped: 'recipient_changed' });
-    expect(build).not.toHaveBeenCalled();
-  });
-
-  test('retry: the address check is case and whitespace tolerant', async () => {
-    readsRow(row({ customer_email: ' Lead@Example.COM ' }));
-    const out = await emailPdf.prepareRetryBody(stored());
-    expect(out.stopped).toBeUndefined();
-  });
-});
-
-describe('the provider-retry rail for PDF-bearing rows', () => {
-  const BLOCKS = [
-    { type: 'paragraph', content: 'Hi {{first_name}},' },
-    { type: 'cta', label: 'View your estimate', url_variable: 'estimate_url' },
-    { type: 'small_note', content: '{{estimate_pdf_note}}' },
-    { type: 'signature', content: '— The Waves Team' },
-  ];
-  const template = { template_key: 'estimate.viewed_followup', name: 'Follow-up', mode: 'service', send_stream: 'service' };
-  const version = { subject: 'Your estimate', blocks: BLOCKS };
-  const render = (note) => library.renderTemplate({
-    template, version, payload: { first_name: 'Sam', estimate_url: 'https://portal.example.test/estimate/tok', estimate_pdf_note: note },
-  });
-  const stored = (extra = {}) => {
-    const withNote = render(pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp);
-    return {
-      id: 'm1', template_key: 'estimate.viewed_followup', estimate_id: ID, has_attachments: true,
-      recipient_email_snapshot: 'lead@example.com',
-      html_snapshot: withNote.html, text_snapshot: withNote.text, ...extra,
-    };
-  };
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    db.mockReset();
-    setGates(true);
-    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
-    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
-    persistence.staleCallLinkageReason.mockResolvedValue(null);
-  });
-
-  test('the rail allowlist is the follow-up templates plus the delivery email, never the proposal', () => {
-    expect(emailPdf.ESTIMATE_PDF_RETRY_TEMPLATE_KEYS).toEqual([...emailPdf.ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS, 'estimate.delivery']);
-    expect(emailPdf.isRetryTemplate('estimate.delivery')).toBe(true);
-    expect(emailPdf.isRetryTemplate('estimate.proposal_delivery')).toBe(false);
-    expect(emailPdf.isRetryTemplate('invoice.sent')).toBe(false);
-  });
-
-  test('stripPdfNote removes exactly the note paragraph from html and text (follow-up and delivery notes)', () => {
-    for (const note of Object.values(pdf.ESTIMATE_EMAIL_PDF_NOTES)) {
-      const withNote = render(note);
-      const without = render('');
-      expect(withNote.html).not.toBe(without.html);
-      const out = emailPdf.stripPdfNote(withNote.html, withNote.text);
-      expect(out.html).toBe(without.html);
-      expect(out.text).toBe(without.text);
-      expect(out.text).not.toContain('PDF');
-      expect(out.html).not.toContain('PDF');
-    }
-  });
-
-  test('a stored body with no note passes through unchanged; a note in only one of html/text cannot be stripped', () => {
-    const plain = render('');
-    expect(emailPdf.stripPdfNote(plain.html, plain.text)).toEqual({ html: plain.html, text: plain.text, removed: false });
-    const withNote = render(pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp);
-    expect(emailPdf.stripPdfNote(withNote.html, plain.text)).toBeNull();
-  });
-
-  test('retry: the stored body with the note removed, no attachment, and never a PDF render', async () => {
-    const build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
-    readsRow(row());
-    const out = await emailPdf.prepareRetryBody(stored());
-    expect(out).toEqual({ attachments: [], html: render('').html, text: render('').text });
-    expect(build).not.toHaveBeenCalled();
-    build.mockRestore();
-  });
-
-  test('retry: the delivery email goes the same way', async () => {
-    readsRow(row());
-    const out = await emailPdf.prepareRetryBody(stored({ template_key: 'estimate.delivery' }));
-    expect(out.attachments).toEqual([]);
-    expect(out.html).toBe(render('').html);
-  });
-
-  test('retry: a template that never got the note block goes back unchanged (it made no attachment claim)', async () => {
-    readsRow(row());
-    const plain = render('');
-    const out = await emailPdf.prepareRetryBody(stored({ html_snapshot: plain.html, text_snapshot: plain.text }));
-    expect(out).toEqual({ attachments: [], html: plain.html, text: plain.text });
-  });
-
-  test('retry: a note in only one of html/text cannot be removed cleanly and is unsendable', async () => {
-    readsRow(row());
-    const plain = render('');
-    const withNote = render(pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp);
-    expect(await emailPdf.prepareRetryBody(stored({ html_snapshot: withNote.html, text_snapshot: plain.text }))).toEqual({ unsendable: true });
-  });
-
-  test('retry works with the gates off: nothing in the body-only path reads them', async () => {
-    readsRow(row());
-    setGates(false);
-    expect((await emailPdf.prepareRetryBody(stored())).attachments).toEqual([]);
-  });
-
-  test.each([
-    ['no estimate id', stored({ estimate_id: null }), () => readsRow(row()), 'estimate_missing'],
-    ['the estimate is gone', stored(), () => readsRow(undefined), 'estimate_missing'],
-    ['the estimate was accepted', stored(), () => readsRow(row({ status: 'accepted' })), 'estimate_not_open'],
-    ['the estimate was archived', stored(), () => readsRow(row({ archived_at: new Date() })), 'estimate_not_open'],
-    ['the estimate expired', stored(), () => readsRow(row({ expires_at: new Date(Date.now() - 1000) })), 'estimate_expired'],
-    ['the estimate was invalidated', stored(), () => { readsRow(row()); claimSql.estimateOffCustomerSurface.mockReturnValue(true); }, 'estimate_invalidated'],
-    ['a call-side block landed', stored(), () => { readsRow(row()); claimSql.callSideBlockForEstimateData.mockResolvedValue('call_draft_block'); }, 'call_side_call_draft_block'],
-    ['the call linkage changed', stored(), () => { readsRow(row()); persistence.staleCallLinkageReason.mockResolvedValue('call_linkage_changed'); }, 'call_linkage_call_linkage_changed'],
-    ['the address was corrected', stored(), () => readsRow(row({ customer_email: 'corrected@example.com' })), 'recipient_changed'],
-  ])('retry stops, no resend of estimate content: %s', async (_label, message, arrange, reason) => {
-    arrange();
-    expect(await emailPdf.prepareRetryBody(message)).toEqual({ stopped: reason });
   });
 });
