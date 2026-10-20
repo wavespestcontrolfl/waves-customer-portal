@@ -264,7 +264,11 @@ describe('openEstimateEmailPdf', () => {
     const out = await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' });
     expect(out.attachments).toEqual([ATTACHMENT]);
     expect(out.payload).toEqual({ estimate_pdf_note: pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp });
-    expect(pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp).toBe("Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 to get started.");
+    expect(pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp).toBe("Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 with any questions.");
+    expect(pdf.ESTIMATE_EMAIL_PDF_NOTES.delivery).toBe("Can't open the link? A PDF copy of this estimate is attached. Reply to this email or call (941) 297-5749 with any questions or to go ahead.");
+    // Mode-neutral: no start date, first visit or "get started" promise (the email also goes to
+    // existing-appointment, invoice-only and office-only estimates).
+    for (const note of Object.values(pdf.ESTIMATE_EMAIL_PDF_NOTES)) expect(note).not.toMatch(/start date|first visit|get started|set your/i);
   });
 
   test.each(['accepted', 'declined', 'expired', 'draft', 'scheduled', 'send_failed'])('a %s estimate gets nothing', async (status) => {

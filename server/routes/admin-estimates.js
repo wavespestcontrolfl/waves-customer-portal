@@ -295,6 +295,24 @@ function estimateEmailPdfOn() {
   return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
 }
 
+// True when a reviewed email's stored PDF decision disagrees with the current
+// one. No stored decision (undefined) is never stale: it means "no PDF".
+function reviewedPdfDecisionStale(reviewedMessages, currentDecision) {
+  const stored = reviewedMessages?.email?.pdfCopy;
+  return reviewedMessages?.email != null && stored !== undefined && stored !== currentDecision;
+}
+
+// Whether THIS delivery email carries the PDF copy: both gates on, not a
+// commercial proposal (it keeps its own PDF path), and not a multi-property
+// group (the shared link renders the whole group; the document is one
+// property's). The review preview, the schedule and the send all use this one
+// answer, so what was reviewed is what is sent (codex #6343 r6).
+async function deliveryPdfCopyDecision(estimateRow, database = db) {
+  if (!estimateEmailPdfOn()) return false;
+  if (normalizeProposal(estimateRow).enabled) return false;
+  return !(await require('../services/estimate-email-pdf').estimateInMultiPropertyGroup(estimateRow, database));
+}
+
 function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '' }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
@@ -913,12 +931,17 @@ async function buildEstimateSendPreview(estimate) {
     // template text, so the reviewed contentHash (a template-version hash)
     // is unaffected; the messageVersion covers the previewed text, and the
     // send re-runs this same builder, so a review and its send agree.
-    const pdfNote = !proposalMode && estimateEmailPdfOn() ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
+    const pdfCopy = !proposalMode && await deliveryPdfCopyDecision(estimate);
+    const pdfNote = pdfCopy ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
     const rendered = EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
       payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote }),
     });
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion) };
+    // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a
+    // schedule built from it). Present only when true, so a send with no PDF
+    // keeps its review byte-identical to before; a review without it means "no
+    // PDF" (sendEstimateNowInner).
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
     email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex') };
@@ -2729,6 +2752,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       if (options.reviewedOffer && estimateOfferVersion(verdictRow) !== options.reviewedOffer) {
         return 'saved_offer_changed';
       }
+      // The reviewed PDF decision must still hold (a gate flip, or the estimate
+      // joining a group, since the review or schedule): never silently add or
+      // drop the file. Reviews that carry no decision mean "no PDF" and are not
+      // stale (codex #6343 r6).
+      if (sendMethod !== 'sms' && reviewedPdfDecisionStale(options.reviewedMessages, await deliveryPdfCopyDecision(verdictRow, trx))) {
+        return 'saved_offer_changed';
+      }
       let data;
       try {
         data = typeof verdictRow.estimate_data === 'string'
@@ -2805,7 +2835,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     });
     if (invalidatedNow) {
       if (invalidatedNow === 'saved_offer_changed') {
-        throw Object.assign(new Error('The saved offer changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+        throw Object.assign(new Error('The saved offer or its PDF copy changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
       }
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
@@ -3052,7 +3082,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         let emailPdfFence = null;
         let emailPdfExpected = false;
         if (!proposalMode) {
-          emailPdfExpected = estimateEmailPdfOn();
+          // A reviewed message with no stored PDF decision is "no PDF" (an old
+          // schedule or a review made with the gate off), never stale.
+          emailPdfExpected = (!options.reviewedMessages || options.reviewedMessages.email?.pdfCopy === true)
+            && await deliveryPdfCopyDecision(freshEstimate);
           emailPdfFence = emailPdfExpected
             ? require('../services/estimate-email-pdf').deliveryPdfFence(freshEstimate, { recipient: estimate.customer_email, validThrough: nextExpiresAt })
             : null;

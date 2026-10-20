@@ -192,12 +192,15 @@ async function buildEstimateDocEmailAttachment(estimate, { validThrough = null }
 // work-order document ONLY: there is no pdfkit fallback (that is the
 // commercial "Proposal" look), and a failure returns null — the email then
 // goes out as it always did, without the PDF or the note about it.
-// The one line under the button when the PDF rides along. It is a template
+// The one line under the button when the PDF rides along. Mode-neutral: the
+// email also goes to estimates that are accepted by confirming an existing
+// appointment, by invoice, or through the office, so it promises no start date
+// and no first visit (codex #6343 r6). It is a template
 // variable (`estimate_pdf_note`) so a send with no PDF drops the block and
 // stays byte-identical to today.
 const ESTIMATE_EMAIL_PDF_NOTES = Object.freeze({
-  delivery: "Can't open the link? A PDF copy of this estimate is attached. To go ahead, reply to this email or call (941) 297-5749 and we'll set your first visit.",
-  followUp: "Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 to get started.",
+  delivery: "Can't open the link? A PDF copy of this estimate is attached. Reply to this email or call (941) 297-5749 with any questions or to go ahead.",
+  followUp: "Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 with any questions.",
 });
 const EMAIL_PDF_BUSY_ATTEMPTS = 3;
 const EMAIL_PDF_BUSY_DELAY_MS = 8000;

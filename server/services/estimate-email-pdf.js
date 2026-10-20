@@ -124,11 +124,15 @@ function pastExpiry(expiry, now) {
 
 // The row-state half of the fence. A first-send follow-up needs an open
 // estimate (sent / viewed) inside its expiry; the manual delivery send is
-// judged on a draft in flight, so `delivery` skips both (its own claim and
-// estimateInvalidatedJustBeforeHandoff cover state) and keeps archived.
+// judged on a row in its claimed 'sending' state (expiry is pinned by the send
+// itself, so `delivery` skips the expiry check).
 function rowStateBlock(row, { validThrough, now, delivery }) {
   if (row.archived_at) return 'estimate_not_open';
-  if (delivery) return null;
+  // The delivery send holds the row in its claimed 'sending' state from the
+  // claim until the provider accepts; any other status at the handoff (a
+  // decline or accept landing during the render, an expiry) is not the row the
+  // PDF was built from (codex #6343 r6).
+  if (delivery) return row.status === 'sending' ? null : 'estimate_not_open';
   if (!['sent', 'viewed'].includes(row.status)) return 'estimate_not_open';
   return pastExpiry(validThrough || row.expires_at, now) ? 'estimate_expired' : null;
 }
@@ -195,6 +199,19 @@ function pdfProviderHandoff(estimateId, expectedFingerprint, opts) {
   };
 }
 
+// True when the estimate belongs to a group that has any OTHER non-archived
+// member. The one definition every PDF decision uses (the review preview, the
+// delivery send and the follow-ups), so they cannot disagree.
+async function estimateInMultiPropertyGroup(estimate, database = db) {
+  if (!estimate?.estimate_group_id) return false;
+  const other = await database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .first('id');
+  return !!other;
+}
+
 function pdfGatesOn() {
   return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
 }
@@ -218,6 +235,9 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
     const fresh = await db('estimates').where({ id: estimateId }).first();
     if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return NONE;
     if (recipient && !sameRecipient(fresh.customer_email, recipient)) return NONE;
+    // Grouped (multi-property) estimates carry no PDF copy: the shared link
+    // renders the whole group but the document is one property's (r6).
+    if (await estimateInMultiPropertyGroup(fresh)) return NONE;
     const pdf = require('./pdf/estimate-doc-pdf');
     // The fingerprint is of the row as the database returned it, taken before
     // anything else touches the object (the builder works on clones).
@@ -260,6 +280,7 @@ function deliveryPdfFence(freshEstimate, { recipient, validThrough = null } = {}
 
 module.exports = {
   openEstimateEmailPdf,
+  estimateInMultiPropertyGroup,
   deliveryPdfFence,
   sameRecipient,
   ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS,

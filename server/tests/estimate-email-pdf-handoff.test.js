@@ -42,6 +42,8 @@ const readsRow = (...rows) => {
   db.mockImplementation(() => {
     const b = {};
     b.where = jest.fn(() => b);
+    b.whereNot = jest.fn(() => b);
+    b.whereNull = jest.fn(() => b);
     b.first = jest.fn(async () => rows[Math.min(i++, rows.length - 1)]);
     return b;
   });
@@ -227,6 +229,39 @@ describe('a live-repriced estimate does not veto itself (codex #6343 r5)', () =>
   });
 });
 
+describe('grouped estimates carry no PDF (codex #6343 r6)', () => {
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+  });
+  afterEach(() => build.mockRestore());
+
+  test('an estimate whose group has another non-archived member gets no PDF and no note', async () => {
+    readsRow(row({ estimate_group_id: 'group-1' }), { id: 'sibling' });
+    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('a group of one (the siblings archived) still gets the PDF', async () => {
+    readsRow(row({ estimate_group_id: 'group-1' }), undefined, row({ estimate_group_id: 'group-1' }));
+    const out = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(out.attachments).toEqual([ATTACHMENT]);
+  });
+
+  test('estimateInMultiPropertyGroup: no group id means no lookup at all', async () => {
+    expect(await emailPdf.estimateInMultiPropertyGroup(row())).toBe(false);
+    expect(db).not.toHaveBeenCalled();
+    readsRow({ id: 'sibling' });
+    expect(await emailPdf.estimateInMultiPropertyGroup(row({ estimate_group_id: 'g' }))).toBe(true);
+  });
+});
+
 describe('the expiry check at the fence (codex #6343 r2)', () => {
   let build;
   beforeEach(() => {
@@ -301,6 +336,10 @@ describe('deliveryPdfFence: the manual delivery send (codex #6343 r4)', () => {
     ['a price edit', { monthly_total: 99 }, 'estimate_changed_since_render'],
     ['a content edit', { estimate_data: { proposal: { terms: 'new' }, lead_id: 'lead-1', lead_linkage: 'sid', estimatorEngine: { callLogId: 'call-1' } } }, 'estimate_changed_since_render'],
     ['an archive', { archived_at: new Date() }, 'estimate_not_open'],
+    ['a decline during the render', { status: 'declined' }, 'estimate_not_open'],
+    ['an accept during the render', { status: 'accepted' }, 'estimate_not_open'],
+    ['the claim released back to a failed send', { status: 'send_failed' }, 'estimate_not_open'],
+    ['the row already marked sent', { status: 'sent' }, 'estimate_not_open'],
   ])('%s vetoes the handoff', async (_label, change, reason) => {
     readsRow(draft(change));
     await expect(run(fenceFor(draft()))).rejects.toMatchObject({ providerBoundaryBlocked: true, reason });
