@@ -206,13 +206,14 @@ async function loadLawnSqft(svc, knex) {
 
 // Whether /complete treats a 0 stock count on this visit as an advisory, not a
 // hold: a WaveGuard member's lawn completion allows negative inventory and
-// records the shortfall (complete-scheduled-service.js isWaveGuardLawnCompletion,
-// the same classifier, so the sheet never refuses what the server accepts). A
-// failed read answers false: the sheet then keeps its stock hold.
+// records the shortfall, and so does any lawn visit under GATE_LAWN_TS_STOCK_ADVISORY
+// (complete-scheduled-service.js isStockAdvisoryCompletion, the same classifier,
+// so the sheet never refuses what the server accepts). A failed read answers
+// false: the sheet then keeps its stock hold.
 async function loadStockAdvisory(svc, knex) {
   try {
     const customer = await knex('customers').where({ id: svc.customer_id }).first('waveguard_tier');
-    return require('./complete-scheduled-service').isWaveGuardLawnCompletion({
+    return require('./complete-scheduled-service').isStockAdvisoryCompletion({
       cust_waveguard_tier: customer?.waveguard_tier || null,
       service_type: svc.service_type,
     });

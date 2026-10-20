@@ -289,6 +289,24 @@ describe('recoverable states', () => {
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
+
+  // GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20): /complete takes the stock below zero instead, and the context says so.
+  test('stockAdvisory: a product at 0 stock holds nothing; the line says the office will restock it', async () => {
+    const zero = { ...CONTEXT, stockAdvisory: true, products: CONTEXT.products.map((p) => (p.id === 'iron' ? { ...p, inventory_on_hand: 0, inventory_unit: 'fl_oz' } : p)) };
+    const restocked = { ...zero, products: zero.products.map((p) => (p.id === 'iron' ? { ...p, inventory_on_hand: 64 } : p)) };
+    const request = makeRequest({ context: [zero, restocked] });
+    await readyVisit(request);
+    fireEvent.click(tile('Chelated Iron Plus'));
+    enterAmount('Chelated Iron Plus', 2);
+    expect(screen.getByText('Chelated Iron Plus shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.queryByText(/Update inventory, then tap Check stock/)).toBeNull();
+    expect(completeButton().disabled).toBe(false);
+    // Check stock still re-reads the count, and the line goes once the office has restocked it.
+    fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
+    await waitFor(() => expect(screen.queryByText(/shows 0 in stock/)).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
+    expect(completeButton().disabled).toBe(false);
+  });
 });
 
 describe('compliance taps', () => {
