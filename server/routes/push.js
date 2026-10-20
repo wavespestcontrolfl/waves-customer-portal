@@ -80,6 +80,12 @@ router.post('/native-subscribe', async (req, res, next) => {
 router.post('/native-unsubscribe', async (req, res, next) => {
   try {
     const { token } = req.body || {};
+    // A contact session (GATE_CONTACT_LOGIN) may release only the device it
+    // presents: the token-less "deactivate all of my devices" form belongs to
+    // the account holder, whose devices those are (codex #6363 r5 P2).
+    if (req.contactSession && (!token || typeof token !== 'string')) {
+      return res.status(400).json({ error: 'device token required', code: 'DEVICE_TOKEN_REQUIRED' });
+    }
     // Token-bearing releases are ACCOUNT-scoped: this device is presenting
     // its own token, and after a failed property re-point the row can sit
     // under a SIBLING profile of the same account — a release scoped to the
