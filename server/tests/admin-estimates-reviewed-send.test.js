@@ -2093,7 +2093,7 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
       expect(email.sendTemplate.mock.calls[0][0].withProviderHandoff).toEqual(expect.any(Function));
     });
 
-    test('an address corrected before the render: no PDF is built and the PDF line is not sent', async () => {
+    test('an address corrected before the render: no PDF is built, no note, and the no-document fence stops the send to the old address', async () => {
       const stale = structuredClone(row);
       row.customer_email = 'corrected@example.invalid';
       const result = await router.sendEstimateNow(stale, 'email', { callerPreClaimed: true });
@@ -2101,8 +2101,8 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
       const sent = email.sendTemplate.mock.calls[0][0];
       expect(sent.attachments).toEqual([]);
       expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
-      expect(sent).not.toHaveProperty('withProviderHandoff');
-      expect(result.channels.email).toMatchObject({ pdfAttached: false, warning: expect.stringMatching(/PDF copy could not be attached/) });
+      expect(sent.withProviderHandoff).toEqual(expect.any(Function));
+      expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
     });
 
     test('the same address in another case or with spaces still gets the PDF', async () => {
@@ -2137,11 +2137,17 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
       expect(result.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/could not be re-checked .* Try sending again/) });
     });
 
-    test('a send without a PDF has no fence and is untouched by an edit', async () => {
-      docPdf.buildEstimateEmailPdfAttachment.mockResolvedValue(null);
-      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
-      expect(email.sendTemplate.mock.calls[0][0]).not.toHaveProperty('withProviderHandoff');
-      expect(result.channels.email.ok).toBe(true);
+    test('a render that returns nothing still carries a no-document fence: untouched by a content edit, stopped by a decline', async () => {
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.monthly_total = '150'; return null; });
+      const edited = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      const sent = email.sendTemplate.mock.calls[0][0];
+      expect(sent.attachments).toEqual([]);
+      expect(sent.withProviderHandoff).toEqual(expect.any(Function));
+      expect(edited.channels.email).toMatchObject({ ok: true, pdfAttached: false });
+      row.status = 'sending';
+      docPdf.buildEstimateEmailPdfAttachment.mockImplementation(async () => { row.status = 'declined'; return null; });
+      const declined = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(declined.channels.email).toMatchObject({ ok: false, error: expect.stringMatching(/email was not sent/) });
     });
   });
 });

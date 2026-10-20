@@ -950,16 +950,10 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-// Why a delivery email that carried the PDF copy was stopped at the provider
-// handoff (estimate-email-pdf deliveryPdfFence), in words for the operator.
-function pdfFenceVetoError(boundaryCheckFailed) {
-  return boundaryCheckFailed
-    ? 'The estimate could not be re-checked before the PDF copy was attached; the email was not sent. Try sending again.'
-    : 'The estimate changed (for example its email address or contents) while the PDF copy was being prepared; the email was not sent. Review the estimate and send again.';
-}
-
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdfNote = '', pdfFence = null, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
+  // The delivery PDF copy's note, fence and veto handling (estimate-email-pdf.js).
+  const pdfPieces = emailPdfCopy().deliverySendPieces(pdf);
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
     const content = estimateSmtpContent({ firstName, viewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`, priceLine, proposalMode });
@@ -972,15 +966,15 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         ...(versionId ? { versionId } : {}),
         ...(expectedContentHash ? { expectedContentHash } : {}),
         to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote }),
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote: pdfPieces.note }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
         idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
         categories: ['estimate_delivery'],
         attachments: Array.isArray(attachments) ? attachments : [],
-        // The PDF copy is a permanent file: the final fence runs at the provider boundary.
-        ...(pdfFence && attachments.length ? { withProviderHandoff: pdfFence.withProviderHandoff } : {}),
+        // The delivery fence runs at the provider boundary (with the file or without it).
+        ...pdfPieces.templateOptions,
         onQueued: onDispatch,
         estimateId: estimate.id,
         ...(estimateIds ? { estimateIds } : {}),
@@ -988,10 +982,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      if (result.aborted && (result.boundaryBlocked || result.boundaryCheckFailed)) {
-        return { ok: false, providerAttempted: false, vetoedAtHandoff: true, error: pdfFenceVetoError(!!result.boundaryCheckFailed), template: 'estimate.delivery' };
-      }
-      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' , ...pdfPieces.vetoFromResult(result) };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -1052,13 +1043,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     return { ok: false, providerAttempted: false, error: err.message, provider: 'smtp_fallback' };
   }
   // The same final fence for the attached PDF copy on the SMTP path.
-  if (pdfFence && smtpAttachments.length) {
-    try {
-      await pdfFence.boundaryCheck();
-    } catch (err) {
-      return { ok: false, providerAttempted: false, vetoedAtHandoff: true, error: pdfFenceVetoError(!!err.providerBoundaryCheckFailed), provider: 'smtp_fallback' };
-    }
-  }
+  await pdfPieces.assertSmtpFence();
   onDispatch?.();
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
@@ -3087,7 +3072,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             priceLine: proposalMode ? freshPriceLine : priceLine,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: pdfCopy.attachment ? [pdfCopy.attachment] : proposalAttachments,
-            ...(pdfCopy.attachment ? { pdfNote: pdfCopy.note, pdfFence: pdfCopy.fence } : {}),
+            pdf: pdfCopy,
             proposalMode,
             versionId: options.reviewedMessages?.email?.versionId || null,
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,

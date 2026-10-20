@@ -556,7 +556,9 @@ async function sendDualChannel(est, { sms, email }) {
         templateKey: email.templateKey,
         to: est.customer_email,
         payload: await withFollowupPropertyRow(est, { ...(email.payload || {}), ...pdfCopy.payload }),
-        ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments, withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
+        ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
+        // The fence rides every prepared send, with the file or without it.
+        ...(pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,

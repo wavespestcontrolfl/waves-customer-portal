@@ -322,7 +322,13 @@ describe('openEstimateEmailPdf', () => {
     expect((await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' })).attachments).toEqual([]);
     readsRow(freshRow());
     build.mockResolvedValue(null);
-    expect(await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    // A render that returns nothing sends no file and no note, but the send keeps
+    // its provider-boundary fence (the busy waits widen the window): codex #6343 r11.
+    const noFile = await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' });
+    expect(noFile.attachments).toEqual([]);
+    expect(noFile.payload).toEqual({});
+    expect(noFile.withProviderHandoff).toEqual(expect.any(Function));
+    expect(noFile.recordDelivered).toBeUndefined();
   });
 });
 
@@ -368,7 +374,14 @@ describe('sendDualChannel with the PDF copy', () => {
   test('a PDF-bearing send passes the final fence as its provider handoff; a body-only send has none', async () => {
     await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
     expect(sent().withProviderHandoff).toEqual(expect.any(Function));
+    // A render that returns nothing: no file, no note, but the fence still rides the send.
     build.mockResolvedValue(null);
+    await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
+    expect(sent()).not.toHaveProperty('attachments');
+    expect(sent().payload).toEqual({ first_name: 'Sam' });
+    expect(sent().withProviderHandoff).toEqual(expect.any(Function));
+    // Ineligible before any render (gate off): exactly as before, no fence.
+    setGates(false);
     await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
     expect(sent()).not.toHaveProperty('withProviderHandoff');
   });

@@ -152,7 +152,9 @@ describe('the provider-boundary fence on a PDF-bearing send', () => {
     const root = path.join(__dirname, '..', 'services');
     for (const file of ['estimate-follow-up.js', 'estimate-extension.js']) {
       const src = fs.readFileSync(path.join(root, file), 'utf8');
-      expect(src).toMatch(/attachments: pdfCopy\.attachments, withProviderHandoff: pdfCopy\.withProviderHandoff/);
+      expect(src).toMatch(/attachments: pdfCopy\.attachments/);
+      // The fence rides every prepared send, with the file or without it.
+      expect(src).toMatch(/withProviderHandoff: pdfCopy\.withProviderHandoff/);
     }
     const renew = fs.readFileSync(path.join(root, 'estimate-auto-renew.js'), 'utf8');
     expect(renew).not.toMatch(/estimate-email-pdf|pdfCopy|attachments/);
@@ -305,7 +307,10 @@ describe('the linked appointment is part of the fence (codex #6343 r8)', () => {
   test('a failed appointment read at render time means no PDF', async () => {
     readsRow(row());
     estimatePublic.findLinkedUpcomingAppointment.mockRejectedValueOnce(new Error('db down'));
-    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    const out = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(out.attachments).toEqual([]);
+    expect(out.payload).toEqual({});
+    expect(out.withProviderHandoff).toEqual(expect.any(Function));
     expect(build).not.toHaveBeenCalled();
   });
 
@@ -391,7 +396,10 @@ describe('prepareDeliveryPdfCopy: the delivery send\'s whole PDF step (codex #63
 
   test('an address that is not the row\'s, a render that returns nothing or throws, or a failed fence read: expected but no file, with the warning', async () => {
     const warning = 'The PDF copy could not be attached; the email went out with the link only.';
-    expect(await prepare({ sendTo: 'old@example.com' })).toMatchObject({ expected: true, attachment: null, fence: null, warning });
+    // Expected but no file: the send still carries the no-document fence.
+    const stale = await prepare({ sendTo: 'old@example.com' });
+    expect(stale).toMatchObject({ expected: true, attachment: null, warning });
+    expect(stale.fence.withProviderHandoff).toEqual(expect.any(Function));
     expect(build).not.toHaveBeenCalled();
     build.mockResolvedValue(null);
     expect(await prepare()).toMatchObject({ expected: true, attachment: null, warning });
@@ -459,6 +467,124 @@ describe('a sibling unarchived during the render vetoes the handoff (codex #6343
     await fence.withProviderHandoff(async (_d, b) => { check = b; });
     readsRow(draft());
     await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+});
+
+describe('a render that produces nothing keeps the provider-boundary fence (codex #6343 r11)', () => {
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockReset();
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(null);
+  });
+  afterEach(() => build.mockRestore());
+
+  async function fenceOf(copy) {
+    let check;
+    await copy.withProviderHandoff(async (_d, b) => { check = b; });
+    return check;
+  }
+
+  test('follow-up: no file and no note, but the fence is there and checks state, recipient and call-side', async () => {
+    readsRow(row(), row());
+    const copy = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup', recipient: 'lead@example.com' });
+    expect(copy).toMatchObject({ attachments: [], payload: {} });
+    expect(copy.recordDelivered).toBeUndefined();
+    await expect((await fenceOf(copy))({ database: db })).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['an accept or decline during the wait', { status: 'accepted' }, 'estimate_not_open'],
+    ['an archive', { archived_at: new Date() }, 'estimate_not_open'],
+    ['an address correction', { customer_email: 'corrected@example.com' }, 'recipient_changed'],
+    ['an expiry', { expires_at: new Date(Date.now() - 1000) }, 'estimate_expired'],
+  ])('follow-up: %s vetoes the body-only send', async (_label, change, reason) => {
+    readsRow(row(), row(change));
+    const copy = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup', recipient: 'lead@example.com' });
+    await expect((await fenceOf(copy))({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason });
+  });
+
+  test('follow-up: a call-side block vetoes it, and a content edit does not (no document to disagree with)', async () => {
+    readsRow(row(), row({ monthly_total: 99 }));
+    const copy = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    const check = await fenceOf(copy);
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+    claimSql.callSideBlockForEstimateData.mockResolvedValue('call_draft_block');
+    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'call_side_call_draft_block' });
+  });
+
+  test('follow-up: a render that throws, or a failed fingerprint read, ends the same way', async () => {
+    readsRow(row(), row());
+    build.mockRejectedValue(new Error('browser down'));
+    const thrown = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(thrown.attachments).toEqual([]);
+    expect(thrown.withProviderHandoff).toEqual(expect.any(Function));
+  });
+
+  test('paths that return before any render keep today\'s behaviour: nothing, no fence', async () => {
+    readsRow(row({ status: 'accepted' }));
+    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    setGates(false);
+    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+    setGates(true);
+    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.deposit_abandoned' })).toEqual({ attachments: [], payload: {} });
+    readsRow(row({ estimate_group_id: 'g' }), { id: 'sibling' });
+    expect(await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
+  });
+
+  test('delivery: expected but no file keeps the claimed-state / address / call-side fence', async () => {
+    const draft = (extra = {}) => row({ status: 'sending', ...extra });
+    const copy = await emailPdf.prepareDeliveryPdfCopy({ freshEstimate: draft(), sendTo: 'lead@example.com', validThrough: new Date('2099-01-01T00:00:00Z') });
+    expect(copy).toMatchObject({ expected: true, attachment: null, note: '' });
+    const check = async (current) => { readsRow(current); return (await fenceOf(copy.fence))({ database: db }); };
+    await expect(check(draft())).resolves.toEqual({ ok: true });
+    await expect(check(draft({ monthly_total: 150 }))).resolves.toEqual({ ok: true });
+    await expect(check(draft({ status: 'declined' }))).rejects.toMatchObject({ reason: 'estimate_not_open' });
+    await expect(check(draft({ customer_email: 'corrected@example.com' }))).rejects.toMatchObject({ reason: 'recipient_changed' });
+    claimSql.callSideBlockForEstimateData.mockResolvedValue('call_draft_block');
+    await expect(check(draft())).rejects.toMatchObject({ reason: 'call_side_call_draft_block' });
+  });
+
+  test('delivery: a proposal, a gate-off send, and a review without the decision still get no fence at all', async () => {
+    const draft = row({ status: 'sending' });
+    expect((await emailPdf.prepareDeliveryPdfCopy({ freshEstimate: draft, sendTo: 'lead@example.com', proposalMode: true })).fence).toBeNull();
+    expect((await emailPdf.prepareDeliveryPdfCopy({ freshEstimate: draft, sendTo: 'lead@example.com', reviewedMessages: { email: { provider: 'sendgrid' } } })).fence).toBeNull();
+    setGates(false);
+    expect((await emailPdf.prepareDeliveryPdfCopy({ freshEstimate: draft, sendTo: 'lead@example.com' })).fence).toBeNull();
+  });
+});
+
+describe('the fingerprint covers what the document projects from the row (codex #6343 r11)', () => {
+  test.each([
+    ['satellite_url', { satellite_url: 'https://maps.googleapis.com/maps/api/staticmap?center=other' }],
+    ['estimate_slug', { estimate_slug: 'EST-2099-0002' }],
+    ['created_at', { created_at: new Date('2030-01-01T00:00:00Z') }],
+  ])('a change to %s changes the fingerprint', (_column, change) => {
+    const base = row({ satellite_url: 'https://maps.googleapis.com/maps/api/staticmap?center=a', estimate_slug: 'EST-2099-0001', created_at: new Date('2026-08-06T14:57:32Z') });
+    expect(emailPdf.rowFingerprint({ ...base, ...change })).not.toBe(emailPdf.rowFingerprint(base));
+  });
+
+  test('a satellite_url change between render and handoff vetoes the PDF', async () => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockResolvedValue(null);
+    const build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+    readsRow(row({ satellite_url: 'https://maps.googleapis.com/maps/api/staticmap?center=a' }), row({ satellite_url: 'https://maps.googleapis.com/maps/api/staticmap?center=b' }));
+    const copy = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await copy.withProviderHandoff(async (_d, b) => { check = b; });
+    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    build.mockRestore();
   });
 });
 

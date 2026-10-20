@@ -54,6 +54,9 @@ const FENCE_COLUMNS = [
   'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total',
   'show_one_time_option', 'bill_by_invoice', 'waveguard_tier', 'service_interest', 'category',
   'source', 'token', 'expires_at',
+  // What the /data payload projects into the document beyond the above: the
+  // map image, the estimate number and the date it prints (codex #6343 r11).
+  'satellite_url', 'estimate_slug', 'created_at',
 ];
 
 // estimate_data keys that are bookkeeping, not document content: the writers
@@ -262,26 +265,49 @@ function openForPdf(row, effectiveExpiry, now) {
   return !pastExpiry(effectiveExpiry, now);
 }
 
+// The estimate row a follow-up PDF may be built for, or null (gate off, not
+// allowlisted, closed or expired, another address, grouped, or the read failed:
+// none of those send anything different from today).
+async function eligibleRow({ estimateId, templateKey, validThrough, now, recipient }) {
+  try {
+    if (!KEY_SET.has(templateKey) || !pdfGatesOn()) return null;
+    const fresh = await db('estimates').where({ id: estimateId }).first();
+    if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return null;
+    if (recipient && !sameRecipient(fresh.customer_email, recipient)) return null;
+    // Grouped (multi-property) estimates carry no PDF copy: the shared link
+    // renders the whole group but the document is one property's (r6).
+    return (await estimateInMultiPropertyGroup(fresh)) ? null : fresh;
+  } catch (e) {
+    logger.warn(`[estimate-email-pdf] skipped for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
+    return null;
+  }
+}
+
 // `validThrough`: the date the document should advertise when the caller
 // knows a newer one than the stored row (an extension in flight).
 // `recipient`: the address the email is going to. When given, the PDF is built
 // only if it is still the estimate's current customer_email, and the handoff
 // fence repeats that check right before the request.
 async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = null, now = new Date(), recipient = null }) {
+  const fresh = await eligibleRow({ estimateId, templateKey, validThrough, now, recipient });
+  if (!fresh) return NONE;
+  // Eligible and about to render: the render can wait (busy retries) long enough
+  // for an accept, decline or address correction to land, so from here the send
+  // always carries a provider-boundary fence, with the file or without it.
+  const opts = { validThrough, recipient };
+  const noFile = () => ({
+    attachments: [],
+    payload: {},
+    withProviderHandoff: pdfProviderHandoff(estimateId, null, opts),
+    boundaryCheck: pdfBoundaryCheck(estimateId, null, opts),
+  });
   try {
-    if (!KEY_SET.has(templateKey) || !pdfGatesOn()) return NONE;
-    const fresh = await db('estimates').where({ id: estimateId }).first();
-    if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return NONE;
-    if (recipient && !sameRecipient(fresh.customer_email, recipient)) return NONE;
-    // Grouped (multi-property) estimates carry no PDF copy: the shared link
-    // renders the whole group but the document is one property's (r6).
-    if (await estimateInMultiPropertyGroup(fresh)) return NONE;
     const pdf = require('./pdf/estimate-doc-pdf');
     // The fingerprint is of the row as the database returned it, taken before
     // anything else touches the object (the builder works on clones).
     const fingerprint = await fullFingerprint(fresh);
     const attachment = await pdf.buildEstimateEmailPdfAttachment(fresh, { validThrough: validThrough || fresh.expires_at || null });
-    if (!attachment) return NONE;
+    if (!attachment) return noFile();
     return {
       attachments: [attachment],
       // Call with the sendTemplate result: records the rate review disclosure
@@ -291,12 +317,12 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
       },
       payload: { estimate_pdf_note: pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp },
       // Pass to sendTemplate: the final fence for the permanent copy.
-      withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint, { validThrough, recipient }),
-      boundaryCheck: pdfBoundaryCheck(estimateId, fingerprint, { validThrough, recipient }),
+      withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint, opts),
+      boundaryCheck: pdfBoundaryCheck(estimateId, fingerprint, opts),
     };
   } catch (e) {
-    logger.warn(`[estimate-email-pdf] skipped for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
-    return NONE;
+    logger.warn(`[estimate-email-pdf] no PDF for estimate ${estimateId}: ${String(e?.message || e).slice(0, 200)}`);
+    return noFile();
   }
 }
 
@@ -313,6 +339,49 @@ async function deliveryPdfFence(freshEstimate, { recipient, validThrough = null 
   return {
     withProviderHandoff: pdfProviderHandoff(freshEstimate.id, fingerprint, opts),
     boundaryCheck: pdfBoundaryCheck(freshEstimate.id, fingerprint, opts),
+  };
+}
+
+// ---- What the manual sender does with the delivery fence -------------------
+// Kept here so sendEstimateEmail (admin-estimates.js) gains no branching.
+function vetoMessage(boundaryCheckFailed) {
+  return boundaryCheckFailed
+    ? 'The estimate could not be re-checked before the PDF copy was attached; the email was not sent. Try sending again.'
+    : 'The estimate changed (for example its email address or contents) while the PDF copy was being prepared; the email was not sent. Review the estimate and send again.';
+}
+
+// A sendTemplate result the fence aborted, as a failed result; null otherwise.
+function vetoFromTemplateResult(result) {
+  const vetoed = result?.aborted && (result.boundaryBlocked || result.boundaryCheckFailed);
+  return vetoed
+    ? { ok: false, providerAttempted: false, vetoedAtHandoff: true, error: vetoMessage(!!result.boundaryCheckFailed) }
+    : null;
+}
+
+// Everything sendEstimateEmail needs from a prepared delivery PDF copy
+// (`pdf` is prepareDeliveryPdfCopy's result, or undefined for a send without
+// one), as plain values and calls so it has no branching of its own:
+//   note             the payload note ('' when no file is attached)
+//   templateOptions  sendTemplate options carrying the fence (the fence rides
+//                    the send with the file or without it)
+//   vetoFromResult   spread into the result: a sendTemplate result the fence
+//                    aborted becomes a failed result the operator sees ({} else)
+//   assertSmtpFence  the same fence for the SMTP path; throws the operator
+//                    message, which the sender reports as a failed channel
+function deliverySendPieces(pdf) {
+  const fence = pdf?.fence || null;
+  return {
+    note: pdf?.note || '',
+    templateOptions: fence ? { withProviderHandoff: fence.withProviderHandoff } : {},
+    vetoFromResult: (result) => vetoFromTemplateResult(result) || {},
+    assertSmtpFence: async () => {
+      if (!fence) return;
+      try {
+        await fence.boundaryCheck();
+      } catch (err) {
+        throw Object.assign(new Error(vetoMessage(!!err.providerBoundaryCheckFailed)), { fenceVetoed: true });
+      }
+    },
   };
 }
 
@@ -357,7 +426,13 @@ async function prepareDeliveryPdfCopy({ freshEstimate, sendTo, validThrough = nu
     logger.warn(`[estimate-email-pdf] delivery PDF decision failed for estimate ${freshEstimate?.id}: ${String(e?.message || e).slice(0, 200)}`);
     return none;
   }
-  const expected = finish({ expected: true, attachment: null, note: '', fence: null, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
+  // A PDF was expected but may not be produced: the render can wait long enough
+  // for an accept, decline or address correction to land, so the email still
+  // carries the delivery fence (claimed state, address, call-side), just
+  // without a document fingerprint.
+  const opts = { validThrough, recipient: sendTo, delivery: true };
+  const noFileFence = { withProviderHandoff: pdfProviderHandoff(freshEstimate.id, null, opts), boundaryCheck: pdfBoundaryCheck(freshEstimate.id, null, opts) };
+  const expected = finish({ expected: true, attachment: null, note: '', fence: noFileFence, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
   try {
     const fence = await deliveryPdfFence(freshEstimate, { recipient: sendTo, validThrough });
     if (!fence) return expected;
@@ -394,6 +469,7 @@ function reviewedPdfDecisionStale(reviewedMessages, currentDecision) {
 
 module.exports = {
   openEstimateEmailPdf,
+  deliverySendPieces,
   prepareDeliveryPdfCopy,
   deliveryPdfCopyDecision,
   reviewedPdfDecisionStale,
