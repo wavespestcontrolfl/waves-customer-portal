@@ -289,8 +289,20 @@ function contextReasons(context, id) {
   return reasons;
 }
 
+// Work budget (Codex #6367 security P2): a spoken name is a few short words.
+// A longer search is not a name and is not ranked; candidate names and words
+// are clipped so one request cannot stall the process.
+const MAX_SEARCH_CHARS = 120;
+const MAX_SEARCH_TOKENS = 6;
+const MAX_CANDIDATE_TOKENS = 8;
+const MAX_WORD_CHARS = 32;
+const clipWords = (tokens, max) => tokens.slice(0, max).map((t) => t.slice(0, MAX_WORD_CHARS));
+
 function rankNameMatchesV2(search, candidates, { limit, minScore, context }) {
-  const searchVariants = tokenVariants(tokenize(search, { v2: true }));
+  if (typeof search !== 'string' || search.length > MAX_SEARCH_CHARS) return [];
+  const searchTokens = tokenize(search, { v2: true });
+  if (searchTokens.length > MAX_SEARCH_TOKENS) return [];
+  const searchVariants = tokenVariants(clipWords(searchTokens, MAX_SEARCH_TOKENS));
   if (!searchVariants[0].length) return [];
   const keys = new Map();
   const keyOf = (word) => {
@@ -319,7 +331,7 @@ function rankNameMatchesV2(search, candidates, { limit, minScore, context }) {
   const floorFirstToken = Math.min(minScore, FIRST_TOKEN_FLOOR);
   const scored = [];
   for (const candidate of candidates) {
-    const candidateVariants = tokenVariants(customerTokens(candidate, { v2: true }));
+    const candidateVariants = tokenVariants(clipWords(customerTokens(candidate, { v2: true }), MAX_CANDIDATE_TOKENS));
     let base = 0;
     let firstExact = false;
     for (const sv of searchVariants) {

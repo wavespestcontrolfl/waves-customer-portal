@@ -466,3 +466,25 @@ describe('query_customers name matcher v2', () => {
     }
   });
 });
+
+describe('name match v2 work budget (Codex #6367 security P2)', () => {
+  const { rankNameMatches } = require('../services/intelligence-bar/name-match');
+  const pool = [{ id: 'a', first_name: 'Richard', last_name: 'Stumpf' }];
+
+  test('a search with more than 6 words or 120 characters is not ranked', () => {
+    expect(rankNameMatches(Array(1000).fill('richard').join(' '), pool, { v2: true })).toEqual([]);
+    expect(rankNameMatches('richard stumpf one two three four five', pool, { v2: true })).toEqual([]);
+    expect(rankNameMatches(`richard ${'x'.repeat(130)}`, pool, { v2: true })).toEqual([]);
+  });
+
+  test('a long candidate name and long words finish fast', () => {
+    const big = [{ id: 'b', first_name: 'Richard', last_name: Array(500).fill('stumpf').join(' '), company_name: 'y'.repeat(5000) }];
+    const started = Date.now();
+    rankNameMatches('richard stumpf', big, { v2: true });
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  test('a normal spoken name still matches', () => {
+    expect(rankNameMatches('richard stumpf', pool, { v2: true })[0]).toEqual(expect.objectContaining({ id: 'a' }));
+  });
+});
