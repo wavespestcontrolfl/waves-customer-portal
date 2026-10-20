@@ -570,9 +570,9 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect((await decisions())[0]).toMatchObject({ verdict: 'skip', skip_reason: 'message_too_long' });
     });
 
-    test('a sender gets at most three model judgments a day; the fourth is a rate-limit skip without a model call (Codex security review)', async () => {
+    test('a customer gets at most four model judgments a day across calls and texts; the next is a rate-limit skip without a model call (Codex security review)', async () => {
       const customerId = await customer();
-      for (let i = 0; i < 3; i += 1) {
+      for (let i = 0; i < 4; i += 1) {
         await trx('day_agreement_decisions').insert({
           source_kind: 'sms', source_key: `sms:9415550142:${randomUUID()}#0`, phone_digits: '9415550142', customer_id: customerId,
           verdict: 'skip', skip_reason: 'model_no_act', created_at: ago(60 * (i + 1)),
@@ -582,8 +582,12 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       const dispatch = answering(agreement());
       await sweep({ dispatch, findSlots: jest.fn() });
       expect(dispatch).not.toHaveBeenCalled();
-      const rows = await trx('day_agreement_decisions').where({ skip_reason: 'sender_rate_limited' });
-      expect(rows).toHaveLength(1);
+      expect(await trx('day_agreement_decisions').where({ skip_reason: 'judge_rate_limited' })).toHaveLength(1);
+      // A call from the same customer is rate-limited too.
+      await call(customerId);
+      await sweep({ dispatch, findSlots: jest.fn() });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(await trx('day_agreement_decisions').where({ skip_reason: 'judge_rate_limited' })).toHaveLength(2);
     });
 
     test('which threads are candidates: day word, 3 hour window, 30 quiet minutes either way, latest inbound only', async () => {

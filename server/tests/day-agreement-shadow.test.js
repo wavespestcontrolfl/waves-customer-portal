@@ -263,10 +263,12 @@ describe('retryable and ambiguous inputs', () => {
     const ctx = { now: NOW, todayET: '2040-03-12', deps: { dispatch } };
     const visits = { where: () => ({ where: () => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ limit: () => ({ select: async () => [] }) }) }) }) }) }) };
     const emptyCatalog = { where: () => ({ whereNotIn: () => ({ orderBy: () => ({ orderBy: () => ({ select: async () => [] }) }) }) }) };
-    const conn = (table) => (table === 'services' ? emptyCatalog : (table === 'scheduled_services' ? visits : failing));
+    // The per-customer quota read (Codex security review): under quota.
+    const quota = { where() { return this; }, count() { return { first: async () => ({ n: 0 }) }; } };
+    const conn = (table) => (table === 'day_agreement_decisions' ? quota : table === 'services' ? emptyCatalog : (table === 'scheduled_services' ? visits : failing));
     conn.raw = () => 'raw';
     await expect(internals.processSource(conn, src, ctx)).rejects.toMatchObject({ code: 'catalog_empty' });
-    const broken = (table) => (table === 'scheduled_services' ? visits : failing);
+    const broken = (table) => (table === 'day_agreement_decisions' ? quota : table === 'scheduled_services' ? visits : failing);
     broken.raw = () => 'raw';
     await expect(internals.processSource(broken, src, ctx)).rejects.toThrow('db down');
     expect(dispatch).not.toHaveBeenCalled();
