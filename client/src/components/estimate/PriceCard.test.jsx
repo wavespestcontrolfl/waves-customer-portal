@@ -965,6 +965,8 @@ describe('PriceCard — monthly average line', () => {
     expect(screen.getAllByText('$94.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('/ application').length).toBeGreaterThan(0);
     expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('about $31.33 a month');
+    // Customer type scale: 14px metadata, never an off-scale 15px.
+    expect(container.querySelector('[data-monthly-average-line]').style.fontSize).toBe('14px');
     expect(screen.getByText('Averaged over the year. You pay after each application.')).toBeInTheDocument();
     // "$X/mo" as the price stays banned.
     expect(container.textContent).not.toMatch(/\$31\.33\s*\/\s*mo/);

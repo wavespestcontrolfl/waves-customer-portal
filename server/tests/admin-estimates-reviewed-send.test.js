@@ -2176,3 +2176,24 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
     });
   });
 });
+
+describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () => {
+  const averageService = require('../services/estimate-monthly-average');
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  test('the send resolves the average from the row read just before sending, not the stale row it was handed', async () => {
+    const spy = jest.spyOn(averageService, 'emailAverageParts').mockImplementation(async (estimate) => ({
+      priceLine: `$94.00 per application · about $${Number(estimate.monthly_total).toFixed(2)} a month`,
+      note: 'Averaged over the year. You pay after each application.',
+    }));
+    const stale = structuredClone(row);
+    stale.monthly_total = '100';
+    row.monthly_total = '31.33'; // a price edit landed after the caller read the row
+    await router.sendEstimateNow(stale, 'email', { callerPreClaimed: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0].monthly_total).toBe('31.33');
+    const sent = email.sendTemplate.mock.calls[email.sendTemplate.mock.calls.length - 1][0];
+    expect(sent.payload.price_summary).toBe('$94.00 per application · about $31.33 a month');
+    expect(sent.payload.next_step_summary).toMatch(/^Averaged over the year\. You pay after each application\. When you are ready/);
+  });
+});

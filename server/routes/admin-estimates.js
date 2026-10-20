@@ -3076,9 +3076,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
-          // GATE_ESTIMATE_MONTHLY_AVERAGE: the same resolution the review
-          // preview ran (null with the gate off or for a commercial proposal).
-          const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
+          // GATE_ESTIMATE_MONTHLY_AVERAGE: resolved from the row read just
+          // before this send (freshEstimate), not the row the request started
+          // with, so a price edit that landed during the send never ships a
+          // stale average. The review preview resolves from the row it read.
+          // Null with the gate off or for a commercial proposal.
+          const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(freshEstimate);
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,

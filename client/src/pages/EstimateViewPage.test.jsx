@@ -2803,6 +2803,53 @@ describe('monthly average beside per-application prices', () => {
     expect(container.textContent).not.toMatch(/Plan total/i);
   });
 
+  it('single service with a positive one-time fee: the context sentence says one-time charges are not in the average', async () => {
+    const payload = single(true);
+    payload.pricing.setupFee = { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true };
+    payload.pricing.renderFlags = { showWaveGuardSetupFee: true };
+    stub(payload);
+    const { container } = render(<EstimateViewPage />);
+    await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+    expect(screen.getAllByText('Averaged over the year. You pay after each application. One-time charges are not in the average.')).toHaveLength(1);
+    // No fee: the plain sentence only (covered above).
+  });
+
+  describe('plan credit comes from the SELECTED cadence combo', () => {
+    const comboPayload = ({ comboCredit, comboSuppressed = false, baseCredit = null }) => {
+      const payload = multi(true);
+      payload.pricing.frequencies = [{ key: 'quarterly', label: 'Quarterly', monthly: 72.3, annual: 867.6, ...(baseCredit ? { manualDiscount: baseCredit } : {}) }];
+      payload.pricing.serviceCadenceCombos = [{
+        selection: { pest_control: 'quarterly', lawn_care: 'standard' },
+        monthly: 62.3, annual: 747.6,
+        ...(comboCredit ? { manualDiscount: comboCredit } : {}),
+        ...(comboSuppressed ? { manualDiscountSuppressed: true } : {}),
+      }];
+      return payload;
+    };
+    const credit = { label: 'Referral Credit', amount: 120, recurringAmount: 120 };
+
+    it('uses the combo\'s own credit even when the base frequency carries none', async () => {
+      stub(comboPayload({ comboCredit: credit }));
+      const { container } = render(<EstimateViewPage />);
+      const summary = await waitFor(() => {
+        const el = container.querySelector('[data-monthly-average-summary]');
+        expect(el).not.toBeNull();
+        return el;
+      });
+      expect(summary.textContent).toContain('Referral Credit');
+      expect(summary.textContent).toContain('−$10.00 a month');
+      expect(cents(summary.querySelector('[data-monthly-average-plan]').textContent.split(')')[1])).toBe(6230);
+    });
+
+    it('ignores a stale base-frequency credit the combo suppresses, and then shows no average (nothing explains the gap)', async () => {
+      stub(comboPayload({ comboSuppressed: true, baseCredit: credit }));
+      const { container } = render(<EstimateViewPage />);
+      await screen.findAllByText('Pest Control');
+      expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
+      expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+    });
+  });
+
   it('gate off: no average line, no summary, no context sentence', async () => {
     stub(multi(false));
     const { container } = render(<EstimateViewPage />);

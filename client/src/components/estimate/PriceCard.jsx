@@ -555,7 +555,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
           price; this is an average of the year, never "$X/mo" as the price.
           Absent (null) with the gate off, so the card is unchanged. */}
       {monthlyAverageShown ? (
-        <div data-monthly-average-line="" style={{ fontSize: 15, fontWeight: 500, color: CUSTOMER_SURFACE.muted, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>
+        <div data-monthly-average-line="" style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>
           {monthlyAverageLine}
         </div>
       ) : null}

@@ -9075,11 +9075,20 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       ? combinedFrequency
       : selectedFrequencyForSection(recurringSections[0], selected);
     // A plan-wide credit the server did NOT itemize into the sections is the
-    // one declared difference between the cards and the plan's monthly.
-    const creditSource = renderFlags.manualDiscountItemizedInSections === true
-      ? null
-      : [combinedFrequency?.manualDiscount, pricing.combinedRecurring?.manualDiscount, pricing.manualDiscount]
-        .find((discount) => discount && Number(discount.amount) > 0);
+    // one declared difference between the cards and the plan's monthly. It
+    // comes from the SELECTED cadence combo's own credit state (a combo carries
+    // its own manualDiscount and suppression marker; the base row's is stale
+    // for it), and from the base frequency only when no combo is selected.
+    const liveCredit = (discount) => (discount && Number(discount.amount) > 0 ? discount : null);
+    let creditSource = null;
+    if (renderFlags.manualDiscountItemizedInSections !== true) {
+      if (selectedCombo) {
+        creditSource = selectedCombo.manualDiscountSuppressed === true ? null : liveCredit(selectedCombo.manualDiscount);
+      } else if (combinedFrequency?.manualDiscountSuppressed !== true) {
+        creditSource = [combinedFrequency?.manualDiscount, pricing.combinedRecurring?.manualDiscount, pricing.manualDiscount]
+          .map(liveCredit).find(Boolean) || null;
+      }
+    }
     const creditMonthly = manualDiscountMonthlyAmount(creditSource);
     return pageMonthlyAverage({
       enabled: true,
@@ -9172,7 +9181,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
                 monthlyAverageLine={monthlyAverage && monthlyAverage.byKey[section.key] != null ? aboutMonth(monthlyAverage.byKey[section.key]) : null}
-                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.showPlan ? MONTHLY_AVERAGE_CONTEXT : null}
+                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.showPlan ? `${MONTHLY_AVERAGE_CONTEXT}${feeList.some((fee) => Number(fee?.amount) > 0) ? ' One-time charges are not in the average.' : ''}` : null}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
