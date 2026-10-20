@@ -94,6 +94,8 @@ describe('SMS opt-out detector', () => {
     'I received your confirmation but I said no texts that day',
     'No\ntexts please',
     'No\nmessages',
+    'I got no texts, keep it that way',
+    'There were no messages this week and I want it that way',
     'no more texts',
     'Please, no more messages.',
     'No more text messages',
