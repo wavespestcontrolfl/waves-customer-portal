@@ -164,6 +164,7 @@ describe('item 1: a visit with a water-in product never says "No special waterin
   test('wording: a quarter inch, a longer window, a same-day label', () => {
     expect(cleanup.waterInAftercare({ inches: 0.25, hours: 24, sameDay: false }, null).watering).toBe('Water in about ¼ inch within 24 hours.');
     expect(cleanup.waterInAftercare({ inches: 0.5, hours: 336, sameDay: false }, null).watering).toBe('Water in about ½ inch within 14 days.');
+    expect(cleanup.waterInAftercare({ inches: 0.5, hours: 60, sameDay: false }, null).watering).toBe('Water in about ½ inch within 60 hours.');
     expect(cleanup.waterInAftercare({ inches: 0.25, hours: 24, sameDay: true }, null).watering).toBe('Water in about ¼ inch today.');
     expect(cleanup.waterInAftercare(null, null)).toBeNull();
   });
@@ -211,6 +212,8 @@ describe('item 2: a granular product never keeps a broadcast spray method', () =
     gateOn();
     expect(cleanup.correctedMethod('broadcast_spray', ARENA)).toBe('granular_broadcast');
     expect(cleanup.correctedMethod('broadcast_spray', { name: 'Test Fungicide' })).toBe('broadcast_spray');
+    // A granular catalog formulation counts when the name carries no mark (a report row passes catalog_formulation).
+    expect(cleanup.correctedMethod('broadcast_spray', { name: 'Test Fire Ant Bait', formulation: 'granular' })).toBe('granular_broadcast');
     expect(cleanup.correctedMethod('bait_placement', ARENA)).toBe('bait_placement');
     expect(cleanup.correctedMethod('spot_treatment', ARENA)).toBe('spot_treatment');
     expect(cleanup.correctedMethod('perimeter_spray', ARENA)).toBe('perimeter_spray');
@@ -348,6 +351,12 @@ describe('item 4: the trouble-spot note', () => {
       products[marker] = true;
       expect(cleanup.waterInRuleOf(products)).toBeNull();
     }
+  });
+
+  test('the photo strip (no shot list) is read for a Trouble spot label too', () => {
+    gateOn();
+    const data = cleanup.attachCleanupFields({ serviceLine: 'lawn', reportV2: { photos: [{ url: 'https://example/a.jpg', label: 'Front yard' }, { url: 'https://example/b.jpg', label: 'Trouble spot' }], followUp: null }, findings: [] });
+    expect(data.troubleSpotNote).toBe('The trouble spot photo shows an area your technician flagged. We will check it again at your next visit.');
   });
 
   test('no trouble-spot photo: the flag is set and the note is null', () => {

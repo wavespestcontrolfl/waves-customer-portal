@@ -459,6 +459,9 @@ async function attachApprovedReportProductFactsBase(knex, products = [], { froze
       product_category: product.product_category || facts.category,
       active_ingredient: product.active_ingredient || facts.activeIngredient,
       epa_reg_number: product.epa_reg_number || facts.epaRegNumber,
+      // GATE_REPORT_CLEANUP_1020: the catalog formulation, so a granular product whose name carries no mark still
+      // reads as granular (internal row field; never on the payload).
+      catalog_formulation: catalog?.formulation || null,
       approved_report_product_facts: facts,
     };
   });
@@ -4901,7 +4904,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const frozenLabelDrops = reportFacts.frozenLabelDropsFor(serviceLine, service.structured_notes);
   const applications = products.map((product, index) => {
     // GATE_REPORT_CLEANUP_1020: a granular product never prints a broadcast spray method (a record made before the fix).
-    const method = reportCleanup1020.correctedMethod(methodFromProduct(product, serviceLine), { name: product.product_name });
+    const method = reportCleanup1020.correctedMethod(methodFromProduct(product, serviceLine), { name: product.product_name, formulation: product.catalog_formulation });
     return {
       id: product.id || `product-${index + 1}`,
       product: {

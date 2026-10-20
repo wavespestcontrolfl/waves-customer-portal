@@ -56,6 +56,7 @@ describe('rate basis (item 5)', () => {
     expect(rateWithBasis({ rateUnit: 'oz/1000sf' }, '0.2')).toBe('0.2 oz per 1,000 sq ft');
     expect(rateWithBasis({ rateUnit: 'fl_oz/gal' }, '1')).toBe('1 fl oz per gal');
     expect(rateWithBasis({ rateUnit: 'lb/acre' }, '2')).toBe('2 lb per acre');
+    expect(rateWithBasis({ rateUnit: 'gal', areaUnit: 'sqft' }, '1')).toBe('1 gal per 1,000 sq ft');
     expect(rateWithBasis({ rateUnit: 'ml/inch dbh' }, '3')).toBe('3 ml per inch of trunk width');
     // bare unit with no square-foot area, a count unit, an unknown basis: no guess
     expect(rateWithBasis({ rateUnit: 'oz' }, '1')).toBeNull();

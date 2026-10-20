@@ -22,7 +22,7 @@ const BASIS_WORDS = {
 // A bare weight or volume unit on a record with a square-foot area is a rate per
 // 1,000 sq ft: the convention every rate reader in the server follows
 // (area-addon-governed-rate.js splitRateUnit).
-const PER_1000_BARE_UNITS = new Set(['oz', 'fl_oz', 'lb', 'g', 'ml']);
+const PER_1000_BARE_UNITS = new Set(['oz', 'fl_oz', 'lb', 'g', 'ml', 'gal']);
 
 const unitWords = (unit) => String(unit || '').replace(/_/g, ' ').trim();
 

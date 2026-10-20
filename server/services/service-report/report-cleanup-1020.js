@@ -50,7 +50,8 @@ function waterInLine({ inches, hours, sameDay }) {
   const amount = formatInches(inches);
   if (!amount) return null;
   if (sameDay) return `Water in about ${amount} today.`;
-  return hours > 48 ? `Water in about ${amount} within ${Math.round(hours / 24)} days.` : `Water in about ${amount} within ${hours} hours.`;
+  // Days only for a whole number of days past 48 hours; any other window keeps its exact hours (60 h never reads as 3 days).
+  return hours > 48 && hours % 24 === 0 ? `Water in about ${amount} within ${hours / 24} days.` : `Water in about ${amount} within ${hours} hours.`;
 }
 
 // The aftercare object for a visit with a water-in product whose full instruction could not be built (a product
@@ -147,7 +148,10 @@ function dropStockLines(data) {
 function troubleSpotNote(data) {
   const v2 = data.reportV2;
   const photoSet = v2 && Array.isArray(v2.photoSet) ? v2.photoSet : [];
-  if (!photoSet.some((photo) => photo && photo.shot === 'trouble')) return null;
+  // The shot list (GATE_LAWN_REPORT_PHOTO_SET), else the strip the report shows, labelled by zone ("Trouble spot").
+  const strip = v2 && Array.isArray(v2.photos) ? v2.photos : [];
+  if (!photoSet.some((photo) => photo && photo.shot === 'trouble')
+    && !strip.some((photo) => photo && /^trouble\b/i.test(String(photo.label || '')))) return null;
   const next = v2.followUp ? 'at the follow-up we already planned' : 'at your next visit';
   return `The trouble spot photo shows an area your technician flagged. We will check it again ${next}.`;
 }
