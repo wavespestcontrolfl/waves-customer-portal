@@ -251,7 +251,9 @@
         "credential_table:scheduled_services"
       ],
       "freeText": {
-        "preview": "note"
+        "preview": "note",
+        "lead_source_detail": "note",
+        "service_interest": "note"
       },
       "signals": [
         "credential_field:token",
@@ -502,7 +504,8 @@
         "leadSourceDetail": "note",
         "reasoning": "note",
         "assumptions": "note",
-        "uncertainty": "note"
+        "uncertainty": "note",
+        "serviceInterest": "note"
       },
       "signals": [
         "credential_field:token",
@@ -572,6 +575,9 @@
         "credential_table:invoices",
         "write:transaction"
       ],
+      "freeText": {
+        "title": "note"
+      },
       "signals": [
         "credential_table:invoices",
         "write:transaction"
@@ -609,6 +615,9 @@
         "credential_table:scheduled_services",
         "write:transaction"
       ],
+      "freeText": {
+        "title": "note"
+      },
       "signals": [
         "credential_table:invoices",
         "credential_table:scheduled_services",
@@ -768,7 +777,9 @@
       ],
       "freeText": {
         "service_interest": "note",
-        "extracted_data": "note"
+        "extracted_data": "note",
+        "heard_about_prompt": "note",
+        "lead_synopsis": "note"
       },
       "signals": [
         "credential_table:estimates"
@@ -810,7 +821,10 @@
       "freeText": {
         "service_interest": "note",
         "extracted_data": "note",
-        "metadata": "note"
+        "metadata": "note",
+        "heard_about_prompt": "note",
+        "lead_synopsis": "note",
+        "transcription_status": "content"
       },
       "signals": [
         "credential_field:processing_token",

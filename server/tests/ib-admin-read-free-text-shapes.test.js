@@ -288,11 +288,11 @@ const SHAPES = {
   '/admin/customers/:id/estimates-summary': {
     params: { id: UUID },
     body: {
-      customer: { id: UUID, first_name: 'Sample', last_name: 'Person', waveguard_tier: 'Gold' },
-      estimates: [{ id: UUID, status: 'sent', token: 'TOKEN-PLACEHOLDER-0001', service_interest: 'Pest control', decline_reason: PASSWORD_NOTE, monthly_total: '59.00' }],
+      customer: { id: UUID, first_name: 'Sample', last_name: 'Person', waveguard_tier: 'Gold', lead_source_detail: PASSWORD_NOTE },
+      estimates: [{ id: UUID, status: 'sent', token: 'TOKEN-PLACEHOLDER-0001', service_interest: LINK_NOTE, decline_reason: PASSWORD_NOTE, monthly_total: '59.00' }],
       stats: { total: 1, accepted: 0, declined: 0, open: 1, conversionRate: null }, lastContact: { channel: 'sms', direction: 'inbound', at: '2026-10-01T12:00:00Z', preview: LINK_NOTE },
     },
-    withheld: ['estimates.0.decline_reason', 'lastContact.preview'],
+    withheld: ['estimates.0.decline_reason', 'estimates.0.service_interest', 'customer.lead_source_detail', 'lastContact.preview'],
     omitted: ['estimates.0.token'],
     kept: { 'estimates.0.status': 'sent', 'stats.open': 1, 'customer.waveguard_tier': 'Gold' },
   },
@@ -362,14 +362,14 @@ const SHAPES = {
     body: {
       estimates: [{
         id: UUID, status: 'sent', customerName: 'Sample Person', customerId: UUID, monthlyTotal: 59, onetimeTotal: 0, tier: 'Gold', sentAt: '2026-10-01T00:00:00Z', viewCount: 2, source: 'manual',
-        leadSourceDetail: PASSWORD_NOTE, description: LINK_NOTE, notes: PASSWORD_NOTE, declineReason: LINK_NOTE, dispositionNote: PASSWORD_NOTE, token: 'TOKEN-PLACEHOLDER-0002',
+        leadSourceDetail: PASSWORD_NOTE, serviceInterest: LINK_NOTE, description: LINK_NOTE, notes: PASSWORD_NOTE, declineReason: LINK_NOTE, dispositionNote: PASSWORD_NOTE, token: 'TOKEN-PLACEHOLDER-0002',
         estimatorEngine: { lane: 'review', laneReasons: ['new customer'], reviewNotes: LINK_NOTE, marginWarnings: [] },
         agentDraftReview: { reasoning: PASSWORD_NOTE, assumptions: [LINK_NOTE], uncertainty: [PASSWORD_NOTE], sqftSource: 'measured', unverifiedLineCount: 0 },
       }],
       truncated: false,
     },
     withheld: [
-      'estimates.0.leadSourceDetail', 'estimates.0.description', 'estimates.0.notes', 'estimates.0.declineReason', 'estimates.0.dispositionNote',
+      'estimates.0.leadSourceDetail', 'estimates.0.serviceInterest', 'estimates.0.description', 'estimates.0.notes', 'estimates.0.declineReason', 'estimates.0.dispositionNote',
       'estimates.0.estimatorEngine.laneReasons', 'estimates.0.estimatorEngine.reviewNotes', 'estimates.0.agentDraftReview.reasoning', 'estimates.0.agentDraftReview.assumptions', 'estimates.0.agentDraftReview.uncertainty',
     ],
     omitted: ['estimates.0.token'],
@@ -380,13 +380,13 @@ const SHAPES = {
     query: { customer_id: UUID },
     body: {
       invoices: [{
-        id: UUID, invoice_number: 'INV-2001', customer_id: UUID, status: 'sent', total: '120.00', notes: PASSWORD_NOTE, title: 'Quarterly service',
+        id: UUID, invoice_number: 'INV-2001', customer_id: UUID, status: 'sent', total: '120.00', notes: PASSWORD_NOTE, title: LINK_NOTE,
         token: 'TOKEN-PLACEHOLDER-0003', send_claim_token: 'CLAIM-PLACEHOLDER-0001', stripe_payment_intent_id: 'pi_PLACEHOLDER0001', stripe_charge_id: 'ch_PLACEHOLDER0001',
         receipt_url: 'https://pay.example.test/receipts/PLACEHOLDER', first_name: 'Sample', card_on_file: { brand: 'visa', last_four: '4242' }, review_hold: false,
       }],
       total: 1, page: 1,
     },
-    withheld: ['invoices.0.notes'],
+    withheld: ['invoices.0.notes', 'invoices.0.title'],
     omitted: ['invoices.0.token', 'invoices.0.send_claim_token', 'invoices.0.stripe_payment_intent_id', 'invoices.0.stripe_charge_id', 'invoices.0.receipt_url'],
     kept: { 'invoices.0.invoice_number': 'INV-2001', 'invoices.0.status': 'sent', 'invoices.0.card_on_file.last_four': '4242', total: 1 },
   },
@@ -394,11 +394,11 @@ const SHAPES = {
   '/admin/invoices/:id': {
     params: { id: UUID },
     body: {
-      id: UUID, invoice_number: 'INV-2001', customer_id: UUID, status: 'sent', total: '120.00', notes: PASSWORD_NOTE, line_items: [{ description: LINK_NOTE, amount: 120 }],
+      id: UUID, invoice_number: 'INV-2001', customer_id: UUID, status: 'sent', total: '120.00', notes: PASSWORD_NOTE, title: PASSWORD_NOTE, line_items: [{ description: LINK_NOTE, amount: 120 }],
       token: 'TOKEN-PLACEHOLDER-0004', send_claim_token: 'CLAIM-PLACEHOLDER-0002', stripe_payment_intent_id: 'pi_PLACEHOLDER0002', stripe_charge_id: 'ch_PLACEHOLDER0002',
       receipt_url: 'https://pay.example.test/receipts/PLACEHOLDER2', customer: { first_name: 'Sample', last_name: 'Person', card_on_file: { brand: 'visa', last_four: '4242' } }, active_payment_plan: null, suggested_coverage: null,
     },
-    withheld: ['notes', 'line_items.0.description'],
+    withheld: ['notes', 'title', 'line_items.0.description'],
     omitted: ['token', 'send_claim_token', 'stripe_payment_intent_id', 'stripe_charge_id', 'receipt_url'],
     kept: { invoice_number: 'INV-2001', status: 'sent', 'line_items.0.amount': 120, 'customer.card_on_file.last_four': '4242' },
   },
@@ -414,12 +414,12 @@ const SHAPES = {
     body: {
       leads: [{
         id: UUID, first_name: 'Sample', last_name: 'Person', phone: '+15555550105', email: 'lead@example.test', status: 'new', lead_type: 'call',
-        service_interest: PASSWORD_NOTE, transcript_summary: LINK_NOTE, extracted_data: { wants: 'quarterly pest control' }, source_name: 'Website', source_channel: 'organic', estimate_status: null, assigned_name: 'Tech A',
+        service_interest: PASSWORD_NOTE, transcript_summary: LINK_NOTE, extracted_data: { wants: 'quarterly pest control' }, heard_about_prompt: PASSWORD_NOTE, lead_synopsis: LINK_NOTE, source_name: 'Website', source_channel: 'organic', estimate_status: null, assigned_name: 'Tech A',
         call_recording_url: 'https://api.example.test/recordings/PLACEHOLDERREC1', anon_id: 'ANON-PLACEHOLDER-1', gclid: 'GCLID-PLACEHOLDER-1',
       }],
       total: 1, page: 1, limit: 25, consultationLinksEnabled: false,
     },
-    withheld: ['leads.0.service_interest', 'leads.0.transcript_summary', 'leads.0.extracted_data'],
+    withheld: ['leads.0.service_interest', 'leads.0.transcript_summary', 'leads.0.extracted_data', 'leads.0.heard_about_prompt', 'leads.0.lead_synopsis'],
     omitted: ['leads.0.call_recording_url', 'leads.0.anon_id', 'leads.0.gclid'],
     kept: { 'leads.0.status': 'new', 'leads.0.source_name': 'Website', total: 1, limit: 25 },
   },
@@ -427,13 +427,13 @@ const SHAPES = {
   '/admin/leads/:id': {
     params: { id: UUID },
     body: {
-      lead: { id: UUID, first_name: 'Sample', status: 'contacted', service_interest: PASSWORD_NOTE, transcript_summary: LINK_NOTE, extracted_data: { wants: 'quarterly pest control' }, source_name: 'Website', assigned_name: 'Tech A', call_recording_url: 'https://api.example.test/recordings/PLACEHOLDERREC2', anon_id: 'ANON-PLACEHOLDER-2', gclid: 'GCLID-PLACEHOLDER-2' },
+      lead: { id: UUID, first_name: 'Sample', status: 'contacted', service_interest: PASSWORD_NOTE, transcript_summary: LINK_NOTE, extracted_data: { wants: 'quarterly pest control' }, heard_about_prompt: PASSWORD_NOTE, lead_synopsis: LINK_NOTE, source_name: 'Website', assigned_name: 'Tech A', call_recording_url: 'https://api.example.test/recordings/PLACEHOLDERREC2', anon_id: 'ANON-PLACEHOLDER-2', gclid: 'GCLID-PLACEHOLDER-2' },
       activities: [{ id: 1, lead_id: UUID, activity_type: 'created', description: PASSWORD_NOTE, performed_by: 'Office', metadata: { from: 'web form' }, created_at: '2026-10-01T00:00:00Z' }],
       calls: [{ id: UUID, direction: 'inbound', duration_seconds: 120, recording_sid: 'RE00000000000000000000000000000001', has_recording: true, transcription: LINK_NOTE, transcription_status: 'completed', created_at: '2026-10-01T00:00:00Z' }],
     },
-    withheld: ['lead.service_interest', 'lead.transcript_summary', 'lead.extracted_data', 'activities.0.description', 'activities.0.metadata', 'calls.0.transcription', 'calls.0.transcription_status'],
+    withheld: ['lead.service_interest', 'lead.transcript_summary', 'lead.extracted_data', 'lead.heard_about_prompt', 'lead.lead_synopsis', 'activities.0.description', 'activities.0.metadata', 'calls.0.transcription'],
     omitted: ['lead.call_recording_url', 'lead.anon_id', 'lead.gclid'],
-    kept: { 'lead.status': 'contacted', 'activities.0.activity_type': 'created', 'calls.0.has_recording': true, 'calls.0.duration_seconds': 120 },
+    kept: { 'lead.status': 'contacted', 'activities.0.activity_type': 'created', 'calls.0.transcription_status': 'completed', 'calls.0.has_recording': true, 'calls.0.duration_seconds': 120 },
   },
   // admin-leads.js:168-262: one object of counts, times and totals; no lead row.
   '/admin/leads/analytics/overview': {
