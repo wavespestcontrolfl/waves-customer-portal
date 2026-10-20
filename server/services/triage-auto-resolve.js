@@ -2633,7 +2633,13 @@ async function loadSlotNoteVisitEvidence(conn, items, flag, now) {
     const primary = payload.scheduled_service_id;
     if (primary === undefined || primary === null || primary === '') continue;
     const fu = payload.follow_up?.scheduled_service_id;
-    wanted.set(item.id, { primary: String(primary), followUp: fu === undefined || fu === null || fu === '' ? null : String(fu) });
+    // Which of the call's visits the card is about (Codex #6347 r2): the
+    // conflict rows tag each clash 'primary' or 'follow_up'; a card with no
+    // tags (an out-of-hours note, an in-transaction fallback row) is about the
+    // primary only.
+    const tags = new Set((Array.isArray(payload.conflicting_visits) ? payload.conflicting_visits : []).map((v) => v?.overlaps_visit || 'primary'));
+    if (!tags.size) tags.add('primary');
+    wanted.set(item.id, { primary: String(primary), followUp: fu === undefined || fu === null || fu === '' ? null : String(fu), tags });
   }
   if (!wanted.size) return;
   const ids = [...new Set([...wanted.values()].flatMap((w) => [w.primary, w.followUp].filter(Boolean)))];
@@ -2645,9 +2651,13 @@ async function loadSlotNoteVisitEvidence(conn, items, flag, now) {
   for (const item of cards) {
     const w = wanted.get(item.id);
     if (!w) continue;
+    // The primary proves the card is this call's booking; only the visits the
+    // card names must be done. A follow-up clash with no follow-up id on the
+    // card cannot be checked, so it stays open.
     const primary = byId.get(w.primary);
-    if (!primary || String(primary.source_call_log_id) !== String(item.call_log_id) || !done(primary)) continue;
-    if (w.followUp && !done(byId.get(w.followUp))) continue;
+    if (!primary || String(primary.source_call_log_id) !== String(item.call_log_id)) continue;
+    if (w.tags.has('primary') && !done(primary)) continue;
+    if (w.tags.has('follow_up') && !(w.followUp && done(byId.get(w.followUp)))) continue;
     flag(item.id, 'slot_note_visit_done');
   }
 }

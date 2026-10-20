@@ -2169,12 +2169,23 @@ describe('visit_passed (booking_time_conflict / booking_out_of_hours on a done v
     expect(await evidenceOf(slotCard('booking_time_conflict', { scheduled_service_id: null }), [visit()])).toBeUndefined();
   });
 
-  test('a card that also records a follow-up visit closes only when the follow-up is done too', async () => {
-    const card = slotCard('booking_time_conflict', { follow_up: { scheduled_service_id: 'v2' } });
+  test('only the visits the card names must be done: overlaps_visit tags decide (Codex #6347 r3)', async () => {
     const followUp = (over = {}) => ({ id: 'v2', status: 'confirmed', scheduled_date: '2026-08-14', source_call_log_id: 'call-1', ...over });
-    expect(await evidenceOf(card, [visit(), followUp()])).toBeUndefined();
-    expect((await evidenceOf(card, [visit(), followUp({ scheduled_date: '2026-07-28' })]))?.slot_note_visit_done).toBe(true);
-    expect(await evidenceOf(card, [visit()])).toBeUndefined();
+    const fu = { follow_up: { scheduled_service_id: 'v2' } };
+    // A primary-only clash closes when the primary is done, whatever the follow-up does.
+    const primaryOnly = slotCard('booking_time_conflict', { ...fu, conflicting_visits: [{ overlaps_visit: 'primary' }] });
+    expect((await evidenceOf(primaryOnly, [visit(), followUp()]))?.slot_note_visit_done).toBe(true);
+    expect((await evidenceOf(primaryOnly, [visit(), followUp({ status: 'cancelled' })]))?.slot_note_visit_done).toBe(true);
+    // A follow-up-only clash waits for the follow-up, not the primary.
+    const followOnly = slotCard('booking_time_conflict', { ...fu, conflicting_visits: [{ overlaps_visit: 'follow_up' }] });
+    expect(await evidenceOf(followOnly, [visit({ status: 'confirmed', scheduled_date: '2026-08-01' }), followUp()])).toBeUndefined();
+    expect((await evidenceOf(followOnly, [visit({ status: 'confirmed', scheduled_date: '2026-08-01' }), followUp({ scheduled_date: '2026-07-28' })]))?.slot_note_visit_done).toBe(true);
+    // Both tagged: both must be done. A follow-up clash with no follow-up id stays open.
+    const both = slotCard('booking_time_conflict', { ...fu, conflicting_visits: [{ overlaps_visit: 'primary' }, { overlaps_visit: 'follow_up' }] });
+    expect(await evidenceOf(both, [visit(), followUp()])).toBeUndefined();
+    expect(await evidenceOf(slotCard('booking_time_conflict', { conflicting_visits: [{ overlaps_visit: 'follow_up' }] }), [visit()])).toBeUndefined();
+    // Untagged (an out-of-hours note) is about the primary only.
+    expect((await evidenceOf(slotCard('booking_out_of_hours', fu), [visit(), followUp()]))?.slot_note_visit_done).toBe(true);
   });
 
   test('the stored payload may be a JSON string', async () => {
