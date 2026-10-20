@@ -125,14 +125,6 @@ function planLabel(model) {
     : 'Your plan averages';
 }
 
-// A service name for the one-line email subject ("Lawn Care — 9 applications/yr"
-// -> "lawn"). Strips the cadence suffix and generic trailing words.
-function shortServiceName(label) {
-  const base = String(label || '').split(/\s[—–-]\s/)[0].trim();
-  const stripped = base.replace(/\s+(care|control|service|services|program|treatment|plan)$/i, '').trim();
-  return stripped || base;
-}
-
 /**
  * The delivery email's two pieces. `priceLine` replaces the "Estimated price"
  * row value; `note` is the second line, which rides in front of the existing
@@ -145,11 +137,9 @@ function emailParts(model, oneTime = null) {
   if (!model) return null;
   let priceLine;
   if (model.multi) {
-    const names = model.services.map((s) => shortServiceName(s.label)).filter(Boolean);
-    const lead = names.length >= 2 && names.length <= 3 && names.every((n) => n.length <= 24)
-      ? `${names.map((n, i) => (i === 0 ? n : n.toLowerCase())).join(' + ')} plan`
-      : 'Your plan';
-    priceLine = `${lead} · ${aboutMonth(model.planMonthly)}`;
+    // The per-application prices stay the prices (they sit on each card and in
+    // the PDF); the average never stands alone as THE price (owner 2026-10-20).
+    priceLine = `Priced per application · plan averages ${aboutMonth(model.planMonthly)}`;
   } else {
     const only = model.services[0];
     priceLine = `${money(only.perApplication)} per application · ${aboutMonth(model.planMonthly)}`;
@@ -176,6 +166,5 @@ module.exports = {
   planLabel,
   aboutMonth,
   emailParts,
-  shortServiceName,
   money,
 };

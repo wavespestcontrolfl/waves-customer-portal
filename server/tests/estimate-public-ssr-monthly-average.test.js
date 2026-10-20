@@ -76,6 +76,19 @@ describe('legacy SSR page: monthly average', () => {
     expect(cents(html.match(/data-monthly-average-plan[\s\S]*?(about \$[\d.,]+ a month)/)[1])).toBe(13280);
   });
 
+  test('the one-time notice follows an additive one-time row (flea), not an either/or option', () => {
+    const flea = { service: 'flea', name: 'Flea Treatment', label: 'Flea Treatment', price: 150, amount: 150, visits: 1 };
+    const withFlea = { result: { lineItems: [tree], oneTime: { items: [flea], membershipFee: 0 } } };
+    const html = render(estimate(66.75, { onetimeTotal: 150 }), withFlea);
+    expect(html).toContain('One-time charges are not in the average.');
+    expect(render(estimate(66.75), data(tree))).not.toContain('One-time charges are not in the average.');
+  });
+
+  test('a wizard draft with the commercial marker never shows the average', () => {
+    const marked = { ...data(tree), commercialEstimatedPricing: true };
+    expect(render(estimate(66.75), marked)).not.toContain('data-monthly-average');
+  });
+
   test('withheld when the cards do not reconcile to the stored monthly total', () => {
     expect(render(estimate(80), data(tree, lawn))).not.toContain('data-monthly-average');
   });

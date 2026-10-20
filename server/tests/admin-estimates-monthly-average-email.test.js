@@ -117,7 +117,7 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
   test('multi service: the plan average equals the stored monthly total; setup stays out of it', async () => {
     const average = await emailAverageParts(bundleEstimate);
     expect(average).toEqual({
-      priceLine: 'Lawn + pest plan · about $72.30 a month',
+      priceLine: 'Priced per application · plan averages about $72.30 a month',
       note: 'Averaged over the year, bundle savings included. You pay after each application. One-time setup $99.00, not in the average.',
     });
     expect(parseFloat(bundleEstimate.monthly_total)).toBe(72.3);
@@ -166,6 +166,30 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     // One-time only: no recurring total.
     expect(await emailAverageParts({ ...pestEstimate, monthly_total: '0', annual_total: '0', onetime_total: '250', estimate_data: {} })).toBeNull();
     expect(moneySummary({ monthly_total: '0', onetime_total: '250' }, { average: { priceLine: 'x' } })).toBe('$250.00 one-time');
+  });
+
+  test('an additive one-time row (flea) reads "One-time charges", not "setup"', async () => {
+    const withFlea = {
+      ...bundleEstimate,
+      onetime_total: '249',
+      estimate_data: { sendSnapshot: { pricingBundle: {
+        ...bundleEstimate.estimate_data.sendSnapshot.pricingBundle,
+        oneTimeBreakdown: { items: [
+          { kind: 'charge', amount: 99, label: 'WaveGuard setup' },
+          { kind: 'charge', amount: 150, label: 'Flea Treatment' },
+        ] },
+      } } },
+    };
+    const average = await emailAverageParts(withFlea);
+    expect(average.priceLine).toBe('Priced per application · plan averages about $72.30 a month');
+    expect(average.note).toContain('One-time charges $249.00, not in the average.');
+    expect(average.note).not.toContain('One-time setup');
+  });
+
+  test('a wizard draft with the commercial marker gets no average, whatever its category says', async () => {
+    const marked = { ...pestEstimate, estimate_data: { ...pestEstimate.estimate_data, commercialEstimatedPricing: true } };
+    expect(marked.category).toBe('RESIDENTIAL');
+    expect(await emailAverageParts(marked)).toBeNull();
   });
 
   test('a commercial proposal keeps its own totals line and ignores the average', () => {

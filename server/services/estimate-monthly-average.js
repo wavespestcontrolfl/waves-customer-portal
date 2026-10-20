@@ -17,6 +17,7 @@
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 const shared = require('../../shared/estimate-monthly-average.cjs');
+const { isCommercialAutoAcceptEstimate } = require('./estimate-commercial-identity');
 
 const SETUP_WORDING = /set-?up|membership|initial/i;
 
@@ -37,20 +38,52 @@ function parseData(value) {
   return typeof value === 'object' ? value : {};
 }
 
-// The plan-level credit the bundle declares, as a monthly amount (the same
-// source estimate-proposal.js reconciles its per-application lines against).
-function declaredCredit(bundle) {
-  const annual = num(bundle?.manualDiscount?.recurringAmount ?? bundle?.manualDiscount?.amount);
-  if (!(annual > 0)) return null;
-  return { label: String(bundle?.manualDiscount?.label || '').trim() || 'Discount', monthly: Math.round((annual / 12) * 100) / 100 };
+const liveCredit = (discount) => (discount && num(discount.recurringAmount ?? discount.amount) > 0 ? discount : null);
+
+const creditOf = (discount) => ({
+  label: String(discount?.label || '').trim() || 'Discount',
+  monthly: Math.round((num(discount.recurringAmount ?? discount.amount) / 12) * 100) / 100,
+});
+
+// The plan-level credit, as a monthly amount, read from the SAME candidate the
+// document's lines were quoted from (perApplicationRecurringResolution), the way
+// the React page reads the selected cadence: a service-cadence COMBO carries its
+// own credit state (manualDiscount + manualDiscountSuppressed) and the bundle
+// root's is stale for it; the top-level frequency and then the bundle root only
+// apply when no combo was selected. Without a resolvable candidate (a bare
+// bundle) the bundle root is all there is.
+function declaredCredit(bundle, candidate = null) {
+  const isCombo = !!candidate && Array.isArray(bundle?.serviceCadenceCombos) && bundle.serviceCadenceCombos.includes(candidate);
+  if (isCombo) {
+    const own = candidate.manualDiscountSuppressed === true ? null : liveCredit(candidate.manualDiscount);
+    return own ? creditOf(own) : null;
+  }
+  if (candidate?.manualDiscountSuppressed === true) return null;
+  const discount = liveCredit(candidate?.manualDiscount) || (bundle?.manualDiscountSuppressed === true ? null : liveCredit(bundle?.manualDiscount));
+  return discount ? creditOf(discount) : null;
 }
 
-// Plans this feature never touches: commercial, authored proposals, quote-required.
+// Plans this feature never touches: commercial (by the canonical classifier the
+// accept and slot routes use: the commercialEstimatedPricing marker, estimated-
+// pricing commercial lines or commercial rows, not only the category), authored
+// proposals, quote-required.
 function isExcludedPlan(estimate, proposal, bundle) {
   if (proposal.enabled === true) return true;
   if (String(estimate.category || '').toUpperCase() === 'COMMERCIAL') return true;
+  if (isCommercialAutoAcceptEstimate(estimate)) return true;
   if ((proposal.programs || []).length > 0 || (proposal.correctiveWork || []).length > 0) return true;
   return bundle?.quoteRequired === true || parseData(estimate.estimate_data ?? estimate.estimateData).quoteRequired === true;
+}
+
+// The candidate cadence the proposal's lines were quoted from; null when it
+// cannot be resolved (callers fall back to the bundle root).
+function resolveCandidate(estimate, livePricing) {
+  try {
+    const { perApplicationRecurringResolution } = require('./estimate-proposal');
+    return perApplicationRecurringResolution(estimate, parseData(estimate.estimate_data ?? estimate.estimateData), livePricing)?.candidate || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -61,12 +94,13 @@ function isExcludedPlan(estimate, proposal, bundle) {
  * @param {object} args.estimate  the estimate row (monthly_total, category)
  * @param {object} args.proposal  normalizeProposal(estimate, {recurringMode:'per_application', ...})
  * @param {object|null} args.bundle  the pricing bundle the lines came from (live, else the send snapshot)
+ * @param {object|null} args.livePricing  the live pricing the lines were quoted with (null = frozen snapshot); resolves the candidate cadence
  * @returns {null | {
  *   model: object,
  *   inputs: { planMonthly: number, credit: object|null, bundleDiscountPct: number, oneTime: object|null },
  * }}
  */
-function monthlyAverageFor({ estimate, proposal, bundle = null } = {}) {
+function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = null } = {}) {
   if (!gateOn() || !estimate || !proposal || isExcludedPlan(estimate, proposal, bundle)) return null;
 
   const lines = (proposal.buildings || []).flatMap((building) => building.lineItems || []);
@@ -78,7 +112,7 @@ function monthlyAverageFor({ estimate, proposal, bundle = null } = {}) {
     && num(line.visitsPerYear) > 0 && num(line.amount) > 0 && line.taxable !== true)) return null;
 
   const bundlePct = num(bundle?.combinedRecurring?.waveGuardDiscountPct);
-  const credit = declaredCredit(bundle);
+  const credit = declaredCredit(bundle, bundle ? resolveCandidate(estimate, livePricing) : null);
   const model = shared.buildMonthlyAverage({
     services: recurring.map((line, i) => ({
       key: String(i),
@@ -92,7 +126,10 @@ function monthlyAverageFor({ estimate, proposal, bundle = null } = {}) {
   });
   if (!model) return null;
 
-  const oneTimeLines = lines.filter((line) => line.frequency === 'one_time' && num(line.amount) > 0);
+  // When the estimate offers a one-time option, its one-time rows are the either/or
+  // alternative to the plan, not an extra charge: only the setup fee counts then.
+  const oneTimeLines = lines.filter((line) => line.frequency === 'one_time' && num(line.amount) > 0
+    && (!estimate.show_one_time_option || SETUP_WORDING.test(String(line.description || ''))));
   const oneTimeAmount = Math.round(oneTimeLines.reduce((sum, line) => sum + num(line.amount), 0) * 100) / 100;
   const oneTime = oneTimeAmount > 0
     ? { amount: oneTimeAmount, setup: oneTimeLines.every((line) => SETUP_WORDING.test(String(line.description || ''))) }
@@ -125,7 +162,7 @@ async function emailAverageParts(estimate) {
     if (!ctx || ctx.billsPerApplication !== true) return null;
     const proposal = normalizeProposal(copy, { recurringMode: 'per_application', livePricing: ctx.livePricing || null });
     const bundle = ctx.livePricing?.bundle || parseData(copy.estimate_data ?? copy.estimateData)?.sendSnapshot?.pricingBundle || null;
-    const result = monthlyAverageFor({ estimate: copy, proposal, bundle });
+    const result = monthlyAverageFor({ estimate: copy, proposal, bundle, livePricing: ctx.livePricing || null });
     return result ? shared.emailParts(result.model, result.inputs.oneTime) : null;
   } catch (err) {
     logger.warn(`[estimate-monthly-average] email parts unavailable for estimate ${estimate?.id}: ${err.message}`);

@@ -131,7 +131,7 @@ describe('emailParts', () => {
       bundleDiscountPct: 0.1,
     });
     expect(emailParts(model, { amount: 99, setup: true })).toEqual({
-      priceLine: 'Lawn + pest plan · about $72.30 a month',
+      priceLine: 'Priced per application · plan averages about $72.30 a month',
       note: 'Averaged over the year, bundle savings included. You pay after each application. One-time setup $99.00, not in the average.',
     });
     expect(emailParts(model, { amount: 99, setup: false }).note).toContain('One-time charges $99.00, not in the average.');
@@ -188,6 +188,59 @@ describe('monthlyAverageFor (server decision)', () => {
     expect(monthlyAverageFor({ estimate: estimateOf(0), proposal: oneTimeOnly })).toBeNull();
     // A stored total that does not match the lines (stale columns) withholds the average.
     expect(monthlyAverageFor({ estimate: estimateOf(40), proposal: pest })).toBeNull();
+  });
+
+  test('the credit comes from the SELECTED service-cadence combo: top-level suppressed, combo grants it', () => {
+    const lines = [
+      perApp('Lawn Care — 9 applications/yr', 56.4, 9),
+      perApp('Pest Control — 4 applications/yr', 90, 4),
+    ];
+    const combo = {
+      key: 'quarterly:standard', annual: 747.6, monthly: 62.3,
+      perServiceTreatments: [
+        { label: 'Lawn Care', service: 'lawn_care', displayPrice: 56.4, visitsPerYear: 9 },
+        { label: 'Pest Control', service: 'pest_control', displayPrice: 90, visitsPerYear: 4 },
+      ],
+      manualDiscount: { label: 'Referral Credit', recurringAmount: 120 },
+    };
+    const bundle = {
+      combinedRecurring: { waveGuardDiscountPct: 0.1 },
+      manualDiscountSuppressed: true,
+      frequencies: [],
+      serviceCadenceCombos: [combo],
+    };
+    // Frozen path: the candidate is resolved from the send snapshot, the way the document's lines were.
+    const frozen = (b) => estimateOf(62.3, { annual_total: 747.6, estimate_data: { sendSnapshot: { pricingBundle: b } } });
+    const result = monthlyAverageFor({ estimate: frozen(bundle), proposal: proposalOf(lines), bundle });
+    expect(result.model.credit).toEqual({ label: 'Referral Credit', monthly: 10 });
+    expect(result.model.planMonthly).toBe(62.3);
+    // A combo that suppresses its credit gets none, even though the bundle root declares one.
+    const suppressed = { ...bundle, manualDiscountSuppressed: false, manualDiscount: { label: 'Root', recurringAmount: 120 }, serviceCadenceCombos: [{ ...combo, manualDiscount: undefined, manualDiscountSuppressed: true }] };
+    expect(monthlyAverageFor({ estimate: frozen(suppressed), proposal: proposalOf(lines), bundle: suppressed })).toBeNull();
+  });
+
+  test('a wizard draft carrying the commercial marker is commercial even with category RESIDENTIAL', () => {
+    const marked = estimateOf(31.33, { estimate_data: { commercialEstimatedPricing: true } });
+    expect(marked.category).toBe('RESIDENTIAL');
+    expect(monthlyAverageFor({ estimate: marked, proposal: pest })).toBeNull();
+    const asString = estimateOf(31.33, { estimate_data: JSON.stringify({ commercialEstimatedPricing: true }) });
+    expect(monthlyAverageFor({ estimate: asString, proposal: pest })).toBeNull();
+    const row = estimateOf(31.33, { estimate_data: { engineResult: { lineItems: [{ service: 'commercial_pest', estimatedPricing: true, annual: 376 }] } } });
+    expect(monthlyAverageFor({ estimate: row, proposal: pest })).toBeNull();
+  });
+
+  test('one-time notice: an additive row (flea) is "charges", not "setup"; an either/or one-time option counts only its setup', () => {
+    const flea = { description: 'Flea Treatment', quantity: 1, unitPrice: 150, amount: 150, frequency: 'one_time', taxable: false };
+    const setup = { description: 'WaveGuard setup', quantity: 1, unitPrice: 99, amount: 99, frequency: 'one_time', taxable: false };
+    const choice = { description: 'One-Time Pest Control', quantity: 1, unitPrice: 250, amount: 250, frequency: 'one_time', taxable: false };
+    const withFlea = monthlyAverageFor({ estimate: estimateOf(31.33), proposal: proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4), setup, flea]) });
+    expect(withFlea.inputs.oneTime).toEqual({ amount: 249, setup: false });
+    expect(emailParts(withFlea.model, withFlea.inputs.oneTime).note).toContain('One-time charges $249.00, not in the average.');
+    const optionEstimate = estimateOf(31.33, { show_one_time_option: true });
+    const withChoice = monthlyAverageFor({ estimate: optionEstimate, proposal: proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4), choice]) });
+    expect(withChoice.inputs.oneTime).toBeNull();
+    const withChoiceAndSetup = monthlyAverageFor({ estimate: optionEstimate, proposal: proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4), setup, choice]) });
+    expect(withChoiceAndSetup.inputs.oneTime).toEqual({ amount: 99, setup: true });
   });
 
   test('a declared bundle credit explains a gap between the lines and the stored total', () => {

@@ -9132,6 +9132,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: readOnlyPreview }
         : null
     );
+    // Charges that sit beside the plan and never enter the monthly average
+    // (GATE_ESTIMATE_MONTHLY_AVERAGE): a setup / first-visit fee, or an ADDITIVE
+    // one-time breakdown row (a flea treatment). When the estimate offers a
+    // one-time option, the breakdown rows are the either/or alternative to the
+    // plan, not an extra charge, so they do not count.
+    const hasOneTimeBesidePlan = feeList.some((fee) => Number(fee?.amount) > 0)
+      || (!estimate.showOneTimeOption && (Array.isArray(pricing.oneTimeBreakdown?.items) ? pricing.oneTimeBreakdown.items : [])
+        .some((item) => item && item.kind === 'charge' && Number(item.amount) > 0 && item.quoteRequired !== true));
     if (mode === 'recurring') {
       return (
         <>
@@ -9181,7 +9189,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
                 monthlyAverageLine={monthlyAverage && monthlyAverage.byKey[section.key] != null ? aboutMonth(monthlyAverage.byKey[section.key]) : null}
-                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.showPlan ? `${MONTHLY_AVERAGE_CONTEXT}${feeList.some((fee) => Number(fee?.amount) > 0) ? ' One-time charges are not in the average.' : ''}` : null}
+                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.showPlan ? `${MONTHLY_AVERAGE_CONTEXT}${hasOneTimeBesidePlan ? ' One-time charges are not in the average.' : ''}` : null}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
@@ -9426,7 +9434,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {(monthlyAverage?.model.showPlan) && mode === 'recurring' ? (
             <MonthlyAverageSummary
               model={monthlyAverage.model}
-              hasOneTime={feeList.some((fee) => Number(fee?.amount) > 0)}
+              hasOneTime={hasOneTimeBesidePlan}
             />
           ) : null}
 

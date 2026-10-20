@@ -2814,6 +2814,51 @@ describe('monthly average beside per-application prices', () => {
     // No fee: the plain sentence only (covered above).
   });
 
+  describe('the one-time notice follows additive one-time breakdown rows, not either/or options', () => {
+    const flea = { service: 'flea', label: 'Flea Treatment', amount: 150, kind: 'charge' };
+    const notice = 'One-time charges are not in the average.';
+
+    it('single service: an additive row (flea) triggers it', async () => {
+      const payload = single(true);
+      payload.pricing.oneTimeBreakdown = { total: 150, items: [flea] };
+      stub(payload);
+      const { container } = render(<EstimateViewPage />);
+      await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+      expect(container.textContent).toContain(notice);
+    });
+
+    it('multi service summary: the same rule', async () => {
+      const payload = multi(true);
+      payload.pricing.setupFee = null;
+      payload.pricing.oneTimeBreakdown = { total: 150, items: [flea] };
+      stub(payload);
+      const { container } = render(<EstimateViewPage />);
+      const summary = await waitFor(() => {
+        const el = container.querySelector('[data-monthly-average-summary]');
+        expect(el).not.toBeNull();
+        return el;
+      });
+      expect(summary.textContent).toContain(notice);
+    });
+
+    it('an either/or one-time option (showOneTimeOption) does not trigger it', async () => {
+      const payload = single(true);
+      payload.estimate.showOneTimeOption = true;
+      payload.pricing.oneTimeBreakdown = { total: 250, items: [{ service: 'pest_control', label: 'One-Time Pest Control', amount: 250, kind: 'charge' }] };
+      stub(payload);
+      const { container } = render(<EstimateViewPage />);
+      await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+      expect(container.textContent).not.toContain(notice);
+    });
+
+    it('no one-time rows, no notice', async () => {
+      stub(single(true));
+      const { container } = render(<EstimateViewPage />);
+      await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+      expect(container.textContent).not.toContain(notice);
+    });
+  });
+
   describe('plan credit comes from the SELECTED cadence combo', () => {
     const comboPayload = ({ comboCredit, comboSuppressed = false, baseCredit = null }) => {
       const payload = multi(true);

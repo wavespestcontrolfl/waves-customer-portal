@@ -146,6 +146,16 @@ describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)',
     });
   });
 
+  test('a wizard draft with the commercial marker never carries the average, whatever its category says', async () => {
+    const base = perApplicationRow();
+    dbRows = { estimates: perApplicationRow({ category: 'RESIDENTIAL', estimate_data: { ...base.estimate_data, commercialEstimatedPricing: true } }) };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+      const body = await res.json();
+      expect(body.proposal).not.toHaveProperty('monthlyAverage');
+    });
+  });
+
   test('a commercial estimate never carries the average', async () => {
     dbRows = { estimates: perApplicationRow({ category: 'COMMERCIAL' }) };
     await withServer(async (baseUrl) => {

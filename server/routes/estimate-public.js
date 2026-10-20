@@ -61,6 +61,7 @@ const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 const monthlyAverageShared = require('../../shared/estimate-monthly-average.cjs');
+const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
 const { classifyTermiteScope } = require('../../shared/estimate-termite-scope.cjs');
 const {
   collapseMirroredRows,
@@ -6310,8 +6311,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const ssrAvgLineHtml = (index) => (ssrMonthlyAverage
     ? `<div class="day-price" ${ssrAvgAttrs}>${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.services[index].monthly))}</div>`
     : '');
+  // One-time charges beside the plan: a setup / bait-station fee, or an ADDITIVE
+  // one-time row (same exclusions as the "billed separately" list: the WaveGuard
+  // setup is counted by its fee, and the either/or one-time choice is not extra).
+  const ssrAvgAdditiveOneTime = ssrMonthlyAverage && oneTimeItems.some((it) => {
+    if (isWaveGuardSetupOneTimeItem(it)) return false;
+    if (canChooseOneTime && isOneTimePestChoiceItem(it)) return false;
+    if (canChooseOneTime && oneTimeChoiceCategory && oneTimeChoiceCategory !== 'pest_control'
+      && isOneTimeChoiceItemForCategory(it, oneTimeChoiceCategory)) return false;
+    return it.quoteRequired !== true && oneTimeItemAmount(it) > 0;
+  });
   const ssrAvgOneTime = ssrMonthlyAverage
-    && ((showMembershipFee && membershipFee > 0 && !membershipSetupWaivedForExistingCustomer) || rodentSetupDueToday > 0);
+    && ((showMembershipFee && membershipFee > 0 && !membershipSetupWaivedForExistingCustomer) || rodentSetupDueToday > 0 || ssrAvgAdditiveOneTime);
   const ssrAvgContext = `${monthlyAverageShared.CONTEXT_LINE}${ssrAvgOneTime ? ' One-time charges are not in the average.' : ''}`;
   const ssrAvgSummaryHtml = !ssrMonthlyAverage ? '' : (ssrMonthlyAverage.showPlan ? `
       <div ${ssrAvgAttrs} data-mode-only="recurring" style="margin-top:16px;padding:14px 16px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;font-size:16px;color:#1B2C5B;max-width:900px">
@@ -9842,28 +9853,11 @@ async function handleEstimateView(req, res, next) {
 // GET /api/estimates/:token — customer views estimate (no auth) — server-rendered HTML
 router.get('/:token', handleEstimateView);
 
-// Auto-priced commercial lawn/tree estimates are approval-only: no bookable
-// slot, no booking deposit/card, and no auto-scheduling — the team confirms
-// scope on-site, schedules, and invoices. They CAN prepay the year at the
-// standard 5% discount (there is no WaveGuard setup fee on commercial). Mirrors
-// estimate-slots-public's isCommercialAutoEstimate — keep both in sync.
-function isCommercialAutoAcceptEstimate(estimate = {}) {
-  let data = estimate.estimate_data;
-  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
-  data = data || {};
-  if (data.commercialEstimatedPricing === true) return true;
-  const isCommercialSvc = (s) => {
-    const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
-    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
-  };
-  const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
-  if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) return true;
-  const recurringRows = [
-    ...(Array.isArray(data.result?.recurring?.services) ? data.result.recurring.services : []),
-    ...(Array.isArray(data.recurring?.services) ? data.recurring.services : []),
-  ];
-  return recurringRows.some(isCommercialSvc);
-}
+// Auto-priced commercial lawn/tree estimates are approval-only: the canonical
+// classifier (estimate_data.commercialEstimatedPricing marker, estimated-pricing
+// commercial lines, commercial recurring rows) lives in
+// services/estimate-commercial-identity.js so the monthly average and every
+// other consumer read the same decision. Imported at the top of this file.
 
 // DISPLAY-ONLY commercial identity for scoped one-time rows priced under
 // GATE_COMMERCIAL_ONETIME_SCOPED (codex #3594 r2 P1): those rows keep ordinary
@@ -30221,6 +30215,7 @@ async function composeEstimateDataPayload(estimate, {
             estimate,
             proposal: proposalForView,
             bundle: proposalBilling.livePricing?.bundle || estimateDataForIntelligence?.sendSnapshot?.pricingBundle || null,
+            livePricing: proposalBilling.livePricing || null,
           })
           : null;
         proposalPublicView = {
