@@ -51,8 +51,8 @@ const OPT_OUT_PATTERNS = [
 // unless, rather, wish, prefer, want, need, ask, request, like, say, tell): "I would prefer it if I
 // received no texts" and "I received your confirmation but I said no texts that day" are requests.
 // A strong request word in the sentence ("please", "anymore", "from now on") keeps it a request.
-// Sentences end at . ! ? ; or a line break; a comma does not end one. "No more texts" stays a stop
-// request anywhere (OPT_OUT_PATTERNS above).
+// Sentences end at . ! ? or ; (a line break or a comma does not end one: "No\ntexts please" is a
+// request). "No more texts" stays a stop request anywhere (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:text\s+messages?|texts?|messages?|sms)\b/gi;
 const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|there(?:'s|\s+has|\s+have)\s+been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
 const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out)\b/i;
@@ -64,8 +64,8 @@ const STOP_LANGUAGE = /\b(?:stop(?!\s+(?:by|over|in|at|back))|stopp|unsubscribe|
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 
 function sentencesOf(body) {
-  const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;\n\r]+[.!?;\n\r]*/g) || [];
-  return pieces.map((piece) => piece.replace(/[.!?;\n\r]+$/, '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;]+[.!?;]*/g) || [];
+  return pieces.map((piece) => piece.replace(/[.!?;]+$/, '').replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
 // 'request', 'report' (a missing-text complaint) or null (no "no texts" in the sentence).
