@@ -204,3 +204,30 @@ describe('monthlyAverageFor (server decision)', () => {
     expect(result.model.planMonthly).toBe(62.3);
   });
 });
+
+describe('reviewedAverageStale (reviewed and scheduled sends)', () => {
+  const { reviewedAverageStale, averageText } = require('../services/estimate-monthly-average');
+  const parts = { priceLine: '$94.00 per application · about $31.33 a month', note: 'Averaged over the year. You pay after each application.' };
+  const reviewed = (email) => ({ sms: null, email });
+
+  test('the recorded copy is the price row and the context sentence', () => {
+    expect(averageText(parts)).toBe(`${parts.priceLine}\n${parts.note}`);
+    expect(averageText(null)).toBeNull();
+  });
+
+  test('gate off with nothing recorded: not stale, and nothing is read', async () => {
+    mockGate.on = false;
+    const loadRow = jest.fn();
+    expect(await reviewedAverageStale(reviewed({ provider: 'sendgrid' }), loadRow)).toBe(false);
+    expect(loadRow).not.toHaveBeenCalled();
+  });
+
+  test('a recorded average with the gate now off is stale; an SMTP or absent review never is', async () => {
+    mockGate.on = false;
+    const loadRow = jest.fn(async () => ({}));
+    expect(await reviewedAverageStale(reviewed({ provider: 'sendgrid', monthlyAverage: averageText(parts) }), loadRow)).toBe(true);
+    expect(await reviewedAverageStale(reviewed({ provider: 'smtp', monthlyAverage: averageText(parts) }), loadRow)).toBe(false);
+    expect(await reviewedAverageStale(null, loadRow)).toBe(false);
+    expect(await reviewedAverageStale(reviewed(null), loadRow)).toBe(false);
+  });
+});

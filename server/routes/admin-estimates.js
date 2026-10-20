@@ -911,6 +911,9 @@ async function buildEstimateSendPreview(estimate) {
   const priceLine = estimateEmailPriceLine(estimate);
   // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
   const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
+  // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
+  // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
+  const averageText = require('../services/estimate-monthly-average').averageText(average);
   const sms = await smsTemplatesRouter.getTemplate('estimate_sent', {
     first_name: firstName, estimate_url: viewUrl,
   }, {}, { noVariants: true, audit: false });
@@ -935,7 +938,7 @@ async function buildEstimateSendPreview(estimate) {
     // schedule built from it). Present only when true, so a send with no PDF
     // keeps its review byte-identical to before; a review without it means "no
     // PDF" (sendEstimateNowInner).
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}) };
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
     // The content hash is of the SMTP content alone (no note), so it is unchanged.
@@ -2715,6 +2718,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
+    // GATE_ESTIMATE_MONTHLY_AVERAGE: the reviewed average copy must still be what this send would carry
+    // (a gate flip or a price edit since the review or schedule). Resolved BEFORE the claim transaction because
+    // it reads billing state on other connections; a mismatch refuses the whole send below, before any channel.
+    const reviewedAverageStale = sendMethod !== 'sms'
+      && await require('../services/estimate-monthly-average').reviewedAverageStale(
+        options.reviewedMessages,
+        async () => (await db('estimates').where({ id: estimate.id }).first()) || estimate,
+      );
     const invalidatedNow = await db.transaction(async (trx) => {
       // Group advisory lock BEFORE any row lock when siblings are claimed
       // below (pre-push audit P1 after r42): two grouped sends / extensions
@@ -2736,6 +2747,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // joining a group, since the review or schedule): never silently add or
       // drop the file. Reviews that carry no decision mean "no PDF" and are not
       // stale (codex #6343 r6).
+      if (reviewedAverageStale) return 'saved_offer_changed';
       if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
@@ -2815,7 +2827,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     });
     if (invalidatedNow) {
       if (invalidatedNow === 'saved_offer_changed') {
-        throw Object.assign(new Error('The saved offer or its PDF copy changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+        throw Object.assign(new Error('The saved offer, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
       }
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })

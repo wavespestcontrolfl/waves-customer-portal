@@ -131,4 +131,33 @@ async function emailAverageParts(estimate) {
   }
 }
 
-module.exports = { monthlyAverageFor, emailAverageParts, gateOn };
+// The exact customer copy the average adds to the delivery email (the price
+// row and the context sentence), or null when there is none. This is what a
+// review records and what the send compares against.
+function averageText(parts) {
+  return parts ? `${parts.priceLine}\n${parts.note}` : null;
+}
+
+/**
+ * True when a REVIEWED (or scheduled) delivery email's recorded average no
+ * longer matches what the send would now carry: a gate flip or a price edit
+ * since the review. Same class as the reviewed PDF decision
+ * (estimate-email-pdf.js reviewedPdfDecisionStale), with one difference: a
+ * review with no recorded average means "no average", so a send that would now
+ * add one is stale too. The copy is never silently added or dropped. SMTP
+ * reviews carry no average line, so they are never stale on this account.
+ *
+ * @param {object|null} reviewedMessages  options.reviewedMessages of the send (null for an unreviewed send)
+ * @param {() => Promise<object>} loadRow  reads the estimate row as it is now
+ */
+async function reviewedAverageStale(reviewedMessages, loadRow) {
+  const reviewedEmail = reviewedMessages?.email;
+  if (!reviewedEmail || reviewedEmail.provider === 'smtp') return false;
+  const stored = reviewedEmail.monthlyAverage ?? null;
+  // Gate off and nothing recorded: nothing to compute, nothing changed.
+  if (stored === null && !gateOn()) return false;
+  // Through module.exports so a test can pin the resolution without a billing fixture.
+  return stored !== averageText(await module.exports.emailAverageParts(await loadRow()));
+}
+
+module.exports = { monthlyAverageFor, emailAverageParts, averageText, reviewedAverageStale, gateOn };
