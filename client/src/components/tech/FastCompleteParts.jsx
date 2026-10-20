@@ -14,6 +14,7 @@ import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-t
 import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { elapsedSince } from '../../lib/on-site-time';
 import { isMlUnit } from '../../lib/measure-units';
+import { normalizeApplicationMethod } from '../../lib/product-rate-prefill';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
@@ -393,6 +394,26 @@ export const COMMON_LAWN_METHODS = [
   { value: 'broadcast_spray', label: 'Broadcast spray', common: true },
   { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
 ];
+
+// A granular product, by what the catalog says: its formulation or category names granular, or its
+// name carries the label's granular mark ("Arena 0.25G", "Headway G", a name with "Granular").
+// A wet-mix mark such as WG, WDG or SC is not one.
+const GRANULAR_NAME = /granul|(?:\d|\s)G(?:\s|$)/;
+export const isGranularProduct = (product) => /^(?:g|gr|granul\w*)$/i.test(String(product?.formulation || '').trim())
+  || /granul/i.test(String(product?.category || product?.product_category || ''))
+  || GRANULAR_NAME.test(String(product?.name || ''));
+
+const SPRAY_METHODS = new Set(['broadcast_spray', 'foliar_spray', 'perimeter_spray']);
+
+/**
+ * The method a lawn row starts on: a granular product never starts on a spray method (the plan's,
+ * the last visit's, or the visit's own default), it starts on Granular broadcast. Any other method
+ * (spot treatment, soil drench) and every other product keep the method they had. A tech who then
+ * picks another method is changing it, not taking a default.
+ */
+export function startMethodFor(product, method) {
+  return isGranularProduct(product) && SPRAY_METHODS.has(normalizeApplicationMethod(method)) ? 'granular_broadcast' : method;
+}
 
 /** The context's method list, or the common three when it has none. */
 export function methodChoicesOf(data) {

@@ -53,7 +53,7 @@ import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, startMethodFor, submissionHolds, ProductTileButton, SavedView,
   SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import {
@@ -152,7 +152,9 @@ function productRow(product, { last = null, added = false, ctx }) {
     seeded = seededAmount(lastAmount, measureUnit(last.amountUnit, lastDimension));
   }
   // The recorded method, only when the server offers it; otherwise none.
-  const method = ctx.methods.some((choice) => choice.value === last?.method) ? last.method : '';
+  // A granular product last recorded on a spray method starts on Granular broadcast (the record was wrong).
+  const lastMethod = startMethodFor(product, last?.method);
+  const method = ctx.methods.some((choice) => choice.value === lastMethod) ? lastMethod : '';
   // The area that product recorded last time, in square feet only.
   const areaLast = last?.areaUnit === 'sqft' && Number(last.areaValue) > 0 ? Number(last.areaValue) : null;
   return withAreaSeed({

@@ -9,6 +9,7 @@ import {
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
+import { isTroubleSpotPhoto, rateWithBasis, techTextBeyondSummary } from './serviceReportCleanup';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -136,6 +137,22 @@ function fmtAmount(value) {
   if (!Number.isFinite(num)) return String(value || '').trim();
   return String(parseFloat(num.toFixed(3)));
 }
+
+// The rate cell. GATE_REPORT_CLEANUP_1020 adds what the rate is per when the record says.
+function rateLabel(app, cleanup) {
+  if (!(app.rate && app.rateUnit)) return '—';
+  const amount = fmtAmount(app.rate);
+  return (cleanup && rateWithBasis(app, amount)) || `${amount} ${fmtUnit(app.rateUnit)}`;
+}
+
+// GATE_REPORT_CLEANUP_1020: a photo card as tall as its photo. The old card was a fixed 190px box,
+// so a wide photo sat in a tall gray frame. The image now keeps its own shape at the cell width;
+// only a photo taller than 190px at that width is capped (and letterboxed at the sides), so a
+// portrait photo still never runs past a page break.
+const PHOTO_FIT_STYLE = {
+  display: 'block', width: '100%', height: 'auto', maxHeight: 190, objectFit: 'contain',
+  background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}`,
+};
 
 function fmtUnit(unit) {
   return String(unit || '').replace(/_/g, ' ').trim();
@@ -726,8 +743,14 @@ export default function ServiceReportDocument({ data, token, web = false }) {
   // GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the frozen "From your technician"
   // paragraph. Lawn carries it in the lead; tree & shrub has no lead and carries it
   // as reportV2.techParagraph. Absent key prints nothing.
-  const techParagraph = v2Lead?.techParagraph
+  // GATE_REPORT_CLEANUP_1020 (data.reportCleanup): it prints only the text the summary above
+  // does not already say, and not at all when the summary says all of it.
+  const reportCleanup = data.reportCleanup === true;
+  const techParagraphFrozen = v2Lead?.techParagraph
     || (data.serviceLine === 'tree_shrub' && typeof v2?.techParagraph === 'string' && v2.techParagraph.trim() ? v2.techParagraph : null);
+  const techParagraph = reportCleanup && techParagraphFrozen
+    ? (techTextBeyondSummary(techParagraphFrozen, summaryParagraphs) || null)
+    : techParagraphFrozen;
   // The lawn V2 payload's reconciled watering lines are the only watering
   // instruction the report prints (see the Re-entry block below).
   const lawnV2Watering = data.serviceLine === 'lawn' && Boolean(v2);
@@ -1463,7 +1486,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                           {/* both halves or neither: a bare "5" can't be read
                               as ounces, gallons or grams in a pesticide
                               record, which is worse than showing nothing. */}
-                          {app.rate && app.rateUnit ? `${fmtAmount(app.rate)} ${fmtUnit(app.rateUnit)}` : '—'}
+                          {rateLabel(app, reportCleanup)}
                         </td>
                         <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}
@@ -1758,7 +1781,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                        readers and the PDF accessibility layer (codex P1). */
                     alt={(!suppressPhotoCaption(photo) && photo.caption) || 'Service photo'}
                     onError={() => markImageFailed(photo.url)}
-                    style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
+                    style={reportCleanup ? PHOTO_FIT_STYLE : { display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
                   />
                   )}
                   {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
@@ -1769,6 +1792,13 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                 </figure>
               ))}
             </div>
+            {/* GATE_REPORT_CLEANUP_1020: the server's one fixed line for a trouble-spot photo
+                (what the spot is, what Waves does next). Only beside that photo. */}
+            {reportCleanup && typeof data.troubleSpotNote === 'string' && data.troubleSpotNote.trim() && photos.some(isTroubleSpotPhoto) && (
+              <p data-testid="doc-trouble-spot-note" style={{ margin: '8px 0 0', fontSize: 11, lineHeight: 1.5, color: INK }}>
+                <strong>Trouble spot:</strong> {data.troubleSpotNote.trim()}
+              </p>
+            )}
           </div>
         )}
 

@@ -123,7 +123,7 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
+  RecoveredCompletion, SavedView, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
@@ -734,7 +734,7 @@ function plannedRate(planned) {
 const guideRowFields = (planned, guided) => ({ guided: guided || null, gateNotes: planned?.gateNotes || [] });
 
 function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false }) {
-  const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
+  const rawMethod = startMethodFor(product, planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn'));
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
   // Under the spot rules a spot row never holds the plan's quantity: it is figured from the plan's

@@ -9,6 +9,7 @@ const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker, labelPicksFromStore
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
 const { frozenCoverageDefaultsOnly, coverageVerdictStamp } = require('./lawn-coverage-verdict');
 const reportFacts = require('./lawn-report-facts');
+const reportCleanup1020 = require('./report-cleanup-1020');
 const { buildPhotoFindings, photoFindingsSignatureState } = require('./lawn-photo-findings');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
@@ -4776,8 +4777,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (correctiveApplied) {
       for (const finding of findings) {
         if (finding.category === 'no_activity') {
-          finding.title = 'No corrective findings logged this visit';
-          finding.detail = 'See your technician’s visit summary for what was applied and observed today; no separate corrective finding was logged.';
+          finding.title = reportCleanup1020.NO_CORRECTIVE_TITLE;
+          finding.detail = reportCleanup1020.NO_CORRECTIVE_DETAIL;
         }
       }
     }
@@ -4899,7 +4900,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // GATE_LAWN_REPORT_POLISH: the one-label-line decision frozen at completion ({} when the record carries none).
   const frozenLabelDrops = reportFacts.frozenLabelDropsFor(serviceLine, service.structured_notes);
   const applications = products.map((product, index) => {
-    const method = methodFromProduct(product, serviceLine);
+    // GATE_REPORT_CLEANUP_1020: a granular product never prints a broadcast spray method (a record made before the fix).
+    const method = reportCleanup1020.correctedMethod(methodFromProduct(product, serviceLine), { name: product.product_name });
     return {
       id: product.id || `product-${index + 1}`,
       product: {
@@ -5850,6 +5852,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         customerConcern: structuredCustomerConcern(structured),
         // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
         reentryText: reportFacts.frozenReentryText(service),
+        // GATE_REPORT_CLEANUP_1020: the water-in the products' own frozen rules ask for, used only when the full instruction makes no claim.
+        waterInRule: reportCleanup1020.waterInRuleOf(products),
         // GATE_LAWN_WATER_RAIN: the rain card's permission, frozen at completion (null = today's card).
         rainAdvice: reportFacts.frozenRainAdvice('lawn', service.structured_notes),
         waterSnapshot,

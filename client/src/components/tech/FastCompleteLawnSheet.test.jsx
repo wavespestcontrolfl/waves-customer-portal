@@ -703,6 +703,17 @@ describe('products', () => {
     expect(pressedMethod(editorFor('Iron Plus'))).toBe('Spot treatment');
   });
 
+  test('a granular product starts on Granular broadcast even when the plan carries a spray method; a spray product keeps it', async () => {
+    const arena = { id: 'aaaaaaaa-0000-4000-8000-0000000000a1', name: 'Arena 0.25G', category: 'insecticide', formulation: 'granular' };
+    const ctx = context({ plannedProducts: { source: 'plan', items: [
+      { productId: arena.id, name: arena.name, applicationMethod: 'broadcast_spray', amount: 8, amountUnit: 'lb' },
+      PLANNED[0],
+    ] } });
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog: [...CATALOG, arena] } });
+    expect(pressedMethod(editorFor('Arena 0.25G'))).toBe('Granular broadcast');
+    expect(pressedMethod(editorFor('Talak 7.9%'))).toBe('Broadcast spray');
+  });
+
   test('an older context with no methods still offers the common three', async () => {
     await openSheet({ request: makeRequest({ ctx: context({ methods: undefined }) }) });
     expect([...methodSelect(editorFor('Talak 7.9%')).options].map((o) => o.textContent)).toEqual(['Spot treatment', 'Broadcast spray', 'Granular broadcast']);

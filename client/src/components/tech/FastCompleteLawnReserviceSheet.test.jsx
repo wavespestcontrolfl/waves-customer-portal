@@ -250,6 +250,18 @@ describe('application method and area', () => {
   const pressed = (name, label) => within(howGroup(name)).getByRole('button', { name: label }).getAttribute('aria-pressed');
   const areaInput = (name) => within(editorFor(name)).getByLabelText('Area treated (sq ft)');
 
+  test('a granular product last recorded on a spray method starts on Granular broadcast', async () => {
+    const headway = { productId: 'headway', name: 'Headway G', totalAmount: 6, amountUnit: 'lb', method: 'broadcast_spray', areaValue: 5200, areaUnit: 'sqft' };
+    const ctx = { ...CONTEXT, lastVisit: { ...CONTEXT.lastVisit, products: [headway, ...CONTEXT.lastVisit.products.slice(0, 2)] } };
+    await readyVisit(makeRequest({ context: ctx }));
+    fireEvent.click(tile('Headway G'));
+    expect(pressed('Headway G', 'Granular broadcast')).toBe('true');
+    expect(pressed('Headway G', 'Broadcast spray')).toBe('false');
+    // A liquid keeps the spray method it recorded.
+    fireEvent.click(tile('Talak 7.9%'));
+    expect(pressed('Talak 7.9%', 'Broadcast spray')).toBe('true');
+  });
+
   test('a seeded last-visit method is preserved, and the body carries each row\'s own method', async () => {
     const request = makeRequest();
     await readyVisit(request);
