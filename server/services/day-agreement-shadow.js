@@ -157,7 +157,9 @@ function quietProbe(conn, since) {
 // The latest inbound text per phone in the window, recruiting applicants' texts
 // (job_* message types) left out: they belong to Recruiting, never to a customer visit.
 function latestInboundPerPhone(conn, since) {
-  return conn('sms_log')
+  // Inbound only, so a send reservation can never match; the shared helper is
+  // applied anyway, as every sms_log reader does (sms-log general-reader guard).
+  return excludeUnresolvedSendReservations(conn('sms_log'))
     .select(conn.raw(`DISTINCT ON (${last10('from_phone')}) id, customer_id, created_at, message_body, ${last10('from_phone')} AS digits`))
     .where('direction', 'inbound').where('created_at', '>=', since).whereNotNull('message_body')
     .modify((q) => excludeRecruitingSmsLog(q, 'message_type'))
