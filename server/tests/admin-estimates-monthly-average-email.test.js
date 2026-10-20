@@ -186,6 +186,16 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     expect(average.note).not.toContain('One-time setup');
   });
 
+  test('accepted, declined and quote-required rows get no email average', async () => {
+    for (const status of ['accepted', 'declined', 'quote_required']) {
+      expect(await emailAverageParts({ ...pestEstimate, status })).toBeNull();
+    }
+    expect(await emailAverageParts({ ...pestEstimate, quote_required: true })).toBeNull();
+    // An open row (and a re-sent expired one) still gets it.
+    expect(await emailAverageParts({ ...pestEstimate, status: 'sent' })).not.toBeNull();
+    expect(await emailAverageParts({ ...pestEstimate, status: 'expired' })).not.toBeNull();
+  });
+
   test('a wizard draft with the commercial marker gets no average, whatever its category says', async () => {
     const marked = { ...pestEstimate, estimate_data: { ...pestEstimate.estimate_data, commercialEstimatedPricing: true } };
     expect(marked.category).toBe('RESIDENTIAL');

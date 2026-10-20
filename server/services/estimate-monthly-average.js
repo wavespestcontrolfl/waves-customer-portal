@@ -97,14 +97,33 @@ function oneTimeBesidePlan({ estimate, bundle, lines }) {
   return { amount: lineCents / 100, setup: knownSetupCents > 0 && knownSetupCents === lineCents };
 }
 
+const CLOSED_STATUSES = new Set(['accepted', 'declined', 'quote_required']);
+
+// Rows the estimate page and the legacy page show no average for: accepted,
+// declined, quote-required. The document pass also hands in the page's own
+// terminal state (it covers expiry, judged by the render pin's valid-through
+// date); the email, which is sent while the estimate is being (re)opened, reads
+// only the row status and the stored quote requirement, never the old expiry date.
+function isClosedOrQuoteRequired(estimate, terminalState) {
+  if (terminalState !== undefined && terminalState !== null) return true;
+  if (CLOSED_STATUSES.has(String(estimate.status || '').toLowerCase())) return true;
+  if (estimate.quote_required === true || estimate.quoteRequired === true) return true;
+  try {
+    return require('./estimate-delivery-options').estimateDataHasQuoteRequirement(parseData(estimate.estimate_data ?? estimate.estimateData)) === true;
+  } catch {
+    return false;
+  }
+}
+
 // Plans this feature never touches: commercial (by the canonical classifier the
 // accept and slot routes use: the commercialEstimatedPricing marker, estimated-
 // pricing commercial lines or commercial rows, not only the category), authored
-// proposals, quote-required.
-function isExcludedPlan(estimate, proposal, bundle) {
+// proposals, quote-required, and rows the pages treat as closed.
+function isExcludedPlan(estimate, proposal, bundle, terminalState) {
   if (proposal.enabled === true) return true;
   if (String(estimate.category || '').toUpperCase() === 'COMMERCIAL') return true;
   if (isCommercialAutoAcceptEstimate(estimate)) return true;
+  if (isClosedOrQuoteRequired(estimate, terminalState)) return true;
   if ((proposal.programs || []).length > 0 || (proposal.correctiveWork || []).length > 0) return true;
   return bundle?.quoteRequired === true || parseData(estimate.estimate_data ?? estimate.estimateData).quoteRequired === true;
 }
@@ -128,14 +147,15 @@ function resolveCandidate(estimate, livePricing) {
  * @param {object} args.estimate  the estimate row (monthly_total, category)
  * @param {object} args.proposal  normalizeProposal(estimate, {recurringMode:'per_application', ...})
  * @param {object|null} args.bundle  the pricing bundle the lines came from (live, else the send snapshot)
+ * @param {string|null} [args.terminalState]  the page's own terminal state (document pass); omitted = judge from the row status
  * @param {object|null} args.livePricing  the live pricing the lines were quoted with (null = frozen snapshot); resolves the candidate cadence
  * @returns {null | {
  *   model: object,
  *   inputs: { planMonthly: number, credit: object|null, bundleDiscountPct: number, oneTime: object|null },
  * }}
  */
-function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = null } = {}) {
-  if (!gateOn() || !estimate || !proposal || isExcludedPlan(estimate, proposal, bundle)) return null;
+function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = null, terminalState } = {}) {
+  if (!gateOn() || !estimate || !proposal || isExcludedPlan(estimate, proposal, bundle, terminalState)) return null;
 
   const lines = (proposal.buildings || []).flatMap((building) => building.lineItems || []);
   const recurring = lines.filter((line) => line.frequency !== 'one_time');

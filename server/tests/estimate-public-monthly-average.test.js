@@ -156,6 +156,20 @@ describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)',
     });
   });
 
+  test.each([
+    ['accepted', { status: 'accepted' }],
+    ['declined', { status: 'declined' }],
+    ['quote_required (no commercial marker)', { status: 'quote_required' }],
+  ])('a %s per-application estimate carries no average on the document pass, as the page and legacy page show none', async (_name, overrides) => {
+    dbRows = { estimates: perApplicationRow(overrides) };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+      const body = await res.json();
+      expect(body.documentRender).toBe(true);
+      expect(body.proposal).not.toHaveProperty('monthlyAverage');
+    });
+  });
+
   test('a commercial estimate never carries the average', async () => {
     dbRows = { estimates: perApplicationRow({ category: 'COMMERCIAL' }) };
     await withServer(async (baseUrl) => {

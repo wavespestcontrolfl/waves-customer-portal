@@ -219,6 +219,16 @@ describe('monthlyAverageFor (server decision)', () => {
     expect(monthlyAverageFor({ estimate: frozen(suppressed), proposal: proposalOf(lines), bundle: suppressed })).toBeNull();
   });
 
+  test('the page\'s own terminal state decides on the document pass; without one the row status does', () => {
+    expect(monthlyAverageFor({ estimate: estimateOf(31.33), proposal: pest, terminalState: null })).not.toBeNull();
+    for (const terminalState of ['accepted', 'declined', 'expired', 'quote_required']) {
+      expect(monthlyAverageFor({ estimate: estimateOf(31.33), proposal: pest, terminalState })).toBeNull();
+    }
+    for (const status of ['accepted', 'declined', 'quote_required']) {
+      expect(monthlyAverageFor({ estimate: estimateOf(31.33, { status }), proposal: pest })).toBeNull();
+    }
+  });
+
   test('a wizard draft carrying the commercial marker is commercial even with category RESIDENTIAL', () => {
     const marked = estimateOf(31.33, { estimate_data: { commercialEstimatedPricing: true } });
     expect(marked.category).toBe('RESIDENTIAL');

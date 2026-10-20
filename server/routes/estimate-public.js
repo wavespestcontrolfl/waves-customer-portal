@@ -30216,6 +30216,8 @@ async function composeEstimateDataPayload(estimate, {
             proposal: proposalForView,
             bundle: proposalBilling.livePricing?.bundle || estimateDataForIntelligence?.sendSnapshot?.pricingBundle || null,
             livePricing: proposalBilling.livePricing || null,
+            // The page's own state (accepted / declined / expired by the pin / quote_required), so the document never prints an average the page suppresses.
+            terminalState: ctaTerminalState,
           })
           : null;
         proposalPublicView = {
