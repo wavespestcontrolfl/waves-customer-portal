@@ -141,6 +141,22 @@ async function filterContactsByOwnPrefs(contacts = [], customerId = null, column
   });
 }
 
+// The slot roles (service_contact, service_contact_2, …) whose phone declined
+// an appointment EMAIL event (appointment-email.js resolveRecipients). Empty
+// with the gate off; throws on an unreadable table (the caller holds).
+async function declinedEmailSlotRoles(customer, eventType, { dbh = db } = {}) {
+  const declined = new Set();
+  if (!contactPrefsLive() || !customer) return declined;
+  const { getServiceContactSlots } = require('./customer-contact');
+  const column = columnForEmailEvent(eventType);
+  const rows = await loadContactPrefRows(customer.id, { dbh });
+  for (const slot of getServiceContactSlots(customer)) {
+    const row = slot.phone ? rows.get(phoneKey(slot.phone)) : null;
+    if (row && !contactAllows(row, column, 'email')) declined.add(slot.role);
+  }
+  return declined;
+}
+
 // Service-report EMAIL recipients (customer-contact.js
 // getServiceReportEmailRecipients) carry the SLOT role, and a slot's email
 // may travel without its phone — so the row is found through the slot's
@@ -205,6 +221,7 @@ module.exports = {
   loadContactPrefRows,
   getContactPrefRow,
   filterContactsByOwnPrefs,
+  declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
   pruneContactNotificationPrefs,
   upsertContactNotificationPrefs,

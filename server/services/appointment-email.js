@@ -128,6 +128,14 @@ async function loadCustomer(customerId) {
 // failed property read under enforcement reads as prefs-unavailable.
 const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
 
+// An unreadable per-contact choices table holds the email exactly like an
+// unreadable prefs row (sendTemplate re-resolves on the next scan).
+function heldContactPrefsError(customer, err) {
+  const held = new Error(`contact notification choices unreadable for customer ${customer.id}: ${err.message}`);
+  held.code = PROPERTY_PREFS_UNAVAILABLE;
+  return held;
+}
+
 async function resolveRecipients(customer, { scheduledServiceId = null, eventType = null } = {}) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
@@ -181,23 +189,9 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
   // The contact's OWN choices (contact login, GATE_CONTACT_LOGIN): a slot
   // whose phone declined this purpose by email is left out of BOTH loops
   // below. Same fail-closed posture as an unreadable prefs row: hold.
-  const ContactPrefs = require('./contact-notification-prefs');
-  const emailColumn = ContactPrefs.columnForEmailEvent(eventType);
-  let declinedSlotRoles = new Set();
-  if (ContactPrefs.contactPrefsLive()) {
-    let rows;
-    try {
-      rows = await ContactPrefs.loadContactPrefRows(customer.id);
-    } catch (err) {
-      const held = new Error(`contact notification choices unreadable for customer ${customer.id}: ${err.message}`);
-      held.code = PROPERTY_PREFS_UNAVAILABLE;
-      throw held;
-    }
-    const keyOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-    declinedSlotRoles = new Set(getServiceContactSlots(customer)
-      .filter((s) => s.phone && rows.has(keyOf(s.phone)) && !ContactPrefs.contactAllows(rows.get(keyOf(s.phone)), emailColumn, 'email'))
-      .map((s) => s.role));
-  }
+  const declinedSlotRoles = await require('./contact-notification-prefs')
+    .declinedEmailSlotRoles(customer, eventType)
+    .catch((err) => { throw heldContactPrefsError(customer, err); });
   // skipConsentGate: the consent artifact attests to receiving TEXTS; email
   // routing follows notification prefs alone (see the recipient spec in
   // tests/appointment-email-recipients.test.js).

@@ -171,6 +171,20 @@ function contactSessionFor(customer, contactKey) {
   return findServiceContactSlotByPhoneKey(customer, contactKey);
 }
 
+// Admission of a CONTACT access token on this request. Fail closed on every
+// request: gate off, an inactive row (no cancelled allowance), or a number
+// that no longer occupies a contact slot all end the session (401); a route
+// outside CONTACT_SESSION_ROUTES answers 403 so the client keeps the session
+// and simply never shows that surface. Returns { contact } or { status, body }.
+function admitContactSession(req, customer, contactKey) {
+  const contact = customer.active === true ? contactSessionFor(customer, contactKey) : null;
+  if (!contact) return { status: 401, body: { error: 'Customer not found or inactive' } };
+  if (!contactSessionRoute(req)) {
+    return { status: 403, body: { error: 'This part of the portal is for the account holder.', code: 'ACCOUNT_HOLDER_ONLY' } };
+  }
+  return { contact };
+}
+
 function refreshExpiryDate(token) {
   const decoded = jwt.decode(token);
   return decoded?.exp ? new Date(decoded.exp * 1000) : null;
@@ -600,21 +614,12 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
       return res.status(401).json({ error: 'Invalid token account' });
     }
 
-    // Contact session (GATE_CONTACT_LOGIN). Fail closed on every request:
-    // gate off, an inactive row (no cancelled allowance), or a number that
-    // no longer occupies a contact slot all end the session with a 401; a
-    // route outside CONTACT_SESSION_ROUTES answers 403 so the client keeps
-    // the session and simply never shows that surface.
+    // Contact session (GATE_CONTACT_LOGIN) — see admitContactSession.
     req.contactSession = null;
     if (decoded.contactKey) {
-      const contact = customer.active === true ? contactSessionFor(customer, decoded.contactKey) : null;
-      if (!contact) {
-        return res.status(401).json({ error: 'Customer not found or inactive' });
-      }
-      if (!contactSessionRoute(req)) {
-        return res.status(403).json({ error: 'This part of the portal is for the account holder.', code: 'ACCOUNT_HOLDER_ONLY' });
-      }
-      req.contactSession = contact;
+      const admission = admitContactSession(req, customer, decoded.contactKey);
+      if (!admission.contact) return res.status(admission.status).json(admission.body);
+      req.contactSession = admission.contact;
     }
 
     req.customer = customer;
