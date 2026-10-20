@@ -810,14 +810,13 @@ const commitmentsReplyTokens = () => anthropicMaxTokens(MODELS.FLAGSHIP, 2000);
 
 async function extractCommitmentsWithModel(transcript, { callStartedAt = null, client = null } = {}) {
   if (!transcript || String(transcript).length < 40) return { items: [], skipped: 'transcript_too_short' };
-  const { dispatchWithFallback, rejectCall } = require('./llm/call');
+  const { dispatchWithFallback } = require('./llm/call');
   const startedAt = Date.now();
   // No sampling controls on the request (current Anthropic models 400 on
   // them). The adapter sets maxRetries 0 whenever a budget is supplied — the
   // pipeline has its own retry lanes, and a pass must not sit through the
   // SDK's per-attempt timeouts.
   let accepted = null;
-  let acceptedLeg = null;
   let lastRejection = null;
   const result = await dispatchWithFallback(COMMITMENTS_POLICY(), {
     text: buildCommitmentsPrompt({ transcript, callStartedAt }),
@@ -849,16 +848,25 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
         lastRejection = { code: 'schema_failed', model: route.model, errors: validate.errors };
         return 'schema_invalid';
       }
-      accepted = parsed;
-      // The chain returns a COPY of the answering leg; the ledger row is keyed
-      // on the adapter's own result object, so keep that one to flip below.
-      acceptedLeg = leg;
+      // Claims returned but every one discarded (ungrounded, below the
+      // confidence floor, wrong party) is an answer that produced nothing
+      // usable: it fails this leg so the backup gets a turn (Codex #6346 r3).
+      // An empty commitments array stays a successful "nothing promised"
+      // (Codex r7 on #4884).
+      const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
+      if (parsed.commitments.length && !grounded.kept.length) {
+        lastRejection = { code: 'all_dropped', model: route.model, grounded };
+        return 'invalid_output';
+      }
+      accepted = grounded;
       return null;
     },
   });
   if (!result.ok) {
     // Unusable answers from every leg that answered: the same skipped
     // outcomes the single-provider pass reported.
+    // Every leg dropped all its claims: an answer with nothing usable, as before.
+    if (lastRejection?.code === 'all_dropped') return commitmentsResult(lastRejection.grounded, lastRejection.model, startedAt);
     if (lastRejection) {
       const { code, ...detail } = lastRejection;
       return { items: [], skipped: code, ...detail, ms: Date.now() - startedAt };
@@ -869,13 +877,10 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
     // skipped 'model_failed' and keeps the deterministic seeds.
     throw new Error(`all_providers_failed${reasons.length ? ` (${reasons.join(', ')})` : ''}`);
   }
-  const parsed = accepted;
-  const model = result.model;
-  const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
-  // Claims returned but every one discarded (ungrounded, below the confidence
-  // floor, wrong party) is an answer that produced nothing usable; an empty
-  // commitments array stays a successful "nothing promised" (Codex r7 on #4884).
-  if (Array.isArray(parsed.commitments) && parsed.commitments.length && !grounded.kept.length) rejectCall(acceptedLeg, 'invalid_output');
+  return commitmentsResult(accepted, result.model, startedAt);
+}
+
+function commitmentsResult(grounded, model, startedAt) {
   return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model, ms: Date.now() - startedAt };
 }
 

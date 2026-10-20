@@ -1083,6 +1083,32 @@ describe('the model pass falls back to OpenAI when Anthropic cannot answer (call
     expect(out.items).toHaveLength(1);
   });
 
+  // An ungrounded quote (not in the transcript) is dropped by groundModelCommitments.
+  const ungrounded = JSON.stringify({ commitments: [{ party: 'waves', kind: 'send_paperwork', description: 'Email the WDO paperwork', channel: 'email', due_text: 'tonight', due_at: null, confidence: 0.9, evidence: [{ quote: 'words nobody said on this call', speaker: 'agent' }] }] });
+
+  test('a primary whose every claim is dropped moves to the backup (Codex #6346 r3)', async () => {
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: ungrounded }] }));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(out.model).toBe(MODELS.OPENAI_REPORT_WRITER);
+    expect(out.items.map((i) => i.kind)).toEqual(['send_paperwork']);
+  });
+
+  test('both legs dropping every claim is an empty answer with the drop counts, not a skip', async () => {
+    global.fetch = jest.fn(async () => openaiBody(ungrounded));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create: jest.fn(async () => ({ content: [{ type: 'text', text: ungrounded }] })) } } });
+    expect(out.items).toEqual([]);
+    expect(out.skipped).toBeUndefined();
+    expect(out.droppedUngrounded).toBe(1);
+  });
+
+  test('an empty commitments array is a successful "nothing promised" and never calls the backup', async () => {
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: JSON.stringify({ commitments: [] }) }] }));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(out.items).toEqual([]);
+  });
+
   test('both legs failing at the provider throws reason codes only (the caller reports model_failed)', async () => {
     global.fetch = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
     await expect(extractCommitmentsWithModel(transcript, { client: { messages: { create: anthropic400() } } }))
