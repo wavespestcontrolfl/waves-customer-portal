@@ -89,12 +89,13 @@ function asksForNoTexts(body) {
   const kinds = sentences.map(noTextsKind);
   if (kinds.includes('request')) return true;
   // A missing-text report is exempt, but not when the message also says stop: explicit stop
-  // language anywhere ("I got no text. Stop contacting me"; "stop by" is a visit and "don't stop"
-  // is the opposite), or a clause that is a plain opt-out keyword with polite words around it
+  // language or a "keep it that way" wording anywhere ("I got no text. Stop contacting me", "I got
+  // no texts. Please keep it that way"; "stop by" is a visit and "don't stop" is the opposite), or
+  // a clause that is a plain opt-out keyword with polite words around it
   // ("I got no text. Cancel please"; "Cancel it" names a visit, not texts). The exact-keyword
   // check above only reads a whole message.
   if (!kinds.includes('report')) return false;
-  if (STOP_LANGUAGE.test(body)) return true;
+  if (STOP_LANGUAGE.test(body) || REQUEST_CONTEXT_AFTER.test(body)) return true;
   return String(body || '').split(/[.!?;,\n\r]+/).some((clause) => {
     const keyword = compactKeyword(clause.replace(KEYWORD_FILLER, ' '));
     return EXACT_OPT_OUT.has(keyword) || /^STO+P+$/.test(keyword);
