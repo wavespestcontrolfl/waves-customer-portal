@@ -3,7 +3,7 @@
 // pest report sheet, whose context says `oneTap: true`,
 //  - the report is written in the background when the tech taps the 1-5 rating;
 //  - the note is not read for products (its facts are still read);
-//  - a product at 0 in stock holds nothing, and a line says so;
+//  - a product at 0 in stock still holds, as without the gate (the server refuses a pest deduction below zero);
 //  - the trace is optional: typed feet cover a perimeter spray with no saved trace.
 // A re-service (and, with it, every lane, typed, station and prepare path), a first
 // cleanout that opens with no house mix, and a context without the key keep the sheet
@@ -153,39 +153,20 @@ describe('one-tap: the rating tap starts the writer', () => {
 });
 
 describe('one-tap: a product at 0 in stock', () => {
-  test('holds nothing: the line shows on both steps, Check stock stays, and the visit goes out', async () => {
-    const request = makeRequest({ products: NO_STOCK });
+  // /complete refuses a pest deduction below zero (only a WaveGuard lawn completion may go negative), so the
+  // one-tap report keeps the hold: letting it through would only move the refusal to the last tap.
+  test.each([['gate on', { oneTap: true }], ['gate off', {}]])('%s: the hold stays, and nothing says the visit can still go', async (_label, context) => {
+    const request = makeRequest({ products: NO_STOCK, context });
     await openSheet(request);
-    const line = 'Taurus SC shows 0 in stock. You can still send. Tell the office to restock it.';
-    expect(screen.getByText(line)).toBeTruthy();
-    expect(screen.queryByText('Taurus SC shows 0 in stock. Update inventory or remove it.')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
-    writeNote();
-    tapRating();
-    await openReport();
-    expect(screen.getByText(line)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await screen.findByTestId('fast-complete-sent');
-    expect(request.bodies('/complete')).toHaveLength(1);
-  });
-
-  test('every product at 0 in stock gets its own line, with one Check stock', async () => {
-    const twoOut = () => CATALOG.map((p) => (p.id === 'surfactant' ? p : { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' }));
-    await openSheet(makeRequest({ products: twoOut }));
-    expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. Tell the office to restock it.')).toBeTruthy();
-    expect(screen.getByText('Atticus Talak 7.9 F shows 0 in stock. You can still send. Tell the office to restock it.')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Check stock' })).toHaveLength(1);
-  });
-
-  test('gate off: the hold stays as it was', async () => {
-    await openSheet(makeRequest({ products: NO_STOCK, context: {} }));
     writeNote();
     tapRating();
     expect(screen.getByText('Taurus SC shows 0 in stock. Update inventory or remove it.')).toBeTruthy();
     expect(screen.queryByText(/You can still send/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    // The rating tap's write waits on the same hold.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reportCalls(request)).toHaveLength(0);
   });
 });
 
