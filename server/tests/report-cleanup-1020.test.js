@@ -149,6 +149,10 @@ describe('item 2: a granular product never keeps a broadcast spray method', () =
 
   test('classifier: granular by formulation or name; water-dispersible granules are sprayed', () => {
     expect(cleanup.isGranularProduct(ARENA)).toBe(true);
+    // Name only (a historical report row carries no formulation): a standalone G word is granular.
+    expect(cleanup.isGranularProduct({ name: 'Headway G' })).toBe(true);
+    expect(cleanup.isGranularProduct({ name: 'Test G Insecticide' })).toBe(true);
+    expect(cleanup.isGranularProduct({ name: 'Test Spray 16.6 g' })).toBe(false);
     expect(cleanup.isGranularProduct({ name: 'Test Product', formulation: 'Granule (G)' })).toBe(true);
     expect(cleanup.isGranularProduct({ name: 'Test Product', formulation: 'Granular pre-emergent on fertilizer' })).toBe(true);
     expect(cleanup.isGranularProduct({ name: 'Test 50 WDG Insecticide', formulation: 'Water-dispersible granule (WDG)' })).toBe(false);

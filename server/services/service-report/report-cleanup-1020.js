@@ -76,13 +76,15 @@ function methodCorrectionKey() {
 const DISPERSIBLE = /water[- ]?(?:dispersible|soluble)|\b(?:WDG|WG|WSG|WP|SP|DF)\b/i;
 const GRANULAR_FORMULATION = /granul|\(G\)|\bT?G\b/i;
 const GRANULAR_NAME = /\bgranul\w*|\b\d+(?:\.\d+)?\s?G\b/i;
+// A standalone capital G word ("Headway G"), case-sensitive so a gram amount ("16.6 g") never reads as granular.
+const GRANULAR_G_WORD = /(?:^|\s)G(?=$|\s)/;
 
 // row: { formulation, name, category } in whatever spelling the caller has.
 function isGranularProduct(row) {
   const formulation = String((row && row.formulation) || '');
   const name = String((row && (row.name || row.product_name)) || '');
   if (DISPERSIBLE.test(formulation) || DISPERSIBLE.test(name)) return false;
-  return GRANULAR_FORMULATION.test(formulation) || GRANULAR_NAME.test(name);
+  return GRANULAR_FORMULATION.test(formulation) || GRANULAR_NAME.test(name) || GRANULAR_G_WORD.test(name);
 }
 
 // A method of broadcast_spray beside a granular product becomes granular_broadcast. Any other method (bait
