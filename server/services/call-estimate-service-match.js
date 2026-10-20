@@ -77,14 +77,15 @@ function askedServiceLines(stored) {
 // unclassifiable (we cannot prove it left the asked line out). Never throws.
 function estimateServiceLines(row) {
   try {
-    // inferEstimateServiceLines stops at a plan's recurring lines; fulfillment
-    // evidence also needs the one-time lines priced beside them (a pest plan
-    // that also prices termite matches a termite ask, Codex #6344 r1).
+    // A plan with one-time rows beside it is read as UNKNOWN (old behavior):
+    // classifying one-time rows from display text misreads add-on families and
+    // stale engine containers (Codex #6344 r1/r2), and a wrongful rejection
+    // would hide a real follow-up. Keeping it open is never the cost here;
+    // closing a promise wrongly is the old behavior, not a new one.
     const data = parseEstimateData(row?.estimate_data);
-    const keys = [
-      ...inferEstimateServiceLines({ estimate_data: row?.estimate_data, service_interest: row?.service_interest, pricing_authority: row?.pricing_authority }),
-      ...(data ? oneTimeServicesFromData(data) : []),
-    ].map((l) => l && l.key);
+    if (data && oneTimeServicesFromData(data).length) return [];
+    const keys = inferEstimateServiceLines({ estimate_data: row?.estimate_data, service_interest: row?.service_interest, pricing_authority: row?.pricing_authority })
+      .map((l) => l && l.key);
     if (!keys.length || keys.some((k) => !LINE_BY_KEY[k])) return [];
     return [...new Set(linesOfKeys(keys))];
   } catch {
@@ -99,4 +100,23 @@ function serviceLinesConflict(askedLines, estimateLines) {
   return !askedLines.some((l) => estimateLines.includes(l));
 }
 
-module.exports = { askedServiceLines, estimateServiceLines, serviceLinesConflict };
+// The asked line for ONE promise, read only from the extraction that filed it:
+// a valid V2 result on the same processing generation the promise row carries
+// (a schema_failed / normalization_failed candidate is kept for audit only, and
+// a later reprocess rewrites the call row but never a staff-confirmed or edited
+// promise; Codex #6344 r1). `callRow` = { ai_extraction_enriched,
+// v2_extraction_status, processing_generation }. [] = unknown.
+function askedLinesForPromise(commitment, callRow) {
+  const sameFiling = commitment?.processing_generation != null && callRow?.processing_generation != null
+    && String(commitment.processing_generation) === String(callRow.processing_generation);
+  return callRow?.v2_extraction_status === 'valid' && sameFiling ? askedServiceLines(callRow.ai_extraction_enriched) : [];
+}
+
+// Does this estimate row count toward a promise whose ask is `asked`? Unknown
+// on either side keeps it (old behavior); only a clear conflict rejects.
+const estimateMatchesAsk = (asked, row) => !serviceLinesConflict(asked, estimateServiceLines(row));
+
+// The call_log columns askedLinesForPromise reads.
+const ASK_CALL_COLUMNS = ['id', 'ai_extraction_enriched', 'v2_extraction_status', 'processing_generation'];
+
+module.exports = { askedServiceLines, estimateServiceLines, serviceLinesConflict, askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS };

@@ -42,7 +42,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { parseETDateTime, etDateString, etParts, addETDays, etWallClockOccurrences } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
-const { askedServiceLines, estimateServiceLines, serviceLinesConflict } = require('./call-estimate-service-match');
+const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -2381,20 +2381,15 @@ async function resolveSendEstimate(ctx) {
   // conflict rejects an estimate, so an unknown line on either side keeps
   // today's behavior. A rejected estimate is skipped, not fatal: a later one
   // that matches still closes the promise.
-  // The ask is read only from the extraction that FILED this promise: a valid
-  // V2 result (a schema_failed / normalization_failed candidate is kept for
-  // audit only) on the same processing generation the row carries. A later
-  // reprocess rewrites the call row but never a staff-confirmed or edited
-  // promise (Codex #6344 r1), so a generation mismatch reads as unknown.
+  // The ask comes from the extraction that FILED this promise
+  // (askedLinesForPromise); the one-hour pager applies the same check.
   let asked;
   const vet = async () => {
     if (asked === undefined) {
-      const row = await conn("call_log").where({ id: call.id }).first("ai_extraction_enriched", "v2_extraction_status", "processing_generation");
-      const sameFiling = commitment?.processing_generation != null && row?.processing_generation != null
-        && String(commitment.processing_generation) === String(row.processing_generation);
-      asked = row?.v2_extraction_status === "valid" && sameFiling ? askedServiceLines(row.ai_extraction_enriched) : [];
+      const row = await conn("call_log").where({ id: call.id }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b)).first(...ASK_CALL_COLUMNS);
+      asked = askedLinesForPromise(commitment, row);
     }
-    return asked.length ? (row) => !serviceLinesConflict(asked, estimateServiceLines(row)) : null;
+    return asked.length ? (row) => estimateMatchesAsk(asked, row) : null;
   };
   return associationProof(ctx, [
     async () => reusedLeadEstimate(ctx, probe, await vet()),

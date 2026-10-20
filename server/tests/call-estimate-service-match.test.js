@@ -103,18 +103,27 @@ describe('askedServiceLines stored as a JSON string', () => {
   });
 });
 
-describe('estimateServiceLines includes one-time lines beside a plan (Codex #6344 r1)', () => {
+describe('an estimate with one-time rows reads as unknown (Codex #6344 r1/r2)', () => {
   const { estimateServiceLines, serviceLinesConflict } = require('../services/call-estimate-service-match');
-  test('a pest plan that also prices termite matches a termite ask', () => {
+  test('a pest plan that also prices termite never rejects a termite ask', () => {
     const row = {
       service_interest: 'Quarterly Pest Control',
-      estimate_data: {
-        recurring: { services: [{ key: 'pest', name: 'Quarterly Pest Control', monthly: 40 }] },
-        result: { oneTime: { items: [{ service: 'Termite treatment', price: 900 }] } },
-      },
+      estimate_data: { result: { oneTime: { items: [{ service: 'Termite treatment', price: 900 }] } } },
     };
-    const lines = estimateServiceLines(row);
-    expect(lines).toEqual(expect.arrayContaining(['termite']));
-    expect(serviceLinesConflict(['termite'], lines)).toBe(false);
+    expect(estimateServiceLines(row)).toEqual([]);
+    expect(serviceLinesConflict(['termite'], estimateServiceLines(row))).toBe(false);
+  });
+});
+
+describe('askedLinesForPromise reads only the filing extraction', () => {
+  const { askedLinesForPromise } = require('../services/call-estimate-service-match');
+  const ext = JSON.stringify({ service_request: { primary_service_category: 'lawn_care' } });
+  test('valid V2 on the same generation', () => {
+    expect(askedLinesForPromise({ processing_generation: 2 }, { v2_extraction_status: 'valid', processing_generation: 2, ai_extraction_enriched: ext })).toEqual(['lawn']);
+  });
+  test('a rejected candidate, a different generation, or no generation is unknown', () => {
+    expect(askedLinesForPromise({ processing_generation: 2 }, { v2_extraction_status: 'schema_failed', processing_generation: 2, ai_extraction_enriched: ext })).toEqual([]);
+    expect(askedLinesForPromise({ processing_generation: 1 }, { v2_extraction_status: 'valid', processing_generation: 2, ai_extraction_enriched: ext })).toEqual([]);
+    expect(askedLinesForPromise({ processing_generation: null }, { v2_extraction_status: 'valid', processing_generation: 2, ai_extraction_enriched: ext })).toEqual([]);
   });
 });
