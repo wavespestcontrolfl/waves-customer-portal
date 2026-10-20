@@ -46,7 +46,8 @@ const OPT_OUT_PATTERNS = [
 // just after it ("no text came", "no texts went out", "no text yesterday"), or "that day" after it
 // with a past receiving word earlier in the sentence. A short question ("No text?") is a report
 // too. A strong request word anywhere in the sentence ("please", "anymore", "from now on") keeps
-// it a stop request, questions included. "No more texts" stays a stop request anywhere
+// it a stop request, questions included. Sentences end at . ! ? ; or a line break; a comma does
+// not end one ("Please, no texts?"). "No more texts" stays a stop request anywhere
 // (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:texts?|text\s+messages?|messages?|sms)\b/gi;
 const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
@@ -57,10 +58,10 @@ const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|e
 const SHORT_QUESTION_WORDS = 4;
 
 function sentencesOf(body) {
-  const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;,\n\r]+[.!?;,\n\r]*/g) || [];
+  const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;\n\r]+[.!?;\n\r]*/g) || [];
   return pieces
     .map((piece) => ({
-      text: piece.replace(/[.!?;,\n\r]+$/, '').replace(/\s+/g, ' ').trim(),
+      text: piece.replace(/[.!?;\n\r]+$/, '').replace(/\s+/g, ' ').trim(),
       question: piece.includes('?'),
     }))
     .filter((sentence) => sentence.text);

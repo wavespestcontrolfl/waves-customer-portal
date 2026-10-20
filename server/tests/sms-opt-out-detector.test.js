@@ -68,6 +68,7 @@ describe('SMS opt-out detector', () => {
     'No messages from you',
     'No texts please?',
     'Can I have no texts please?',
+    'Please, no texts?',
     'no more texts',
     'Please, no more messages.',
     'No more text messages',
@@ -88,6 +89,8 @@ describe('SMS opt-out detector', () => {
     'There was no message from the tech',
     'We have had no texts since Monday',
     'No text came',
+    'Hmm, no text?',
+    'I got no text that day. Please call me.',
   ])('"no text" that reports a missing text is not opt_out: %s', (body) => {
     expect(detectSmsOptCommand(body)).toEqual({ action: null });
   });
