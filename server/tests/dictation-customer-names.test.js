@@ -238,9 +238,9 @@ describe('gate on: buildDictationHints', () => {
 describe('mergeTranscriptionKeywords', () => {
   test('keeps the shared hints first, adds extras, de-duplicates and caps', () => {
     const base = transcriptionKeywords();
-    const merged = mergeTranscriptionKeywords(base, ['Stumpfy', 'sarasota', 'Stumpfy', '', 'x'.repeat(41), 'Bad\nname']);
+    const merged = mergeTranscriptionKeywords(base, ['Examplefy', 'sarasota', 'Examplefy', '', 'x'.repeat(41), 'Bad\nname']);
     expect(merged.slice(0, base.length)).toEqual(base);
-    expect(merged.slice(base.length)).toEqual(['Stumpfy', 'Bad name']);
+    expect(merged.slice(base.length)).toEqual(['Examplefy', 'Bad name']);
     const many = mergeTranscriptionKeywords(base, Array.from({ length: 80 }, (_, i) => `Surname${i}`));
     expect(many.length).toBe(base.length + 50);
   });
