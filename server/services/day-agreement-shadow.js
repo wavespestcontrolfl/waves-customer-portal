@@ -496,13 +496,19 @@ function smsMomentSkip(src, parsedAt) {
   return null;
 }
 
-// When this phone's text thread was last put to the model: a judged '#0' row's
-// sweep time. Every moment before it was in that judged thread.
+// The newest inbound text of this phone that a judged source was built on (its
+// id is in the source key). That text was the latest and the thread was quiet
+// when it was judged, so every moment at or before it was in that thread; a row's
+// own created_at is stamped after the model call and is no watermark (pre-push audit).
 async function lastJudgedSmsAt(conn, digits) {
   if (!digits) return null;
-  const row = await conn('day_agreement_decisions')
+  const judgedIds = conn('day_agreement_decisions')
     .where('source_kind', 'sms').where('phone_digits', digits).where('source_key', 'like', '%#0')
     .where((q) => q.whereNotNull('model').orWhere('skip_reason', 'judge_unusable'))
+    .select(conn.raw("split_part(split_part(source_key, ':', 3), '#', 1)"));
+  const row = await excludeUnresolvedSendReservations(conn('sms_log'))
+    .where('direction', 'inbound')
+    .whereRaw('id::text IN (?)', [judgedIds])
     .max({ at: 'created_at' }).first();
   return row?.at ? new Date(row.at) : null;
 }

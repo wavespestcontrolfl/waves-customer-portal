@@ -639,9 +639,10 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await text(customerId, 'We can come Wednesday morning.', 100, { direction: 'outbound' });
       await text(customerId, 'Wednesday works', 45);
       // An earlier sweep (10:00 ET) already judged this phone's thread, so the 09:30 moment was seen.
+      const judgedInbound = await text(customerId, 'ok', 120); // the 10:00 ET text an earlier sweep judged
       await trx('day_agreement_decisions').insert({
-        source_kind: 'sms', source_key: `sms:9415550142:${randomUUID()}#0`, phone_digits: '9415550142', customer_id: customerId,
-        verdict: 'skip', skip_reason: 'model_no_act', model: 'stub-model', created_at: ago(120),
+        source_kind: 'sms', source_key: `sms:9415550142:${judgedInbound}#0`, phone_digits: '9415550142', customer_id: customerId,
+        verdict: 'skip', skip_reason: 'model_no_act', model: 'stub-model',
       });
       const same = agreement({ at: '2040-03-12T11:15', daypart: 'morning' });
       const early = agreement({ at: '2040-03-12T09:30' });
