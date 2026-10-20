@@ -209,9 +209,10 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, offset
     }
   }
   // Promised reschedule links a replay did not record: the office sends them by hand.
-  const linkOmitted = ranCalls.filter((r) => r.out.omittedLinkPromises).map((r) => id8(r.id));
-  totals.linkPromisesNotRecorded = linkOmitted.length;
-  log(`  reschedule links promised but NOT recorded (office to handle): ${linkOmitted.length} ${linkOmitted.join(', ')}`);
+  // Each promise counts, not each call: one call can promise links for two visits (Codex #6346 r6).
+  const linkOmitted = ranCalls.filter((r) => r.out.omittedLinkPromises);
+  totals.linkPromisesNotRecorded = linkOmitted.reduce((n, r) => n + r.out.omittedLinkPromises, 0);
+  log(`  reschedule links promised but NOT recorded (office to handle): ${totals.linkPromisesNotRecorded} ${linkOmitted.map((r) => `${id8(r.id)} x${r.out.omittedLinkPromises}`).join(', ')}`);
   log(`  ran ${totals.ran} (rows written for ${totals.withRows}, nothing promised or still unreadable for ${totals.noRows}), skipped ${totals.skipped}, failed ${totals.failed}`);
   return totals;
 }

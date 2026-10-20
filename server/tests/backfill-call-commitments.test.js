@@ -109,4 +109,13 @@ describe('backfill-call-commitments', () => {
     const totals = await backfill.run({ dbh: fakeDb(), from: '2026-10-15', to: '2026-10-18', apply: true, gateLive: true, find: async () => candidates, step, log: () => {} });
     expect(totals).toMatchObject({ failed: 2, ran: 0, skipped: 0 });
   });
+  test('omitted link promises are counted per promise and listed with their count (Codex #6346 r6)', async () => {
+    const step = jest.fn()
+      .mockResolvedValueOnce({ ran: true, rows: 1, omittedLinkPromises: 2 })
+      .mockResolvedValueOnce({ ran: true, rows: 0, omittedLinkPromises: 0 });
+    const lines = [];
+    const totals = await backfill.run({ dbh: fakeDb(), from: '2026-10-15', to: '2026-10-18', apply: true, gateLive: true, find: async () => candidates, step, log: (l) => lines.push(l) });
+    expect(totals.linkPromisesNotRecorded).toBe(2);
+    expect(lines.join('\n')).toMatch(/NOT recorded \(office to handle\): 2 aaaaaaaa x2/);
+  });
 });
