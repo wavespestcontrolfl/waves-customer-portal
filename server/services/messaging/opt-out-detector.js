@@ -32,10 +32,27 @@ const OPT_OUT_PATTERNS = [
   /\btake\s+me\s+off\s+of\s+(your|this|the|my)?\s*(text\s+)?(list|texts?|messages?|messaging|sms)\b/i,
   /\bdo\s+not\s+(text|message|contact|sms)\b/i,
   /\bdon'?t\s+(text|message|contact|sms)\b/i,
-  /\bno\s+(more\s+)?(texts?|messages?|sms)\b/i,
+  /\bno\s+more\s+(texts?|messages?|sms)\b/i,
   /\bwrong\s+number\b/i,
   /\bnot\s+(my|the)\s+number\b/i,
 ];
+
+// A bare "no text(s)" / "no messages" is a stop request only as its own sentence or line
+// ("No texts please", "Ok. No messages."). Inside a longer sentence it usually reports a text that
+// never came: a complaint like "I got the confirmation but no text that day" unsubscribed a
+// customer on 2026-10-19. A question ("No text?") is never a request. "No more texts" stays a
+// request anywhere (OPT_OUT_PATTERNS above).
+const NO_TEXTS_SENTENCE = /^(?:(?:ok|okay|and|so|just|please)\s+)*no\s+(?:texts?|text\s+messages?|messages?|sms)(?:\s+(?:please|pls|plz|thanks|thank\s+you|anymore|any\s+more|from\s+now\s+on|to\s+this\s+number))*$/i;
+
+function sentencesOf(body) {
+  const pieces = String(body || '').replace(/[‘’]/g, "'").match(/[^.!?;,\n\r]+[.!?;,\n\r]*/g) || [];
+  return pieces
+    .map((piece) => ({
+      text: piece.replace(/[.!?;,\n\r]+$/, '').replace(/\s+/g, ' ').trim(),
+      question: piece.includes('?'),
+    }))
+    .filter((sentence) => sentence.text);
+}
 
 const WRONG_NUMBER_PATTERNS = [
   /\bwrong\s+number\b/i,
@@ -132,6 +149,15 @@ function detectSmsOptCommand(body) {
       action: 'opt_out',
       reason: 'opt_out_natural_language',
       sourceKeyword: optOutMatch.source,
+      detectionMethod: 'natural_language',
+    };
+  }
+
+  if (sentencesOf(body).some((sentence) => !sentence.question && NO_TEXTS_SENTENCE.test(sentence.text))) {
+    return {
+      action: 'opt_out',
+      reason: 'opt_out_natural_language',
+      sourceKeyword: NO_TEXTS_SENTENCE.source,
       detectionMethod: 'natural_language',
     };
   }

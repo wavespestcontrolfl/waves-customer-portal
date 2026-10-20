@@ -44,6 +44,39 @@ describe('SMS opt-out detector', () => {
     expect(detectSmsOptCommand(body).action).toBe('opt_out');
   });
 
+  // "No text(s)" is a stop request as its own sentence or line, and "no more texts" anywhere. Inside
+  // a longer sentence a bare "no text" reports a text that never came; that wording unsubscribed a
+  // customer on 2026-10-19.
+  test.each([
+    'No texts please',
+    'NO TEXTS!',
+    'no sms',
+    'No texts, thank you',
+    'Ok. No messages.',
+    'Please no texts from now on',
+    'No text messages please',
+    'Hi Adam\nNo texts please',
+    'no more texts',
+    'Please, no more messages.',
+    'No more text messages',
+    'We went with another company, no more texts please',
+  ])('"no texts" as its own request is opt_out: %s', (body) => {
+    expect(detectSmsOptCommand(body)).toMatchObject({ action: 'opt_out', reason: 'opt_out_natural_language' });
+  });
+
+  test.each([
+    'Hi, we had a lawn visit set for Thursday. I got the confirmation two days before but no text that day.',
+    'I got the confirmation but no text that day',
+    'No text?',
+    'Still no text?',
+    'no text yet',
+    'I got no text reminder this time',
+    'There was no message from the tech',
+    'Still no texts about my appointment',
+  ])('"no text" inside a sentence or a question is not opt_out: %s', (body) => {
+    expect(detectSmsOptCommand(body)).toEqual({ action: null });
+  });
+
   test.each([
     'wrong number',
     'sorry wrong number',
