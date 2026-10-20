@@ -519,6 +519,16 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
     }
   });
 
+  test('spelling-only matches get through the prefilter: a shared ending or one slip', () => {
+    const index = buildNameIndex([named('h', 'Pat', 'Henderson'), named('s', 'Pat', 'Smyth-Jones'), named('q', 'Zed', 'Quill'), named('l', 'Pat', 'Lindqvist')]);
+    const survivors = (search) => prefilterNameIndex(search, index).map((e) => e.id);
+    expect(survivors('Pat Anderson')).toContain('h');
+    expect(ids(rankNameMatches('Pat Anderson', survivors('Pat Anderson').map((id) => index.byId.get(id)), { v2: true, prefiltered: true }))).toContain('h');
+    // The same answer as scoring every row with no prefilter in the way.
+    expect(ids(rankNameMatches('Pat Anderson', [named('h', 'Pat', 'Henderson')], v2))).toEqual(['h']);
+    expect(survivors('Pat Lindqvest')).toContain('l');
+  });
+
   test('survivors are capped and need a shared key; an unrelated book yields none', () => {
     const index = buildNameIndex(everyone);
     expect(prefilterNameIndex('richard', index)).toHaveLength(MAX_SURVIVORS);

@@ -310,12 +310,14 @@ const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_CACHE_MAX_ENTRIES = 6;
 
 // Sound keys of one word, as prefixed strings: exact word, first three
-// letters, spelling-sound key, Double Metaphone (both readings), tolerant key.
+// and last letters, spelling-sound key, Double Metaphone (both readings), tolerant key.
 function wordKeys(word, memo) {
   let keys = memo.get(word);
   if (keys) return keys;
   keys = [`w:${word}`];
-  if (word.length >= 3) keys.push(`f:${word.slice(0, 3)}`);
+  // First and last three letters: a spelling slip or a shared ending (Anderson /
+  // Henderson) leaves one end intact, so spelled-only matches still get through.
+  if (word.length >= 3) keys.push(`f:${word.slice(0, 3)}`, `l:${word.slice(-3)}`);
   const phonetic = phoneticKey(word);
   if (phonetic.length >= 2) keys.push(`p:${phonetic}`);
   const [dm0, dm1] = doubleMetaphone(word);
@@ -377,13 +379,13 @@ function prefilterNameIndex(search, index, { include = [] } = {}) {
     for (const token of variant) for (const key of wordKeys(token.replace(MERGED, ''), memo)) searchKeys.add(key);
   }
   // A shared key counts for more when it is rare (a surname) than when half the
-  // book has it (a common first name), and a shared first three letters is the
-  // weakest evidence of all.
+  // book has it (a common first name), and a shared first or last three letters is
+  // the weakest evidence of all.
   const counts = new Map();
   for (const key of searchKeys) {
     const list = index.postings.get(key);
     if (!list) continue;
-    const weight = (key.startsWith('f:') ? 0.5 : 1) / (1 + Math.log2(list.length));
+    const weight = (key.startsWith('f:') || key.startsWith('l:') ? 0.5 : 1) / (1 + Math.log2(list.length));
     for (const at of list) counts.set(at, (counts.get(at) || 0) + weight);
   }
   const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, MAX_SURVIVORS).map(([at]) => index.entries[at]);
