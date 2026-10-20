@@ -90,17 +90,23 @@ describe('the office alert for a product a pest visit took below zero', () => {
     productId, productName, status: 'deducted_insufficient_stock', stockAfter, deductedAmount: 4, inventoryUnit: 'fl_oz',
   });
   const record = (deductions) => ({ id: 'record-1', structured_notes: { inventoryDeductions: deductions } });
-  // The live count read: the rows it returns, and the ids it was asked for.
-  const catalog = (rows) => {
+  // Each product's live count, read under its row lock inside the alert's own transaction: the counts it returns,
+  // the locked reads it was asked for, and the transaction the alert must ride.
+  const catalog = (stockById) => {
     const reads = [];
-    const database = (table) => ({ whereIn: (_column, ids) => ({ select: async () => { reads.push({ table, ids }); return rows; } }) });
-    database.reads = reads;
+    const trx = (table) => ({
+      where: ({ id }) => ({
+        forUpdate: () => ({ first: async () => { reads.push({ table, id, locked: true }); return id in stockById ? { inventory_on_hand: stockById[id] } : undefined; } }),
+      }),
+    });
+    const database = { transaction: jest.fn(async (work) => work(trx)), reads, trx };
     return database;
   };
 
   test('one alert for each product still below zero, keyed by the product, deduped on an open row only', async () => {
-    const database = catalog([{ id: 'taurus', inventory_on_hand: '-3.0000' }]);
+    const database = catalog({ taurus: '-3.0000' });
     await notifyOfficeOfStockShortfalls({ svc, record: record([shortfall('taurus', 'Taurus SC')]), database });
+    expect(database.reads).toEqual([{ table: 'products_catalog', id: 'taurus', locked: true }]);
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = compose.raiseAdminAlert.mock.calls[0];
     expect(category).toBe('inventory');
@@ -114,7 +120,9 @@ describe('the office alert for a product a pest visit took below zero', () => {
       subject: { type: 'check', id: 'stock-shortfall:taurus' },
       doneWhen: 'stock_restocked',
     });
+    // The insert rides the transaction that holds the product's row lock, so a restock cannot land in between.
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'stock-shortfall:taurus', dedupeOpenOnly: true });
+    expect(opts.trx).toBe(database.trx);
     expect(opts.metadata).toMatchObject({ productId: 'taurus', scheduledServiceId: 'visit-1', serviceRecordId: 'record-1', stockAfter: -3 });
     expect(opts.detail).toBe('Taurus SC went to -3 fl oz on hand after a pest visit used 4 fl oz. Restock it, or fix the count if the shelf has more.');
     // The alert rules accept it as composed (raiseAdminAlert is stood in here).
@@ -122,22 +130,22 @@ describe('the office alert for a product a pest visit took below zero', () => {
   });
 
   test('a product back to zero or above, and a row that did not go short, get none', async () => {
-    const database = catalog([{ id: 'taurus', inventory_on_hand: '0.0000' }]);
+    const database = catalog({ taurus: '0.0000' });
     const deductions = [shortfall('taurus', 'Taurus SC'), { productId: 'talak', productName: 'Talak', status: 'deducted', stockAfter: 12 }];
     await notifyOfficeOfStockShortfalls({ svc, record: record(deductions), database });
-    expect(database.reads).toEqual([{ table: 'products_catalog', ids: ['taurus'] }]);
+    expect(database.reads).toEqual([{ table: 'products_catalog', id: 'taurus', locked: true }]);
     expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('saved notes stored as text are read the same way', async () => {
-    const database = catalog([{ id: 'taurus', inventory_on_hand: '-3' }]);
+    const database = catalog({ taurus: '-3' });
     const textNotes = { id: 'record-1', structured_notes: JSON.stringify({ inventoryDeductions: [shortfall('taurus', 'Taurus SC')] }) };
     await notifyOfficeOfStockShortfalls({ svc, record: textNotes, database });
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
   test('a name the alert rules refuse falls back to plain words; the detail keeps it whole', async () => {
-    const database = catalog([{ id: 'odd', inventory_on_hand: '-1' }]);
+    const database = catalog({ odd: '-1' });
     await notifyOfficeOfStockShortfalls({ svc, record: record([shortfall('odd', 'Bait [old lot]', -1)]), database });
     const [, spec, opts] = compose.raiseAdminAlert.mock.calls[0];
     expect(spec).toMatchObject({ action: 'restock a product', why: 'A product went below zero in stock after a pest visit.' });
@@ -145,16 +153,17 @@ describe('the office alert for a product a pest visit took below zero', () => {
     expect(() => compose.composeAdminAlert(spec)).not.toThrow();
   });
 
-  test('no shortfall: nothing is read and nothing is raised', async () => {
-    const database = catalog([]);
+  test('no shortfall: no transaction, nothing read, nothing raised', async () => {
+    const database = catalog({});
     await notifyOfficeOfStockShortfalls({ svc, record: record([]), database });
+    expect(database.transaction).not.toHaveBeenCalled();
     expect(database.reads).toEqual([]);
     expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('a failed alert is logged and never fails the visit', async () => {
     compose.raiseAdminAlert.mockRejectedValueOnce(new Error('notifications unavailable'));
-    const database = catalog([{ id: 'taurus', inventory_on_hand: '-3' }]);
+    const database = catalog({ taurus: '-3' });
     await expect(notifyOfficeOfStockShortfalls({ svc, record: record([shortfall('taurus', 'Taurus SC')]), database })).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('stock shortfall alert failed (non-blocking)'));
   });
