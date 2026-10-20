@@ -203,7 +203,9 @@ test('one customer word satisfies at most one search word', () => {
 
 // ─── Name matcher v2 (GATE_NAME_MATCH_V2) ───────────────────────
 
-const { MAX_RESULTS_V2, suffixSimilarity } = require('../services/intelligence-bar/name-match');
+const {
+  MAX_RESULTS_V2, suffixSimilarity, MAX_SURVIVORS, buildNameIndex, prefilterNameIndex, resetNameIndexCache,
+} = require('../services/intelligence-bar/name-match');
 const { doubleMetaphone } = require('../utils/double-metaphone');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -347,6 +349,7 @@ describe('query_customers name matcher v2', () => {
   let previous;
   beforeEach(() => {
     previous = process.env.GATE_NAME_MATCH_V2;
+    resetNameIndexCache();
     db.__queries = [];
     db.__rows = () => [];
   });
@@ -486,5 +489,104 @@ describe('name match v2 work budget (Codex #6367 security P2)', () => {
 
   test('a normal spoken name still matches', () => {
     expect(rankNameMatches('richard stompf', pool, { v2: true })[0]).toEqual(expect.objectContaining({ id: 'a' }));
+  });
+});
+
+describe('name match v2 work cap (Codex #6367 perf)', () => {
+  const firsts = ['Pat', 'Maria', 'Jose', 'Anne', 'Sam', 'Lee', 'Kim', 'Dana', 'Ray', 'Tom', 'Ana', 'Ben'];
+  const lasts = ['Smith', 'Garcia', 'Nguyen', 'Allman', 'Jones', 'Brown', 'Taylor', 'Reed', 'Lopez', 'Clark', 'Young', 'Hall', 'Dunn'];
+  // 20,000 synthetic customers plus 600 Richards (more than the survivor cap) and the two Stompf rows.
+  const book = Array.from({ length: 20000 }, (_, i) => named(`b${String(i).padStart(5, '0')}`, `${firsts[i % 12]}${i % 7 ? '' : 'son'}`, `${lasts[(i * 7) % 13]}${i % 11 ? '' : 'ton'}`));
+  const richardsBook = Array.from({ length: 600 }, (_, i) => named(`r${String(i).padStart(3, '0')}`, 'Richard', lasts[i % 13]));
+  const stompfRows = [named('stompf-r', 'Richard', 'Stompf'), named('stompf-o', 'Orlando', 'Stompf')];
+  const everyone = [...book, ...richardsBook, ...stompfRows];
+  const fastest = (fn, runs = 3) => {
+    let best = Infinity;
+    for (let i = 0; i < runs; i += 1) { const t = process.hrtime.bigint(); fn(); best = Math.min(best, Number(process.hrtime.bigint() - t) / 1e6); }
+    return best;
+  };
+
+  test('a call over a built index of 20,000 customers finishes in under 150 ms and still ranks Stompf', () => {
+    const index = buildNameIndex(everyone);
+    expect(prefilterNameIndex('richard dump', index).length).toBeLessThanOrEqual(MAX_SURVIVORS);
+    for (const [search, id] of [['richard dump', 'stompf-r'], ['orlan dump', 'stompf-o'], ["Richard's dump", 'stompf-r']]) {
+      const run = (context) => rankNameMatches(search, prefilterNameIndex(search, index), { v2: true, prefiltered: true, context });
+      expect(fastest(() => run(null))).toBeLessThan(150);
+      expect(ids(run(null))).toContain(id);
+      const visit = run({ visitTodayIds: new Set([id]) });
+      expect(visit[0]).toMatchObject({ id, reasons: ['visit_soon'] });
+      expect(fastest(() => run({ visitTodayIds: new Set([id]) }))).toBeLessThan(150);
+    }
+  });
+
+  test('survivors are capped and need a shared key; an unrelated book yields none', () => {
+    const index = buildNameIndex(everyone);
+    expect(prefilterNameIndex('richard', index)).toHaveLength(MAX_SURVIVORS);
+    expect(prefilterNameIndex('xylophone trumpet', index)).toEqual([]);
+    expect(prefilterNameIndex('9415550100', index)).toEqual([]);
+    // The customer on screen rides along even with no shared key.
+    expect(prefilterNameIndex('xylophone trumpet', index, { include: ['stompf-r'] }).map((e) => e.id)).toEqual(['stompf-r']);
+  });
+
+  describe('through query_customers', () => {
+    const prev = process.env.GATE_NAME_MATCH_V2;
+    beforeEach(() => { process.env.GATE_NAME_MATCH_V2 = 'true'; resetNameIndexCache(); db.__queries = []; });
+    afterAll(() => { if (prev === undefined) delete process.env.GATE_NAME_MATCH_V2; else process.env.GATE_NAME_MATCH_V2 = prev; });
+
+    const mockBook = (visits = []) => {
+      db.__rows = (q) => {
+        if (q.sql.includes('from "scheduled_services"')) return visits;
+        if (/from "(sms_log|call_log)"/.test(q.sql)) return [];
+        if (q.sql.includes('count(*)')) return [{ count: '1' }];
+        if (!q.sql.includes('"customers"."email"')) return everyone;
+        if (q.bindings.includes('stompf-r')) return [{ id: 'stompf-r', first_name: 'Richard', last_name: 'Stompf' }];
+        return [{ id: 'b00001', first_name: 'Pat', last_name: 'Dunn' }];
+      };
+    };
+    const candidateReads = () => db.__queries.filter((q) => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')).length;
+
+    test('an unscoped book is read once, then served from the cache; a call is under 150 ms', async () => {
+      mockBook([{ customer_id: 'stompf-r' }]);
+      const first = await executeTool('query_customers', { search: 'richard dump' });
+      expect(first.alternatives[0]).toMatchObject({ id: 'stompf-r' });
+      expect(candidateReads()).toBe(1);
+      const started = process.hrtime.bigint();
+      const second = await executeTool('query_customers', { search: 'richard dump' });
+      expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(150);
+      expect(second.alternatives[0]).toMatchObject({ id: 'stompf-r', match: { score: 1, reasons: ['visit_soon'] } });
+      expect(candidateReads()).toBe(1);
+      // Another filter set is another cache entry.
+      await executeTool('query_customers', { search: 'richard dump', filters: { active: true } });
+      expect(candidateReads()).toBe(2);
+    });
+
+    test('a scoped task never uses the cache', async () => {
+      mockBook();
+      await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-1'] });
+      await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-1'] });
+      expect(candidateReads()).toBe(2);
+      await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-2'] });
+      expect(candidateReads()).toBe(3);
+    });
+
+    test('context reads cover only the survivors, and are skipped for fewer than two', async () => {
+      mockBook();
+      await executeTool('query_customers', { search: 'richard dump' });
+      const visit = db.__queries.find((q) => q.sql.includes('from "scheduled_services"'));
+      expect(visit.sql).toContain('"customer_id" in');
+      expect(visit.bindings).toContain('stompf-r');
+      expect(visit.bindings).not.toContain('b00003'); // an unrelated customer
+      expect(visit.bindings.filter((b) => typeof b === 'string' && /^(b|r)\d+$/.test(b)).length).toBeLessThanOrEqual(MAX_SURVIVORS);
+
+      resetNameIndexCache();
+      db.__queries = [];
+      db.__rows = (q) => {
+        if (q.sql.includes('count(*)')) return [{ count: '1' }];
+        if (!q.sql.includes('"customers"."email"')) return [named('only', 'Richard', 'Stompf'), named('other', 'Zed', 'Quill')];
+        return [{ id: 'only', first_name: 'Richard', last_name: 'Stompf' }];
+      };
+      await executeTool('query_customers', { search: 'richard stompf' });
+      expect(db.__queries.some((q) => /from "(scheduled_services|sms_log|call_log)"/.test(q.sql))).toBe(false);
+    });
   });
 });

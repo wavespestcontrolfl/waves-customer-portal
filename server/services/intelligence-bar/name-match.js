@@ -298,12 +298,147 @@ const MAX_CANDIDATE_TOKENS = 8;
 const MAX_WORD_CHARS = 32;
 const clipWords = (tokens, max) => tokens.slice(0, max).map((t) => t.slice(0, MAX_WORD_CHARS));
 
-function rankNameMatchesV2(search, candidates, { limit, minScore, context }) {
-  if (typeof search !== 'string' || search.length > MAX_SEARCH_CHARS) return [];
+// ─── Candidate index and prefilter (Codex #6367 perf) ────────────
+//
+// Ranking a whole customer book on every call costs seconds at 20,000 rows.
+// The index holds each candidate's clipped name words once (and a posting list
+// per sound key), so a call looks up the few candidates that share a key with
+// the search and runs the full scorer on those only.
+
+const MAX_SURVIVORS = 500;
+const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
+const INDEX_CACHE_MAX_ENTRIES = 6;
+
+// Sound keys of one word, as prefixed strings: exact word, first three
+// letters, spelling-sound key, Double Metaphone (both readings), tolerant key.
+function wordKeys(word, memo) {
+  let keys = memo.get(word);
+  if (keys) return keys;
+  keys = [`w:${word}`];
+  if (word.length >= 3) keys.push(`f:${word.slice(0, 3)}`);
+  const phonetic = phoneticKey(word);
+  if (phonetic.length >= 2) keys.push(`p:${phonetic}`);
+  const [dm0, dm1] = doubleMetaphone(word);
+  if (dm0.length >= 2) keys.push(`m:${dm0}`);
+  if (dm1.length >= 2 && dm1 !== dm0) keys.push(`m:${dm1}`);
+  const tolerant = tolerantKey(word);
+  if (tolerant.length >= 2) keys.push(`t:${tolerant}`);
+  memo.set(word, keys);
+  return keys;
+}
+
+// Every word a candidate can be compared by: its words and each adjacent pair
+// run together (the same merged words tokenVariants makes).
+function indexWords(tokens) {
+  const words = tokens.slice();
+  for (let i = 0; i + 1 < tokens.length; i += 1) words.push(tokens[i] + tokens[i + 1]);
+  return words;
+}
+
+// candidates: [{ id, first_name, last_name, company_name }] -> index.
+function buildNameIndex(candidates) {
+  const memo = new Map();
+  const entries = [];
+  const byId = new Map();
+  const postings = new Map();
+  for (const candidate of candidates) {
+    const tokens = clipWords(customerTokens(candidate, { v2: true }), MAX_CANDIDATE_TOKENS);
+    const entry = { id: candidate.id, tokens, at: entries.length };
+    entries.push(entry);
+    byId.set(candidate.id, entry);
+    const seen = new Set();
+    for (const word of indexWords(tokens)) for (const key of wordKeys(word, memo)) seen.add(key);
+    for (const key of seen) {
+      const list = postings.get(key);
+      if (list) list.push(entry.at); else postings.set(key, [entry.at]);
+    }
+  }
+  return { entries, byId, postings };
+}
+
+// The search as v2 reads it, or null when it is not a rankable name.
+function parseSearchV2(search) {
+  if (typeof search !== 'string' || search.length > MAX_SEARCH_CHARS) return null;
   const searchTokens = tokenize(search, { v2: true });
-  if (searchTokens.length > MAX_SEARCH_TOKENS) return [];
-  const searchVariants = tokenVariants(clipWords(searchTokens, MAX_SEARCH_TOKENS));
-  if (!searchVariants[0].length) return [];
+  if (searchTokens.length > MAX_SEARCH_TOKENS) return null;
+  const variants = tokenVariants(clipWords(searchTokens, MAX_SEARCH_TOKENS));
+  return variants[0].length ? variants : null;
+}
+
+// Candidates that share at least one sound key with some search word (or
+// run-together pair), best by weight of shared keys, at most MAX_SURVIVORS.
+// `include` ids (the customer on screen) always ride along when indexed.
+function prefilterNameIndex(search, index, { include = [] } = {}) {
+  const variants = parseSearchV2(search);
+  if (!variants) return [];
+  const memo = new Map();
+  const searchKeys = new Set();
+  for (const variant of variants) {
+    for (const token of variant) for (const key of wordKeys(token.replace(MERGED, ''), memo)) searchKeys.add(key);
+  }
+  // A shared key counts for more when it is rare (a surname) than when half the
+  // book has it (a common first name), and a shared first three letters is the
+  // weakest evidence of all.
+  const counts = new Map();
+  for (const key of searchKeys) {
+    const list = index.postings.get(key);
+    if (!list) continue;
+    const weight = (key.startsWith('f:') ? 0.5 : 1) / (1 + Math.log2(list.length));
+    for (const at of list) counts.set(at, (counts.get(at) || 0) + weight);
+  }
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, MAX_SURVIVORS).map(([at]) => index.entries[at]);
+  const chosen = new Set(best);
+  for (const id of include) {
+    const entry = index.byId.get(id);
+    if (entry && !chosen.has(entry)) { chosen.add(entry); best.push(entry); }
+  }
+  return best;
+}
+
+// Small per-process cache of built indexes: key -> { at, promise }. The key
+// names the exact scoped query, so one scope never reads another's index.
+const indexCache = new Map();
+function cachedNameIndex(key, load, now = Date.now()) {
+  const hit = indexCache.get(key);
+  if (hit && now - hit.at < INDEX_CACHE_TTL_MS) return hit.promise;
+  indexCache.delete(key);
+  const promise = Promise.resolve().then(load).then(buildNameIndex);
+  indexCache.set(key, { at: now, promise });
+  promise.catch(() => { if (indexCache.get(key) && indexCache.get(key).promise === promise) indexCache.delete(key); });
+  while (indexCache.size > INDEX_CACHE_MAX_ENTRIES) indexCache.delete(indexCache.keys().next().value);
+  return promise;
+}
+function resetNameIndexCache() { indexCache.clear(); }
+
+// Best score of one candidate over the run-together variants of both sides,
+// and whether the search's first word matched exactly.
+function bestBaseScore(searchVariants, candidateVariants, simFn, minScore) {
+  let base = 0;
+  let firstExact = false;
+  for (const sv of searchVariants) {
+    for (const cv of candidateVariants) {
+      const result = scoreCandidateV2(sv, cv, simFn);
+      if (result.score > base) { base = result.score; firstExact = result.firstExact; }
+    }
+  }
+  // The first word is exact but the rest is garbled: still worth a choice.
+  const first = searchVariants[0];
+  if (base < minScore && first.length > 1 && candidateVariants[0].includes(first[0])) {
+    for (const cv of candidateVariants) {
+      const loose = scoreCandidateV2(first, cv, simFn, FIRST_TOKEN_OTHER_WORD);
+      if (loose.firstExact && loose.score > base) { base = loose.score; firstExact = true; }
+    }
+  }
+  return { base, firstExact };
+}
+
+// `candidates` is raw rows, or index entries ({ id, tokens }) already
+// prefiltered by the caller (`prefiltered: true`). Raw rows are indexed and
+// prefiltered here, so a caller never scores more than MAX_SURVIVORS rows.
+function rankNameMatchesV2(search, candidates, { limit, minScore, context, prefiltered = false }) {
+  const searchVariants = parseSearchV2(search);
+  if (!searchVariants) return [];
+  const pool = prefiltered ? candidates : prefilterNameIndex(search, buildNameIndex(candidates));
   const keys = new Map();
   const keyOf = (word) => {
     if (!keys.has(word)) keys.set(word, phoneticKey(word));
@@ -330,30 +465,14 @@ function rankNameMatchesV2(search, candidates, { limit, minScore, context }) {
   const floorWithContext = Math.min(minScore, CONTEXT_FLOOR);
   const floorFirstToken = Math.min(minScore, FIRST_TOKEN_FLOOR);
   const scored = [];
-  for (const candidate of candidates) {
-    const candidateVariants = tokenVariants(clipWords(customerTokens(candidate, { v2: true }), MAX_CANDIDATE_TOKENS));
-    let base = 0;
-    let firstExact = false;
-    for (const sv of searchVariants) {
-      for (const cv of candidateVariants) {
-        const result = scoreCandidateV2(sv, cv, simFn);
-        if (result.score > base) { base = result.score; firstExact = result.firstExact; }
-      }
-    }
-    // The first word is exact but the rest is garbled: still worth a choice.
-    const first = searchVariants[0];
-    if (base < minScore && first.length > 1 && candidateVariants[0].includes(first[0])) {
-      for (const cv of candidateVariants) {
-        const loose = scoreCandidateV2(first, cv, simFn, FIRST_TOKEN_OTHER_WORD);
-        if (loose.firstExact && loose.score > base) { base = loose.score; firstExact = true; }
-      }
-    }
+  for (const candidate of pool) {
+    const { base, firstExact } = bestBaseScore(searchVariants, tokenVariants(candidate.tokens), simFn, minScore);
     if (!base) continue;
     const reasons = contextReasons(context, candidate.id);
     const bonus = reasons.reduce((sum, r) => sum + CONTEXT_BONUS[r], 0);
     const qualifies = base >= minScore
       || (bonus > 0 && base >= floorWithContext)
-      || (firstExact && first.length > 1 && base >= floorFirstToken);
+      || (firstExact && searchVariants[0].length > 1 && base >= floorFirstToken);
     if (!qualifies) continue;
     const entry = { id: candidate.id, score: Math.round((base + bonus) * 1000) / 1000 };
     if (reasons.length) entry.reasons = reasons;
@@ -372,8 +491,8 @@ function rankNameMatchesV2(search, candidates, { limit, minScore, context }) {
 // Set }): a bonus of +0.15 / +0.10 / +0.05 and a 0.65 floor for a customer
 // with any bonus. A v2 entry with a bonus also carries `reasons`. Without
 // `v2` the scoring is the original, whatever `context` holds.
-function rankNameMatches(search, candidates, { limit, minScore = MIN_SCORE, v2 = false, context = null } = {}) {
-  if (v2) return rankNameMatchesV2(search, candidates, { limit: limit || MAX_RESULTS_V2, minScore, context });
+function rankNameMatches(search, candidates, { limit, minScore = MIN_SCORE, v2 = false, context = null, prefiltered = false } = {}) {
+  if (v2) return rankNameMatchesV2(search, candidates, { limit: limit || MAX_RESULTS_V2, minScore, context, prefiltered });
   const cap = limit === undefined ? MAX_RESULTS : limit;
   const searchTokens = tokenize(search);
   if (!searchTokens.length) return [];
@@ -393,4 +512,5 @@ function rankNameMatches(search, candidates, { limit, minScore = MIN_SCORE, v2 =
 module.exports = {
   MAX_RESULTS, MAX_RESULTS_V2, MIN_SCORE, tokenize, isNameLikeSearch, phoneticKey, levenshtein, wordSimilarity, rankNameMatches,
   wordSimilarityV2, suffixSimilarity, tolerantKey,
+  MAX_SURVIVORS, buildNameIndex, prefilterNameIndex, cachedNameIndex, resetNameIndexCache,
 };
