@@ -817,6 +817,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   // pipeline has its own retry lanes, and a pass must not sit through the
   // SDK's per-attempt timeouts.
   let accepted = null;
+  let acceptedLeg = null;
   let lastRejection = null;
   const result = await dispatchWithFallback(COMMITMENTS_POLICY(), {
     text: buildCommitmentsPrompt({ transcript, callStartedAt }),
@@ -849,6 +850,9 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
         return 'schema_invalid';
       }
       accepted = parsed;
+      // The chain returns a COPY of the answering leg; the ledger row is keyed
+      // on the adapter's own result object, so keep that one to flip below.
+      acceptedLeg = leg;
       return null;
     },
   });
@@ -873,7 +877,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   // Claims returned but every one discarded (ungrounded, below the confidence
   // floor, wrong party) is an answer that produced nothing usable; an empty
   // commitments array stays a successful "nothing promised" (Codex r7 on #4884).
-  if (Array.isArray(parsed.commitments) && parsed.commitments.length && !grounded.kept.length) rejectCall(result, 'invalid_output');
+  if (Array.isArray(parsed.commitments) && parsed.commitments.length && !grounded.kept.length) rejectCall(acceptedLeg, 'invalid_output');
   return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model, ms: Date.now() - startedAt };
 }
 
