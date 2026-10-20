@@ -15,6 +15,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 import { reportGreetingFirstName } from '../lib/reportGreeting';
+import ProjectReportDocument from './ProjectReportDocument';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -23,7 +24,7 @@ import { reportGreetingFirstName } from '../lib/reportGreeting';
  */
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
+export const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = DOC_FONT; // "'Inter', system-ui, sans-serif" — the one customer body stack
@@ -76,7 +77,7 @@ const secondaryButtonStyle = {
   border: `1px solid ${ESTIMATE_BORDER}`,
 };
 
-const TYPE_LABELS = {
+export const TYPE_LABELS = {
   wdo_inspection: 'WDO Inspection',
   termite_inspection: 'Termite Inspection',
   termite_treatment: 'Termite Treatment',
@@ -123,7 +124,7 @@ export const TERMITE_COMPLIANCE_SECTIONS = {
 // Mirrors the estimate hero's phone display (EstimateViewPage helper of the
 // same name): 10-digit US numbers get the (xxx) xxx-xxxx treatment, anything
 // else renders as stored.
-function formatCustomerPhone(phone) {
+export function formatCustomerPhone(phone) {
   const raw = String(phone || '').replace(/\D/g, '');
   const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
   if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
@@ -139,7 +140,7 @@ function dateOnlyToNoonUtc(dateOnlyValue) {
   return new Date(Date.UTC(y, m - 1, d, 12));
 }
 
-function formatReportDate(value) {
+export function formatReportDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
@@ -148,7 +149,7 @@ function formatReportDate(value) {
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
 
-function formatAppointmentDate(value) {
+export function formatAppointmentDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
@@ -169,7 +170,7 @@ function formatAppointmentTime(value) {
   return `${hour12}:${minute} ${suffix}`;
 }
 
-function formatAppointmentWindow(appt) {
+export function formatAppointmentWindow(appt) {
   if (!appt) return '';
   const date = formatAppointmentDate(appt.scheduledDate);
   const start = formatAppointmentTime(appt.windowStart);
@@ -303,11 +304,11 @@ const FIELD_LABELS = {
   renewal_due: 'Renewal due by',
 };
 
-function humanizeKey(k) {
+export function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-function formatFindingValue(key, value) {
+export function formatFindingValue(key, value) {
   const raw = String(value);
   if (key !== 'species') return raw;
   return raw.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
@@ -324,7 +325,7 @@ const ROOF_RAT_LEARN_MORE = [
   'The Florida Department of Health associates rats and mice with illnesses such as leptospirosis, salmonella, typhus, and rat-bite fever, so droppings, urine, saliva, nesting material, and contaminated dust are part of the concern.',
 ].join(' ');
 
-function getFindingInsight(key, value) {
+export function getFindingInsight(key, value) {
   if (key === 'species' && includesAny(value, ['roof rat'])) return ROOF_RAT_SPECIES_NOTE;
   return '';
 }
@@ -333,14 +334,14 @@ function isRoofRatFinding(key, value) {
   return key === 'species' && includesAny(value, ['roof rat']);
 }
 
-function includesAny(text, words) {
+export function includesAny(text, words) {
   const value = String(text || '').toLowerCase();
   return words.some(word => value.includes(word));
 }
 
 // Service type prints the bare type label — the hero kicker already carries
 // the project's title (what it's for), so repeating it here would read twice.
-function buildAtAGlance({ data, typeLabel }) {
+export function buildAtAGlance({ data, typeLabel }) {
   const rows = [
     ['Service type', typeLabel],
   ];
@@ -368,6 +369,53 @@ function isPastReportDate(value) {
   return key < `${get('year')}-${get('month')}-${get('day')}`;
 }
 
+// The two project types that keep their own page when GATE_REPORT_SIMPLE_WEB is
+// live (owner 2026-10-17: "skip wdo, and pre treatment"): official paper
+// documents. The server and this page both check it.
+export const SIMPLE_WEB_EXCLUDED_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
+
+// Findings the page lists, whether the sectioned narrative stands in for them,
+// and the termite compliance answers that must survive that suppression. One
+// place, so the glass page and the simple work-order layout apply the same rule.
+export function projectFindingsView(data) {
+  const findings = data.findings || {};
+  const findingsEntries = Object.entries(findings)
+    .filter(([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && v !== null && v !== undefined && v !== '');
+  // The structured findings feed the AI writer, so when the report carries
+  // the sectioned narrative (Customer Concern / What We Inspected / …) the
+  // raw findings list would repeat the same content — the narrative is the
+  // customer-facing rendering of it. Raw findings still show on reports
+  // without a drafted narrative, otherwise they'd have no body at all.
+  // WDO exception: a legacy/pre-archive WDO report has no filled FDACS PDF
+  // to link, so its structured findings (FDACS finding, live WDO, damage,
+  // inaccessible areas…) are the only formal record on the page — never
+  // suppress those unless the archived filled form is available.
+  const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
+  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
+    && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
+  // Statutory compliance answers survive the narrative suppression in their
+  // own block; when the raw findings list renders they're already in it.
+  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[data.projectType] || null;
+  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
+    ? complianceSection.fields
+      .map(([key, label]) => [label, findings[key]])
+      .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    : [];
+  return { findings, findingsEntries, suppressFindingsForNarrative, complianceSection, complianceEntries };
+}
+
+// Identity block lines: name, email, phone, address, MIXED-CASE ("William
+// Carter", never "WILLIAM CARTER" — owner ruling 2026-07-16). ALL-CAPS records
+// title-case for display only, same rule as ReportViewPage's contact block.
+export function displayContactLine(raw) {
+  const s2 = String(raw || '').trim();
+  if (!s2 || s2 !== s2.toUpperCase()) return s2;
+  if (s2.includes('@')) return s2.toLowerCase();
+  return s2.toLowerCase()
+    .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+    .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+}
+
 export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -387,7 +435,11 @@ export default function ProjectReportViewPage() {
   // The applicator is the tech who PERFORMED the linked visit, which can
   // differ from the project's creator (technicianName) — Codex r2 #5032.
   const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
-  const glassActive = !isPaperDocument;
+  // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): the server sets simpleWebReport
+  // on every project type except the two paper documents; that layout is the
+  // plain work-order document, so it never mounts the glass scene.
+  const simpleWeb = data?.simpleWebReport === true && !SIMPLE_WEB_EXCLUDED_TYPES.has(data?.projectType);
+  const glassActive = !isPaperDocument && !simpleWeb;
   useGlassSurface(glassActive);
 
   useEffect(() => {
@@ -485,34 +537,14 @@ export default function ProjectReportViewPage() {
     </CustomerColumn>
   );
 
+  if (simpleWeb) return <ProjectReportDocument data={data} token={token} />;
+
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';
   const reportTitle = String(data.title || '').trim() || typeLabel;
-  const findings = data.findings || {};
-  const findingsEntries = Object.entries(findings)
-    .filter(([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && v !== null && v !== undefined && v !== '');
+  const { findings, findingsEntries, suppressFindingsForNarrative, complianceSection, complianceEntries } = projectFindingsView(data);
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
-  // The structured findings feed the AI writer, so when the report carries
-  // the sectioned narrative (Customer Concern / What We Inspected / …) the
-  // raw findings list would repeat the same content — the narrative is the
-  // customer-facing rendering of it. Raw findings still show on reports
-  // without a drafted narrative, otherwise they'd have no body at all.
-  // WDO exception: a legacy/pre-archive WDO report has no filled FDACS PDF
-  // to link, so its structured findings (FDACS finding, live WDO, damage,
-  // inaccessible areas…) are the only formal record on the page — never
-  // suppress those unless the archived filled form is available.
-  const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
-  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
-    && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
-  // Statutory compliance answers survive the narrative suppression in their
-  // own block; when the raw findings list renders they're already in it.
-  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[data.projectType] || null;
-  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
-    ? complianceSection.fields
-      .map(([key, label]) => [label, findings[key]])
-      .filter(([, value]) => value !== null && value !== undefined && value !== '')
-    : [];
   const atAGlanceRows = buildAtAGlance({ data, typeLabel });
   const firstName = reportGreetingFirstName(data) || 'there';
   // The certificate headline mirrors the full type label (owner directive
@@ -535,18 +567,8 @@ export default function ProjectReportViewPage() {
       ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
       : (data.customerAddress || data.cityState || '');
   // Identity block under the headline — owner ruling 2026-07-16: every
-  // report shows the same block in the same order and format: name, email,
-  // phone, address, MIXED-CASE ("William Carter", never "WILLIAM CARTER" —
-  // supersedes the uppercase treatment). ALL-CAPS records title-case for
-  // display only, same rule as ReportViewPage's contact block.
-  const displayContactLine = (raw) => {
-    const s2 = String(raw || '').trim();
-    if (!s2 || s2 !== s2.toUpperCase()) return s2;
-    if (s2.includes('@')) return s2.toLowerCase();
-    return s2.toLowerCase()
-      .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
-      .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
-  };
+  // report shows the same block in the same order and format (see
+  // displayContactLine).
   const heroContactLines = [
     data.customerName,
     data.customerEmail,
@@ -1249,7 +1271,7 @@ function RoofRatPhoto() {
   );
 }
 
-function getPhotoLabel(photo) {
+export function getPhotoLabel(photo) {
   return photo.caption || (photo.category ? `${photo.category.replace(/_/g, ' ')} photo` : 'Service photo');
 }
 
@@ -1344,7 +1366,7 @@ export function parseSections(text) {
   return foundRequired ? sections : null;
 }
 
-function titleCase(s) {
+export function titleCase(s) {
   return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
 }
 
@@ -1374,7 +1396,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   );
 }
 
-function shouldShowBookingCta(text) {
+export function shouldShowBookingCta(text) {
   const value = String(text || '');
   const negativeBeforeAction = /\b(no|not|none|without|unnecessary|isn'?t|not currently)\b.{0,55}\b(service|appointment|schedule|booking|treatment|treat|application|follow[-\s]?up|inspection|exclusion)\b/i.test(value);
   const actionBeforeNegative = /\b(service|appointment|booking|treatment|application|follow[-\s]?up|inspection|exclusion)\b.{0,55}\b(no|not|unnecessary|isn'?t)\b/i.test(value);
