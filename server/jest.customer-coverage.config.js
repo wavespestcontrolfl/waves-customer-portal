@@ -16,6 +16,10 @@ module.exports = {
     '<rootDir>/tests/customer-auth-resolve-bearer.test.js',
     '<rootDir>/tests/customer-refresh-session.test.js',
     '<rootDir>/tests/cancelled-portal-read-access.test.js',
+    // Contact login (GATE_CONTACT_LOGIN): the contact-session allow-list,
+    // admission and refresh-rotation paths in middleware/auth.js — the
+    // same real-middleware harness as the cancelled read-access suite.
+    '<rootDir>/tests/contact-portal-access.test.js',
     '<rootDir>/tests/autopay-eligibility.test.js',
     '<rootDir>/tests/portal-ach-add-bank.test.js',
     '<rootDir>/tests/customer-pricing-ai.test.js',
