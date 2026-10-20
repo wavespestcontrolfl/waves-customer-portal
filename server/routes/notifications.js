@@ -747,8 +747,7 @@ async function contactPreferencePayload(req) {
   // The report rule (customer-contact.js slotWithheldFromReports) decides
   // whether this contact ever gets the visit's findings; the card says so
   // instead of offering a report toggle that would never fire.
-  const { withAccountPrimaryContact, slotWithheldFromReports } = require('../services/customer-contact');
-  const reportsWithheld = slotWithheldFromReports(await withAccountPrimaryContact(req.customer), contact);
+  const reportsWithheld = await require('../services/contact-session-projection').contactSessionReportsWithheld(req);
   return {
     contact: { name: contact.name || '', phone: contact.phone, email: contact.email || '', slot: contact.slot },
     preferences,

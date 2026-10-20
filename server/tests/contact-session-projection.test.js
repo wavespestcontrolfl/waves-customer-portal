@@ -133,6 +133,19 @@ describe('pure projections', () => {
     expect(await projection.contactSessionReportsWithheld({ customer: { id: 'c', contact_role: null }, contactSession: OCCUPANT })).toBe(false);
     expect(await projection.contactSessionReportsWithheld({ customer: { id: 'c', contact_role: 'property_manager' }, contactSession: OCCUPANT })).toBe(true);
   });
+
+  test('deny wins across every slot carrying the number: an allowed slot 1 does not open reports a tenant slot 2 withholds (codex r4)', async () => {
+    db.mockImplementation(() => chain([]));
+    const twice = {
+      id: 'c', contact_role: null,
+      service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contact_role: null,
+      service_contact2_name: 'Sam', service_contact2_phone: '(941) 555-0202', service_contact2_role: 'tenant',
+    };
+    // The login matched slot 1 (unlabeled); the verdict still sees slot 2.
+    expect(await projection.contactSessionReportsWithheld({ customer: twice, contactSession: OCCUPANT })).toBe(true);
+    // The same number in two allowed slots stays allowed.
+    expect(await projection.contactSessionReportsWithheld({ customer: { ...twice, service_contact2_role: null }, contactSession: OCCUPANT })).toBe(false);
+  });
 });
 
 describe('GET /schedule and /schedule/next for a contact session', () => {

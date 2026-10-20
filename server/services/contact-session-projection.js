@@ -16,12 +16,20 @@
 //     self-serve re-service page, the overlay handoff.
 
 // Does the report rule withhold from this request's contact? A holder
-// session is never withheld.
+// session is never withheld. Deny wins across EVERY slot that carries the
+// session's number (the contact save does not reject a phone stored twice):
+// an allowed slot before a tenant slot must not open the reports the
+// delivery resolvers withhold (codex #6363 r4 P2), so the verdict is taken
+// over all matching slots on the account-resolved row, not the first one
+// the login matched.
 async function contactSessionReportsWithheld(req) {
   if (!req.contactSession) return false;
-  const { withAccountPrimaryContact, slotWithheldFromReports } = require('./customer-contact');
+  const { withAccountPrimaryContact, slotWithheldFromReports, getServiceContactSlots, phoneKeyOf } = require('./customer-contact');
   const row = await withAccountPrimaryContact(req.customer);
-  return slotWithheldFromReports(row, req.contactSession);
+  const key = req.contactSession.phoneKey;
+  const matching = getServiceContactSlots(row).filter((slot) => slot.phone && phoneKeyOf(slot.phone) === key);
+  if (!matching.length) return slotWithheldFromReports(row, req.contactSession);
+  return matching.some((slot) => slotWithheldFromReports(row, slot));
 }
 
 // A service-history row (portal-service-history.js) or service detail
