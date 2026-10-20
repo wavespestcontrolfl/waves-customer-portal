@@ -68,7 +68,7 @@ async function withServer(fn) {
   }
 }
 
-function mockProject(projectType) {
+function mockProject(projectType, { project = {}, visitTechnicianId = null, technicians = {} } = {}) {
   const projectQueries = [chain({
     first: jest.fn().mockResolvedValue({
       id: 'project-1',
@@ -83,12 +83,18 @@ function mockProject(projectType) {
       city: 'Testville',
       state: 'FL',
       findings: { evidence_type: 'Synthetic evidence' },
+      ...project,
     }),
   })];
   db.mockImplementation((table) => {
     if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
     if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
-    if (table === 'service_records') return chain();
+    if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(visitTechnicianId ? { technician_id: visitTechnicianId } : undefined) });
+    if (table === 'technicians') {
+      const q = chain();
+      q.where = jest.fn((cond) => { q.first = jest.fn().mockResolvedValue(technicians[cond.id] || undefined); return q; });
+      return q;
+    }
     if (table === 'activity_log') return chain();
     throw new Error(`Unexpected table query: ${table}`);
   });
@@ -147,6 +153,52 @@ describe('GET /reports/project/:token/data simple web report (GATE_REPORT_SIMPLE
       });
     },
   );
+
+  // Codex P1 #6353: the work-order layout prints a Technician row. An office
+  // staffer who typed up the project must never be named as the technician.
+  const createdByOffice = {
+    project: {
+      service_record_id: 'visit-1',
+      created_by_tech_id: 'tech-office',
+      technician_name: 'Office Creator',
+    },
+    visitTechnicianId: 'tech-field',
+    technicians: {
+      'tech-field': { id: 'tech-field', name: 'Field Tech' },
+      'tech-office': { id: 'tech-office', name: 'Office Creator' },
+    },
+  };
+
+  test('gate on: the Technician row names who performed the visit, not who created the project', async () => {
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    mockProject('pest_inspection', createdByOffice);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await getData(baseUrl);
+      expect(status).toBe(200);
+      expect(body.performingTechnicianName).toBe('Field Tech');
+      // technicianName keeps its meaning (the creator) for the pages that read it
+      expect(body.technicianName).toBe('Office Creator');
+    });
+  });
+
+  test('gate on: a linked visit with no technician names nobody', async () => {
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    mockProject('pest_inspection', { ...createdByOffice, visitTechnicianId: null });
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.simpleWebReport).toBe(true);
+      expect(body.performingTechnicianName).toBeNull();
+    });
+  });
+
+  test('gate off: no performingTechnicianName key', async () => {
+    gates.reportSimpleWebLive.mockReturnValue(false);
+    mockProject('pest_inspection', createdByOffice);
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect('performingTechnicianName' in body).toBe(false);
+    });
+  });
 
   test('a gates module without the reader reads as off', async () => {
     const saved = gates.reportSimpleWebLive;

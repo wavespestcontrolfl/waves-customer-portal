@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectApplicatorTechnician, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -883,12 +883,21 @@ async function heldReportPaymentContext(project) {
   return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
 }
 
-// GATE_REPORT_SIMPLE_WEB: every project type except the two official paper
-// documents (the WDO inspection and the pre-construction termite certificate).
-function simpleWebProjectReport(projectType) {
-  if (projectType === 'wdo_inspection' || projectType === 'pre_treatment_termite_certificate') return false;
+// GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "skip wdo, and pre treatment, but
+// for everything else the simple layout"): the payload keys that switch the
+// page to the work-order document, for every project type except the two
+// official paper documents (the WDO inspection and the pre-construction
+// termite certificate). Read at call time; a partial gates module reads as
+// off, and off adds nothing. The layout prints a Technician row: it names the
+// technician who PERFORMED the linked visit (the applicator resolver), whether
+// or not that visit applied product, never technician_name, the staffer who
+// created the project record (codex P1 #6353).
+async function simpleWebProjectFields(project) {
+  if (project.project_type === 'wdo_inspection' || project.project_type === 'pre_treatment_termite_certificate') return {};
   const gates = require('../config/feature-gates');
-  return typeof gates.reportSimpleWebLive === 'function' && gates.reportSimpleWebLive();
+  if (typeof gates.reportSimpleWebLive !== 'function' || !gates.reportSimpleWebLive()) return {};
+  const technician = await resolveProjectApplicatorTechnician(project, db);
+  return { simpleWebReport: true, performingTechnicianName: String(technician?.name || '').trim() || null };
 }
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
@@ -1041,6 +1050,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // the internal-key/fee strip below (structured treatment fields, never
     // free text, so nothing here needs scrubbing).
     const { applicatorFdacsId, applicatorName, poisonControl } = await resolveProjectReportPreviewFields(project, viewerProjectDate, db);
+    const simpleWebFields = await simpleWebProjectFields(project);
 
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
@@ -1126,11 +1136,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         status: upcomingAppointment.status,
       } : null,
       photos: photosWithUrls,
-      // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "skip wdo, and pre
-      // treatment, but for everything else the simple layout"): the page
-      // shows the work-order document. Read at call time; a partial gates
-      // module reads as off. The two paper documents never switch.
-      ...(simpleWebProjectReport(project.project_type) ? { simpleWebReport: true } : {}),
+      // GATE_REPORT_SIMPLE_WEB: simpleWebReport + performingTechnicianName
+      // while live (simpleWebProjectFields); nothing when off.
+      ...simpleWebFields,
     });
   } catch (err) { next(err); }
 });

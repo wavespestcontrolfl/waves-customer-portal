@@ -68,6 +68,7 @@ describe('the simple project report', () => {
   it('shows the work-order document: title heading, customer and service blocks, footer, no glass', async () => {
     const { container } = renderProjectReport(payload('pest_inspection', {
       findings: { evidence_type: 'Droppings by the garage door', species: 'roof rat' },
+      performingTechnicianName: 'Jordan',
     }));
     expect(await screen.findByRole('heading', { level: 1, name: 'PEST INSPECTION REPORT' })).toBeInTheDocument();
     expect(container.querySelector('.project-report-document')).not.toBeNull();
@@ -77,7 +78,10 @@ describe('the simple project report', () => {
     expect(container.textContent).toMatch(/Pat Tester/);
     expect(container.textContent).toMatch(/\(941\) 555-0100/);
     expect(container.textContent).toMatch(/pat@example\.test/);
-    expect(container.textContent).toMatch(/Technician\s*Alex/);
+    // the technician who performed the visit, never technicianName (the
+    // staffer who created the project record, codex P1 #6353)
+    expect(container.textContent).toMatch(/Technician\s*Jordan/);
+    expect(container.textContent).not.toMatch(/Alex/);
     // findings, with the roof-rat note kept
     expect(screen.getByRole('heading', { level: 2, name: 'Findings' })).toBeInTheDocument();
     expect(container.textContent).toMatch(/Droppings by the garage door/);
@@ -88,6 +92,13 @@ describe('the simple project report', () => {
     expect(screen.queryByRole('region', { name: 'Share feedback' })).toBeNull();
     expect(container.textContent).not.toMatch(/Ask Waves/);
     expect(container.querySelector('.project-report-page')).toBeNull();
+  });
+
+  it('leaves the Technician row out when the performer is unknown', async () => {
+    const { container } = renderProjectReport(payload('pest_inspection', { performingTechnicianName: null }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'PEST INSPECTION REPORT' })).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/Technician/);
+    expect(container.textContent).not.toMatch(/Alex/);
   });
 
   it('the print button calls window.print', async () => {
