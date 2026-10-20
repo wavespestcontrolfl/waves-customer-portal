@@ -118,4 +118,7 @@ describe('backfill-call-commitments', () => {
     expect(totals.linkPromisesNotRecorded).toBe(2);
     expect(lines.join('\n')).toMatch(/NOT recorded \(office to handle\): 2 aaaaaaaa x2/);
   });
+  test('the real pipeline step the apply path loads is exported (first apply threw: not a function)', () => {
+    expect(typeof require('../services/call-recording-processor').recordCommitmentsStep).toBe('function');
+  });
 });
