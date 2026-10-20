@@ -218,14 +218,23 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
 }
 
 // The holder's contact save rewrote the slots: drop the rows of phones that
-// no longer occupy one. Inside the save's transaction; a missing table is
-// the absent state.
-async function pruneContactNotificationPrefs(trx, customerId, keepPhones = []) {
-  const keep = [...new Set(keepPhones.map(phoneKey).filter(Boolean))];
+// no longer occupy one, and clear the email-only delivery choices of a kept
+// phone whose slot no longer carries an email (an "email only" choice with
+// no address would deliver nothing — codex #6363 r6 P2). `contacts` are the
+// saved slots ({ phone, email }; a bare phone string = no email). Inside the
+// save's transaction; a missing table is the absent state.
+async function pruneContactNotificationPrefs(trx, customerId, contacts = []) {
+  const slots = contacts.map((c) => (typeof c === 'string' ? { phone: c } : c || {}));
+  const keep = [...new Set(slots.map((c) => phoneKey(c.phone)).filter(Boolean))];
+  const emailLess = [...new Set(slots.filter((c) => !String(c.email || '').trim()).map((c) => phoneKey(c.phone)).filter(Boolean))];
   try {
     const q = trx(TABLE).where({ customer_id: customerId });
     if (keep.length) q.whereNotIn('phone_key', keep);
     await q.delete();
+    for (const col of Object.values(CHANNEL_COLUMN_FOR)) {
+      if (!emailLess.length) break;
+      await trx(TABLE).where({ customer_id: customerId, [col]: 'email' }).whereIn('phone_key', emailLess).update({ [col]: null, updated_at: new Date() });
+    }
   } catch (err) {
     if (err && err.code === '42P01') return;
     throw err;

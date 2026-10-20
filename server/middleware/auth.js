@@ -233,8 +233,25 @@ async function insertRefreshRecord(
     token_hash: hashRefreshToken(refreshToken),
     parent_jti: parentJti,
     expires_at: expiresAt,
+    // The contact phone a CONTACT family was minted for (GATE_CONTACT_LOGIN):
+    // the holder's contact save revokes the families of phones it removed
+    // (revokeRemovedContactRefreshSessions), so re-adding the number later
+    // never revives a removed device's session (codex #6363 r6 P2).
+    contact_key: contactKey || null,
   });
   return { refreshToken, familyId, jti, expiresAt };
+}
+
+// The holder rewrote this row's contact slots: every contact refresh family
+// on the row whose phone no longer occupies a slot ends now. Inside the
+// save's transaction. Phones are keyed as the session claim keys them.
+async function revokeRemovedContactRefreshSessions(trx, customerId, keepPhones = []) {
+  const { phoneKeyOf } = require('../services/customer-contact');
+  const keep = [...new Set(keepPhones.map(phoneKeyOf).filter(Boolean))];
+  const now = new Date();
+  const q = trx(REFRESH_TABLE).where({ customer_id: customerId }).whereNotNull('contact_key').whereNull('revoked_at');
+  if (keep.length) q.whereNotIn('contact_key', keep);
+  return q.update({ revoked_at: now, revoke_reason: 'contact_removed', updated_at: now });
 }
 
 /**
@@ -331,7 +348,19 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // switch is never a contact's to make.
     const contactKey = decoded.contactKey || null;
     if (contactKey) {
+      if (!contactLoginLive()) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
       if (customer.active !== true || !contactSessionFor(customer, contactKey)) {
+        // The number is gone from the row (or the row is inactive): the
+        // family ends here, not just this exchange — a later re-add of the
+        // same phone must not revive it (codex #6363 r6 P2). A gate flip is
+        // not that: it only refuses, so the sessions survive it.
+        if (decoded.familyId) {
+          const now = new Date();
+          await trx(REFRESH_TABLE)
+            .where({ family_id: decoded.familyId })
+            .whereNull('revoked_at')
+            .update({ revoked_at: now, revoke_reason: 'contact_removed', updated_at: now });
+        }
         return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
       }
       if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {
@@ -788,6 +817,7 @@ module.exports = {
   generateRefreshToken,
   reissueRefreshSessionForProperty,
   revokeCustomerRefreshSessions,
+  revokeRemovedContactRefreshSessions,
   revokeRefreshSession,
   rotateRefreshSession,
   verifyRefreshCredential,

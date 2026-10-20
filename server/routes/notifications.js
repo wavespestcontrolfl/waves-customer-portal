@@ -740,7 +740,11 @@ async function contactPreferencePayload(req) {
     preferences[key] = !holderOff && own?.[col] !== false;
   }
   for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) {
-    preferences[key] = CONTACT_CHANNEL_VALUES.includes(own?.[col]) ? own[col] : 'both';
+    const chosen = CONTACT_CHANNEL_VALUES.includes(own?.[col]) ? own[col] : 'both';
+    // An email-only choice with no address on file (the holder removed it)
+    // is nothing — the save clears it; a row from before that reads as the
+    // default rather than as an option the card no longer offers (codex r6).
+    preferences[key] = chosen === 'email' && !contact.email ? 'both' : chosen;
   }
   preferences.smsEnabled = own?.sms_enabled !== false;
   preferences.emailEnabled = own?.email_enabled !== false;
@@ -807,6 +811,20 @@ router.put('/contact-preferences', async (req, res, next) => {
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
     const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
+      // An attestation confirms this phone's ask and runs the consent
+      // follow-up (onRecipientConfirmed), which locks the row of EVERY
+      // customer the phone has a confirmed row on. Lock order as
+      // markRecipientOptin (#5467): all of those customers rows first, in
+      // id order, this row among them — BEFORE this row's own lock below,
+      // so two contacts attesting the same phone on two accounts (or an
+      // attestation and a YES webhook) never hold one each and wait on the
+      // other (codex #6363 r6 P2).
+      if (updates.consentAttested === true) {
+        const sharedIds = (await trx('recipient_optin').where({ phone_key: contact.phoneKey }).whereNotNull('customer_id').select('customer_id'))
+          .map((r) => String(r.customer_id));
+        const lockIds = [...new Set([String(req.customerId), ...sharedIds])].sort();
+        await trx('customers').whereIn('id', lockIds).orderBy('id').forUpdate().select('id');
+      }
       // The session's slot is re-read under the row lock: a holder who
       // removed or replaced this number since the token was checked must
       // not have the pruned row (and its attestation) recreated here, nor
@@ -827,13 +845,9 @@ router.put('/contact-preferences', async (req, res, next) => {
       // The in-app attestation confirms THIS customer's pending or
       // undelivered ask for this phone. ask_failed included (the ask never
       // reached them, but they have now agreed in the app); declined (STOP)
-      // left alone — carrier START is the only way back. Lock order as
-      // markRecipientOptin: the customers rows first, in id order, then the
-      // opt-in rows (#5467).
+      // left alone — carrier START is the only way back. The customers rows
+      // the follow-up touches are already held (above, in id order).
       const { onRecipientConfirmed } = require('../services/recipient-optin');
-      const customerIds = (await trx('recipient_optin').where({ phone_key: contact.phoneKey }).whereNotNull('customer_id').select('customer_id'))
-        .map((r) => r.customer_id).sort();
-      if (customerIds.length) await trx('customers').whereIn('id', customerIds).orderBy('id').forUpdate().select('id');
       const confirmed = await trx('recipient_optin')
         .where({ customer_id: req.customerId, phone_key: contact.phoneKey })
         .whereIn('status', ['pending', 'ask_failed'])
@@ -1202,10 +1216,13 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           ...consentUpdates,
           updated_at: new Date(),
         });
-        // A removed contact's own notification choices go with them
-        // (contact login, GATE_CONTACT_LOGIN).
+        // A removed contact's own notification choices and portal sessions
+        // go with them; a kept contact who lost their email loses their
+        // email-only choices (contact login, GATE_CONTACT_LOGIN).
         await require('../services/contact-notification-prefs')
-          .pruneContactNotificationPrefs(trx, req.params.customerId, contacts.map((c) => c.phone));
+          .pruneContactNotificationPrefs(trx, req.params.customerId, contacts);
+        await require('../middleware/auth')
+          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, contacts.map((c) => c.phone));
       });
       savedContacts = contacts.map(serviceContactPayload);
       if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };
@@ -1286,9 +1303,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           updated_at: new Date(),
         });
         // Same prune as the list save: a replaced slot-1 person's own choices
-        // (and attestation) go with them (codex #6363 r2 P2).
+        // (and attestation) and sessions go with them (codex #6363 r2 P2).
         await require('../services/contact-notification-prefs')
-          .pruneContactNotificationPrefs(trx, req.params.customerId, postSave.map((c) => c.phone));
+          .pruneContactNotificationPrefs(trx, req.params.customerId, postSave);
+        await require('../middleware/auth')
+          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, postSave.map((c) => c.phone));
       });
       if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
       // Same events as the list save — the legacy shape must not be a

@@ -481,11 +481,13 @@ function findServiceContactSlotByPhoneKey(customer, phoneKey) {
 // (unconsented_slot_phone_keys, #5467) waits for that person's own YES,
 // exactly as their texts do: a plausible-but-wrong inferred number must not
 // become a login to the customer's address, schedule and reports (codex
-// #6363 r4 security P2).
+// #6363 r4 security P2). The ACTUAL stamp, never serviceContactsConsented:
+// that helper honors DISABLE_CONTACT_CONSENT_GATE=1, the SMS fan-out rollback
+// switch, which must not open the login to unstamped numbers (codex r6 P1).
 function contactSlotMayLogIn(customer, phoneKey) {
   const key = phoneKeyOf(phoneKey);
   if (!customer || !key) return false;
-  return serviceContactsConsented(customer) && !unconsentedSlotPhoneKeys(customer).has(key);
+  return !!customer.service_contacts_consent_at && !unconsentedSlotPhoneKeys(customer).has(key);
 }
 
 // True if this customer has a distinct service contact configured (any slot).

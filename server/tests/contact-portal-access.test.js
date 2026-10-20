@@ -70,6 +70,7 @@ function builder(table) {
   b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
   b.whereNotNull = (col) => { conds.push((r) => r[norm(col)] != null); return b; };
   b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[norm(col)]))); return b; };
+  b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[norm(col)]))); return b; };
   b.whereRaw = (sql, params) => {
     if (/regexp_replace/.test(sql)) {
       const like = String(params[0]).replace(/%/g, '');
@@ -299,6 +300,14 @@ describe('contact login — who a number signs in as', () => {
     tables.customers[0].service_contacts_consent_at = null;
     expect((await login(TENANT_PHONE)).status).toBe(401);
     expect((await login(HOLDER_PHONE)).status).toBe(200);
+    // The SMS fan-out rollback switch (DISABLE_CONTACT_CONSENT_GATE=1) is
+    // not an attestation: it must not open the login (codex r6 P1).
+    process.env.DISABLE_CONTACT_CONSENT_GATE = '1';
+    try {
+      expect((await login(TENANT_PHONE)).status).toBe(401);
+    } finally {
+      delete process.env.DISABLE_CONTACT_CONSENT_GATE;
+    }
   });
 
   test('a live contact session ends when its number becomes unconsented (401), like a removed slot', async () => {
@@ -330,16 +339,18 @@ describe('contact session — route allow-list', () => {
       expect(res.body.lastName).toBe('Spouse');
       expect(res.body.phone).toBe(CONTACT_PHONE);
       expect(res.body.address.line1).toBe('1 Gulf Dr');
-      // Nothing the Billing / Refer tabs render from.
-      for (const key of ['referralCode', 'accountCredit', 'credits', 'annualPrepay', 'monthlyRate', 'autoApplyAccountCredit']) {
+      // Nothing the Billing / Refer tabs render from, and not the holder's
+      // plan tier (codex r6 P2).
+      for (const key of ['referralCode', 'accountCredit', 'credits', 'annualPrepay', 'monthlyRate', 'autoApplyAccountCredit', 'tier']) {
         expect(res.body).not.toHaveProperty(key);
       }
       expect(res.body.notificationPrefs).toBeNull();
       expect(res.body.propertyScope).toEqual({ enabled: false, propertyId: null, closed: false });
     } else if (path.startsWith('/api/auth/properties')) {
       expect(res.body.properties.map((p) => p.id)).toEqual(['cust-holder']);
-      // Label + address only: no holder name, no rate.
-      expect(JSON.stringify(res.body)).not.toMatch(/Pat|Owner|120/);
+      // Label + address only: no holder name, no rate, no tier.
+      expect(JSON.stringify(res.body)).not.toMatch(/Pat|Owner|120|gold/);
+      expect(res.body.properties[0]).not.toHaveProperty('tier');
     } else {
       expect(res.body).toEqual({ ok: true, contact: 1, id: 'cust-holder' });
     }
@@ -380,11 +391,32 @@ describe('contact session — lifecycle', () => {
     expect(billing.status).toBe(403);
   });
 
-  test('the holder removing the contact ends the session: requests 401, refresh refused', async () => {
+  test('the holder removing the contact ends the session: requests 401, refresh refused, and the family is dead even once the number is re-added', async () => {
     const first = await login(CONTACT_PHONE);
+    const slot = { service_contact_name: 'Sam Spouse', service_contact_phone: CONTACT_PHONE, service_contact_email: 'sam@example.com' };
     Object.assign(tables.customers[0], { service_contact_name: null, service_contact_phone: null, service_contact_email: null });
     expect((await call('GET', '/api/auth/me', bearerOf(first.body.token))).status).toBe(401);
     expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: first.body.refreshToken })).status).toBe(401);
+    // The refused exchange revoked the family (codex r6 P2): re-adding the
+    // same number does not revive the removed device's token.
+    expect(tables.customer_refresh_tokens.every((r) => r.revoked_at && r.revoke_reason === 'contact_removed')).toBe(true);
+    Object.assign(tables.customers[0], slot);
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: first.body.refreshToken })).status).toBe(401);
+    // A fresh OTP login works again.
+    expect((await login(CONTACT_PHONE)).status).toBe(200);
+  });
+
+  test('the holder\'s contact save revokes the families of the phones it removed, by the contact key the family was minted with', async () => {
+    const contact = await login(CONTACT_PHONE);
+    const tenant = await login(TENANT_PHONE);
+    const holder = await login(HOLDER_PHONE);
+    expect(tables.customer_refresh_tokens.map((r) => r.contact_key)).toEqual(['9415550202', '9415550303', null]);
+    // Slot 1 removed, the tenant kept (the save path prunes by the kept phones).
+    await auth.revokeRemovedContactRefreshSessions((table) => builder(table), 'cust-holder', [TENANT_PHONE]);
+    Object.assign(tables.customers[0], { service_contact_name: null, service_contact_phone: null, service_contact_email: null });
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: contact.body.refreshToken })).status).toBe(401);
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: tenant.body.refreshToken })).status).toBe(200);
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: holder.body.refreshToken })).status).toBe(200);
   });
 
   test('the contact moving to another slot keeps the session (the claim is the phone, not the slot)', async () => {

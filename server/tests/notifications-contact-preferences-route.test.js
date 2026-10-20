@@ -24,11 +24,13 @@ jest.mock('../services/service-contact-events', () => ({ recordServiceContactCha
 const mockSession = { current: null };
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => { Object.assign(req, mockSession.current); next(); },
+  revokeRemovedContactRefreshSessions: jest.fn(() => Promise.resolve(0)),
 }));
 
 const express = require('express');
 const db = require('../models/db');
 const { onRecipientConfirmed } = require('../services/recipient-optin');
+const { revokeRemovedContactRefreshSessions } = require('../middleware/auth');
 const router = require('../routes/notifications');
 
 // ── in-memory db ──────────────────────────────────────────────────────────
@@ -147,6 +149,10 @@ describe('GET /contact-preferences', () => {
     expect(res.body.reportsWithheld).toBe(true);
     expect(res.body.emailAvailable).toBe(false);
     expect(res.body.consentAttestedAt).toBe('2026-10-20T00:00:00Z');
+    // A stored email-only choice with no address on file reads as the
+    // default, never as an option the card no longer offers (codex r6).
+    tables.service_contact_notification_prefs[0].en_route_channel = 'email';
+    expect((await get()).body.preferences.enRouteChannel).toBe('both');
   });
 
   test('a holder session is refused (the holder manages contacts through /property-preferences)', async () => {
@@ -285,6 +291,21 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
     expect(tables.service_contact_notification_prefs).toEqual([
       expect.objectContaining({ phone_key: '9415550303' }),
     ]);
+    // The removed phone's portal sessions end with it (codex r6 P2).
+    expect(revokeRemovedContactRefreshSessions).toHaveBeenCalledWith(expect.anything(), 'cust-1', ['+19415550303']);
+  });
+
+  test('a kept contact who lost their email loses their email-only delivery choices (codex r6)', async () => {
+    tables.service_contact_notification_prefs.push(
+      { customer_id: 'cust-1', phone_key: '9415550202', en_route_channel: 'email', service_complete_channel: 'both' },
+    );
+    mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
+    const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContacts: [{ firstName: 'Sam', lastName: 'Spouse', phone: '+19415550202', email: '' }],
+      serviceContactsConsent: true,
+    });
+    expect(res.status).toBe(200);
+    expect(tables.service_contact_notification_prefs[0]).toEqual(expect.objectContaining({ en_route_channel: null, service_complete_channel: 'both' }));
   });
 
   test('the legacy single-contact save (serviceContact) prunes the replaced slot-1 person too, keeping slot 2/3 survivors (codex r2)', async () => {

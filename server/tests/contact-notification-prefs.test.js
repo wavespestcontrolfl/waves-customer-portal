@@ -29,6 +29,8 @@ function builder() {
   const matching = () => rows.filter((r) => conds.every((c) => c(r)));
   b.where = (obj) => { Object.entries(obj).forEach(([k, v]) => conds.push((r) => String(r[k]) === String(v))); return b; };
   b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[col]))); return b; };
+  b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[col]))); return b; };
+  b.update = async (patch) => { if (failWith) throw failWith; const hit = matching(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
   b.select = async () => { if (failWith) throw failWith; return matching(); };
   b.first = async () => { if (failWith) throw failWith; return matching()[0] || null; };
   b.delete = async () => { if (failWith) throw failWith; const hit = matching(); rows = rows.filter((r) => !hit.includes(r)); return hit.length; };
@@ -189,6 +191,21 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
       { customer_id: 'cust-1', phone_key: '9415550303' },
       { customer_id: 'cust-2', phone_key: '9415550303' },
     ]);
+  });
+
+  test('a kept phone whose slot lost its email loses its email-only delivery choices; a phone with an email keeps them (codex r6)', async () => {
+    rows = [
+      { customer_id: 'cust-1', phone_key: '9415550202', en_route_channel: 'email', service_complete_channel: 'sms', tech_arrived_channel: 'email' },
+      { customer_id: 'cust-1', phone_key: '9415550303', en_route_channel: 'email' },
+      { customer_id: 'cust-2', phone_key: '9415550202', en_route_channel: 'email' },
+    ];
+    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+      { phone: '+19415550202', email: '' },
+      { phone: '+19415550303', email: 'terry@example.com' },
+    ]);
+    expect(rows[0]).toEqual(expect.objectContaining({ en_route_channel: null, service_complete_channel: 'sms', tech_arrived_channel: null }));
+    expect(rows[1].en_route_channel).toBe('email');
+    expect(rows[2].en_route_channel).toBe('email');
   });
 
   test('an empty slot list clears every row of that customer only', async () => {

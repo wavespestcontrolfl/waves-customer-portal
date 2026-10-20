@@ -5187,7 +5187,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           </div>
           {renderTimeTBD(s)}
 
-          {/* Communication Timeline */}
+          {/* Communication Timeline — the holder's promises, built from the
+              holder's prefs. A read-only session has none loaded (a contact's
+              own choices live on their notification card, and a withheld
+              report never comes), so it promises nothing (codex #6363 r6). */}
+          {!readOnlyVisits && (
           <div style={{
             marginTop: 14, padding: 12, borderRadius: 10,
             background: subtle, border: '1px solid #E7E2D7',
@@ -5221,6 +5225,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               </div>
             ))}
           </div>
+          )}
 
           {/* Confirm + Reschedule — C4: both are appointment mutations, so a
               cancelled (read-only) session renders neither control; the

@@ -13,8 +13,12 @@ jest.mock('../services/email-template-library', () => ({
 // select + prep_template_key update) — stub the db so the token resolves
 // without a live connection.
 jest.mock('../models/db', () => jest.fn());
+// The slot-1 contact's own email master switch (contact login): declined =
+// the mail goes to the account holder instead.
+jest.mock('../services/contact-notification-prefs', () => ({ contactDeclinesChannel: jest.fn(async () => false) }));
 
 const db = require('../models/db');
+const { contactDeclinesChannel } = require('../services/contact-notification-prefs');
 const EmailTemplates = require('../services/email-template-library');
 const ProjectEmail = require('../services/project-email');
 
@@ -60,6 +64,7 @@ function project(overrides = {}) {
 describe('project email service', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    contactDeclinesChannel.mockResolvedValue(false);
     // Project already carries a prep_token, so ensurePrepToken's select
     // returns it and no mint/update path runs.
     db.mockImplementation(() => dbChain({ prep_token: 'preptok123' }));
@@ -87,6 +92,30 @@ describe('project email service', () => {
         property_address: '123 Palm Ave Bradenton, FL 34211',
       }),
     }));
+  });
+
+  test('a slot-1 contact whose email switch is off is skipped for the holder: reports, invoice-bearing variants and prep guides alike (codex #6363 r6 P1)', async () => {
+    contactDeclinesChannel.mockResolvedValue(true);
+    const withContact = customer({ service_contact_email: 'service@example.com', service_contact_name: 'Sam Service', service_contact_phone: '+19415550202' });
+    await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://portal.wavespestcontrol.com/report/project/x' });
+    await ProjectEmail.sendProjectReportWithInvoice({ project: project(), customer: withContact, reportUrl: 'https://x', payUrl: 'https://pay', invoice: { id: 'inv-1', invoice_number: 'INV-1', total: 100 } });
+    await ProjectEmail.sendProjectInvoiceBeforeReport({ project: project(), customer: withContact, payUrl: 'https://pay', invoice: { id: 'inv-1', invoice_number: 'INV-1', total: 100 } });
+    await ProjectEmail.sendPrepGuide({ project: project(), customer: withContact });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(4);
+    for (const [args] of EmailTemplates.sendTemplate.mock.calls) {
+      expect(args.to).toBe('primary@example.com');
+      expect(args.payload.first_name).toBe('Taylor');
+    }
+    expect(contactDeclinesChannel).toHaveBeenCalledWith('cust-1', { phone: '+19415550202', role: 'service_contact' }, 'email');
+    // An explicit recipient (a report copy, the payer) is never re-routed.
+    EmailTemplates.sendTemplate.mockClear();
+    await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x', recipient: { email: 'ap@payer.example', name: 'AP', role: 'payer' } });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@payer.example' }));
+    // Switch on (the default): the contact gets it, and the holder is never asked.
+    contactDeclinesChannel.mockResolvedValue(false);
+    EmailTemplates.sendTemplate.mockClear();
+    await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'service@example.com', payload: expect.objectContaining({ first_name: 'Sam' }) }));
   });
 
   test('sends mapped prep guide with supplied idempotency key', async () => {

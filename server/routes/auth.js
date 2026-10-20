@@ -164,7 +164,8 @@ function actorPayload(contact) {
 // The signed-in identity. For a CONTACT session (GATE_CONTACT_LOGIN) that is
 // the contact's own name, phone and email — never the account holder's
 // (codex round 1 on #6363: the login response carried the holder's identity
-// to the contact's device).
+// to the contact's device), and no plan tier either: the contact UI mounts
+// no plan surface, and the tier is the holder's (codex r6 P2).
 function authCustomerPayload(customer, contact = null) {
   const [contactFirst, ...contactRest] = String(contact?.name || '').trim().split(/\s+/).filter(Boolean);
   return {
@@ -176,7 +177,7 @@ function authCustomerPayload(customer, contact = null) {
     lastName: contact ? contactRest.join(' ') : customer.last_name,
     email: contact ? (contact.email || '') : customer.email,
     phone: contact ? contact.phone : customer.phone,
-    tier: customer.waveguard_tier,
+    ...(contact ? {} : { tier: customer.waveguard_tier }),
   };
 }
 
@@ -185,9 +186,10 @@ function accountIdForCustomer(customer) {
 }
 
 // A contact session's property entry: the row's label and address only — no
-// holder name, no rate (the switcher labels by profileLabel / address).
+// holder name, no rate, no plan tier (the switcher labels by profileLabel /
+// address).
 function contactPropertyPayload(customer) {
-  const { firstName, lastName, monthlyRate, ...entry } = propertyPayload(customer);
+  const { firstName, lastName, monthlyRate, tier, ...entry } = propertyPayload(customer);
   return entry;
 }
 
@@ -558,7 +560,6 @@ router.get('/me', authenticate, async (req, res, next) => {
         state: customer.state,
         zip: customer.zip,
       },
-      tier: customer.waveguard_tier,
       memberSince: customer.member_since,
       cancelled: false,
       cancelledAt: null,

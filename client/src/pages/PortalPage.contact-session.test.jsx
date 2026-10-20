@@ -36,12 +36,13 @@ vi.mock('../components/brand/CustomerDialogHost', () => ({
 import api from '../utils/api';
 import { DocumentSection, ScheduleTab } from './PortalPage';
 
+// No tier on a contact session (the server omits the holder's plan).
 const contactCustomer = {
   id: 'cust-1', firstName: 'Sam', lastName: 'Spouse',
-  phone: '+19415550202', email: 'sam@example.com', tier: 'gold', property: {},
+  phone: '+19415550202', email: 'sam@example.com', property: {},
   actor: { kind: 'contact', slot: 1, name: 'Sam Spouse', phone: '+19415550202', email: 'sam@example.com' },
 };
-const holderCustomer = { ...contactCustomer, firstName: 'Pat', phone: '+19415550101', actor: { kind: 'holder' } };
+const holderCustomer = { ...contactCustomer, firstName: 'Pat', phone: '+19415550101', tier: 'gold', actor: { kind: 'holder' } };
 
 const contactPrefs = () => ({
   contact: { name: 'Sam Spouse', phone: '+19415550202', email: 'sam@example.com', slot: 1 },
@@ -90,6 +91,9 @@ describe('ScheduleTab — contact session is view-only', () => {
     expect(screen.queryByRole('button', { name: /^confirm/i })).not.toBeInTheDocument();
     expect(screen.queryByText('Reschedule')).not.toBeInTheDocument();
     expect(screen.queryByText('Request Visit')).not.toBeInTheDocument();
+    // The holder's "You'll hear from us" timeline is built from the holder's
+    // prefs; a contact's own choices live on their card (codex r6).
+    expect(screen.queryByText("You'll hear from us")).not.toBeInTheDocument();
     expect(api.getNotificationPrefs).not.toHaveBeenCalled();
     expect(api.getPropertyNotificationPrefs).not.toHaveBeenCalled();
     // The holder's cards are gone; the contact's own card is up.
@@ -104,6 +108,7 @@ describe('ScheduleTab — contact session is view-only', () => {
     await renderSchedule(holderCustomer, { onRequestVisit: vi.fn() });
     expect(screen.getByRole('button', { name: /^confirm/i })).toBeInTheDocument();
     expect(screen.getByText('Reschedule')).toBeInTheDocument();
+    expect(screen.getByText("You'll hear from us")).toBeInTheDocument();
     expect(api.getNotificationPrefs).toHaveBeenCalled();
     expect(api.getContactNotificationPrefs).not.toHaveBeenCalled();
     expect(screen.queryByTestId('contact-notification-card')).not.toBeInTheDocument();
