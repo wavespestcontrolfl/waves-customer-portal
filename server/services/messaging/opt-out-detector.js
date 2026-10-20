@@ -51,7 +51,11 @@ const OPT_OUT_PATTERNS = [
 // No evidence counts after a conditional, request or speech word earlier in the sentence (if,
 // unless, rather, wish, prefer, want, need, ask, request, like, say, tell): "I would prefer it if I
 // received no texts" and "I asked that no messages were sent to me" are requests. Nor before a
-// "keep it that way" wording after it ("I got no texts, keep it that way" is a request).
+// "keep it that way" wording after it ("I got no texts, keep it that way" is a request), nor when
+// a word about the future ends the phrase, within four words and no comma ("I got the
+// confirmation but no text that day or ever again" is a request). Only words that close the
+// phrase count (anymore, ever again, "or from now on"): "from now on" alone can open the next
+// request ("I got no text that day and from now on please text me the day before").
 // Sentences end at . ! ? or ; (a line break or a comma does not end one: "No\ntexts please" is a
 // request). "No more texts" stays a stop request anywhere (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:text\s+messages?|texts?|messages?|sms)\b/gi;
@@ -62,6 +66,7 @@ const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
 const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like|say|says|said|tell|tells|told)\b/i;
 const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|asap|already|just)\b/gi;
 const REQUEST_CONTEXT_AFTER = /\b(?:(?:keep|leave)\s+(?:it|them)\s+(?:that\s+way|like\s+that|off)|(?:stay|stays|remain|remains)\s+that\s+way|(?:want|prefer|like)\s+it\s+(?:that\s+way|like\s+that))\b/i;
+const FUTURE_AFTER = /^(?:\s+[\w']+){0,4}?\s+(?:anymore|any\s+more|ever\s+again|(?:or|nor)\s+(?:from\s+now\s+on|going\s+forward|in\s+the\s+future))\b/i;
 const STOP_LANGUAGE = /(?<!\b(?:don'?t|do\s+not|never|not|won'?t|can'?t|didn'?t|doesn'?t)\s+)\b(?:stop(?!\s+(?:by|over|in|at|back)\b)|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
 
 function sentencesOf(body) {
@@ -78,6 +83,7 @@ function noTextsKind(text) {
     const after = text.slice(match.index + match[0].length);
     const sameClause = before.split(',').pop();
     const reportsPastText = !REQUEST_CONTEXT_EARLIER.test(before) && !REQUEST_CONTEXT_AFTER.test(after)
+      && !FUTURE_AFTER.test(after)
       && (PAST_REPORT_JUST_BEFORE.test(before) || PAST_ARRIVAL_AFTER.test(after)
         || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(sameClause)));
     return !reportsPastText;
