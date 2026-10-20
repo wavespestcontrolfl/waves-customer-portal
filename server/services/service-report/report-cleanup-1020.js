@@ -32,6 +32,9 @@ const hasWateringText = (facts) => !!(String(facts.irrigationNotes || '').trim()
 
 function waterInRuleOf(products) {
   if (!live()) return null;
+  // A product whose rule or catalog row could not be read may be a hold: no affirmative advice (report-data.js
+  // withholds the full instruction on the same markers).
+  if (products && (products.wateringRuleLookupFailed || products.catalogEnrichmentFailed)) return null;
   const facts = (Array.isArray(products) ? products : []).map((p) => (p && p.approved_report_product_facts) || {});
   const rules = facts.map((f) => (f.wateringRule && typeof f.wateringRule === 'object' ? f.wateringRule : null));
   if (rules.some((rule) => rule && rule.mode === 'hold')) return { hold: true };
@@ -138,19 +141,15 @@ function dropStockLines(data) {
 }
 
 // ── Item 4: a trouble-spot photo gets one fixed sentence ───────────────────
-const TROUBLE_TOPIC = { weeds: 'weeds', damage: 'turf stress', coverage: 'thin turf' };
-const ISSUE = new Set(['watch', 'needs_attention']);
-
+// Nothing ties a visit-wide finding to the trouble photo itself, so the sentence never names what the photo shows
+// (a weed finding elsewhere must not label a thin-turf photo as weeds); it says the technician flagged it and when
+// Waves looks again.
 function troubleSpotNote(data) {
   const v2 = data.reportV2;
   const photoSet = v2 && Array.isArray(v2.photoSet) ? v2.photoSet : [];
   if (!photoSet.some((photo) => photo && photo.shot === 'trouble')) return null;
-  const topic = (Array.isArray(v2.insights) ? v2.insights : [])
-    .filter((card) => card && ISSUE.has(card.status) && TROUBLE_TOPIC[card.category])
-    .map((card) => TROUBLE_TOPIC[card.category])[0];
-  const what = topic ? `an area with ${topic}` : 'an area your technician flagged';
   const next = v2.followUp ? 'at the follow-up we already planned' : 'at your next visit';
-  return `The trouble spot photo shows ${what}. We will check it again ${next}.`;
+  return `The trouble spot photo shows an area your technician flagged. We will check it again ${next}.`;
 }
 
 // The flag the client keys off, and the note. Present only while the gate is live; the note is null with no

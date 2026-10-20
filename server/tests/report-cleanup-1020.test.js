@@ -330,14 +330,24 @@ describe('item 4: the trouble-spot note', () => {
       .toBe('The trouble spot photo shows an area your technician flagged. We will check it again at the follow-up we already planned.');
   });
 
-  test('the spot is named from the visit findings when one is on watch', () => {
+  test('the note never names the spot from a visit-wide finding (nothing ties it to the photo)', () => {
     gateOn();
     const note = (category) => cleanup.attachCleanupFields(troubleVisit({ insights: [{ category, status: 'watch' }] })).troubleSpotNote;
-    expect(note('weeds')).toMatch(/^The trouble spot photo shows an area with weeds\./);
-    expect(note('damage')).toMatch(/shows an area with turf stress\./);
-    expect(note('coverage')).toMatch(/shows an area with thin turf\./);
-    expect(note('mowing')).toMatch(/shows an area your technician flagged\./);
-    expect(cleanup.attachCleanupFields(troubleVisit({ insights: [{ category: 'weeds', status: 'healthy' }] })).troubleSpotNote).toMatch(/an area your technician flagged/);
+    for (const category of ['weeds', 'damage', 'coverage', 'mowing']) {
+      expect(note(category)).toBe('The trouble spot photo shows an area your technician flagged. We will check it again at your next visit.');
+    }
+  });
+
+  test('a failed watering-rule or catalog read gives no water-in fallback', () => {
+    gateOn();
+    const waterIn = { approved_report_product_facts: { wateringRule: { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24 } } };
+    const unknown = { approved_report_product_facts: {} };
+    expect(cleanup.waterInRuleOf([waterIn, unknown])).toMatchObject({ inches: 0.5, hours: 24 });
+    for (const marker of ['wateringRuleLookupFailed', 'catalogEnrichmentFailed']) {
+      const products = [waterIn, unknown];
+      products[marker] = true;
+      expect(cleanup.waterInRuleOf(products)).toBeNull();
+    }
   });
 
   test('no trouble-spot photo: the flag is set and the note is null', () => {
