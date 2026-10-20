@@ -5,7 +5,8 @@
 //  - the note is not read for products (its facts are still read);
 //  - a product at 0 in stock still holds, as without the gate, unless the context also says stockAdvisory
 //    (GATE_PEST_STOCK_ADVISORY: FastCompleteSheet.report-flow.test.jsx);
-//  - the trace is optional: typed feet cover a perimeter spray with no saved trace.
+//  - the trace is optional: typed feet cover a perimeter spray with no saved trace;
+//  - the photo and trace reads hold nothing: a read still loading or failed sends with its field left out.
 // A re-service gets the same sheet (the server sends the key for a recurring series or
 // a re-service only). Every lane, typed, station and prepare path, a first cleanout that
 // opens with no house mix, and a context without the key keep the sheet as it was
@@ -42,6 +43,7 @@ const NO_STOCK = () => CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory
 
 function makeRequest({
   service = REGULAR, facts = FACTS, trace = { enabled: true, treatmentZone: null }, products = CATALOG, context = { oneTap: true }, reportGate = null,
+  photos = { photos: [] },
 } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
@@ -51,8 +53,9 @@ function makeRequest({
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return { available: false, promises: [] };
     if (path.split('?')[0].endsWith('/blog-posts')) return { available: false, posts: [] };
-    if (path.endsWith('/photos')) return { photos: [] };
-    if (path.split('?')[0].endsWith('/treatment-zone')) return trace;
+    // `photos` / `trace` may be functions: a read that never answers, or one that fails.
+    if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : photos;
+    if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace() : trace;
     if (path === '/admin/schedule/generate-report') {
       if (reportGate) await reportGate;
       return { report: REPORT };
@@ -181,6 +184,87 @@ describe('one-tap: a product at 0 in stock', () => {
     writeNote();
     tapRating();
     await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
+  });
+});
+
+// The photo and trace reads hold nothing on the one-tap report (owner 2026-10-17, the scope page's "Loading photos"
+// and "Check the trace" holds and their Full form escapes). The body then omits the field of a read that did not
+// answer, so /complete skips that check instead of refusing a mismatch (an answered read still sends it).
+describe('one-tap: the photo and trace reads hold nothing', () => {
+  const never = () => new Promise(() => {});
+  const failed = () => Promise.reject(Object.assign(new Error('Read failed'), { status: 503 }));
+  const openWithFullForm = async (request) => {
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} onFullForm={onFullForm} voiceFillEnabled />);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    return onFullForm;
+  };
+  const sentBody = async (request) => {
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(request.bodies('/complete')).toHaveLength(1));
+    return request.bodies('/complete')[0];
+  };
+
+  test('a photo read still loading: the tap writes, the report opens and sends, with no photoCaptionsSeen', async () => {
+    const request = makeRequest({ photos: never });
+    await openWithFullForm(request);
+    writeNote();
+    tapRating();
+    await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
+    await openReport();
+    const body = await sentBody(request);
+    expect('photoCaptionsSeen' in body).toBe(false);
+    // the trace read answered (none saved), so its check still goes
+    expect(body.traceSeen).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+  });
+
+  test('a photo read that failed (photos outside the note box): it sends, with no photoCaptionsSeen', async () => {
+    const request = makeRequest({ photos: failed });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    const body = await sentBody(request);
+    // an empty list would be refused if saved photos carry descriptions
+    expect('photoCaptionsSeen' in body).toBe(false);
+  });
+
+  test('a trace read that failed: no hold, no Full form, typed feet cover the spray, and the body omits traceSeen', async () => {
+    const request = makeRequest({ facts: PERIMETER, trace: failed });
+    await openWithFullForm(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    expect(screen.queryByText(/Couldn’t check for a saved trace/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+    // its retry stays offered
+    expect(screen.getByRole('button', { name: 'Check the trace again' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Feet sprayed'), { target: { value: '150' } });
+    const body = await sentBody(request);
+    expect('traceSeen' in body).toBe(false);
+    // the photo read answered, so its check still goes
+    expect(body.photoCaptionsSeen).toEqual([]);
+    expect(body.products.find((p) => p.applicationMethod === 'perimeter_spray')).toMatchObject({ areaValue: 150, areaUnit: 'linear_ft' });
+  });
+
+  test('a trace read still loading: the feet box shows and the body omits traceSeen', async () => {
+    const request = makeRequest({ facts: PERIMETER, trace: never });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    expect(screen.queryByText('Checking for a saved trace…')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Feet sprayed'), { target: { value: '120' } });
+    const body = await sentBody(request);
+    expect('traceSeen' in body).toBe(false);
+  });
+
+  test('gate off: a trace read that failed still holds and offers the Full form', async () => {
+    const request = makeRequest({ facts: PERIMETER, trace: failed, context: {} });
+    await openWithFullForm(request);
+    expect(await screen.findByRole('button', { name: 'Full form' })).toBeTruthy();
   });
 });
 

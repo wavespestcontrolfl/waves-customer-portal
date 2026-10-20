@@ -1086,9 +1086,13 @@ const reportCustomerText = (isReservice) => ({
 // server what was written so an edit gets its heads-up. A regular visit gets
 // the full form's customer text, pay link and review ask; a re-service never
 // gets a pay link or a review ask.
+// A read the sheet got an answer to: not still loading, not failed, and (the photo read) not a failure it swallowed
+// (`read` false; the trace read has no such field).
+const readAnswered = (read) => read.loaded === true && read.failed !== true && read.read !== false;
+
 function reportCompletionBody({
   form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, customerText, promiseMarks, recordFields = null,
-  traceOnReport = true, photos = [],
+  traceOnReport = true, visitPhotos,
 }) {
   const ratingSent = ratingAllowed && Number.isInteger(form.rating);
   // A lane or typed visit records its own record, as the report was written
@@ -1099,8 +1103,11 @@ function reportCompletionBody({
     ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
     // The saved trace this report was judged against (null: none, or a map
     // gate that hides traces), for the server to re-check under the visit
-    // lock and freeze: the report shows only this trace.
-    traceSeen: trace.zone?.updated_at ?? null,
+    // lock and freeze: the report shows only this trace. Sent only when the
+    // trace read answered: the one-tap report (GATE_ONE_TAP_REPORT) sends with
+    // a read still loading or failed, and the server then skips the check
+    // (every other flow holds until the read answers, so it always sends it).
+    ...(readAnswered(trace) ? { traceSeen: trace.zone?.updated_at ?? null } : {}),
     // A saved trace this visit's report never shows (the live context's
     // traceOnReport): the server still checks it did not change, but freezes
     // the record as judged against no trace, so it sets no outdoor wait.
@@ -1132,8 +1139,9 @@ function reportCompletionBody({
     ...(promiseMarks.length ? { promiseMarks } : {}),
     // The photo descriptions the report was written from (a changed one
     // makes the report stale here): the server re-reads them under the visit
-    // lock, so one changed on another device refuses the send.
-    photoCaptionsSeen: photoCaptionsOf(photos),
+    // lock, so one changed on another device refuses the send. Sent only when
+    // the photo read answered, as traceSeen above.
+    ...(readAnswered(visitPhotos) ? { photoCaptionsSeen: photoCaptionsOf(visitPhotos.photos) } : {}),
     techTips: techTipsOf(form, tipsAvailable),
     // The picked Waves blog post; /complete checks it is still live and
     // freezes it onto the report.
@@ -1155,9 +1163,11 @@ function reportCompletionBody({
 // "Couldn’t": the note's read of where product went down, the saved trace).
 const needsFullFormHold = (reason) => /\bfull form\b|^couldn[’']t\b/i.test(String(reason || ''));
 
-function reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace }) {
+// The one-tap report (`oneTap`): a failed photo or trace read holds nothing there, so it sends nobody to the full form
+// (the read's own retry stays offered); a writer that failed still does, as it has no other way out.
+function reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace, oneTap }) {
   if (needsFullFormHold(generateMissing.reason) || needsFullFormHold(completeMissing.reason)) return true;
-  return !!report.writeError || visitPhotos.failed === true || trace.failed === true;
+  return !!report.writeError || (!oneTap && (visitPhotos.failed === true || trace.failed === true));
 }
 
 // A hold's fix as the footer's own button: the missing trace opens the tracer
@@ -1185,7 +1195,9 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // `stockAdvisory` (GATE_PEST_STOCK_ADVISORY, the context's key): a 0-in-stock product holds nothing, because /complete
 // takes this pest visit's stock below zero and records the shortfall (owner 2026-10-20, "dont block"); `stockNotices`
 // lists every such product for the sheet to name.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, stationHold = '', stockAdvisory, ...sendInputs }) {
+// `oneTap` (GATE_ONE_TAP_REPORT, owner 2026-10-17): the photo read holds nothing (photos are optional, shown when
+// saved; the body then omits photoCaptionsSeen until the read answers). A photo change still being saved still holds.
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
   const outOfStock = active.find(isOutOfStockRow);
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
@@ -1193,8 +1205,8 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
-    [!photosLoaded, 'Loading photos…'],
-    [photosFailed, 'Read the photos again first.'],
+    [!oneTap && !photosLoaded, 'Loading photos…'],
+    [!oneTap && photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
     // A station visit's stations (GATE_STATION_FAST_COMPLETE): the first report
     // is never written without them, and one that cannot be judged goes to the
@@ -1204,7 +1216,7 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [!stockAdvisory && outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
-    ...(stage === 'complete' ? sendHoldsFor(mode)({ active, ...sendInputs }) : []),
+    ...(stage === 'complete' ? sendHoldsFor(mode)({ active, oneTap, ...sendInputs }) : []),
     // Voice fill: a product row it set waits on the tech's ✓, and what it could
     // not settle is still open (the list sits under the report).
     ...(stage === 'complete' && voiceHolds ? [
@@ -1232,10 +1244,11 @@ function StockNotices({ rows, checking, locked, onCheck, disabled }) {
   );
 }
 
-// One-tap: the "Feet sprayed" box, where a perimeter spray has no saved trace at all (the trace's own read settles
-// first, so the box never flashes). Null: no box.
+// One-tap: the "Feet sprayed" box, where a perimeter spray has no saved trace the sheet knows of: none saved, or a
+// trace read still loading or failed (the report step comes after the read in practice; the trace stays offered).
+// Null: no box.
 function feetFieldFor({ oneTap, trace, active, draft, value, onChange }) {
-  if (!oneTap || !trace.loaded || trace.failed || trace.zone || !perimeterSprayRow(active, draft)) return null;
+  if (!oneTap || trace.zone || !perimeterSprayRow(active, draft)) return null;
   return { value, onChange };
 }
 
@@ -1439,8 +1452,10 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
 // 2026-10-10), so the record goes as it was heard.
 // The one-tap report (`oneTap`, owner 2026-10-17): the trace is optional. A perimeter spray with no saved trace is
 // covered by the feet the tech types (`typedFeet`, a whole number above 0), so the trace still can be done but
-// never has to be, and "can't be traced here" never sends the tech to the Full form. A saved trace that gives no
-// feet (an outline, an old trace) keeps the rules below: the record would show it beside the typed feet.
+// never has to be, and "can't be traced here" never sends the tech to the Full form. Its read holds nothing either:
+// still loading or failed, the typed feet cover the spray and the body omits traceSeen (a saved trace the sheet
+// could not read still shows on the report). A saved trace that gives no feet (an outline, an old trace) keeps the
+// rules below: the record would show it beside the typed feet.
 function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead, oneTap = false, typedFeet = null }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const perimeterRow = perimeterSprayRow(active, draft);
@@ -1448,7 +1463,6 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
   if (oneTap && !traceRead.zone) {
     return [
       ...ready.report,
-      ...ready.trace,
       [untraced && !typedFeet, 'Type the feet you sprayed, or trace it.', null, traceAvailable ? 'trace' : null],
     ];
   }
@@ -1947,6 +1961,7 @@ function ReportFlowForm({
     form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
     stationHold: recordState.stationGate.generate,
     stockAdvisory: ctx.stockAdvisory,
+    oneTap,
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({
@@ -1954,13 +1969,13 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
-    stationSendHold: recordState.stationGate.complete, oneTap, typedFeet: typedFeetValue,
+    stationSendHold: recordState.stationGate.complete, typedFeet: typedFeetValue,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full
   // form, or a read this sheet can't finish without (the report, the photos,
   // the trace), so an outage never leaves the visit with no way to complete.
-  const fullFormNeeded = reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace });
+  const fullFormNeeded = reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace, oneTap });
   useEffect(() => { onFullFormNeeded?.(fullFormNeeded); }, [fullFormNeeded, onFullFormNeeded]);
   useEffect(() => () => onFullFormNeeded?.(false), [onFullFormNeeded]);
 
@@ -2045,7 +2060,7 @@ function ReportFlowForm({
     form, rows, draft, perimeterFeet: oneTap && !trace.zone ? typedFeetValue : perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
     recordFields: recordState.inputs(record, draft?.facts),
     traceOnReport: ctx.traceOnReport,
-    photos: visitPhotos.photos,
+    visitPhotos,
   });
   // Prepare mode: a part is prepared only while it could be prepared right now. Exactly when the Complete button is
   // there and enabled: the report is fresh for the current note and inputs (no write action), nothing is waiting on
