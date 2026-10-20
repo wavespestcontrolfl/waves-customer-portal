@@ -68,18 +68,30 @@ function sentencesOf(body) {
   return pieces.map((piece) => piece.replace(/[.!?;\n\r]+$/, '').replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
+// 'request', 'report' (a missing-text complaint) or null (no "no texts" in the sentence).
+function noTextsKind(text) {
+  const matches = [...text.matchAll(NO_TEXTS)];
+  if (!matches.length) return null;
+  if (STRONG_REQUEST.test(text)) return 'request';
+  const isRequest = matches.some((match) => {
+    const before = text.slice(0, match.index);
+    const after = text.slice(match.index + match[0].length);
+    const reportsPastText = !CONDITIONAL_EARLIER.test(before) && (PAST_REPORT_JUST_BEFORE.test(before)
+      || PAST_ARRIVAL_AFTER.test(after) || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(before)));
+    return !reportsPastText;
+  });
+  return isRequest ? 'request' : 'report';
+}
+
 function asksForNoTexts(body) {
-  return sentencesOf(body).some((text) => {
-    const matches = [...text.matchAll(NO_TEXTS)];
-    if (!matches.length) return false;
-    if (STRONG_REQUEST.test(text)) return true;
-    return matches.some((match) => {
-      const before = text.slice(0, match.index);
-      const after = text.slice(match.index + match[0].length);
-      const reportsPastText = !CONDITIONAL_EARLIER.test(before) && (PAST_REPORT_JUST_BEFORE.test(before)
-        || PAST_ARRIVAL_AFTER.test(after) || (THAT_DAY_AFTER.test(after) && PAST_RECEIVING_EARLIER.test(before)));
-      return !reportsPastText;
-    });
+  const sentences = sentencesOf(body);
+  const kinds = sentences.map(noTextsKind);
+  if (kinds.includes('request')) return true;
+  // A missing-text report is exempt, but not when another sentence is a plain opt-out keyword
+  // ("I got no text. STOP"): the exact-keyword check above only reads a whole message.
+  return kinds.includes('report') && sentences.some((text) => {
+    const keyword = compactKeyword(text);
+    return EXACT_OPT_OUT.has(keyword) || /^STO+P+$/.test(keyword);
   });
 }
 
