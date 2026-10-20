@@ -193,6 +193,58 @@ describe('the judge, through the real fallback chain', () => {
   });
 });
 
+const SERVICE = { name: 'Quarterly Pest Control Service', service_key: 'pest_general_quarterly', default_duration_minutes: 75 };
+
+describe('which service the picker is asked about', () => {
+  const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
+  const catalog = [
+    { id: 1, name: 'Quarterly Pest Control Service', short_name: 'Pest Quarterly', service_key: 'pest_general_quarterly' },
+    { id: 2, name: 'Monthly Lawn Care Service', short_name: 'Lawn Care', service_key: 'lawn_care_monthly' },
+    { id: 3, name: 'Waves Pest Control Appointment Service', short_name: 'Appointment', service_key: 'general_appointment' },
+    { id: 4, name: 'Waves Assessment', short_name: 'Waves Assess', service_key: 'lawn_inspection' },
+  ];
+
+  test('resolves an exact name, short name or key through the call booking resolver', () => {
+    expect(internals.resolveNewVisitService(catalog, 'Quarterly Pest Control Service').id).toBe(1);
+    expect(internals.resolveNewVisitService(catalog, 'pest quarterly').id).toBe(1);
+    expect(internals.resolveNewVisitService(catalog, 'lawn_care_monthly').id).toBe(2);
+  });
+
+  test('a missing, unknown, multi-service or generic service is unresolved', () => {
+    for (const text of [null, '', '  ', 'pest control', 'pest and lawn', 'Waves Pest Control Appointment Service', 'Waves Assessment']) {
+      expect(internals.resolveNewVisitService(catalog, text)).toBeNull();
+    }
+    expect(internals.resolveNewVisitService([], 'Quarterly Pest Control Service')).toBeNull();
+  });
+
+  test('a new visit passes the service identity and its catalog length; a move passes its own visit\'s', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const findSlots = jest.fn(async () => ({ slots: [] }));
+    const args = { customerId: 'c1', day: '2040-03-14', daypart: 'any' };
+    await internals.pickSlot(conn, { ...args, fromVisit: null, service: SERVICE }, { findSlots });
+    expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({
+      serviceType: 'Quarterly Pest Control Service', serviceTypes: ['Quarterly Pest Control Service'], durationMinutes: 75,
+    }));
+    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', service_type: 'Lawn Care', estimated_duration_minutes: 90, lat: 27.9, lng: -82.1 } }, { findSlots });
+    expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ serviceType: 'Lawn Care', serviceTypes: ['Lawn Care'], durationMinutes: 90 }));
+  });
+
+  test('with no service identity at all the picker is never called', async () => {
+    const findSlots = jest.fn();
+    expect(await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: null }, { findSlots }))
+      .toEqual({ reason: 'service_unresolved' });
+    expect(findSlots).not.toHaveBeenCalled();
+  });
+
+  test('the collision guard is told the service, so a technician switched off for it is dropped outside capacity routing too', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const filterColliding = jest.fn(async (shaped) => shaped);
+    const findSlots = jest.fn(async () => ({ slots: [{ date: '2040-03-14', start_time: '10:00', end_time: '11:00', technician: { id: 't1' } }] }));
+    await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: SERVICE }, { findSlots, filterColliding });
+    expect(filterColliding.mock.calls[0][1].serviceMix).toEqual({ services: ['Quarterly Pest Control Service'] });
+  });
+});
+
 describe('the collision guard on offered slots', () => {
   const OLD_CAPACITY = process.env.GATE_SCHEDULING_CAPACITY;
   afterEach(() => {
@@ -234,7 +286,7 @@ describe('the collision guard on offered slots', () => {
     const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
     const findSlots = jest.fn(async () => ({ slots: [slot('13:00', 't1'), slot('15:00', 't1')] }));
     const guard = (blocked) => jest.fn(async (shaped) => shaped.filter((s) => !blocked.includes(s.windowStart)));
-    const args = { customerId: 'c1', day: '2040-03-14', daypart: 'afternoon', fromVisit: null };
+    const args = { customerId: 'c1', day: '2040-03-14', daypart: 'afternoon', fromVisit: null, service: SERVICE };
     expect((await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00']) })).slot.start_time).toBe('15:00');
     expect(await internals.pickSlot(conn, args, { findSlots, filterColliding: guard(['13:00', '15:00']) })).toEqual({ reason: 'no_slot' });
   });
@@ -244,12 +296,12 @@ describe('the collision guard on offered slots', () => {
     const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
     const findSlots = jest.fn(async () => ({ slots: [] }));
     const args = { customerId: 'c1', day: '2040-03-14', daypart: 'any' };
-    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', lat: '27.9', lng: '-82.1' } }, { findSlots });
+    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', service_type: 'Lawn Care', lat: '27.9', lng: '-82.1' } }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.9, lng: -82.1 }));
     expect(conn).not.toHaveBeenCalled(); // the visit's pin was enough
-    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', lat: null, lng: null } }, { findSlots });
+    await internals.pickSlot(conn, { ...args, fromVisit: { id: 'v1', service_type: 'Lawn Care', lat: null, lng: null } }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
-    await internals.pickSlot(conn, { ...args, fromVisit: null }, { findSlots });
+    await internals.pickSlot(conn, { ...args, fromVisit: null, service: SERVICE }, { findSlots });
     expect(findSlots).toHaveBeenLastCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.45 }));
   });
 
@@ -257,7 +309,7 @@ describe('the collision guard on offered slots', () => {
     delete process.env.GATE_SCHEDULING_CAPACITY;
     const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ latitude: 27.4, longitude: -82.45 }) }) }));
     const findSlots = jest.fn(async () => ({ slots: [] }));
-    await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null }, { findSlots });
+    await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: SERVICE }, { findSlots });
     expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: true }));
   });
 });

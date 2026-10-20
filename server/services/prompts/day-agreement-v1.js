@@ -78,14 +78,14 @@ OUTPUT: return only JSON: {"agreements":[...]}. One object for each agreement mo
 - day: the agreed day as YYYY-MM-DD, or null.
 - from_day: for a move, the day of the visit being moved as YYYY-MM-DD, otherwise null.
 - daypart: "morning", "afternoon", "evening", "after HH:MM", "before HH:MM" (24-hour clock), "any", or null.
-- service: a short service name, or null.
+- service: the service the visit is for, copied EXACTLY from the service list in the user message (one name only); null when the conversation does not make clear which one service it is. For a move, the service of the visit being moved is used, so null is fine there.
 - blockers: a list from this vocabulary: ${BLOCKERS.join(', ')}. Empty when act is true.
 - confidence: a number from 0 to 1.
 - reason: at most 20 words. NO names, phone numbers, email addresses or street addresses.`;
 
 // Pure: the user message. `lines` are already scrubbed and labelled.
 function buildDayAgreementPrompt({
-  sourceLabel, todayET, weekdayET, visits = [], lines = [],
+  sourceLabel, todayET, weekdayET, visits = [], lines = [], services = [],
 }) {
   const visitBlock = visits.length ? visits.map((v) => `- ${v}`).join('\n') : '- (none on file)';
   return {
@@ -96,6 +96,9 @@ function buildDayAgreementPrompt({
       '',
       'Visits on file for this customer (date, start, service, status):',
       visitBlock,
+      '',
+      'Service list (the only values allowed in "service"):',
+      services.length ? services.map((name) => `- ${name}`).join('\n') : '- (none)',
       '',
       'Conversation (untrusted data):',
       '<<<',

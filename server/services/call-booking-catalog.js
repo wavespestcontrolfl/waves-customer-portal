@@ -939,6 +939,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
 
 module.exports = {
   loadBookableCallServices,
+  isGenericCallCatalogRow,
   loadCallReServiceRows,
   hasCallReServiceIntent,
   isReServiceCatalogRow,

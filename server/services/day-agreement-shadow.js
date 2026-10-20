@@ -41,6 +41,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isRealConversation, parseExtraction } = require('./call-held-visits');
+const { loadBookableCallServices, resolveCallBookingCatalogService, isGenericCallCatalogRow } = require('./call-booking-catalog');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { scrubPans } = require('../utils/pan-scrub');
@@ -310,7 +311,9 @@ async function coordinates(conn, customerId, fromVisit) {
 // admission (09:00 grid, close, lunch) is then applied by find-time itself,
 // because pickSlot asks for customerFacing slots. The visit being moved is
 // excluded from the check.
-async function dropCollidingSlots(slots, { day, where, fromVisit }, deps) {
+async function dropCollidingSlots(slots, {
+  day, where, fromVisit, serviceName = null,
+}, deps) {
   const { capacityEnabled } = require('./scheduling/policy');
   if (capacityEnabled()) return slots;
   const filterColliding = deps.filterColliding || require('./estimate-slot-availability').filterCollidingSlots;
@@ -319,20 +322,50 @@ async function dropCollidingSlots(slots, { day, where, fromVisit }, deps) {
   }));
   const kept = new Set(await filterColliding(shaped, {
     dateFrom: day, dateTo: day, coords: where, excludeServiceIds: fromVisit ? [fromVisit.id] : [],
+    // A technician switched off for this kind of work is not offered (the estimate picker's rule).
+    ...(serviceName ? { serviceMix: { services: [serviceName] } } : {}),
   }));
   return shaped.filter((s) => kept.has(s)).map((s) => s.slot);
 }
 
+// The one catalog service an agreed new visit is for: the judged service text
+// resolved through the call booking path's own resolver (exact name, short name
+// or key, then its keyword rules) over the bookable catalog. A generic row (the
+// anything-appointment, the assessment) is no settled service, and neither is no
+// match: null, so the sweep never asks the picker about work it cannot name.
+function resolveNewVisitService(catalog, serviceText) {
+  const text = String(serviceText || '').trim();
+  if (!text || !catalog.length) return null;
+  const row = resolveCallBookingCatalogService({
+    extracted: { specific_service_name: text, matched_service: text, requested_service: text }, services: catalog,
+  });
+  return row && !isGenericCallCatalogRow(row) ? row : null;
+}
+
+// Name and length of the visit the picker is asked about: the moved visit's own
+// service and length, or the resolved catalog service and its default length.
+function visitIdentity({ fromVisit, service }) {
+  if (fromVisit) return { name: fromVisit.service_type || null, minutes: Number(fromVisit.estimated_duration_minutes) || 60 };
+  return { name: service?.name || null, minutes: Number(service?.default_duration_minutes) || 60 };
+}
+
 // The first slot the picker would take on the agreed day, honoring the daypart
-// and whole-hour starts. { slot } or { reason }.
-async function pickSlot(conn, { customerId, day, daypart, fromVisit }, deps) {
+// and whole-hour starts. { slot } or { reason }. The service identity goes to
+// find-time the way the other new-booking callers pass it (serviceType and
+// serviceTypes), so capacity routing drops technicians switched off for that
+// kind of work; the collision guard applies the same rule outside capacity mode.
+async function pickSlot(conn, {
+  customerId, day, daypart, fromVisit, service = null,
+}, deps) {
+  const identity = visitIdentity({ fromVisit, service });
+  if (!identity.name) return { reason: 'service_unresolved' };
   const where = await coordinates(conn, customerId, fromVisit);
   if (!where) return { reason: 'no_coordinates' };
   const findSlots = deps.findSlots || require('./scheduling/find-time').findAvailableSlots;
   const result = await findSlots({
     lat: where.lat, lng: where.lng,
-    durationMinutes: Number(fromVisit?.estimated_duration_minutes) || 60,
-    serviceType: fromVisit?.service_type || undefined,
+    durationMinutes: identity.minutes,
+    serviceType: identity.name, serviceTypes: [identity.name],
     dateFrom: day, dateTo: day, topN: SLOT_TOP_N,
     includeWeekends: true, slotStepMinutes: 60, everyStepStart: true, providerTravel: false,
     // The customer-window admission every customer-facing caller asks for (find-time
@@ -341,7 +374,7 @@ async function pickSlot(conn, { customerId, day, daypart, fromVisit }, deps) {
     excludeServiceIds: fromVisit ? [fromVisit.id] : [],
   });
   const offered = result && !result.error && Array.isArray(result.slots) ? result.slots : [];
-  const free = offered.length ? await dropCollidingSlots(offered, { day, where, fromVisit }, deps) : [];
+  const free = offered.length ? await dropCollidingSlots(offered, { day, where, fromVisit, serviceName: identity.name }, deps) : [];
   const slot = rules.chooseSlot(free, daypart);
   return slot ? { slot } : { reason: 'no_slot' };
 }
@@ -377,9 +410,12 @@ async function decideMoment(conn, src, index, agreement, ctx) {
   const target = rules.validDay(a.day) ? { target_date: a.day } : {};
   if (!decision.pass) return skipRow(src, index, decision.reason, { ...known, ...target });
   const fromVisit = decision.fromVisitId ? dayVisits.find((v) => v.id === decision.fromVisitId) : null;
+  // A new visit needs ONE catalog service to ask the picker about (a move keeps its visit's own).
+  const service = fromVisit ? null : resolveNewVisitService(ctx.catalog, a.service);
+  if (!fromVisit && !service) return skipRow(src, index, 'service_unresolved', { ...known, ...target });
   let picked;
   try {
-    picked = await pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit }, ctx.deps);
+    picked = await pickSlot(conn, { customerId: src.customerId, day: a.day, daypart: a.daypart, fromVisit, service }, ctx.deps);
   } catch (err) {
     logger.error(`[day-agreement] slot lookup failed (${err.code || err.name || 'error'})`);
     picked = { reason: 'slot_lookup_failed' };
@@ -399,14 +435,16 @@ async function processSource(conn, src, ctx) {
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
   if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };
   const lines = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
+  const catalog = await loadBookableCallServices(conn);
   const parts = prompts.buildDayAgreementPrompt({
     sourceLabel: src.label, todayET: ctx.todayET, weekdayET: WEEKDAYS[etParts(ctx.now).dayOfWeek], visits: lines, lines: src.lines,
+    services: catalog.filter((row) => !isGenericCallCatalogRow(row)).map((row) => row.name),
   });
   const judged = await judge(parts, ctx.deps);
   if (!judged.ok) return judged.transient ? { transient: true } : { rows: [skipRow(src, 0, 'judge_unusable')] };
   const rows = [];
   for (const [index, agreement] of judged.agreements.entries()) {
-    rows.push(await decideMoment(conn, src, index, agreement, { ...ctx, model: judged.model }));
+    rows.push(await decideMoment(conn, src, index, agreement, { ...ctx, catalog, model: judged.model }));
   }
   return { rows };
 }
@@ -462,6 +500,7 @@ module.exports = {
     validateAnswer,
     judge,
     pickSlot,
+    resolveNewVisitService,
     dropCollidingSlots,
     processSource,
     decideMoment,

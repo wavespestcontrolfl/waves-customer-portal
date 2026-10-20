@@ -52,6 +52,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     featureGates.gates.dayAgreementShadow = true;
     trx = await database.transaction();
     global.__dayAgreementTrx = trx;
+    await trx('technicians').insert({ id: SLOT_TECH, name: 'Sample Slot Tech' });
   });
   afterEach(async () => {
     featureGates.gates.dayAgreementShadow = oldGate;
@@ -97,11 +98,13 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     return id;
   };
   const agreement = (over = {}) => ({
-    at: '2040-03-12T10:30', act: true, kind: 'new_visit', day: dayPlus(2), from_day: null, daypart: 'any', service: 'pest control',
+    at: '2040-03-12T10:30', act: true, kind: 'new_visit', day: dayPlus(2), from_day: null, daypart: 'any', service: 'Quarterly Pest Control Service',
     blockers: [], confidence: 0.9, reason: 'Staff offered the day; the customer agreed.', ...over,
   });
   const answering = (...agreements) => jest.fn(async () => ({ ok: true, json: { agreements }, model: 'stub-model' }));
-  const slot = (date, start, techId = null) => ({
+  // Every slot find-time returns carries a technician; the collision guard drops a slot without one.
+  const SLOT_TECH = randomUUID();
+  const slot = (date, start, techId = SLOT_TECH) => ({
     date, start_time: start, end_time: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}${start.slice(2)}`, technician: { id: techId },
   });
   const technician = async () => {
@@ -109,6 +112,8 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     await trx('technicians').insert({ id, name: 'Sample Tech' });
     return id;
   };
+  const SERVICE_NAME = 'Quarterly Pest Control Service';
+  const catalogService = () => trx('services').where({ service_key: 'pest_general_quarterly' }).first();
   const sweep = (deps) => shadow.runDayAgreementShadow({ now: NOW, conn: trx, deps });
   const decisions = () => trx('day_agreement_decisions').orderBy('source_key');
 
@@ -366,6 +371,54 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(findSlots).not.toHaveBeenCalled();
     });
 
+    test('a new visit asks the picker about the ONE catalog service the model named, with its catalog length', async () => {
+      const customerId = await customer();
+      await call(customerId);
+      await trx('services').where({ service_key: 'pest_general_quarterly' }).update({ default_duration_minutes: 75 });
+      const findSlots = jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] }));
+      const dispatch = answering(agreement({ service: 'Quarterly Pest Control Service' }));
+      await sweep({ dispatch, findSlots });
+      expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({
+        serviceType: SERVICE_NAME, serviceTypes: [SERVICE_NAME], durationMinutes: 75,
+      }));
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_book' })]);
+      // The model is shown the catalog names, and only the non-generic ones.
+      const prompt = dispatch.mock.calls[0][1].text;
+      expect(prompt).toContain(`- ${SERVICE_NAME}`);
+      expect(prompt).not.toContain('Waves Pest Control Appointment Service');
+    });
+
+    test('the short name or key also resolves; an unnamed, unknown or generic service is service_unresolved and the picker is never asked', async () => {
+      const customerId = await customer();
+      const findSlots = jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] }));
+      for (const service of ['Pest Quarterly', 'pest_general_quarterly']) {
+        await call(customerId);
+        await sweep({ dispatch: answering(agreement({ service })), findSlots });
+      }
+      expect((await decisions()).map((r) => r.verdict)).toEqual(['would_book', 'would_book']);
+      await trx('day_agreement_decisions').delete();
+      findSlots.mockClear();
+      for (const service of [null, 'pest control', 'Waves Pest Control Appointment Service', 'Waves Assessment', 'Pest Control and Lawn Care']) {
+        await trx('call_log').delete();
+        await call(customerId);
+        await trx('day_agreement_decisions').delete();
+        await sweep({ dispatch: answering(agreement({ service })), findSlots });
+        expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'service_unresolved', target_date: expect.anything() })]);
+      }
+      expect(findSlots).not.toHaveBeenCalled();
+    });
+
+    test('a move keeps its own visit\'s service: an unnamed judged service does not block it', async () => {
+      const customerId = await customer();
+      const from = dayPlus(4);
+      await visit(customerId, from, { service_type: 'Lawn Care' });
+      await call(customerId);
+      const findSlots = jest.fn(async () => ({ slots: [slot(dayPlus(2), '10:00')] }));
+      await sweep({ dispatch: answering(agreement({ kind: 'move', from_day: from, service: null })), findSlots });
+      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'would_move' })]);
+      expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'Lawn Care', serviceTypes: ['Lawn Care'] }));
+    });
+
     test('a customer with no coordinates and no visit to read them from is a skip', async () => {
       const customerId = await customer({ latitude: null, longitude: null });
       await call(customerId);
@@ -605,10 +658,47 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       await trx('technicians').insert({ id: technicianId, name: 'Sample Tech', field_dispatchable: true, employment_status: 'active' });
       const customerId = await customer();
       const target = dayPlus(2);
-      const picked = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'afternoon', fromVisit: null }, {});
+      const picked = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'afternoon', fromVisit: null, service: await catalogService() }, {});
       expect(picked.reason).toBeUndefined();
       expect(picked.slot).toMatchObject({ date: target, technician: { id: technicianId } });
       expect(picked.slot.start_time).toMatch(/^(12|13|14|15|16):00$/);
+    });
+
+    test('under capacity routing a technician switched off for the service is never offered; with every technician off it is no_slot', async () => {
+      const OLD = process.env.GATE_SCHEDULING_CAPACITY;
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      try {
+        const off = randomUUID();
+        const on = randomUUID();
+        await trx('technicians').insert([
+          { id: off, name: 'Sample Off', field_dispatchable: true, employment_status: 'active' },
+          { id: on, name: 'Sample On', field_dispatchable: true, employment_status: 'active' },
+        ]);
+        await trx('technician_capabilities').insert({ technician_id: off, service_category: 'general', active: false });
+        const customerId = await customer();
+        const target = dayPlus(2);
+        const args = { customerId, day: target, daypart: 'any', fromVisit: null, service: await catalogService() };
+        const picked = await shadow._internals.pickSlot(trx, args, {});
+        expect(picked.slot.technician.id).toBe(on);
+        await trx('technician_capabilities').insert({ technician_id: on, service_category: 'general', active: false });
+        expect(await shadow._internals.pickSlot(trx, args, {})).toEqual({ reason: 'no_slot' });
+        // The same two technicians are both offered for work in a category neither is switched off for.
+        const lawn = await shadow._internals.pickSlot(trx, { ...args, service: { name: 'Monthly Lawn Care Service', default_duration_minutes: 60 } }, {});
+        expect(lawn.slot).toBeDefined();
+      } finally {
+        if (OLD === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = OLD;
+      }
+    });
+
+    test('outside capacity routing the collision guard drops a technician switched off for the service', async () => {
+      const { filterCollidingSlots } = require('../services/estimate-slot-availability');
+      const off = randomUUID();
+      await trx('technicians').insert({ id: off, name: 'Sample Off' });
+      await trx('technician_capabilities').insert({ technician_id: off, service_category: 'general', active: false });
+      const target = dayPlus(2);
+      const candidate = (techId) => ({ date: target, techId, windowStart: '10:00', windowEnd: '11:00' });
+      const range = { dateFrom: target, dateTo: target, serviceMix: { services: [SERVICE_NAME] } };
+      expect(await filterCollidingSlots([candidate(off), candidate(SLOT_TECH)], range)).toEqual([candidate(SLOT_TECH)]);
     });
 
     test('under capacity routing the picker still hands back only customer-grid starts: no 08:00, no lunch-overlapping start', async () => {
@@ -618,10 +708,10 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
         await trx('technicians').insert({ id: randomUUID(), name: 'Sample Tech', field_dispatchable: true, employment_status: 'active' });
         const customerId = await customer();
         const target = dayPlus(2);
-        const first = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'morning', fromVisit: null }, {});
+        const first = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'morning', fromVisit: null, service: await catalogService() }, {});
         expect(first.slot).toBeDefined();
         expect(first.slot.start_time).not.toBe('08:00');
-        const everyStart = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'before 09:00', fromVisit: null }, {});
+        const everyStart = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'before 09:00', fromVisit: null, service: await catalogService() }, {});
         expect(everyStart).toEqual({ reason: 'no_slot' });
       } finally {
         if (OLD === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = OLD;
