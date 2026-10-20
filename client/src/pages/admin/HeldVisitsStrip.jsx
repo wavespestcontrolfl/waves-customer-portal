@@ -36,6 +36,13 @@ const fromDayLabel = (row) => formatETDateOnly(row.from_date_et, { weekday: 'sho
 // (the same ?appointment= deep link the Auto-Dispatch audit uses). No new write.
 export const moveVisitHref = (row) => `/admin/dispatch?tab=schedule&date=${encodeURIComponent(row.from_date_et)}${row.from_visit_id ? `&appointment=${encodeURIComponent(row.from_visit_id)}` : ''}`;
 
+// The move link's words: "the visit" only when the server named exactly one; with several
+// movable visits on the old day the link opens that day's schedule (Codex #6345 r3).
+export const moveLinkLabel = (row) => {
+  if (!row.from_date_et) return 'Open the schedule';
+  return row.from_visit_id ? `Open the ${fromDayLabel(row)} visit` : `Open ${fromDayLabel(row)} on the schedule`;
+};
+
 export function fromCall(row) {
   if (!row.call_at) return kindText(row).lead;
   const day = formatETDate(row.call_at, { weekday: 'long' });
@@ -113,7 +120,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                     href={moveVisitHref(row)}
                     className={cn(buttonStyles({ variant: 'primary', density: 'comfortable' }), 'no-underline')}
                   >
-                    {row.from_date_et ? `Open the ${fromDayLabel(row)} visit` : 'Open the visit'}
+                    {moveLinkLabel(row)}
                   </a>
                 ) : (
                   <Button density="comfortable" onClick={() => onBook?.(row)}>Book it</Button>

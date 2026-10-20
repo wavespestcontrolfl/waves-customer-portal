@@ -104,7 +104,8 @@ describe('a day-only move row', () => {
 
   it('falls back to the old day\'s schedule when the visit id is missing', () => {
     render(<HeldVisitsStrip heldVisits={[{ ...move, from_visit_id: null }]} onBook={() => {}} />);
-    expect(screen.getByRole('link', { name: 'Open the Fri, Nov 6 visit' })).toHaveAttribute('href', '/admin/dispatch?tab=schedule&date=2026-11-06');
+    // No single visit named: the words say "schedule", never "the visit" (Codex #6345 r3).
+    expect(screen.getByRole('link', { name: 'Open Fri, Nov 6 on the schedule' })).toHaveAttribute('href', '/admin/dispatch?tab=schedule&date=2026-11-06');
   });
 });
 
