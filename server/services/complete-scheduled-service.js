@@ -261,7 +261,8 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';
   if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
   if (serviceLine === 'mosquito') return 'fog_ulv';
-  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : 'broadcast_spray';
+  // The lawn fallback is corrected too, so the stored method and the report label agree.
+  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : correctedGranularMethod('broadcast_spray', product);
   if (serviceLine === 'palm' || serviceLine === 'tree_shrub') return 'foliar_spray';
   if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
   return 'perimeter_spray';

@@ -231,6 +231,11 @@ describe('item 2: a granular product never keeps a broadcast spray method', () =
     expect(inferServiceReportApplicationMethod({ ...catalog, application_method: 'broadcast_spray' }, {}, 'lawn')).toBe('granular_broadcast');
     // A spray product keeps its spray method.
     expect(inferServiceReportApplicationMethod({ name: 'Test Fungicide', category: 'fungicide', formulation: 'SC' }, { applicationMethod: 'broadcast_spray' }, 'lawn')).toBe('broadcast_spray');
+    // No method on the row or the catalog: the lawn fallback is corrected too.
+    expect(inferServiceReportApplicationMethod(catalog, {}, 'lawn')).toBe('granular_broadcast');
+    expect(inferServiceReportApplicationMethod({ name: 'Test Fungicide', category: 'fungicide', formulation: 'SC' }, {}, 'lawn')).toBe('broadcast_spray');
+    gateOff();
+    expect(inferServiceReportApplicationMethod(catalog, {}, 'lawn')).toBe('broadcast_spray');
   });
 
   test('the plan default (lawn completion defaults) uses the same correction', () => {
