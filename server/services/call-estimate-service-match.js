@@ -107,6 +107,10 @@ function serviceLinesConflict(askedLines, estimateLines) {
 // promise; Codex #6344 r1). `callRow` = { ai_extraction_enriched,
 // v2_extraction_status, processing_generation }. [] = unknown.
 function askedLinesForPromise(commitment, callRow) {
+  // A promise staff confirmed, edited or wrote restates the obligation in its
+  // own words; the call's service category no longer speaks for it, so its ask
+  // is unknown and the old rule applies (Codex #6344 r3).
+  if (commitment?.human_state != null || (commitment?.source && commitment.source !== 'ai')) return [];
   const sameFiling = commitment?.processing_generation != null && callRow?.processing_generation != null
     && String(commitment.processing_generation) === String(callRow.processing_generation);
   return callRow?.v2_extraction_status === 'valid' && sameFiling ? askedServiceLines(callRow.ai_extraction_enriched) : [];

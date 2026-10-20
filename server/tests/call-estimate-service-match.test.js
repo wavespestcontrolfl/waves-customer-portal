@@ -121,6 +121,12 @@ describe('askedLinesForPromise reads only the filing extraction', () => {
   test('valid V2 on the same generation', () => {
     expect(askedLinesForPromise({ processing_generation: 2 }, { v2_extraction_status: 'valid', processing_generation: 2, ai_extraction_enriched: ext })).toEqual(['lawn']);
   });
+  test('a promise staff touched (human_state set, or a human-written row) is unknown', () => {
+    const call = { v2_extraction_status: 'valid', processing_generation: 2, ai_extraction_enriched: ext };
+    expect(askedLinesForPromise({ processing_generation: 2, human_state: 'edited' }, call)).toEqual([]);
+    expect(askedLinesForPromise({ processing_generation: 2, source: 'human' }, call)).toEqual([]);
+    expect(askedLinesForPromise({ processing_generation: 2, source: 'ai', human_state: null }, call)).toEqual(['lawn']);
+  });
   test('a rejected candidate, a different generation, or no generation is unknown', () => {
     expect(askedLinesForPromise({ processing_generation: 2 }, { v2_extraction_status: 'schema_failed', processing_generation: 2, ai_extraction_enriched: ext })).toEqual([]);
     expect(askedLinesForPromise({ processing_generation: 1 }, { v2_extraction_status: 'valid', processing_generation: 2, ai_extraction_enriched: ext })).toEqual([]);
