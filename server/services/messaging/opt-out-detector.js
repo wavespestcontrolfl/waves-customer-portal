@@ -38,18 +38,19 @@ const OPT_OUT_PATTERNS = [
 ];
 
 // A bare "no text(s)" / "no messages" stays a stop request almost everywhere ("No texts please",
-// "Please no texts or calls", "Call me anytime but no texts"). It is NOT one when the sentence
-// reports a text that never came, as a complaint did on 2026-10-19 ("I got the confirmation but no
-// text that day" unsubscribed the customer twice): the sentence is a question, a receiving word
-// comes earlier in it ("got", "received", "saw"), a reporting word sits just before it ("still",
-// "was", "had"), or a time or arrival word follows it ("yet", "that day", "came"). A strong request
-// word in the same sentence ("please", "anymore", "from now on") keeps it a stop request.
+// "Please no texts or calls", "I get too many notifications so no texts"). It is NOT one when the
+// words around it report a text that never came, as a complaint did on 2026-10-19 ("I got the
+// confirmation but no text that day" unsubscribed the customer twice): the word just before it is
+// a receiving or reporting word ("got no text", "still no text", "there was no message"), the words
+// just after it are an arrival or past-time word ("no text yet", "no text that day", "no texts
+// came"), or the sentence is a short question ("No text?"). A strong request word anywhere in the
+// sentence ("please", "anymore", "from now on") keeps it a stop request, questions included.
 // "No more texts" stays a stop request anywhere (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:texts?|text\s+messages?|messages?|sms)\b/gi;
-const RECEIVED_EARLIER = /\b(?:got|get|gets|getting|gotten|received|receive|receiving|saw|see|seen|heard|hear)\b/i;
-const REPORTED_JUST_BEFORE = /\b(?:still|was|were|is|are|there'?s|been|had|have|has)\s+$/i;
-const MISSED_AFTER = /^\s+(?:yet|today|tonight|yesterday|that\s+day|(?:this|last)\s+(?:morning|afternoon|evening|night|week|time)|came|come|arrived|arrive|showed\s+up|went\s+out|(?:was|were|got)\s+sent|sent)\b/i;
+const REPORTED_JUST_BEFORE = /\b(?:got|get|gets|getting|gotten|received|receive|receiving|saw|see|seen|heard|still|was|were|is|are|there|there'?s|been|had|have|has|why)\s+$/i;
+const MISSED_AFTER = /^\s+(?:yet|yesterday|that\s+day|last\s+(?:night|week|time)|this\s+time|came|comes?|arrived|arrives?|showed\s+up|went\s+out|(?:was|were|got)\s+sent|sent|received)\b/i;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
+const SHORT_QUESTION_WORDS = 4;
 
 function sentencesOf(body) {
   const pieces = String(body || '').replace(/[\u2018\u2019]/g, "'").match(/[^.!?;,\n\r]+[.!?;,\n\r]*/g) || [];
@@ -63,16 +64,12 @@ function sentencesOf(body) {
 
 function asksForNoTexts(body) {
   return sentencesOf(body).some(({ text, question }) => {
-    if (question) return false;
-    const strong = STRONG_REQUEST.test(text);
-    for (const match of text.matchAll(NO_TEXTS)) {
-      if (strong) return true;
-      const before = text.slice(0, match.index);
-      const after = text.slice(match.index + match[0].length);
-      const reportsMissingText = RECEIVED_EARLIER.test(before) || REPORTED_JUST_BEFORE.test(before) || MISSED_AFTER.test(after);
-      if (!reportsMissingText) return true;
-    }
-    return false;
+    const matches = [...text.matchAll(NO_TEXTS)];
+    if (!matches.length) return false;
+    if (STRONG_REQUEST.test(text)) return true;
+    if (question && text.split(' ').length <= SHORT_QUESTION_WORDS) return false;
+    return matches.some((match) => !REPORTED_JUST_BEFORE.test(text.slice(0, match.index))
+      && !MISSED_AFTER.test(text.slice(match.index + match[0].length)));
   });
 }
 
