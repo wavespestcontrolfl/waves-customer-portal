@@ -53,6 +53,8 @@ function parseArgs(argv) {
  * @param visits    the customer's visits ({ id, d, status, window_start,
  *                  created_at, updated_at }); d = 'YYYY-MM-DD'
  */
+const OBSERVE_MS = 14 * 24 * 3600 * 1000;
+
 function classifyOutcome(decision, visits) {
   const agreed = ms(decision.agreed_at);
   const live = visits.filter((v) => !DEAD_STATUSES.includes(String(v.status || '').toLowerCase()));
@@ -60,7 +62,10 @@ function classifyOutcome(decision, visits) {
   // after the agreement, or the very visit a move named now sitting on the
   // target day. A bare updated_at also moves on a status change (a visit
   // completed as planned), so it is never read as a booking or a move.
-  const created = live.filter((v) => ms(v.created_at) > agreed);
+  // Only a booking someone made within the observation window counts: a
+  // series top-up (recurring_parent_id) or a visit created weeks later is not
+  // this agreement's outcome (pre-push audit).
+  const created = live.filter((v) => !v.recurring_parent_id && ms(v.created_at) > agreed && ms(v.created_at) <= agreed + OBSERVE_MS);
   const movedHere = live.filter((v) => decision.from_visit_id && v.id === decision.from_visit_id && v.d === decision.target_date);
   const touched = [...created, ...movedHere];
   const onDay = touched.filter((v) => v.d === decision.target_date);
@@ -165,7 +170,7 @@ async function loadVisits(client, decisions) {
   if (!customers.length) return [];
   const earliest = decisions.map((d) => ms(d.agreed_at)).filter(Number.isFinite).sort((a, b) => a - b)[0];
   const { rows } = await client.query(
-    `SELECT id, customer_id, status, window_start, created_at, updated_at,
+    `SELECT id, customer_id, status, window_start, created_at, updated_at, recurring_parent_id,
             to_char(scheduled_date, 'YYYY-MM-DD') AS d
        FROM scheduled_services
       WHERE (customer_id = ANY($1::uuid[]) AND (created_at >= $2 OR updated_at >= $2))

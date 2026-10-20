@@ -36,6 +36,12 @@ describe('classifyOutcome', () => {
     expect(report.classifyOutcome(decision(), [visit({ created_at: before, status: 'completed' })]).outcome).toBe('nothing');
   });
 
+  test('a series top-up or a visit created after the 14-day window is not this agreement\'s outcome (pre-push audit)', () => {
+    expect(report.classifyOutcome(decision(), [visit({ recurring_parent_id: 'series-1' })]).outcome).toBe('nothing');
+    const late = new Date(new Date(decision().agreed_at).getTime() + 30 * 24 * 3600 * 1000).toISOString();
+    expect(report.classifyOutcome(decision(), [visit({ d: '2040-05-01', created_at: late })]).outcome).toBe('nothing');
+  });
+
   test('one agreement judged again from a later thread snapshot counts once', () => {
     const d1 = decision({ id: 'a1', verdict: 'would_book', customer_id: 'c-1' });
     const d2 = decision({ id: 'a2', verdict: 'would_book', customer_id: 'c-1' });
