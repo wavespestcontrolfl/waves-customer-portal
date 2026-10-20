@@ -9,6 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
+const { ibTargetRulesV2Live } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
@@ -784,6 +785,7 @@ async function assignTechnician(input, actionContext = {}) {
       'scheduled_services.id',
       'scheduled_services.status',
       'customers.first_name', 'customers.last_name',
+      'scheduled_services.customer_id',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
       // The window rides the assignment notice's snapshot (Codex r4 P2): a
@@ -833,6 +835,10 @@ async function assignTechnician(input, actionContext = {}) {
     scheduled_date: s.scheduled_date,
     current_tech: s.current_tech_name || 'Unassigned',
     ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
+    // GATE_IB_TARGET_RULES_V2: the stop's owner by id, so owner-direct can tell a named
+    // customer from a same-name one. Only while the gate is on (off = preview unchanged);
+    // the executor's drift check reads id, tech, date and visit only.
+    ...(ibTargetRulesV2Live() && s.customer_id ? { customer_id: String(s.customer_id) } : {}),
   }));
 
   if (confirmed !== true) {

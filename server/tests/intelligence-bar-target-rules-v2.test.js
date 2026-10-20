@@ -88,14 +88,19 @@ describe('rule 1: a card when the customer is neither named nor on screen', () =
       expect(run('reschedule_appointment', { appointment_id: id(60), new_date: '2026-11-03' }, { pinned_appointment: { id: id(60), visit_id: null } })).toBe(false);
     });
 
-    test('assign_technician matches the stop customer to a named or on-screen name', () => {
+    test('assign_technician reads the stop customer id: a same-name customer is not the named one', () => {
       const input = { service_ids: [id(70)], technician_name: 'Synthetic Tech' };
-      const preview = customer => ({ would_assign_to: 'Synthetic Tech', would_assign_to_id: id(80), stops: [{ id: id(70), customer }] });
-      const ctx = context({ targets: [{ customer_id: NAMED, label: 'Pat  Example' }], page: { ids: {}, customer: { customer_id: SCREEN, label: 'Sam Screen' } } });
-      expect(run('assign_technician', input, preview('pat example'), ctx)).toBe(true);
-      expect(run('assign_technician', input, preview('Sam Screen'), ctx)).toBe(true);
-      expect(run('assign_technician', input, preview('Found Person'), ctx)).toBe(false);
-      expect(run('assign_technician', input, preview(''), ctx)).toBe(false);
+      const preview = customer_id => ({ would_assign_to: 'Synthetic Tech', would_assign_to_id: id(80),
+        stops: [{ id: id(70), customer: 'Pat Example', ...(customer_id ? { customer_id } : {}) }] });
+      // Two customers named Pat Example: NAMED is the one the owner named, TWIN shares the name.
+      const TWIN = id(5);
+      const ctx = context({ targets: [{ customer_id: NAMED, label: 'Pat Example' }], page: { ids: {}, customer: { customer_id: SCREEN, label: 'Sam Screen' } } });
+      expect(run('assign_technician', input, preview(NAMED), ctx)).toBe(true);
+      expect(run('assign_technician', input, preview(SCREEN), ctx)).toBe(true);
+      expect(run('assign_technician', input, preview(TWIN), ctx)).toBe(false);
+      expect(run('assign_technician', input, preview(FOUND), ctx)).toBe(false);
+      // No customer id in the preview (the name alone proves nothing): card.
+      expect(run('assign_technician', input, preview(null), ctx)).toBe(false);
     });
 
     test('tools that edit no customer are not subject to the rule', () => {

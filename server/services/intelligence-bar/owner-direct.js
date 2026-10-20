@@ -118,17 +118,14 @@ const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().rep
 // (the customer is the message's own content), create_restock_request and
 // toggle_estimate_v2_view (no customer is edited).
 const CUSTOMER_ID_EDIT_TOOLS = new Set(['update_customer', 'update_customer_property', 'set_primary_property', 'update_property_access']);
-const normalizedName = value => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 // Built once per request from the finished task context. null while the gate
 // is off. With the gate on and no grounding passed, every subject edit is carded.
 function targetGrounding(taskContext) {
   if (!ibTargetRulesV2Live()) return null;
   const ids = new Set();
-  const names = new Set();
   const addTarget = (target) => {
     if (target?.customer_id) ids.add(String(target.customer_id).toLowerCase());
-    if (target?.label) names.add(normalizedName(target.label));
   };
   for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) addTarget(target);
   addTarget(taskContext?.target);
@@ -138,7 +135,7 @@ function targetGrounding(taskContext) {
   const page = taskContext?.page || {};
   addTarget(page.customer);
   if (page.ids?.customer_id) ids.add(String(page.ids.customer_id).toLowerCase());
-  return { ids, names };
+  return { ids };
 }
 
 const groundedCustomerId = (id, grounding) => Boolean(id) && Boolean(grounding?.ids?.has(String(id).toLowerCase()));
@@ -149,16 +146,14 @@ function customerNamedOrOnScreenPossible(toolName, input, grounding) {
 }
 
 // Full half, on the finished preview: reschedule_appointment pins its
-// appointment's customer id; assign_technician lists the stop's customer by
-// name, matched against the names the task resolved.
+// appointment's customer id; assign_technician's stop carries its customer id.
 function customerNamedOrOnScreen(toolName, input, preview, grounding) {
   if (!ibTargetRulesV2Live()) return true;
   if (CUSTOMER_ID_EDIT_TOOLS.has(toolName)) return groundedCustomerId(input?.customer_id, grounding);
   if (toolName === 'reschedule_appointment') return groundedCustomerId(preview?.pinned_appointment?.customer_id, grounding);
-  if (toolName === 'assign_technician') {
-    const name = normalizedName(preview?.stops?.[0]?.customer);
-    return Boolean(name) && Boolean(grounding?.names?.has(name));
-  }
+  // The stop's customer id comes from the proposal's own read (the stops preview, gate on);
+  // a preview without it (or a name) cannot show whose stop it is, so it keeps its card.
+  if (toolName === 'assign_technician') return groundedCustomerId(preview?.stops?.[0]?.customer_id, grounding);
   return true;
 }
 
