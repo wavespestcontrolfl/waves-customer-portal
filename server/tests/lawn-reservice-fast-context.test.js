@@ -137,6 +137,26 @@ describe('buildLawnReserviceFastContext', () => {
     });
   });
 
+  describe('GATE_REPORT_CLEANUP_1020', () => {
+    const saved = process.env.GATE_REPORT_CLEANUP_1020;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_REPORT_CLEANUP_1020; else process.env.GATE_REPORT_CLEANUP_1020 = saved; });
+    const read = () => buildLawnReserviceFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog }));
+
+    test('gate off: the key is absent', async () => {
+      delete process.env.GATE_REPORT_CLEANUP_1020;
+      const ctx = await read();
+      expect(ctx.eligible).toBe(true);
+      expect('methodCorrection' in ctx).toBe(false);
+    });
+
+    test('gate on (exactly true): methodCorrection is true; any other value stays off', async () => {
+      process.env.GATE_REPORT_CLEANUP_1020 = 'true';
+      expect((await read()).methodCorrection).toBe(true);
+      process.env.GATE_REPORT_CLEANUP_1020 = '1';
+      expect('methodCorrection' in await read()).toBe(false);
+    });
+  });
+
   describe('GATE_ONE_TAP_REPORT', () => {
     const saved = process.env.GATE_ONE_TAP_REPORT;
     afterEach(() => { if (saved === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = saved; });

@@ -280,6 +280,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     // GATE_ONE_TAP_REPORT: the sheet reads no note for products (its "fill from the note" tap goes); the note's mic
     // stays. Gate off = no key at all.
     ...(require('../config/feature-gates').oneTapReportLive() && { oneTap: true }),
+    // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. Gate off = no key at all.
+    ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
   };
 }
 

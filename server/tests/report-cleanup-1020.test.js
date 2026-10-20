@@ -56,11 +56,42 @@ describe('item 1: a visit with a water-in product never says "No special waterin
     gateOn();
     expect(cleanup.waterInRuleOf(VISIT_PRODUCTS)).toEqual({ inches: 0.5, hours: 24, sameDay: false });
     expect(cleanup.waterInRuleOf([product('Test Spray', null)])).toBeNull();
-    expect(cleanup.waterInRuleOf([product('Test Hold', { mode: 'hold', hold_hours: 24 })])).toBeNull();
     expect(cleanup.waterInRuleOf([product('A', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 48 }), product('B', { mode: 'water_in', water_in_inches: 0.75, water_in_by_hours: 24 })]))
       .toEqual({ inches: 0.75, hours: 24, sameDay: false });
     gateOff();
     expect(cleanup.waterInRuleOf(VISIT_PRODUCTS)).toBeNull();
+  });
+
+  test('a hold on any product keeps hold semantics: no water-in fallback, and no watering line at all', () => {
+    gateOn();
+    const HOLD = { mode: 'hold', hold_hours: 24, source: 'label' };
+    for (const mix of [
+      [product('Test Herbicide', HOLD), product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null)],
+      [product('Test Herbicide', HOLD), product('Test Fungicide', null)],
+    ]) {
+      expect(cleanup.waterInRuleOf(mix)).toEqual({ hold: true });
+      const aftercare = buildAftercare([{ product: { name: 'x' } }], { instruction: null, waterInRule: cleanup.waterInRuleOf(mix) });
+      expect(aftercare.watering).toBe('');
+      expect(aftercare.neutral).toBe(false);
+      expect(aftercare.watering).not.toMatch(/No special watering|Water in about/);
+      expect(aftercareCustomerTask(aftercare, null)).toBeNull();
+    }
+    // Through the whole report, with a weekly plan on the card: the plan swap never prints the neutral line either.
+    const v2 = buildLawnReportV2({
+      lawnAssessment: { scores: { turfDensity: 88, weedSuppression: 92, colorHealth: 86, stressDamage: 90, fungusControl: 95, overallScore: 89 }, turfProfile: { grassType: 'st_augustine' }, waterContext: { weekPlan: { title: 'Plan', visitInPlanWeek: true } }, photos: [] },
+      applications: [{ product: { name: 'x' } }],
+      waterInRule: { hold: true },
+    });
+    expect(v2.aftercare.watering).toBe('');
+    gateOff();
+    expect(cleanup.waterInRuleOf([product('Test Herbicide', HOLD)])).toBeNull();
+  });
+
+  test('water-in beside a product with no rule (no hold) gives the water-in line', () => {
+    gateOn();
+    const rule = cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null)]);
+    expect(rule).toEqual({ inches: 0.5, hours: 24, sameDay: false });
+    expect(buildAftercare([], { instruction: null, waterInRule: rule }).watering).toBe('Water in about ½ inch within 24 hours.');
   });
 
   test('the instruction makes no claim (a product with no stored rule), the legacy reading said "No special watering" (root cause)', () => {

@@ -408,11 +408,12 @@ const SPRAY_METHODS = new Set(['broadcast_spray', 'foliar_spray', 'perimeter_spr
 /**
  * The method a lawn row starts on: a granular product never starts on a spray method (the plan's,
  * the last visit's, or the visit's own default), it starts on Granular broadcast. Any other method
- * (spot treatment, soil drench) and every other product keep the method they had. A tech who then
+ * (spot treatment, soil drench) and every other product keep the method they had, and so does
+ * every product while `enabled` is false (the sheets pass the context's methodCorrection). A tech who then
  * picks another method is changing it, not taking a default.
  */
-export function startMethodFor(product, method) {
-  return isGranularProduct(product) && SPRAY_METHODS.has(normalizeApplicationMethod(method)) ? 'granular_broadcast' : method;
+export function startMethodFor(product, method, enabled = true) {
+  return enabled && isGranularProduct(product) && SPRAY_METHODS.has(normalizeApplicationMethod(method)) ? 'granular_broadcast' : method;
 }
 
 /** The context's method list, or the common three when it has none. */

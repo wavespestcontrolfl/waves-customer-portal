@@ -39,4 +39,9 @@ describe('startMethodFor', () => {
     expect(startMethodFor(granular, undefined)).toBeUndefined();
     expect(startMethodFor(liquid, 'broadcast_spray')).toBe('broadcast_spray');
   });
+
+  test('changes nothing while the correction is off', () => {
+    expect(startMethodFor(granular, 'broadcast_spray', false)).toBe('broadcast_spray');
+    expect(startMethodFor(granular, 'broadcast_spray', undefined)).toBe('granular_broadcast');
+  });
 });

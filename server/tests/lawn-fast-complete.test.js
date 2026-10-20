@@ -443,6 +443,29 @@ describe('buildLawnFastContext', () => {
     });
   });
 
+  describe('method correction (GATE_REPORT_CLEANUP_1020)', () => {
+    afterEach(() => { delete process.env.GATE_REPORT_CLEANUP_1020; });
+    const read = () => buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
+
+    test('gate off: the context carries no methodCorrection key', async () => {
+      delete process.env.GATE_REPORT_CLEANUP_1020;
+      expect('methodCorrection' in await read()).toBe(false);
+    });
+
+    test('gate on (exactly true): methodCorrection is true; any other value stays off', async () => {
+      process.env.GATE_REPORT_CLEANUP_1020 = 'true';
+      expect((await read()).methodCorrection).toBe(true);
+      process.env.GATE_REPORT_CLEANUP_1020 = 'on';
+      expect('methodCorrection' in await read()).toBe(false);
+    });
+
+    test('an ineligible visit carries no methodCorrection even with the gate on', async () => {
+      process.env.GATE_REPORT_CLEANUP_1020 = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
+      expect('methodCorrection' in await read()).toBe(false);
+    });
+  });
+
   describe('weed spot rules (GATE_LAWN_SPOT_RULES)', () => {
     const P_LEAD = uuid(21);
     const P_SURF = uuid(22);

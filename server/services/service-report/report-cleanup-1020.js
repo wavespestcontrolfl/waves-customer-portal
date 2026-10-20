@@ -26,11 +26,15 @@ function waterInRuleOf(products) {
   if (!live()) return null;
   const rules = (Array.isArray(products) ? products : [])
     .map((p) => p && p.approved_report_product_facts && p.approved_report_product_facts.wateringRule)
-    .filter((rule) => rule && rule.mode === 'water_in');
-  if (!rules.length) return null;
-  const inches = Math.max(...rules.map((r) => Number(r.water_in_inches) || 0.25));
-  const hours = Math.min(...rules.map((r) => Number(r.water_in_by_hours) || 24));
-  return { inches, hours, sameDay: rules.some((r) => r.water_in_same_day === true) };
+    .filter((rule) => rule && typeof rule === 'object');
+  // A hold on any product keeps hold semantics: the instruction builder owns a hold or a hold beside a water-in
+  // (including the case it cannot honour), and this fallback must never override it or print "No special watering".
+  if (rules.some((rule) => rule.mode === 'hold')) return { hold: true };
+  const waterIns = rules.filter((rule) => rule.mode === 'water_in');
+  if (!waterIns.length) return null;
+  const inches = Math.max(...waterIns.map((r) => Number(r.water_in_inches) || 0.25));
+  const hours = Math.min(...waterIns.map((r) => Number(r.water_in_by_hours) || 24));
+  return { inches, hours, sameDay: waterIns.some((r) => r.water_in_same_day === true) };
 }
 
 function waterInLine({ inches, hours, sameDay }) {
@@ -44,6 +48,10 @@ function waterInLine({ inches, hours, sameDay }) {
 // with no stored rule beside it). It reads like a recorded product instruction that earns no weekly plan credit:
 // the line is also the customer's own task, so the hero and Ask Waves state it once.
 function waterInAftercare(rule, reentry) {
+  if (rule && rule.hold) {
+    // No claim and a hold on the visit: no watering line at all (not neutral, so no "No special watering" and no plan swap).
+    return { watering: '', reentry, waterInRequired: false, neutral: false };
+  }
   const line = rule && waterInLine(rule);
   if (!line) return null;
   return {
@@ -57,6 +65,11 @@ function waterInAftercare(rule, reentry) {
     neutral: false,
     evidenceSource: 'product_instruction',
   };
+}
+
+// The sheet's granular default keys off this (client/src/lib product method default). Absent while the gate is off.
+function methodCorrectionKey() {
+  return live() ? { methodCorrection: true } : {};
 }
 
 // ── Item 2: a granular product never keeps a spray method ──────────────────
@@ -148,6 +161,7 @@ function reportCleanup1020PdfSignature() {
 module.exports = {
   waterInRuleOf,
   waterInAftercare,
+  methodCorrectionKey,
   isGranularProduct,
   correctedMethod,
   cleanFollowUp,
