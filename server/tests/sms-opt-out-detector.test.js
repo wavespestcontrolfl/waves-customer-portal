@@ -46,7 +46,7 @@ describe('SMS opt-out detector', () => {
 
   // A bare "no text(s)" stays a stop request unless the sentence reports, in the past tense, a text
   // that never came; that complaint wording unsubscribed a customer on 2026-10-19. A request is
-  // never in the past tense. "No more texts" is a request anywhere.
+  // never in the past tense, and questions get no exception. "No more texts" is a request anywhere.
   test.each([
     'No texts please',
     'NO TEXTS!',
@@ -69,6 +69,8 @@ describe('SMS opt-out detector', () => {
     'No texts please?',
     'Can I have no texts please?',
     'Please, no texts?',
+    'No texts, only calls?',
+    'No texts, understood?',
     'no more texts',
     'Please, no more messages.',
     'No more text messages',
@@ -80,18 +82,15 @@ describe('SMS opt-out detector', () => {
   test.each([
     'Hi, we had a lawn visit set for Thursday. I got the confirmation two days before but no text that day.',
     'I got the confirmation but no text that day',
-    'No text?',
-    'Still no text?',
-    'Why no text?',
     'Why was there no text?',
     'Did you send it? I got no text',
     'I got no text reminder this time',
     'There was no message from the tech',
     'We have had no texts since Monday',
     'No text came',
-    'Hmm, no text?',
+    'No text messages arrived',
     'I got no text that day. Please call me.',
-  ])('"no text" that reports a missing text is not opt_out: %s', (body) => {
+  ])('"no text" that reports a missing text in the past tense is not opt_out: %s', (body) => {
     expect(detectSmsOptCommand(body)).toEqual({ action: null });
   });
 
