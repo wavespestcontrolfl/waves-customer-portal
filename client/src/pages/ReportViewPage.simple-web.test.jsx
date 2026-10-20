@@ -75,3 +75,64 @@ describe('the simple web report', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).length).toBeGreaterThan(3);
   });
 });
+
+// GATE_REPORT_GLASS_WEB (owner 2026-10-20): the server adds glassWeb beside simpleWebReport; the web page then
+// dresses each section as a glass card. The PDF render never takes it.
+describe('the glass look on the simple web report', () => {
+  it('without glassWeb: no glass attributes anywhere in the document', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true }));
+    await screen.findByText(/This report is provided for your records/);
+    const doc = container.querySelector('.service-report-document');
+    expect(doc.classList.contains('is-glass')).toBe(false);
+    expect(doc.querySelector('[data-glass], [data-gt], [data-glass-accent]')).toBeNull();
+    expect(container.querySelector('a[data-glass-accent]')).toBeNull();
+    expect(doc.style.background).toMatch(/#fff|rgb\(255, 255, 255\)/);
+  });
+
+  it('with glassWeb: every section is a glass card with a glass heading, same text and order', async () => {
+    const plain = renderReport(payload({ simpleWebReport: true }));
+    await screen.findByText(/This report is provided for your records/);
+    const plainText = plain.container.querySelector('.service-report-document').textContent;
+    const plainHeadings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    cleanup();
+
+    const { container } = renderReport(payload({ simpleWebReport: true, glassWeb: true }));
+    await screen.findByText(/This report is provided for your records/);
+    const doc = container.querySelector('.service-report-document');
+    expect(doc.classList.contains('is-glass')).toBe(true);
+    expect(doc.querySelectorAll('[data-glass="card"]').length).toBeGreaterThan(5);
+    const headings = screen.getAllByRole('heading', { level: 2 });
+    expect(headings.map((h) => h.textContent)).toEqual(plainHeadings);
+    headings.forEach((h) => expect(h.getAttribute('data-gt')).toBe('eyebrow'));
+    // the title is a role heading, never an h1/h2 element the theme would resize
+    expect(doc.querySelector('h1, h2')).toBeNull();
+    expect(doc.textContent).toBe(plainText);
+    expect(screen.getByRole('link', { name: /Download PDF/ }).hasAttribute('data-glass-accent')).toBe(true);
+    // the white sheet is gone so the scene shows through
+    expect(doc.style.background).toBe('transparent');
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+  });
+
+  it('the footer and the letterhead sit inside glass cards', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, glassWeb: true }));
+    await screen.findByText(/This report is provided for your records/);
+    const doc = container.querySelector('.service-report-document');
+    expect(doc.querySelector('.doc-letterhead').closest('[data-glass="card"]')).not.toBeNull();
+    expect(doc.querySelector('.doc-footer')?.getAttribute('data-glass')).toBe('card');
+  });
+
+  it('pdf mode never takes the glass, even with the key', async () => {
+    window.history.pushState({}, '', '/report/test-simple-web?mode=pdf');
+    try {
+      const { container } = renderReport(payload({ simpleWebReport: true, glassWeb: true }));
+      await screen.findByText(/This report is provided for your records/);
+      const doc = container.querySelector('.service-report-document');
+      expect(doc.classList.contains('is-glass')).toBe(false);
+      expect(doc.classList.contains('is-web')).toBe(false);
+      expect(doc.querySelector('[data-glass], [data-gt]')).toBeNull();
+      expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+});

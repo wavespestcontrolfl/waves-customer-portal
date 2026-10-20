@@ -10450,17 +10450,22 @@ const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 // The server builds this payload as it builds the PDF's (same compliance
 // strips), and sets data.simpleWebReport only while the gate is live.
 function SimpleWebReport({ data, token }) {
+  // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the server sets glassWeb only
+  // while that gate is live. The page-level useGlassSurface already mounted
+  // the scene; this only drops the white sheet and dresses the cards.
+  const glass = data.glassWeb === true;
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   useEffect(() => {
     trackReportEvent(token, 'service_report_viewed', { layout: 'simple' });
   }, [token]);
   return (
-    <div style={{ background: '#fff', flex: 1 }}>
+    <div style={{ background: glass ? 'transparent' : '#fff', flex: 1 }}>
       {pdfUrl ? (
         <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0', display: 'flex', justifyContent: 'flex-end' }}>
           <a
             href={pdfUrl}
             download
+            {...(glass ? { 'data-glass-accent': '' } : {})}
             onClick={(e) => {
               trackReportEvent(token, 'pdf_downloaded');
               // In the Capacitor shell an <a download> dead-ends the webview —
@@ -10484,7 +10489,7 @@ function SimpleWebReport({ data, token }) {
           <RecapVideoCard recap={data.recap} token={token} />
         </div>
       ) : null}
-      <ServiceReportDocument data={data} token={token} web />
+      <ServiceReportDocument data={data} token={token} web glass={glass} />
     </div>
   );
 }

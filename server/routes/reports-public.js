@@ -47,6 +47,12 @@ const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 const { sessionMfaBlock } = require('../services/staff-mfa');
 
+// GATE_REPORT_GLASS_WEB (owner 2026-10-20): the simple web report wears the glass
+// look. Only beside the simple web switch; a partial gates module reads as off.
+function glassWebLive(simpleWeb, gates) {
+  return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
+}
+
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
 // solely when the request carries a valid staff JWT — the report page
@@ -2626,6 +2632,10 @@ router.get('/:token/data', async (req, res, next) => {
       // The key the page reads to render the work-order document. Absent =
       // byte-identical payload.
       if (simpleWeb) v1Data.simpleWebReport = true;
+      // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the simple web report wears the
+      // glass look. Only beside simpleWebReport (the page reads both); a partial
+      // gates module reads as off. Absent key = byte-identical payload.
+      if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
       return res.json(v1Data);
     }
 
