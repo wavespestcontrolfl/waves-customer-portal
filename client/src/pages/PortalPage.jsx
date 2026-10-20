@@ -4605,9 +4605,10 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
       </div>
       <div style={{ padding: '4px 18px 12px' }}>
         <ContactMasterSwitch
-          icon="smartphone" label="Text messages" description="Off stops every text to your number; email updates are unaffected."
+          icon="smartphone" label="Text messages" description="Off stops every text and app notification to your phone; email updates are unaffected. App notifications follow your Text choices below."
           on={prefs.smsEnabled !== false} disabled={busy} onChange={() => save({ smsEnabled: prefs.smsEnabled === false })}
         />
+
         {data.emailAvailable && (
           <ContactMasterSwitch
             icon="mail" label="Email messages" description="Off stops every email to your address, including notices with no setting of their own; texts are unaffected."
@@ -4739,7 +4740,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const multiProperty = properties.length > 1;
   // Saved-property scope reads the per-entry twin (/schedule/properties-next,
   // rows keyed like the entries); the profile scope keeps /account-next.
-  const accountNextRead = usePortalRead(`account-next:${customer?.id}:${activePropertyId}:${multiProperty}:${savedScope}`, () => multiProperty
+  // A contact session's entries are the rows their number is a contact on
+  // (not one account's profiles), so neither read applies: the picker
+  // renders without next-visit chips.
+  const accountNextRead = usePortalRead(`account-next:${customer?.id}:${activePropertyId}:${multiProperty}:${savedScope}`, () => multiProperty && !contactSession
     ? (savedScope
       // A 404 here means GATE_APP_PROPERTY_SCOPE went dark while this tab was
       // open (codex #4207 r1 P1): the server has already dropped its property

@@ -22,14 +22,17 @@ const SAM = { phone: '+19415550202', email: 'sam@example.com', name: 'Sam', role
 const TERRY = { phone: '+19415550303', email: 'terry@example.com', name: 'Terry', role: 'service_contact_2' };
 
 let rows;
+let devices = [];
 let failWith = null;
-function builder() {
+function builder(table) {
   const conds = [];
   const b = {};
-  const matching = () => rows.filter((r) => conds.every((c) => c(r)));
+  const source = () => (table === 'push_subscriptions' ? devices : rows);
+  const matching = () => source().filter((r) => conds.every((c) => c(r)));
   b.where = (obj) => { Object.entries(obj).forEach(([k, v]) => conds.push((r) => String(r[k]) === String(v))); return b; };
   b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[col]))); return b; };
   b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[col]))); return b; };
+  b.whereNotNull = (col) => { conds.push((r) => r[col] != null); return b; };
   b.update = async (patch) => { if (failWith) throw failWith; const hit = matching(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
   b.select = async () => { if (failWith) throw failWith; return matching(); };
   b.first = async () => { if (failWith) throw failWith; return matching()[0] || null; };
@@ -40,7 +43,8 @@ function builder() {
 beforeEach(() => {
   rows = [];
   failWith = null;
-  db.mockImplementation(() => builder());
+  devices = [];
+  db.mockImplementation((table) => builder(table));
   process.env.GATE_CONTACT_LOGIN = 'true';
 });
 afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; });
@@ -583,11 +587,20 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
       { customer_id: 'cust-1', phone_key: '9415550303' },
       { customer_id: 'cust-2', phone_key: '9415550303' },
     ];
-    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', ['(941) 555-0303']);
+    devices = [
+      { customer_id: 'cust-1', active: true, contact_phone_key: '9415550202' },
+      { customer_id: 'cust-1', active: true, contact_phone_key: '9415550303' },
+      { customer_id: 'cust-1', active: true, contact_phone_key: null },
+      { customer_id: 'cust-2', active: true, contact_phone_key: '9415550202' },
+    ];
+    await ContactPrefs.pruneContactNotificationPrefs((table) => builder(table), 'cust-1', ['(941) 555-0303']);
     expect(rows).toEqual([
       { customer_id: 'cust-1', phone_key: '9415550303' },
       { customer_id: 'cust-2', phone_key: '9415550303' },
     ]);
+    // The removed contact's app device is deactivated; the survivor's, the
+    // holder's and another customer's rows are untouched.
+    expect(devices.map((d) => d.active)).toEqual([false, true, true, true]);
   });
 
   test('a kept phone whose slot lost its email loses its email-only delivery choices; a phone with an email keeps them (codex r6)', async () => {
@@ -634,7 +647,7 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
 
   test('an empty slot list clears every row of that customer only', async () => {
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202' }, { customer_id: 'cust-2', phone_key: '9415550202' }];
-    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', []);
+    await ContactPrefs.pruneContactNotificationPrefs((table) => builder(table), 'cust-1', []);
     expect(rows).toEqual([{ customer_id: 'cust-2', phone_key: '9415550202' }]);
   });
 });

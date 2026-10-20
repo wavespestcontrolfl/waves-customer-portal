@@ -4778,6 +4778,99 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// On-location contacts' OWN notification choices (contact login,
+// GATE_CONTACT_LOGIN; service_contact_notification_prefs). Customer 360 reads
+// every slot with its effective choices and may narrow them (turn a purpose
+// off, pick a delivery) exactly as the contact can in the app. The
+// contact's consent attestation is theirs alone: staff never stamp it, and —
+// as in the app — turning texts ON for a contact who has not attested is
+// refused. Gate off: rows are shown and saved but the senders ignore them
+// (`live: false`).
+// =========================================================================
+async function contactNotificationChoices(customerId) {
+  const ContactPrefs = require('../services/contact-notification-prefs');
+  const { getServiceContactSlots, withAccountPrimaryContact, slotWithheldFromReports, phoneKeyOf } = require('../services/customer-contact');
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  if (!customer) return null;
+  const [accountRow, rows, optins] = await Promise.all([
+    db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null),
+    ContactPrefs.loadContactPrefRows(customerId),
+    db('recipient_optin').where({ customer_id: customerId }).select('phone_key', 'status').catch(() => []),
+  ]);
+  const optinByKey = new Map((optins || []).map((r) => [String(r.phone_key), r.status]));
+  const forReports = await withAccountPrimaryContact(customer);
+  const contacts = getServiceContactSlots(customer)
+    .map((slot, i) => ({ ...slot, slot: i + 1 }))
+    .filter((slot) => slot.name || slot.phone || slot.email)
+    .map((slot) => {
+      const key = phoneKeyOf(slot.phone);
+      const own = key ? rows.get(key) || null : null;
+      return {
+        slot: slot.slot,
+        name: slot.name,
+        phone: slot.phone,
+        email: slot.email,
+        contactRole: slot.contactRole,
+        ...ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable: !!slot.email }),
+        hasOwnChoices: !!own,
+        emailAvailable: !!slot.email,
+        reportsWithheld: slotWithheldFromReports(forReports, slot),
+        consentAttestedAt: own?.consent_attested_at || null,
+        smsOptin: key ? optinByKey.get(key) || 'none' : 'none',
+      };
+    });
+  return { contacts, live: ContactPrefs.contactPrefsLive() };
+}
+
+router.get('/:id/contact-notification-prefs', async (req, res, next) => {
+  try {
+    const payload = await contactNotificationChoices(req.params.id);
+    if (!payload) return res.status(404).json({ error: 'Customer not found' });
+    res.json(payload);
+  } catch (err) { next(err); }
+});
+
+router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, res, next) => {
+  try {
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    const { getServiceContactSlots } = require('../services/customer-contact');
+    const slotNo = Number(req.params.slot);
+    if (![1, 2, 3].includes(slotNo)) return res.status(400).json({ error: 'slot must be 1, 2 or 3' });
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const slot = getServiceContactSlots(customer)[slotNo - 1];
+    if (!slot || !slot.phone) return res.status(404).json({ error: 'No contact with a phone number in that slot' });
+
+    const schema = Joi.object({
+      ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_PREF_KEY_BY_COLUMN).map((key) => [key, Joi.boolean()])),
+      ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_CHANNEL_KEY_BY_COLUMN).map((key) => [key, Joi.string().valid(...ContactPrefs.CONTACT_CHANNEL_VALUES)])),
+      smsEnabled: Joi.boolean(),
+      emailEnabled: Joi.boolean(),
+    }).min(1);
+    const { value: updates, error } = schema.validate(req.body || {});
+    if (error) return res.status(400).json({ error: error.message });
+    const patch = ContactPrefs.contactPrefPatchFromBody(updates);
+    if (!slot.email && Object.values(patch).includes('email')) {
+      return res.status(400).json({ error: 'This contact has no email address on file, so email-only delivery cannot be chosen.' });
+    }
+    const existing = await ContactPrefs.getContactPrefRow(req.params.id, slot.phone);
+    if (ContactPrefs.bodyEnablesTexts(updates) && !existing?.consent_attested_at) {
+      return res.status(400).json({
+        error: 'This contact has not agreed to texts in the app yet. Staff can turn their notifications off, but only the contact can turn them on.',
+        code: 'CONSENT_REQUIRED',
+      });
+    }
+    await withCustomerCommsLock(db, req.params.id, async (trx) => {
+      await ContactPrefs.upsertContactNotificationPrefs(trx, req.params.id, slot.phone, patch);
+      await auditCustomerMutation(req, 'customer.contact_notification_prefs.update', req.params.id,
+        { slot: slotNo, fields: Object.keys(updates).sort() }, false, trx);
+    });
+    logger.info(`[customers] contact notification prefs updated for ${req.params.id} slot ${slotNo}: ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
+    res.json({ success: true, ...(await contactNotificationChoices(req.params.id)) });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/customers/:id/property-preferences
 //
 // Staff-facing counterpart to the customer portal's PUT /api/property/

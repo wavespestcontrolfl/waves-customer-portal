@@ -123,6 +123,46 @@ const EMAIL_EVENT_COLUMN = {
   'appointment.tech_arrived': 'tech_arrived',
 };
 
+// Push purposes a CONTACT's device may receive (push_subscriptions rows
+// stamped with contact_phone_key), by the sender's message type or the
+// bell's preference key → the contact pref column that narrows it. A null
+// column is a notice with no opt-out (cancellation, no-show) that still
+// goes. Anything absent — billing, receipts, requests, estimates, weather,
+// an untyped bell — never reaches a contact device.
+const CONTACT_PUSH_COLUMN = {
+  appointment_confirmation: 'appointment_confirmation',
+  appointment_rescheduled: 'appointment_confirmation',
+  reschedule_series_confirmation: 'appointment_confirmation',
+  appointment_cancelled: null,
+  appointment_series_cancelled: null,
+  appointment_no_show: null,
+  appointment_reminder: 'service_reminder_24h',
+  reminder_72h: 'service_reminder_72h',
+  service_reminder_72h: 'service_reminder_72h',
+  service_reminder_24h: 'service_reminder_24h',
+  tech_en_route: 'tech_en_route',
+  tech_arrived: 'tech_arrived',
+  service_completed: 'service_completed',
+  lawn_watering_instruction: 'service_completed',
+};
+
+// { allowed, column } for a push: allowed=false = contact devices excluded.
+function contactPushPurpose(messageType) {
+  const type = String(messageType || '');
+  if (!type) return { allowed: false, column: null };
+  if (type.startsWith('service_complete') || type.startsWith('service_report_v1')) return { allowed: true, column: 'service_completed' };
+  if (!Object.prototype.hasOwnProperty.call(CONTACT_PUSH_COLUMN, type)) return { allowed: false, column: null };
+  return { allowed: true, column: CONTACT_PUSH_COLUMN[type] };
+}
+
+// Does this body turn texts ON (a master switch, a purpose, or a
+// text-capable delivery choice)? That needs the contact's attestation.
+function bodyEnablesTexts(updates = {}) {
+  return updates.smsEnabled === true
+    || Object.values(CONTACT_PREF_KEY_BY_COLUMN).some((key) => updates[key] === true)
+    || Object.values(CONTACT_CHANNEL_KEY_BY_COLUMN).some((key) => ['sms', 'both'].includes(updates[key]));
+}
+
 function contactPrefsLive() {
   try {
     return require('../config/feature-gates').contactLoginLive();
@@ -605,11 +645,14 @@ async function rerouteForContactEmailOptOut(customerId, email, { dbh = db, recip
 }
 
 // The holder's contact save rewrote the slots: drop the rows of phones that
-// no longer occupy one, and clear the email-only delivery choices of a kept
+// no longer occupy one, clear the email-only delivery choices of a kept
 // phone whose slot no longer carries an email (an "email only" choice with
-// no address would deliver nothing — codex #6363 r6 P2). `contacts` are the
-// saved slots ({ phone, email }; a bare phone string = no email). Inside the
-// save's transaction; a missing table is the absent state.
+// no address would deliver nothing — codex #6363 r6 P2), and deactivate the
+// removed phones' app devices (a removed contact's phone must stop getting
+// appointment pushes at once, not when its heartbeat ages out). `contacts`
+// are the saved slots ({ phone, email }; a bare phone string = no email).
+// Inside the save's transaction; a missing table or column is the absent
+// state.
 async function pruneContactNotificationPrefs(trx, customerId, contacts = []) {
   const slots = contacts.map((c) => (typeof c === 'string' ? { phone: c } : c || {}));
   // Email availability is per NUMBER, across every slot that carries it
@@ -636,8 +679,15 @@ async function pruneContactNotificationPrefs(trx, customerId, contacts = []) {
       await trx(TABLE).where({ customer_id: customerId, email_enabled: false }).whereIn('phone_key', emailLess).update({ email_enabled: null, updated_at: new Date() });
     }
   } catch (err) {
-    if (err && err.code === '42P01') return;
-    throw err;
+    if (err && err.code !== '42P01') throw err;
+  }
+  try {
+    const devices = trx('push_subscriptions').where({ customer_id: customerId, active: true }).whereNotNull('contact_phone_key');
+    if (keep.length) devices.whereNotIn('contact_phone_key', keep);
+    await devices.update({ active: false, updated_at: new Date() });
+  } catch (err) {
+    // 42P01 = no table, 42703 = pre-migration column.
+    if (err && !['42P01', '42703'].includes(err.code)) throw err;
   }
 }
 
@@ -659,11 +709,14 @@ module.exports = {
   CONTACT_PREF_TOGGLES,
   CHANNEL_COLUMN_FOR,
   CONTACT_PREF_COLUMNS,
+  CONTACT_PUSH_COLUMN,
   CONTACT_PREF_KEY_BY_COLUMN,
   CONTACT_CHANNEL_KEY_BY_COLUMN,
   CONTACT_CHANNEL_VALUES,
   effectiveContactPreferences,
   contactPrefPatchFromBody,
+  bodyEnablesTexts,
+  contactPushPurpose,
   contactPrefsLive,
   columnForEmailEvent,
   contactAllows,

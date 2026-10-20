@@ -234,6 +234,8 @@ async function hasFreshPushDevice(customerId, knex = db) {
   }
   const row = await knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
+    // A contact's device (contact login) is never proof the HOLDER has the app.
+    .whereNull('contact_phone_key')
     .where('updated_at', '>=', heartbeatCutoff())
     .first('id')
     .catch(() => null);
@@ -404,7 +406,7 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt });
+  }, { shouldContinue, minUpdatedAt, messageType });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
 }
 

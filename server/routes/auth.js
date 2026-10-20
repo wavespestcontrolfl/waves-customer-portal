@@ -120,9 +120,17 @@ async function activeCustomerByPhone(phone) {
 // Consulted only after the holder lookup found nothing: a number that is
 // someone's own account always signs in as that account.
 async function contactCustomerByPhone(phone) {
+  return (await contactCustomersByPhone(phone))[0] || null;
+}
+
+// Every ACTIVE row that lists this number as an on-location contact, in
+// landing order: [{ customer, contact }]. The first is where the login lands;
+// the rest are the contact's switch targets (/auth/properties +
+// /auth/select-property, the same switcher a multi-property holder uses).
+async function contactCustomersByPhone(phone) {
   const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
   const last10 = normalizePhoneDigits(phone);
-  if (last10.length < 10) return null;
+  if (last10.length < 10) return [];
   const rows = await db('customers')
     .whereNull('deleted_at')
     .where({ active: true })
@@ -138,14 +146,26 @@ async function contactCustomerByPhone(phone) {
     // eligible row cut off by a cap on the ineligible ones (codex r7 P2).
     .orderBy('is_primary_profile', 'desc', 'last')
     .orderBy('created_at', 'asc');
+  const matches = [];
   for (const row of rows) {
     // Only a number the holder attested to may log in (customer-contact.js
     // contactSlotMayLogIn): an inferred, unconsented slot phone is unknown.
     if (!contactSlotMayLogIn(row, last10)) continue;
     const contact = findServiceContactSlotByPhoneKey(row, last10);
-    if (contact) return { customer: row, contact };
+    if (contact) matches.push({ customer: row, contact });
   }
-  return null;
+  return matches;
+}
+
+// The property list of a contact session: every row the number is a contact
+// on (one entry each, the signed-in row included). The client's switcher
+// shows it only when there is more than one.
+async function contactPropertiesForSession(req) {
+  const matches = await contactCustomersByPhone(req.contactSession.phone);
+  const mine = matches.some((m) => String(m.customer.id) === String(req.customer.id));
+  const rows = mine ? matches.map((m) => m.customer) : [req.customer, ...matches.map((m) => m.customer)];
+  // Each entry names the house that row's contact reads are scoped to.
+  return Promise.all(rows.map((row) => contactPropertyPayload(row, req.contactSession)));
 }
 
 // Who a phone number signs in as: { customer, contact } — contact null for
@@ -493,8 +513,10 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
       refreshToken,
       customer: authCustomerPayload(customer, contact),
       actor: actorPayload(contact),
-      // A contact session lists only the row it belongs to (no switcher).
-      properties: contact ? [await contactPropertyPayload(customer, contact)] : await accountPropertiesForCustomer(customer),
+      // A contact session lists the rows the number is a contact on.
+      properties: contact
+        ? await contactPropertiesForSession({ contactSession: contact, customer })
+        : await accountPropertiesForCustomer(customer),
     });
   } catch (err) {
     next(err);
@@ -702,11 +724,10 @@ router.put('/credit-preference', authenticate, async (req, res, next) => {
 // simply gets the profile list it already understands.
 router.get('/properties', authenticate, async (req, res, next) => {
   try {
-    // A contact session lists only the row it belongs to — no sibling
-    // profiles, no saved-property list (a switch mints credentials the
-    // contact may not hold).
+    // A contact session lists the rows its number is a contact on — never
+    // the account's sibling profiles or saved-property list.
     if (req.contactSession) {
-      return res.json({ properties: [await contactPropertyPayload(req.customer, req.contactSession)] });
+      return res.json({ properties: await contactPropertiesForSession(req) });
     }
     // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
     // customer-wide, /auth/me reports the scope disabled) — it keeps the
@@ -741,6 +762,36 @@ router.post('/select-property', authenticate, async (req, res, next) => {
       .first();
 
     if (!target) return res.status(404).json({ error: 'Property not found' });
+
+    // Contact session (GATE_CONTACT_LOGIN): the switch target must list this
+    // number as a contact; the new family is minted for the target's own
+    // account with the same contact claim (a saved-property selection is
+    // never a contact's).
+    if (req.contactSession) {
+      const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
+      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)) {
+        return res.status(403).json({ error: 'Property is not available for this account' });
+      }
+      const switched = await rotateRefreshSession(currentRefreshToken, {
+        targetCustomerId: target.id,
+        expectedCustomerId: req.customerId,
+        expectedFamilyId: req.authSessionId,
+        contactSwitch: true,
+        revokeReason: 'property_switch',
+      });
+      if (switched.ok === false) {
+        return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+      }
+      const contactToken = generateToken(target.id, switched.accountId, switched.familyId, { contactKey: req.contactSession.phoneKey });
+      const targetContact = findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey);
+      return res.json({
+        token: contactToken,
+        refreshToken: switched.refreshToken,
+        customer: authCustomerPayload(target, targetContact),
+        actor: actorPayload(targetContact),
+        properties: await contactPropertiesForSession({ contactSession: req.contactSession, customer: target }),
+      });
+    }
 
     const currentAccountId = req.accountId || accountIdForCustomer(req.customer);
     const targetAccountId = accountIdForCustomer(target);

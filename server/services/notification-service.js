@@ -847,7 +847,14 @@ const NotificationService = {
         // the house this notification is about, for the push sink's link.
         ...(createOpts.appointmentId ? { appointmentId: createOpts.appointmentId } : {}),
         ...(createOpts.propertyId ? { propertyId: createOpts.propertyId } : {}),
-      }, { ...pushOptions, ...(dedupeKey ? { notificationId: notification.id } : {}) });
+      }, {
+        // What the bell is about, for contact devices (contact login): the
+        // preference key names the purpose (tech_en_route, service_completed);
+        // a bell without one never reaches a contact device.
+        messageType: preferenceKey || null,
+        ...pushOptions,
+        ...(dedupeKey ? { notificationId: notification.id } : {}),
+      });
       pushQueued = true;
       // Scheduled advisories can record provider acceptance separately from
       // bell creation. Request-path callers retain the asynchronous dispatch.

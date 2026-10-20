@@ -113,13 +113,55 @@ async function sendSubscription(sub, notification, options) {
   }
 }
 
+// Contact devices (contact login, GATE_CONTACT_LOGIN): push_subscriptions
+// rows stamped with contact_phone_key belong to an on-location contact's
+// phone. They are EXCLUDED from every customer push unless the purpose is
+// one a contact may receive (contact-notification-prefs.js
+// contactPushPurpose: appointment and report notices), and then only while
+// the key still occupies a contact slot on the row's customer and that
+// contact's own choices allow it. Fail closed: an unreadable choices table
+// or customer row drops the contact device, never the holder's.
+async function contactDevicesAllowed(subs, purpose, database = db) {
+  const contactSubs = subs.filter((s) => s.contact_phone_key);
+  if (!contactSubs.length) return subs;
+  const holderSubs = subs.filter((s) => !s.contact_phone_key);
+  const ContactPrefs = require('./contact-notification-prefs');
+  if (!purpose.allowed || !ContactPrefs.contactPrefsLive()) return holderSubs;
+  const { findServiceContactSlotByPhoneKey, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
+  const kept = [];
+  const customers = new Map();
+  const prefRows = new Map();
+  for (const sub of contactSubs) {
+    const id = String(sub.customer_id);
+    try {
+      if (!customers.has(id)) {
+        customers.set(id, await database('customers').where({ id: sub.customer_id }).first('id', 'phone', ...SERVICE_CONTACT_COLUMNS));
+      }
+      if (!prefRows.has(id)) prefRows.set(id, await ContactPrefs.loadContactPrefRows(sub.customer_id, { dbh: database }));
+    } catch (err) {
+      logger.warn(`[push] contact device check failed for ${id}: ${err.code || err.message} — holding contact devices`);
+      continue;
+    }
+    const customer = customers.get(id);
+    if (!customer || !findServiceContactSlotByPhoneKey(customer, sub.contact_phone_key)) continue;
+    // Push rides the contact's TEXT choice: a purpose they declined, texts
+    // off, or an email-only delivery choice all hold the push too.
+    if (!ContactPrefs.contactAllows(prefRows.get(id).get(String(sub.contact_phone_key)) || null, purpose.column, 'sms')) continue;
+    kept.push(sub);
+  }
+  return [...holderSubs, ...kept];
+}
+
 class PushNotificationService {
-  async customerStatus(customerId, database = db) {
+  // opts.contactKey: a contact session's own status — only that contact's
+  // devices count; a holder's status never counts a contact device.
+  async customerStatus(customerId, database = db, { contactKey = null } = {}) {
     const context = await customerPushContext(customerId, database);
     if (!context) return { enabled: false, registered: false, fresh: false };
-    const rows = await database('push_subscriptions')
+    const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
-      .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at');
+      .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
+      .filter((row) => (contactKey ? String(row.contact_phone_key || '') === String(contactKey) : !row.contact_phone_key));
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
     const providers = { ios: apns.status().configured, android: fcm.status().configured };
     return {
@@ -185,11 +227,16 @@ class PushNotificationService {
     // boundary; letting this query's own exception escape would report a
     // never-attempted send as ambiguous instead of not_sent (codex P2).
     let subs;
+    // opts.messageType: what this push is about (the routed message type or
+    // the bell's preference key). Contact devices are included only for the
+    // appointment / report purposes contactPushPurpose names; an untyped
+    // push never reaches one.
+    const contactPurpose = require('./contact-notification-prefs').contactPushPurpose(opts.messageType);
     try {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      subs = await query;
+      subs = await contactDevicesAllowed(await query, contactPurpose);
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };
