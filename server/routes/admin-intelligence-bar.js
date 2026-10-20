@@ -4273,6 +4273,12 @@ async function answerModelFailure(req, res, { err, activeTask, pendingProposals 
           { role: 'assistant', content: appendTaintMarker(appendTaintMarker(handled.answer, failureTurn.imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER) }]
         : (activeTask?.response?.conversationHistory || priorHistory),
       response: handled.answer,
+      // The failed exchange is not appended to a server thread, so the client
+      // drops its thread: the next ask starts without one and the no-thread
+      // follow-up guards apply (fails closed), never a stale thread id.
+      threadsEnabled: false,
+      threadId: undefined,
+      threadSeq: undefined,
       toolCalls: [],
       structuredData: null,
       // Cards minted in an earlier round of this request stay confirmable.

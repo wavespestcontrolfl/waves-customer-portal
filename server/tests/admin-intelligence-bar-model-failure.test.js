@@ -416,6 +416,9 @@ describe('round 2 fixes (#6368)', () => {
       expect(history[2].content).toContain('move the Tuesday visit to Friday');
       expect(history[3].role).toBe('assistant');
       expect(history[3].content).toContain('The AI model did not answer this request');
+      // The client drops its thread: the failed exchange is not in it.
+      expect(body.threadsEnabled).toBe(false);
+      expect(body.threadId).toBeUndefined();
     });
   });
 
