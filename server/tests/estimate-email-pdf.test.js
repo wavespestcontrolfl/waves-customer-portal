@@ -11,15 +11,6 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   billingEmailDetailsLive: () => false,
 }));
-// The fence reads the live billing state through these (codex #6343 r13); the real
-// module needs a database, so the suite answers "monthly lane, not prepaid".
-jest.mock('../services/estimate-proposal-billing', () => ({
-  estimateSoldAsAnnualPrepay: jest.fn(async () => false),
-  resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: false, livePricing: null })),
-  documentPrintsRateReviewTerms: jest.fn(async () => false),
-  ensureRateReviewTermsEvidenceBeforeRender: jest.fn(),
-  recordRateReviewTermsServedOutcome: jest.fn(),
-}));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
   estimateOffCustomerSurface: jest.fn(() => false),
@@ -41,6 +32,8 @@ jest.mock('../services/estimate-deposits', () => ({
 jest.mock('../services/estimate-conversion-guard', () => ({ customerConvertedSince: jest.fn(async () => ({ converted: false })) }));
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => null) }));
 jest.mock('../routes/estimate-public', () => ({
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
+  composeEstimateDataPayload: jest.fn((...args) => require('./helpers/estimate-document-payload').documentPayloadFromRow(...args)),
   findLinkedUpcomingAppointment: jest.fn(async () => null),
   adoptionServiceModesForContract: jest.fn(() => []),
   isEstimateAcceptActive: jest.fn(() => true),
@@ -50,7 +43,6 @@ jest.mock('../routes/estimate-public', () => ({
   buildPricingBundle: jest.fn(async () => ({})),
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
   estimateTrenchingReviewRequired: jest.fn(() => false),
-  reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
   resolveAcceptOneTimeTotal: jest.fn(() => 149),
   commercialAcceptDepositExempt: jest.fn(() => false),
   isCommercialAutoAcceptEstimate: jest.fn(() => false),

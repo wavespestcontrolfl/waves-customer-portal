@@ -71,11 +71,6 @@ jest.mock('../services/estimate-learning', () => ({ recordSentLearningEvent: jes
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/triage-auto-resolve', () => ({ deliveredEstimateScope: jest.fn(() => ({ lines: [] })) }));
-jest.mock('../services/estimate-proposal-billing', () => ({
-  estimateSoldAsAnnualPrepay: jest.fn(async () => false),
-  resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: false, livePricing: null })),
-  documentPrintsRateReviewTerms: jest.fn(async () => false),
-}));
 jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   buildEstimateProposalEmailAttachmentPreferred: jest.fn(async () => ({ filename: 'synthetic-proposal.pdf', content: 'c3ludGhldGlj', type: 'application/pdf' })),
   buildEstimateEmailPdfAttachment: jest.fn(async () => null),
@@ -83,6 +78,8 @@ jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   ESTIMATE_EMAIL_PDF_NOTES: { delivery: 'Synthetic delivery PDF note.', followUp: 'Synthetic follow-up PDF note.' },
 }));
 jest.mock('../routes/estimate-public', () => ({
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
+  composeEstimateDataPayload: jest.fn((...args) => require('./helpers/estimate-document-payload').documentPayloadFromRow(...args)),
   findLinkedUpcomingAppointment: jest.fn(async () => null), adoptionServiceModesForContract: jest.fn(() => []),
   acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({ services: [] })),

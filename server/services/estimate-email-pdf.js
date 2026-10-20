@@ -113,75 +113,71 @@ function rowFingerprint(row, { omitExpiry = false } = {}) {
   return canonical(pick);
 }
 
-// The linked appointment the page's acceptance contract reads
-// (resolveEstimateAcceptance: findLinkedUpcomingAppointment), as the state the
-// document's mode and its "Confirm appointment / your appointment stays as
-// scheduled" copy depend on. A cancel or reschedule changes it; an unrelated
-// scheduled_services row does not (the finder returns only the linked one).
-// Throws when the read fails, which the callers treat like any fence read
-// failure (codex #6343 r8).
-async function linkedAppointmentState(row) {
+// The document's own input (codex #6343 r14). Four rounds added one more input
+// to the fence at a time (appointment, billing, satellite, then the contact
+// fields filled from the linked customer or lead); the headless page renders
+// ONE thing, the /:token/data payload, so the fence now compares that. This
+// builds the same payload the route serves the render pass (reconcile the
+// membership snapshot onto the row, then composeEstimateDataPayload in the
+// signed-pin pdf mode) on a CLONE of the row, and keeps only the fields
+// EstimateProposalDocument reads. The pdf pass writes nothing: no view count,
+// no first-view flip, no served-disclosure evidence (customerView is off), no
+// park side effects (runParkSideEffects is off), no consultation probe; the
+// membership reconcile edits the object in place only.
+//
+// Left out because they change per request and the page never prints them:
+// estimate.askToken (a JWT signed with a fresh iat), meta.generatedAt,
+// meta.cacheHit, and the page-only blocks (consultationOffer, pricing bundle
+// extras, deposit and card policies, supportSources). Everything the document
+// prints is in, so the contact fields (name, phone, email, address after the
+// customer/lead fill), the acceptance contract with its linked appointment, the
+// billing-dependent proposal lines, the call to action state and the satellite
+// path are covered at once, and a new input the page learns to print is
+// covered as soon as it is added to this list.
+function documentInputProjection(payload) {
+  const estimate = payload?.estimate || {};
+  const pick = (source, keys) => Object.fromEntries(keys.map((k) => [k, source?.[k] === undefined ? null : source[k]]));
+  return {
+    estimate: {
+      ...pick(estimate, [
+        'id', 'token', 'slug', 'customerName', 'customerPhone', 'customerEmail', 'address', 'category',
+        'createdAt', 'expiresAt', 'satelliteUrl', 'licenseNumber', 'noGuaranteeClaims', 'noEstimateWideGuarantee', 'acceptance',
+      ]),
+      // The page prints only the body and metrics of the pricing intelligence.
+      intelligence: estimate.intelligence ? pick(estimate.intelligence, ['body', 'metrics']) : null,
+    },
+    proposal: payload?.proposal ?? null,
+    cta: payload?.cta ?? null,
+    acceptance: payload?.acceptance ?? null,
+    publicOrigin: payload?.publicOrigin ?? null,
+    documentRender: payload?.documentRender ?? null,
+  };
+}
+
+// `validThrough`: the date the render was pinned to (the render pin's vexp);
+// without one the document shows the stored expires_at, which is also what the
+// row fingerprint reads. `omitExpiry`: the manual delivery send persists
+// expires_at later in its own flow, so its fence leaves the printed date out.
+async function documentInputHash(row, { validThrough = null, omitExpiry = false } = {}) {
   const estimatePublic = require('../routes/estimate-public');
-  const data = parseData(row) || {};
-  const appointment = await estimatePublic.findLinkedUpcomingAppointment(row, data, {
-    serviceModes: estimatePublic.adoptionServiceModesForContract(row, data),
-  });
-  if (!appointment) return null;
-  const when = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
-  return {
-    id: appointment.id,
-    status: appointment.status || null,
-    scheduled_date: when(appointment.scheduled_date),
-    window_start: when(appointment.window_start),
-    window_end: when(appointment.window_end),
-    service_type: appointment.service_type || null,
-    claimed: appointment.customer_id != null,
-    hold: appointment.reservation_expires_at != null,
-  };
-}
-
-// The live billing state the document prints by (codex #6343 r13): the page
-// resolves the customer's billing lane (billing_mode, membership), the estimate's
-// annual-prepay term and, for a per-application lane, the live pricing bundle at
-// render time, and none of those live on the estimates row. So the fence
-// resolves them the same way the document route does, on a CLONE (the
-// resolution reconciles a membership snapshot onto the row it is handed, and
-// the caller's row is the object the row fingerprint reads), and compares a
-// canonical projection of what the document prints from them: the lane, the
-// prepay fact, the live-pricing outcome, the totals after reconciliation, the
-// normalized proposal lines and the rate-review decision. Everything in it is a
-// pure function of stored state (no clock, no ids minted per call), so an
-// unchanged state never vetoes itself. An unreadable prepay lookup throws like
-// any other fence read failure; the lane and pricing lookups report an
-// inconclusive answer in their own fail-safe value (legacy copy), which the
-// projection records as it is.
-async function billingState(row) {
-  const billing = require('./estimate-proposal-billing');
-  const { normalizeProposal } = require('./estimate-proposal');
   const estimate = structuredClone(row);
-  if (await billing.estimateSoldAsAnnualPrepay(estimate) === null) throw new Error('billing state unreadable: prepay lookup failed');
-  const context = await billing.resolveProposalBillingContext(estimate);
-  const live = context?.livePricing || null;
-  const proposal = normalizeProposal(estimate, {
-    recurringMode: context?.billsPerApplication === true ? 'per_application' : 'legacy',
-    livePricing: live,
+  await estimatePublic.reconcileFrozenMembershipSnapshot(estimate);
+  const pinned = validThrough ? new Date(validThrough).toISOString() : null;
+  const payload = await estimatePublic.composeEstimateDataPayload(estimate, {
+    isPdfRenderPass: true,
+    docRenderPin: { validThrough: pinned },
   });
-  return {
-    billsPerApplication: context?.billsPerApplication === true,
-    live: live ? { unresolved: live.unresolved === true, snapshotHit: live.snapshotHit === true } : null,
-    totals: [estimate.monthly_total, estimate.annual_total, estimate.accepted_frequency_key].map((v) => (v == null ? null : String(v))),
-    proposal,
-    printsRateReviewTerms: (await billing.documentPrintsRateReviewTerms(estimate, { billing: context })) === true,
-  };
+  const projection = documentInputProjection(payload);
+  if (omitExpiry) delete projection.estimate.expiresAt;
+  return crypto.createHash('sha256').update(canonical(projection)).digest('hex');
 }
 
-// What the fence compares: the estimates row's content, the linked
-// appointment state and the live billing state the document prints by. Group membership is NOT part of it: a grouped estimate is
-// never a valid baseline (codex #6343 r10), so handoffBlockReason refuses any
-// grouped estimate outright instead of comparing against a captured verdict.
-async function fullFingerprint(row, opts) {
-  const billing = crypto.createHash('sha256').update(canonical(await billingState(row))).digest('hex');
-  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}|${billing}`;
+// What the fence compares: the estimates row's content and the document's own
+// input. Group membership is NOT part of it: a grouped estimate is never a valid
+// baseline (codex #6343 r10), so handoffBlockReason refuses any grouped estimate
+// outright instead of comparing against a captured verdict.
+async function fullFingerprint(row, opts = {}) {
+  return `${rowFingerprint(row, opts)}|${await documentInputHash(row, opts)}`;
 }
 
 // The address an email actually goes to must still be the estimate's current
@@ -234,7 +230,7 @@ async function handoffBlockReason(estimateId, expectedFingerprint, { validThroug
   if (recipient && !sameRecipient(row.customer_email, recipient)) return 'recipient_changed';
   const stateBlock = rowStateBlock(row, { validThrough, now, delivery });
   if (stateBlock) return stateBlock;
-  if (expectedFingerprint && (await fullFingerprint(row, { omitExpiry: delivery })) !== expectedFingerprint) return 'estimate_changed_since_render';
+  if (expectedFingerprint && (await fullFingerprint(row, { omitExpiry: delivery, validThrough: validThrough || (delivery ? null : row.expires_at) })) !== expectedFingerprint) return 'estimate_changed_since_render';
   // A one-property PDF must never go out for a multi-property group, whenever
   // the group formed (r6 exclusion; r9/r10 sibling unarchived mid-render).
   if (expectedFingerprint && await module.exports.estimateInMultiPropertyGroup(row)) return 'estimate_grouped';
@@ -341,7 +337,7 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
     const pdf = require('./pdf/estimate-doc-pdf');
     // The fingerprint is of the row as the database returned it, taken before
     // anything else touches the object (the builder works on clones).
-    const fingerprint = await fullFingerprint(fresh);
+    const fingerprint = await fullFingerprint(fresh, { validThrough: validThrough || fresh.expires_at || null });
     const attachment = await pdf.buildEstimateEmailPdfAttachment(fresh, { validThrough: validThrough || fresh.expires_at || null });
     if (!attachment) return noFile();
     return {
@@ -370,7 +366,7 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
 // be built at all).
 async function deliveryPdfFence(freshEstimate, { recipient, validThrough = null } = {}) {
   if (!freshEstimate?.id || !sameRecipient(freshEstimate.customer_email, recipient)) return null;
-  const fingerprint = await fullFingerprint(freshEstimate, { omitExpiry: true });
+  const fingerprint = await fullFingerprint(freshEstimate, { omitExpiry: true, validThrough });
   const opts = { validThrough, recipient, delivery: true };
   return {
     withProviderHandoff: pdfProviderHandoff(freshEstimate.id, fingerprint, opts),
@@ -537,6 +533,8 @@ function reviewedPdfDecisionStale(reviewedMessages, currentDecision) {
 }
 
 module.exports = {
+  documentInputHash,
+  documentInputProjection,
   openEstimateEmailPdf,
   deliverySendPieces,
   prepareDeliveryPdfCopy,

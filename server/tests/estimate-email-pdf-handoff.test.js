@@ -13,13 +13,10 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/estimate-public', () => ({
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
+  composeEstimateDataPayload: jest.fn((...args) => require('./helpers/estimate-document-payload').documentPayloadFromRow(...args)),
   findLinkedUpcomingAppointment: jest.fn(async () => null),
   adoptionServiceModesForContract: jest.fn(() => []),
-}));
-jest.mock('../services/estimate-proposal-billing', () => ({
-  estimateSoldAsAnnualPrepay: jest.fn(async () => false),
-  resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: false, livePricing: null })),
-  documentPrintsRateReviewTerms: jest.fn(async () => false),
 }));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
@@ -240,12 +237,31 @@ describe('a live-repriced estimate does not veto itself (codex #6343 r5)', () =>
   });
 });
 
-describe('the linked appointment is part of the fence (codex #6343 r8)', () => {
+describe('the document\'s own input is the fence (codex #6343 r14)', () => {
+  // The real composeEstimateDataPayload is exercised in
+  // estimate-email-pdf-document-input.test.js (linked customer contact, billing,
+  // appointment, line items against the real composer). Here the composer is a
+  // stand-in so each case moves exactly one thing the payload carries between the
+  // render and the handoff and checks the fence's wiring.
   const estimatePublic = require('../routes/estimate-public');
-  const appt = (extra = {}) => ({
-    id: 'appt-1', status: 'confirmed', scheduled_date: '2026-10-30', window_start: '09:00:00', window_end: '11:00:00',
-    service_type: 'Pest control', customer_id: 'cust-1', reservation_expires_at: null, notes: 'office note', updated_at: new Date('2026-10-19T12:00:00Z'), ...extra,
-  });
+  const { documentPayloadFromRow } = require('./helpers/estimate-document-payload');
+  const APPOINTMENT = { mode: 'existing_appointment', appointment: { id: 'appt-1', scheduledDate: '2026-10-30', windowStart: '09:00', windowEnd: '11:00', serviceType: 'Pest control', status: 'confirmed' } };
+  // Payload changes: each returns a modified copy of what the stand-in builds.
+  const withPayload = (edit) => async (estimate, opts) => edit(await documentPayloadFromRow(estimate, opts));
+  const CHANGES = {
+    'a linked customer phone edit': (p) => { p.estimate.customerPhone = '9415550199'; return p; },
+    'a linked customer name edit': (p) => { p.estimate.customerName = 'Someone Else'; return p; },
+    'a linked customer address edit': (p) => { p.estimate.address = '9 Elsewhere Rd'; return p; },
+    'a billing change (monthly lane)': (p) => { p.cta.monthlyBilled = true; return p; },
+    'a line-item edit': (p) => { p.proposal = { buildings: [{ lineItems: [{ description: 'x', unitPrice: 1 }] }] }; return p; },
+    'an appointment that appears': (p) => { p.estimate.acceptance = APPOINTMENT; return p; },
+    'an appointment that moves': (p) => { p.estimate.acceptance = { ...APPOINTMENT, appointment: { ...APPOINTMENT.appointment, scheduledDate: '2026-11-02' } }; return p; },
+    'an appointment that moves to another window': (p) => { p.estimate.acceptance = { ...APPOINTMENT, appointment: { ...APPOINTMENT.appointment, windowStart: '13:00', windowEnd: '15:00' } }; return p; },
+    'an appointment that changes status': (p) => { p.estimate.acceptance = { ...APPOINTMENT, appointment: { ...APPOINTMENT.appointment, status: 'rescheduled' } }; return p; },
+    'a different service on the appointment': (p) => { p.estimate.acceptance = { ...APPOINTMENT, appointment: { ...APPOINTMENT.appointment, serviceType: 'Lawn care' } }; return p; },
+    'a call to action that turns terminal': (p) => { p.cta.terminalState = 'expired'; return p; },
+    'a satellite image that appears': (p) => { p.estimate.satelliteUrl = '/api/estimates/tok/map/satellite'; return p; },
+  };
   let build;
   beforeEach(() => {
     jest.clearAllMocks();
@@ -254,64 +270,81 @@ describe('the linked appointment is part of the fence (codex #6343 r8)', () => {
     claimSql.estimateOffCustomerSurface.mockReturnValue(false);
     claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
     persistence.staleCallLinkageReason.mockResolvedValue(null);
-    estimatePublic.findLinkedUpcomingAppointment.mockReset();
-    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValue(null);
+    estimatePublic.composeEstimateDataPayload.mockReset();
+    estimatePublic.composeEstimateDataPayload.mockImplementation((...args) => documentPayloadFromRow(...args));
+    estimatePublic.reconcileFrozenMembershipSnapshot.mockReset();
     build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
   });
   afterEach(() => build.mockRestore());
 
-  // Follow-up path: render with `atRender`, then run the handoff with `atHandoff`.
-  async function followUpFence(atRender, atHandoff) {
+  // Follow-up path: the payload at render is edited by `atRender`, at the handoff by `atHandoff`.
+  async function followUp(atRender, atHandoff) {
     readsRow(row(), row());
-    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(atRender);
+    if (atRender) estimatePublic.composeEstimateDataPayload.mockImplementationOnce(withPayload(atRender));
     const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
     expect(o.attachments).toEqual([ATTACHMENT]);
     let check;
     await o.withProviderHandoff(async (_d, b) => { check = b; });
-    if (atHandoff instanceof Error) estimatePublic.findLinkedUpcomingAppointment.mockRejectedValueOnce(atHandoff);
-    else estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(atHandoff);
+    if (atHandoff instanceof Error) estimatePublic.composeEstimateDataPayload.mockRejectedValueOnce(atHandoff);
+    else if (atHandoff) estimatePublic.composeEstimateDataPayload.mockImplementationOnce(withPayload(atHandoff));
     return check({ database: db });
   }
 
-  test('the finder is asked exactly like the page asks it (same service modes)', async () => {
-    estimatePublic.adoptionServiceModesForContract.mockReturnValueOnce(['recurring']);
-    await followUpFence(appt(), appt());
-    expect(estimatePublic.findLinkedUpcomingAppointment).toHaveBeenCalledWith(expect.objectContaining({ id: ID }), expect.any(Object), { serviceModes: ['recurring'] });
+  test('the payload is composed the way the render pass is served: reconciled clone, pdf pass, pinned valid-through', async () => {
+    await followUp();
+    const [estimate, opts] = estimatePublic.composeEstimateDataPayload.mock.calls[0];
+    expect(opts).toEqual({ isPdfRenderPass: true, docRenderPin: { validThrough: '2099-01-01T00:00:00.000Z' } });
+    expect(estimatePublic.reconcileFrozenMembershipSnapshot).toHaveBeenCalledWith(estimate);
+    expect(estimatePublic.composeEstimateDataPayload).toHaveBeenCalledTimes(2);
   });
 
-  test('the same appointment, and an unrelated column changing on it, do not trip the fence', async () => {
-    await expect(followUpFence(appt(), appt())).resolves.toEqual({ ok: true });
-    await expect(followUpFence(appt(), appt({ notes: 'something else', updated_at: new Date() }))).resolves.toEqual({ ok: true });
+  test('the same unchanged estimate composed twice (fresh per-request fields each time) never vetoes itself', async () => {
+    await expect(followUp()).resolves.toEqual({ ok: true });
+    await expect(followUp(CHANGES['a billing change (monthly lane)'], CHANGES['a billing change (monthly lane)'])).resolves.toEqual({ ok: true });
+    // Several handoffs in a row against one baseline.
+    readsRow(row(), row());
+    const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await o.withProviderHandoff(async (_d, b) => { check = b; });
+    for (let i = 0; i < 3; i += 1) {
+      readsRow(row());
+      await expect(check({ database: db })).resolves.toEqual({ ok: true });
+    }
   });
 
-  test('no appointment before and after is fine', async () => {
-    await expect(followUpFence(null, null)).resolves.toEqual({ ok: true });
+  test('the composer does not see the row the fingerprint reads: it gets a clone', async () => {
+    const fresh = row();
+    readsRow(fresh);
+    estimatePublic.composeEstimateDataPayload.mockImplementationOnce(async (estimate) => {
+      estimate.monthly_total = 'MUTATED';
+      estimate.estimate_data.injected = true;
+      return documentPayloadFromRow(estimate);
+    });
+    await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(fresh.monthly_total).toBe(59);
+    expect(fresh.estimate_data).not.toHaveProperty('injected');
   });
 
-  test.each([
-    ['cancelled (the finder no longer returns it)', null],
-    ['rescheduled to another day', appt({ scheduled_date: '2026-11-02' })],
-    ['moved to another window', appt({ window_start: '13:00:00', window_end: '15:00:00' })],
-    ['changed status', appt({ status: 'rescheduled' })],
-    ['replaced by another appointment', appt({ id: 'appt-2' })],
-    ['changed service', appt({ service_type: 'Lawn care' })],
-    ['released from the customer', appt({ customer_id: null })],
-    ['turned into a timed hold', appt({ customer_id: null, reservation_expires_at: new Date(Date.now() + 600000) })],
-  ])('a linked appointment %s between render and handoff vetoes the PDF', async (_label, atHandoff) => {
-    await expect(followUpFence(appt(), atHandoff)).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  test.each(Object.keys(CHANGES))('%s between render and handoff vetoes the PDF', async (name) => {
+    await expect(followUp(null, CHANGES[name])).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
   });
 
-  test('an appointment that appears after a render with none vetoes it too (the mode would now read existing_appointment)', async () => {
-    await expect(followUpFence(null, appt())).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  test('a change that was already in the payload at render (and stays) does not veto', async () => {
+    await expect(followUp(CHANGES['an appointment that appears'], CHANGES['an appointment that appears'])).resolves.toEqual({ ok: true });
   });
 
-  test('a failed appointment read at the handoff is a tagged retryable check failure, not a pass', async () => {
-    await expect(followUpFence(appt(), new Error('db down'))).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  test('the per-request fields (askToken, generatedAt) are not part of it', async () => {
+    const volatile = (p) => { p.estimate.askToken = 'another-token'; p.meta.generatedAt = '2030-01-01T00:00:00.000Z'; p.meta.cacheHit = true; return p; };
+    await expect(followUp(null, volatile)).resolves.toEqual({ ok: true });
   });
 
-  test('a failed appointment read at render time means no PDF', async () => {
+  test('a failed composition at the handoff is a tagged retryable check failure, not a pass', async () => {
+    await expect(followUp(null, new Error('db down'))).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  });
+
+  test('a failed composition at render time means no PDF (and no build)', async () => {
     readsRow(row());
-    estimatePublic.findLinkedUpcomingAppointment.mockRejectedValueOnce(new Error('db down'));
+    estimatePublic.composeEstimateDataPayload.mockRejectedValueOnce(new Error('db down'));
     const out = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
     expect(out.attachments).toEqual([]);
     expect(out.payload).toEqual({});
@@ -319,15 +352,32 @@ describe('the linked appointment is part of the fence (codex #6343 r8)', () => {
     expect(build).not.toHaveBeenCalled();
   });
 
-  test('the delivery fence carries it too: a cancel between render and handoff vetoes the send', async () => {
+  test('the delivery fence carries it too, and leaves the printed date out', async () => {
     const draft = (extra = {}) => row({ status: 'sending', ...extra });
-    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(appt());
-    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
+    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com', validThrough: new Date('2099-02-01T00:00:00Z') });
     let check;
     await fence.withProviderHandoff(async (_d, b) => { check = b; });
+    expect(estimatePublic.composeEstimateDataPayload.mock.calls[0][1].docRenderPin).toEqual({ validThrough: '2099-02-01T00:00:00.000Z' });
+    // The send persists expires_at later: not a change.
+    readsRow(draft({ expires_at: new Date('2099-02-01T00:00:00Z') }));
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+    // A phone edit on the linked customer during the render is.
     readsRow(draft());
-    estimatePublic.findLinkedUpcomingAppointment.mockResolvedValueOnce(null);
+    estimatePublic.composeEstimateDataPayload.mockImplementationOnce(withPayload(CHANGES['a linked customer phone edit']));
     await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+
+  test('the no-file fence keeps no fingerprint: a payload change does not stop a link-only email', async () => {
+    build.mockResolvedValue(null);
+    readsRow(row(), row());
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(open.attachments).toEqual([]);
+    let check;
+    await open.withProviderHandoff(async (_d, b) => { check = b; });
+    estimatePublic.composeEstimateDataPayload.mockClear();
+    estimatePublic.composeEstimateDataPayload.mockImplementation(withPayload(CHANGES['an appointment that appears']));
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+    expect(estimatePublic.composeEstimateDataPayload).not.toHaveBeenCalled();
   });
 });
 
@@ -458,7 +508,7 @@ describe('prepareDeliveryPdfCopy: the delivery send\'s whole PDF step (codex #63
     build.mockRejectedValue(new Error('browser down'));
     expect(await prepare()).toMatchObject({ expected: true, attachment: null, warning });
     build.mockResolvedValue(ATTACHMENT);
-    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockRejectedValueOnce(new Error('db down'));
+    require('../routes/estimate-public').composeEstimateDataPayload.mockRejectedValueOnce(new Error('db down'));
     expect(await prepare()).toMatchObject({ expected: true, attachment: null, warning });
   });
 });
@@ -814,132 +864,3 @@ describe('the destination must still be the estimate\'s recipient (pre-push audi
   });
 });
 
-describe('the live billing state is part of the fence (codex #6343 r13)', () => {
-  const billing = require('../services/estimate-proposal-billing');
-  const PER_APPLICATION = { billsPerApplication: true, livePricing: { bundle: { frequencies: [] }, defaultCandidate: null, snapshotHit: true } };
-  const MONTHLY = { billsPerApplication: false, livePricing: null };
-  let build;
-  beforeEach(() => {
-    jest.clearAllMocks();
-    db.mockReset();
-    setGates(true);
-    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
-    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
-    persistence.staleCallLinkageReason.mockResolvedValue(null);
-    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockReset();
-    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockResolvedValue(null);
-    billing.estimateSoldAsAnnualPrepay.mockReset();
-    billing.estimateSoldAsAnnualPrepay.mockResolvedValue(false);
-    billing.resolveProposalBillingContext.mockReset();
-    billing.resolveProposalBillingContext.mockImplementation(async () => ({ ...MONTHLY }));
-    billing.documentPrintsRateReviewTerms.mockReset();
-    billing.documentPrintsRateReviewTerms.mockResolvedValue(false);
-    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
-  });
-  afterEach(() => build.mockRestore());
-
-  // Follow-up path: the billing context at render is `atRender`, at the handoff `atHandoff`.
-  async function followUp(atRender, atHandoff, { rows = [row(), row()] } = {}) {
-    readsRow(...rows);
-    billing.resolveProposalBillingContext.mockImplementationOnce(async () => structuredClone(atRender));
-    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    expect(open.attachments).toEqual([ATTACHMENT]);
-    let check;
-    await open.withProviderHandoff(async (_d, b) => { check = b; });
-    billing.resolveProposalBillingContext.mockImplementationOnce(async () => structuredClone(atHandoff));
-    return check({ database: db });
-  }
-
-  test('two resolutions of the same unchanged state give the same fingerprint (no self-veto), even as fresh objects each time', async () => {
-    await expect(followUp(MONTHLY, MONTHLY)).resolves.toEqual({ ok: true });
-    await expect(followUp(PER_APPLICATION, PER_APPLICATION)).resolves.toEqual({ ok: true });
-    // Many resolutions in a row, each a new object, never differ.
-    readsRow(row(), row());
-    billing.resolveProposalBillingContext.mockImplementation(async () => structuredClone(PER_APPLICATION));
-    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    let check;
-    await open.withProviderHandoff(async (_d, b) => { check = b; });
-    for (let i = 0; i < 3; i += 1) {
-      readsRow(row());
-      await expect(check({ database: db })).resolves.toEqual({ ok: true });
-    }
-  });
-
-  test('a billing mode change between render and handoff vetoes the PDF', async () => {
-    await expect(followUp(MONTHLY, PER_APPLICATION)).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
-    await expect(followUp(PER_APPLICATION, MONTHLY)).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
-  });
-
-  test('a live-pricing outcome change (rebuild failed, or snapshot rejected) vetoes it too', async () => {
-    const unresolved = { billsPerApplication: true, livePricing: { unresolved: true } };
-    await expect(followUp(PER_APPLICATION, unresolved)).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
-    const rebuilt = { billsPerApplication: true, livePricing: { ...PER_APPLICATION.livePricing, snapshotHit: false } };
-    await expect(followUp(PER_APPLICATION, rebuilt)).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
-  });
-
-  test('a change in the rate-review decision, or in the totals the resolution reconciles onto the row, vetoes it', async () => {
-    readsRow(row(), row());
-    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    let check;
-    await open.withProviderHandoff(async (_d, b) => { check = b; });
-    billing.documentPrintsRateReviewTerms.mockResolvedValueOnce(true);
-    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
-    readsRow(row());
-    // A membership change makes the resolution reprice the clone (the way the page's reconcile does).
-    billing.resolveProposalBillingContext.mockImplementationOnce(async (estimate) => { estimate.monthly_total = 49; return { ...MONTHLY }; });
-    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
-  });
-
-  test('the resolution runs on a clone: the row the fingerprint reads is never mutated', async () => {
-    const fresh = row();
-    readsRow(fresh);
-    billing.resolveProposalBillingContext.mockImplementation(async (estimate) => { estimate.monthly_total = 'MUTATED'; estimate.estimate_data.injected = true; return { ...MONTHLY }; });
-    await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    expect(fresh.monthly_total).toBe(59);
-    expect(fresh.estimate_data).not.toHaveProperty('injected');
-  });
-
-  test('an unreadable prepay lookup at the handoff is a tagged check failure, not a pass; at render it means no PDF', async () => {
-    readsRow(row(), row());
-    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    let check;
-    await open.withProviderHandoff(async (_d, b) => { check = b; });
-    billing.estimateSoldAsAnnualPrepay.mockResolvedValueOnce(null);
-    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
-    // A thrown billing read fails the same way.
-    readsRow(row());
-    billing.resolveProposalBillingContext.mockRejectedValueOnce(new Error('db down'));
-    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
-
-    build.mockClear();
-    readsRow(row());
-    billing.estimateSoldAsAnnualPrepay.mockResolvedValueOnce(null);
-    const noPdf = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    expect(noPdf.attachments).toEqual([]);
-    expect(build).not.toHaveBeenCalled();
-  });
-
-  test('the delivery fence carries it: a billing mode change during the render vetoes the send', async () => {
-    const draft = () => row({ status: 'sending' });
-    billing.resolveProposalBillingContext.mockImplementationOnce(async () => ({ ...MONTHLY }));
-    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
-    let check;
-    await fence.withProviderHandoff(async (_d, b) => { check = b; });
-    readsRow(draft());
-    billing.resolveProposalBillingContext.mockImplementationOnce(async () => structuredClone(PER_APPLICATION));
-    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
-    readsRow(draft());
-    await expect(check({ database: db })).resolves.toEqual({ ok: true });
-  });
-
-  test('the no-file fence keeps no fingerprint: a billing change does not stop a link-only email', async () => {
-    build.mockResolvedValue(null);
-    readsRow(row(), row());
-    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
-    expect(open.attachments).toEqual([]);
-    let check;
-    await open.withProviderHandoff(async (_d, b) => { check = b; });
-    billing.resolveProposalBillingContext.mockImplementation(async () => structuredClone(PER_APPLICATION));
-    await expect(check({ database: db })).resolves.toEqual({ ok: true });
-  });
-});
