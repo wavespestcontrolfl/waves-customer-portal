@@ -17,7 +17,8 @@ const db = require('../models/db');
 const Context = require('../services/intelligence-bar/task-context');
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const { executeAdminReadTool } = require('../services/intelligence-bar/admin-read-tools');
-const { omitPaths, omitProblem, omittedKeyNames } = require('../utils/response-projection');
+const { omitPaths, omitProblem, omittedKeyNames, keepPaths, keepProblem } = require('../utils/response-projection');
+const { isFreeTextName } = require('../utils/signed-link-redaction');
 
 const A = '10000000-0000-4000-8000-00000000000a';
 const B = '10000000-0000-4000-8000-00000000000b';
@@ -119,6 +120,59 @@ describe('the response projection', () => {
     expect(omittedKeyNames(entryOf('/admin/customers/:id/estimates-summary').omit)).toContain('token');
     expect(omittedKeyNames(entryOf('/admin/dispatch/board').omit)).toContain('avatar_url');
     for (const endpoint of ['/admin/leads', '/admin/leads/:id']) expect(omittedKeyNames(entryOf(endpoint).omit)).toEqual(expect.arrayContaining(['call_recording_url', 'anon_id', 'gclid']));
+  });
+});
+
+describe('keep mode (an allow-list) in the response projection', () => {
+  test('only the listed paths survive; a new key at any depth is dropped', () => {
+    const value = {
+      invoices: [{ id: 1, status: 'sent', payment_reference: 'x', future_column: 'y', card_on_file: { brand: 'visa', last_four: '4242', future_nested: 'z' } }, { id: 2 }],
+      total: 2, brand_new_top: 'q', counts: { a: 1, b: 2 }, areas: ['one', 'two'],
+    };
+    expect(keepPaths(value, ['invoices.*.id', 'invoices.*.status', 'invoices.*.card_on_file.brand', 'invoices.*.card_on_file.last_four', 'total', 'counts', 'areas'])).toEqual({
+      invoices: [{ id: 1, status: 'sent', card_on_file: { brand: 'visa', last_four: '4242' } }, { id: 2 }], total: 2, counts: { a: 1, b: 2 }, areas: ['one', 'two'],
+    });
+  });
+  test('a path to an object or a list of objects keeps nothing inside it by itself', () => {
+    expect(keepPaths({ a: { x: 'text' }, list: [{ x: 1 }], total: 3 }, ['a', 'list', 'total'])).toEqual({ total: 3 });
+  });
+  test('a map that holds anything but numbers is dropped whole, and an array is not transparent', () => {
+    expect(keepPaths({ counts: { a: 1, b: 'free text' }, rows: [{ id: 1 }] }, ['counts', 'rows.id'])).toEqual({});
+  });
+  test('a record with nothing listed stays as an empty item so counts of items are right; plain values not listed go', () => {
+    expect(keepPaths({ rows: [{ x: 1 }, { x: 2 }], names: ['a', 'b'] }, ['rows.*.id', 'names.*.id'])).toEqual({ rows: [{}, {}], names: [] });
+  });
+  test('a top-level list works', () => {
+    expect(keepPaths([{ id: 1, junk: 2 }], ['*.id'])).toEqual([{ id: 1 }]);
+  });
+  test('the list is validated: key names and "*" only, no free-text or operator-entered key, none repeated', () => {
+    const opts = { isFreeText: isFreeTextName, content: [] };
+    expect(keepProblem(['a.*.b', 'c'], opts)).toBeNull();
+    for (const bad of [[], 'a', ['a b'], ['a', 'a'], ['**.a'], ['a.*'], ['a..b'], [3], ['notes'], ['a.*.description'], ['x.title'], ['profileLabel'], ['payment_reference'], ['customers.*.tags'], ['est.competitorName'], ['lead.extracted_data'], ['metadata']]) {
+      expect({ bad, problem: keepProblem(bad, opts) === null }).toEqual({ bad, problem: false });
+    }
+    // a name that looks like free text may be kept only when the row declares it business reference text
+    expect(keepProblem(['calls.*.transcription_status'], opts)).toMatch(/free text/);
+    expect(keepProblem(['calls.*.transcription_status'], { ...opts, content: ['transcription_status'] })).toBeNull();
+  });
+  test('every new row is in keep mode, with a valid list that names no operator-entered field', () => {
+    for (const endpoint of NEW_ENDPOINTS) {
+      const entry = entryOf(endpoint);
+      expect({ endpoint, keep: Array.isArray(entry.keep) && entry.keep.length > 0 }).toEqual({ endpoint, keep: true });
+      const content = Object.entries(entry.freeText || {}).filter(([, kind]) => kind === 'content').map(([key]) => key);
+      expect({ endpoint, problem: keepProblem(entry.keep, { isFreeText: isFreeTextName, content }) }).toEqual({ endpoint, problem: null });
+      // no note declaration survives on a keep row: what is not listed is dropped, not withheld
+      expect({ endpoint, notes: Object.values(entry.freeText || {}).filter(kind => kind === 'note') }).toEqual({ endpoint, notes: [] });
+    }
+  });
+  test('the 35 rows that were on main are unchanged: none is in keep mode', () => {
+    expect(catalog.entries.filter(entry => entry.keep).length).toBe(NEW_ENDPOINTS.length);
+  });
+  test('a row that is not in keep mode does not carry the reviewed-list note', async () => {
+    process.env.GATE_IB_GENERAL_READ = 'true'; process.env.GATE_IB_PLATFORM = 'true';
+    global.fetch = jest.fn(async () => ({ status: 200, headers: { get: key => ({ 'content-type': 'application/json' })[String(key).toLowerCase()] ?? null }, text: async () => JSON.stringify({ enabled: true }) }));
+    const result = await executeAdminReadTool(TOOL, { endpoint: '/admin/estimates/source-performance' }, READER);
+    expect(result.note).not.toMatch(/reviewed list of fields/);
   });
 });
 

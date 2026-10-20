@@ -29,7 +29,7 @@ const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
 const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../../utils/redact-request-url');
 const { newState, redactSecrets, redactString, withholdNotes } = require('../../utils/signed-link-redaction');
-const { omitPaths, omittedKeyNames } = require('../../utils/response-projection');
+const { omitPaths, omittedKeyNames, keepPaths } = require('../../utils/response-projection');
 const catalog = require('./admin-read-catalog.json');
 
 const LOOPBACK_HOST = '127.0.0.1';
@@ -323,11 +323,16 @@ async function shapeResponse(response, entry, authorization) {
 // fields), then cut to the cap.
 const NOTES_WITHHELD_NOTE = 'Free-text notes are not read through this tool, because people paste passwords and links into them. Tell the operator the note exists and its length; they can read it on the record.';
 
+// Said when a row is in keep mode: the answer holds only the reviewed fields.
+const KEEP_NOTE = 'This read returns only a reviewed list of fields (ids, names, contact details, dates, numbers and statuses). Free text, notes, titles, tags and any field not on the list exist on the record but are not shown; say so if the operator asks for one.';
+
 function answerFrom(parsed, status, entry) {
   const state = newState();
   // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read.
-  // The row's projection next (keys that never reach the model), then every string is scrubbed.
-  const clean = redactSecrets(withholdNotes(entry.omit ? omitPaths(parsed, entry.omit) : parsed, entry.freeText || {}, state), state);
+  // The row's projection next: keys it omits never reach the model, and a row in keep mode (an allow-list) passes ONLY the
+  // keys it lists, so a column added later is dropped until a person reviews it. Then every string is scrubbed.
+  const projected = entry.keep ? keepPaths(entry.omit ? omitPaths(parsed, entry.omit) : parsed, entry.keep) : (entry.omit ? omitPaths(parsed, entry.omit) : parsed);
+  const clean = redactSecrets(withholdNotes(projected, entry.freeText || {}, state), state);
   const fitted = fitToCap(clean);
   const removed = [
     state.links ? `${state.links} signed file link(s)` : null,
@@ -338,6 +343,7 @@ function answerFrom(parsed, status, entry) {
     UNTRUSTED_NOTE,
     state.notes ? NOTES_WITHHELD_NOTE : null,
     entry.omit ? `Left out of this read by design, never shown: ${omittedKeyNames(entry.omit).join(', ')}.` : null,
+    entry.keep ? KEEP_NOTE : null,
     removed.length ? `Removed ${removed.join(', ')} (shown as "[signed link removed]", "[private link removed]" or "[removed]"); the bar never holds a credential or a link that carries one.` : null,
     fitted.truncated
       ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). ${narrowHint(entry)}${paginationHint(clean)}`

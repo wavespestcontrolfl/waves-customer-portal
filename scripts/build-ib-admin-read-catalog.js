@@ -30,7 +30,8 @@ const path = require('path');
 const crypto = require('crypto');
 const parser = require('@babel/parser');
 const rules = require('../server/utils/admin-read-rules');
-const { omitProblem } = require('../server/utils/response-projection');
+const { omitProblem, keepProblem } = require('../server/utils/response-projection');
+const { isFreeTextName } = require('../server/utils/signed-link-redaction');
 const { isCredentialName, isStrongCredentialName } = require('../server/utils/credential-fields');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1025,15 +1026,23 @@ function keywordsProblem(row) {
   return ok ? null : 'keywords must be 1 to 16 distinct lower-case phrases of up to 60 letters, digits, spaces and dashes';
 }
 
+// keep: the allow-list mode of the projection (a row that returns a whole table row or a broad object lists the
+// response keys it keeps; every other key is dropped). A kept key must not look like free text unless the row declares it content.
+function keepRowProblem(row) {
+  if (row.keep === undefined) return null;
+  const content = Object.entries(row.freeText || {}).filter(([, kind]) => kind === 'content').map(([key]) => key);
+  return keepProblem(row.keep, { isFreeText: isFreeTextName, content });
+}
+
 // What a row hands the run-time reader beyond scope and query: the response projection and the finder phrases.
-const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keywords ? { keywords: row.keywords } : {}) });
+const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keep ? { keep: row.keep } : {}), ...(row.keywords ? { keywords: row.keywords } : {}) });
 
 function validateReviewedRow(row) {
   const fail = message => { throw new Error(`admin-read-reviewed.json ${row.endpoint}: ${message}`); };
   if (!Object.hasOwn(ROW_SCOPES, row.scope)) fail(`scope must be one of ${Object.keys(ROW_SCOPES).join(', ')}`);
   const names = rules.patternParams(row.endpoint);
   const problem = idParamProblem(row) || scopeParamProblem(row) || paramKindProblem(row, names) || queryProblem(row, names)
-    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit));
+    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit)) || keepRowProblem(row);
   if (problem) fail(problem);
 }
 

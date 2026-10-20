@@ -46,7 +46,7 @@
     },
     {
       "endpoint": "/admin/customers",
-      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end.",
+      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "area",
@@ -77,12 +77,63 @@
         "customers by city",
         "customer tier"
       ],
+      "keep": [
+        "customers.*.id",
+        "customers.*.firstName",
+        "customers.*.lastName",
+        "customers.*.matchedHomeAddress",
+        "customers.*.accountId",
+        "customers.*.isPrimaryProfile",
+        "customers.*.contactRole",
+        "customers.*.email",
+        "customers.*.phone",
+        "customers.*.city",
+        "customers.*.serviceContactName",
+        "customers.*.serviceContactPhone",
+        "customers.*.serviceContactEmail",
+        "customers.*.serviceContact2Name",
+        "customers.*.serviceContact2Phone",
+        "customers.*.serviceContact2Email",
+        "customers.*.serviceContact3Name",
+        "customers.*.serviceContact3Phone",
+        "customers.*.serviceContact3Email",
+        "customers.*.address",
+        "customers.*.tier",
+        "customers.*.monthlyRate",
+        "customers.*.memberSince",
+        "customers.*.active",
+        "customers.*.pipelineStage",
+        "customers.*.leadScore",
+        "customers.*.leadSource",
+        "customers.*.companyName",
+        "customers.*.propertyType",
+        "customers.*.lastContactDate",
+        "customers.*.lastContactType",
+        "customers.*.nextFollowUp",
+        "customers.*.lifetimeRevenue",
+        "customers.*.totalServices",
+        "customers.*.lastServiceDate",
+        "customers.*.nextServiceDate",
+        "customers.*.serviceTypes",
+        "customers.*.serviceCount",
+        "customers.*.lastRating",
+        "customers.*.balanceOwed",
+        "customers.*.overdueInvoiceCount",
+        "customers.*.healthScore",
+        "customers.*.healthGrade",
+        "customers.*.cardsOnFile",
+        "customers.*.propertyCount",
+        "total",
+        "page",
+        "limit",
+        "totalPages",
+        "pipelineCounts",
+        "filters.sources",
+        "filters.areas"
+      ],
       "acceptSignals": [
         "credential_table:customers"
       ],
-      "freeText": {
-        "leadSourceDetail": "note"
-      },
       "signals": [
         "credential_table:customers"
       ],
@@ -110,7 +161,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/cards",
-      "reviewed": "Handler: payment_methods rows for one customer, mapped to id, method type, brand, last four, expiry month and year, bank name and default flag. No Stripe id and no token is mapped. Handler and every followed function read end to end.",
+      "reviewed": "Handler: payment_methods rows for one customer, mapped to id, method type, brand, last four, expiry month and year, bank name and default flag. No Stripe id and no token is mapped. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -123,6 +174,16 @@
         "card on file",
         "customer bank account on file"
       ],
+      "keep": [
+        "cards.*.id",
+        "cards.*.method_type",
+        "cards.*.brand",
+        "cards.*.last_four",
+        "cards.*.exp_month",
+        "cards.*.exp_year",
+        "cards.*.bank_name",
+        "cards.*.is_default"
+      ],
       "acceptSignals": [
         "credential_table:scheduled_services"
       ],
@@ -134,7 +195,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/collection-holds",
-      "reviewed": "Handler + collection-hold-admin.listCollectionHolds: active collections_flags rows of one customer, mapped to id, flag, reason, creator, time and stops_charges. Read only (the release is a separate POST). The hold reason is free text and is withheld by the key-name default. Handler and every followed function read end to end.",
+      "reviewed": "Handler + collection-hold-admin.listCollectionHolds: active collections_flags rows of one customer, mapped to id, flag, reason, creator, time and stops_charges. Read only (the release is a separate POST). The hold reason is free text and is withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -145,13 +206,20 @@
         "dispute hold",
         "payment dispute hold on a customer"
       ],
+      "keep": [
+        "holds.*.id",
+        "holds.*.flag",
+        "holds.*.created_by",
+        "holds.*.created_at",
+        "holds.*.stops_charges"
+      ],
       "signals": [],
       "unresolved": [],
       "hash": "0be77fccf0cd3ad5308f1dd7ce4d9697"
     },
     {
       "endpoint": "/admin/customers/:id/comms",
-      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end.",
+      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -174,6 +242,22 @@
         "calls and texts for a customer",
         "customer conversation",
         "customer voicemails"
+      ],
+      "keep": [
+        "comms.*.id",
+        "comms.*.conversationId",
+        "comms.*.channel",
+        "comms.*.direction",
+        "comms.*.durationSeconds",
+        "comms.*.answeredBy",
+        "comms.*.isRead",
+        "comms.*.deliveryStatus",
+        "comms.*.createdAt",
+        "comms.*.contactPhone",
+        "total",
+        "limit",
+        "channel",
+        "hasMore"
       ],
       "acceptSignals": [
         "credential_table:customers",
@@ -211,7 +295,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/deposit-credit",
-      "reviewed": "Handler + estimate-deposits.pendingDepositCreditForCustomer + PayerService.resolveForInvoice: amount, estimate id and slug, and whether the customer is payer-billed. Read only. Handler and every followed function read end to end.",
+      "reviewed": "Handler + estimate-deposits.pendingDepositCreditForCustomer + PayerService.resolveForInvoice: amount, estimate id and slug, and whether the customer is payer-billed. Read only. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -222,13 +306,18 @@
         "estimate deposit credit",
         "pending deposit for a customer"
       ],
+      "keep": [
+        "credit.amount",
+        "credit.estimateId",
+        "credit.payerBilled"
+      ],
       "signals": [],
       "unresolved": [],
       "hash": "cfe6065a0c9f9fb1897df17c3b6c758e"
     },
     {
       "endpoint": "/admin/customers/:id/estimates-summary",
-      "reviewed": "Handler: customers explicit-column select, estimates on the customer record (id, status, token, service interest, decline reason, totals, tier, dates) and the newest message preview; conversion stats computed in memory. The estimate bearer token is omitted by the row (the run-time credential pass would also drop it). Free text: decline_reason is withheld by the key-name default; the newest message preview is declared a note. Handler and every followed function read end to end.",
+      "reviewed": "Handler: customers explicit-column select, estimates on the customer record (id, status, token, service interest, decline reason, totals, tier, dates) and the newest message preview; conversion stats computed in memory. The estimate bearer token is omitted by the row (the run-time credential pass would also drop it). Free text: decline_reason is withheld by the key-name default; the newest message preview is declared a note. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -246,15 +335,48 @@
         "accepted estimates",
         "quote status"
       ],
+      "keep": [
+        "customer.id",
+        "customer.first_name",
+        "customer.last_name",
+        "customer.phone",
+        "customer.email",
+        "customer.address_line1",
+        "customer.city",
+        "customer.state",
+        "customer.zip",
+        "customer.waveguard_tier",
+        "customer.active",
+        "customer.created_at",
+        "customer.property_type",
+        "customer.company_name",
+        "customer.lead_source",
+        "estimates.*.id",
+        "estimates.*.status",
+        "estimates.*.monthly_total",
+        "estimates.*.annual_total",
+        "estimates.*.onetime_total",
+        "estimates.*.waveguard_tier",
+        "estimates.*.created_at",
+        "estimates.*.sent_at",
+        "estimates.*.viewed_at",
+        "estimates.*.accepted_at",
+        "estimates.*.declined_at",
+        "estimates.*.expires_at",
+        "stats.total",
+        "stats.accepted",
+        "stats.declined",
+        "stats.open",
+        "stats.conversionRate",
+        "stats.acceptedLifetimeMonthly",
+        "lastContact.channel",
+        "lastContact.direction",
+        "lastContact.at"
+      ],
       "acceptSignals": [
         "credential_field:token",
         "credential_table:scheduled_services"
       ],
-      "freeText": {
-        "preview": "note",
-        "lead_source_detail": "note",
-        "service_interest": "note"
-      },
       "signals": [
         "credential_field:token",
         "credential_table:scheduled_services"
@@ -264,7 +386,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/latest-scheduled-service",
-      "reviewed": "Handler: the newest non-cancelled scheduled_services row of one customer, first() of id, service type, date and status. Handler and every followed function read end to end.",
+      "reviewed": "Handler: the newest non-cancelled scheduled_services row of one customer, first() of id, service type, date and status. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -274,6 +396,12 @@
         "latest visit",
         "most recent scheduled service",
         "last scheduled visit for a customer"
+      ],
+      "keep": [
+        "service.id",
+        "service.serviceType",
+        "service.scheduledDate",
+        "service.status"
       ],
       "acceptSignals": [
         "credential_table:scheduled_services"
@@ -286,7 +414,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/timeline",
-      "reviewed": "Handler + customer-history.listCustomerTimeline: one select per event source (interaction, sms, voice, legacy call, service, invoice, estimate, payment, scheduled service, review, activity), each read-only, merged and cut to limit (default 50, max 100); the cursor is not offered because a query value is capped at 200 characters. credential_table call_log and customers are explicit-column selects here. Event descriptions are free text and are withheld by the key-name default; event titles (a fixed label, a service name, an interaction subject line or an activity action) are returned. Handler and every followed function read end to end.",
+      "reviewed": "Handler + customer-history.listCustomerTimeline: one select per event source (interaction, sms, voice, legacy call, service, invoice, estimate, payment, scheduled service, review, activity), each read-only, merged and cut to limit (default 50, max 100); the cursor is not offered because a query value is capped at 200 characters. credential_table call_log and customers are explicit-column selects here. Event descriptions are free text and are withheld by the key-name default; event titles (a fixed label, a service name, an interaction subject line or an activity action) are returned. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -304,6 +432,15 @@
         "what happened with this customer",
         "customer events",
         "customer calls and texts history"
+      ],
+      "keep": [
+        "timeline.*.id",
+        "timeline.*.type",
+        "timeline.*.date",
+        "missingSources",
+        "limit",
+        "type",
+        "hasMore"
       ],
       "acceptSignals": [
         "credential_table:call_log",
@@ -350,7 +487,7 @@
     },
     {
       "endpoint": "/admin/dispatch/alerts",
-      "reviewed": "Handler: dispatch_alerts joined to technician, job and customer with an explicit column list; limit default 50, max 200; unresolved by default. The payload column is system-written JSON. Handler and every followed function read end to end.",
+      "reviewed": "Handler: dispatch_alerts joined to technician, job and customer with an explicit column list; limit default 50, max 200; unresolved by default. The payload column is system-written JSON. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "limit",
@@ -361,13 +498,31 @@
         "late technician alerts",
         "dispatch problems"
       ],
+      "keep": [
+        "alerts.*.id",
+        "alerts.*.type",
+        "alerts.*.severity",
+        "alerts.*.tech_id",
+        "alerts.*.tech_name",
+        "alerts.*.job_id",
+        "alerts.*.customer_first_name",
+        "alerts.*.customer_last_name",
+        "alerts.*.address",
+        "alerts.*.service_type",
+        "alerts.*.scheduled_date",
+        "alerts.*.window_start",
+        "alerts.*.window_end",
+        "alerts.*.created_at",
+        "alerts.*.resolved_at",
+        "alerts.*.resolved_by"
+      ],
       "signals": [],
       "unresolved": [],
       "hash": "498c1c7f86876852f5fef1a2eb981968"
     },
     {
       "endpoint": "/admin/dispatch/board",
-      "reviewed": "Handler: today's clocked-in technicians (status, last location, job counts) and today's jobs (id, customer first name and last initial, address, window, status). The technician photo is a presigned S3 URL (tech-photo.js), which the row omits (avatar_url) so the signed_url signals are accepted. Handler and every followed function read end to end.",
+      "reviewed": "Handler: today's clocked-in technicians (status, last location, job counts) and today's jobs (id, customer first name and last initial, address, window, status). The technician photo is a presigned S3 URL (tech-photo.js), which the row omits (avatar_url) so the signed_url signals are accepted. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "omit": [
         "techs.avatar_url"
@@ -378,6 +533,33 @@
         "technician locations today",
         "todays jobs on the board",
         "dispatch today"
+      ],
+      "keep": [
+        "techs.*.id",
+        "techs.*.name",
+        "techs.*.role",
+        "techs.*.status",
+        "techs.*.lat",
+        "techs.*.lng",
+        "techs.*.current_job_id",
+        "techs.*.eta_minutes",
+        "techs.*.updated_at",
+        "techs.*.location_updated_at",
+        "techs.*.today_total",
+        "techs.*.today_completed",
+        "techs.*.out_today",
+        "jobs.*.id",
+        "jobs.*.technician_id",
+        "jobs.*.customer_id",
+        "jobs.*.customer_name",
+        "jobs.*.address",
+        "jobs.*.lat",
+        "jobs.*.lng",
+        "jobs.*.status",
+        "jobs.*.service_type",
+        "jobs.*.scheduled_date",
+        "jobs.*.window_start",
+        "jobs.*.window_end"
       ],
       "acceptSignals": [
         "signed_url:@aws-sdk/s3-request-presigner",
@@ -397,7 +579,7 @@
     },
     {
       "endpoint": "/admin/dispatch/jobs/:id",
-      "reviewed": "Handler: one scheduled_services row with its customer and technician, an explicit column list (names, phone, email, address, window, status, notes, internal_notes). Scope is broad on purpose: the visit id is not a customer id, so a task for one customer cannot use it. The notes and internal_notes are free text and are withheld by the key-name default. Handler and every followed function read end to end.",
+      "reviewed": "Handler: one scheduled_services row with its customer and technician, an explicit column list (names, phone, email, address, window, status, notes, internal_notes). Scope is broad on purpose: the visit id is not a customer id, so a task for one customer cannot use it. The notes and internal_notes are free text and are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "params": {
         "id": "uuid"
@@ -409,6 +591,26 @@
         "appointment detail",
         "visit notes",
         "job drawer"
+      ],
+      "keep": [
+        "id",
+        "customer_id",
+        "customer_first_name",
+        "customer_last_name",
+        "customer_phone",
+        "customer_email",
+        "address",
+        "lat",
+        "lng",
+        "tech_id",
+        "tech_full_name",
+        "status",
+        "service_type",
+        "scheduled_date",
+        "window_start",
+        "window_end",
+        "updated_at",
+        "visit_id"
       ],
       "signals": [],
       "unresolved": [],
@@ -453,7 +655,7 @@
     },
     {
       "endpoint": "/admin/dispatch/techs/:id",
-      "reviewed": "Handler: one technician (name, role, contact, status, last location) and that technician's route for today (customer names, addresses, windows, status), with the count of unresolved late alerts. Explicit columns throughout. Handler and every followed function read end to end.",
+      "reviewed": "Handler: one technician (name, role, contact, status, last location) and that technician's route for today (customer names, addresses, windows, status), with the count of unresolved late alerts. Explicit columns throughout. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "params": {
         "id": "uuid"
@@ -464,13 +666,40 @@
         "technician route today",
         "technician status"
       ],
+      "keep": [
+        "id",
+        "name",
+        "role",
+        "phone",
+        "email",
+        "active",
+        "status",
+        "current_job_id",
+        "lat",
+        "lng",
+        "status_updated_at",
+        "location_updated_at",
+        "today.scheduled_date",
+        "today.completed",
+        "today.total",
+        "today.late_count",
+        "route.*.job_id",
+        "route.*.customer_first_name",
+        "route.*.customer_last_name",
+        "route.*.address",
+        "route.*.service_type",
+        "route.*.scheduled_date",
+        "route.*.window_start",
+        "route.*.window_end",
+        "route.*.status"
+      ],
       "signals": [],
       "unresolved": [],
       "hash": "fff055e70de321e980fb41bf0337fbfc"
     },
     {
       "endpoint": "/admin/estimates",
-      "reviewed": "Handler (admin-estimates.js GET /): estimates joined to the creator, every row mapped to an explicit field list (status, contact, totals, dates, views, clicks, source, service lines, notes, decline reason, review material from estimate_data); limit default 50, max 500. pricingRisk is not offered (it runs the pricing-risk batch). The estimate token is omitted by the row. credential_field:token and credential_link:hasToken are the bearer token field and a presence check. Free text: notes, declineReason, dispositionNote, reviewNotes and description are withheld by the key-name default; leadSourceDetail and the agent draft reasoning, assumptions and uncertainty are declared notes. Handler and every followed function read end to end.",
+      "reviewed": "Handler (admin-estimates.js GET /): estimates joined to the creator, every row mapped to an explicit field list (status, contact, totals, dates, views, clicks, source, service lines, notes, decline reason, review material from estimate_data); limit default 50, max 500. pricingRisk is not offered (it runs the pricing-risk batch). The estimate token is omitted by the row. credential_field:token and credential_link:hasToken are the bearer token field and a presence check. Free text: notes, declineReason, dispositionNote, reviewNotes and description are withheld by the key-name default; leadSourceDetail and the agent draft reasoning, assumptions and uncertainty are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "archived",
@@ -495,18 +724,60 @@
         "declined estimates",
         "quote pipeline"
       ],
+      "keep": [
+        "estimates.*.id",
+        "estimates.*.status",
+        "estimates.*.customerName",
+        "estimates.*.customerId",
+        "estimates.*.customerPhone",
+        "estimates.*.address",
+        "estimates.*.customerEmail",
+        "estimates.*.updatedAt",
+        "estimates.*.monthlyTotal",
+        "estimates.*.onetimeTotal",
+        "estimates.*.tier",
+        "estimates.*.createdBy",
+        "estimates.*.sentAt",
+        "estimates.*.viewedAt",
+        "estimates.*.acceptedAt",
+        "estimates.*.scheduledAt",
+        "estimates.*.expiresAt",
+        "estimates.*.sendMethod",
+        "estimates.*.declinedAt",
+        "estimates.*.viewCount",
+        "estimates.*.lastViewedAt",
+        "estimates.*.clickCount",
+        "estimates.*.lastClickedAt",
+        "estimates.*.createdAt",
+        "estimates.*.source",
+        "estimates.*.leadSource",
+        "estimates.*.isPriority",
+        "estimates.*.followUpCount",
+        "estimates.*.lastFollowUpAt",
+        "estimates.*.disposition",
+        "estimates.*.dispositionSource",
+        "estimates.*.competitorPrice",
+        "estimates.*.archivedAt",
+        "estimates.*.showOneTimeOption",
+        "estimates.*.billByInvoice",
+        "estimates.*.isCommercialProposal",
+        "estimates.*.confirmedAppointment.id",
+        "estimates.*.confirmedAppointment.scheduledDate",
+        "estimates.*.confirmedAppointment.windowDisplay",
+        "estimates.*.confirmedAppointment.windowStart",
+        "estimates.*.confirmedAppointment.serviceType",
+        "estimates.*.confirmedAppointment.linked",
+        "estimates.*.estimatorEngine.lane",
+        "estimates.*.agentDraftReview.sqftSource",
+        "estimates.*.agentDraftReview.unverifiedLineCount",
+        "estimates.*.agentDraftReview.createdAt",
+        "truncated"
+      ],
       "acceptSignals": [
         "credential_field:token",
         "credential_link:hasToken",
         "credential_table:estimates"
       ],
-      "freeText": {
-        "leadSourceDetail": "note",
-        "reasoning": "note",
-        "assumptions": "note",
-        "uncertainty": "note",
-        "serviceInterest": "note"
-      },
       "signals": [
         "credential_field:token",
         "credential_link:hasToken",
@@ -539,7 +810,7 @@
     },
     {
       "endpoint": "/admin/invoices",
-      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end.",
+      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "customer",
       "scopeParam": "customer_id",
       "query": [
@@ -571,13 +842,65 @@
         "invoice status",
         "outstanding balance"
       ],
+      "keep": [
+        "invoices.*.id",
+        "invoices.*.invoice_number",
+        "invoices.*.customer_id",
+        "invoices.*.service_date",
+        "invoices.*.due_date",
+        "invoices.*.subtotal",
+        "invoices.*.discount_amount",
+        "invoices.*.tax_rate",
+        "invoices.*.tax_amount",
+        "invoices.*.total",
+        "invoices.*.credit_applied",
+        "invoices.*.status",
+        "invoices.*.sent_at",
+        "invoices.*.viewed_at",
+        "invoices.*.paid_at",
+        "invoices.*.view_count",
+        "invoices.*.payment_method",
+        "invoices.*.card_brand",
+        "invoices.*.card_last_four",
+        "invoices.*.service_type",
+        "invoices.*.tech_name",
+        "invoices.*.sms_sent_at",
+        "invoices.*.sms_reminder_count",
+        "invoices.*.last_reminder_at",
+        "invoices.*.receipt_sent_at",
+        "invoices.*.prepaid_at",
+        "invoices.*.archived_at",
+        "invoices.*.payer_id",
+        "invoices.*.scheduled_service_id",
+        "invoices.*.created_at",
+        "invoices.*.updated_at",
+        "invoices.*.first_name",
+        "invoices.*.last_name",
+        "invoices.*.phone",
+        "invoices.*.email",
+        "invoices.*.waveguard_tier",
+        "invoices.*.property_type",
+        "invoices.*.review_hold",
+        "invoices.*.annual_prepay_id",
+        "invoices.*.annual_prepay_status",
+        "invoices.*.annual_prepay_term_start",
+        "invoices.*.annual_prepay_term_end",
+        "invoices.*.annual_prepay_amount",
+        "invoices.*.card_on_file.brand",
+        "invoices.*.card_on_file.last_four",
+        "invoices.*.active_payment_plan.id",
+        "invoices.*.active_payment_plan.payment_amount",
+        "invoices.*.active_payment_plan.payment_frequency",
+        "invoices.*.active_payment_plan.next_payment_date",
+        "invoices.*.active_payment_plan.total_balance",
+        "invoices.*.active_payment_plan.status",
+        "total",
+        "page"
+      ],
       "acceptSignals": [
         "credential_table:invoices",
         "write:transaction"
       ],
-      "freeText": {
-        "title": "note"
-      },
       "signals": [
         "credential_table:invoices",
         "write:transaction"
@@ -590,7 +913,7 @@
     },
     {
       "endpoint": "/admin/invoices/:id",
-      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end.",
+      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -610,14 +933,81 @@
         "invoice line items",
         "invoice balance"
       ],
+      "keep": [
+        "id",
+        "invoice_number",
+        "customer_id",
+        "service_date",
+        "due_date",
+        "subtotal",
+        "discount_amount",
+        "tax_rate",
+        "tax_amount",
+        "total",
+        "credit_applied",
+        "status",
+        "sent_at",
+        "viewed_at",
+        "paid_at",
+        "view_count",
+        "payment_method",
+        "card_brand",
+        "card_last_four",
+        "service_type",
+        "tech_name",
+        "sms_sent_at",
+        "sms_reminder_count",
+        "last_reminder_at",
+        "receipt_sent_at",
+        "prepaid_at",
+        "archived_at",
+        "payer_id",
+        "scheduled_service_id",
+        "created_at",
+        "updated_at",
+        "review_hold",
+        "line_items.*.quantity",
+        "line_items.*.unit_price",
+        "line_items.*.amount",
+        "line_items.*.category",
+        "customer.first_name",
+        "customer.last_name",
+        "customer.phone",
+        "customer.email",
+        "customer.waveguard_tier",
+        "customer.address_line1",
+        "customer.city",
+        "customer.state",
+        "customer.zip",
+        "customer.card_on_file.brand",
+        "customer.card_on_file.last_four",
+        "active_payment_plan.id",
+        "active_payment_plan.payment_amount",
+        "active_payment_plan.payment_frequency",
+        "active_payment_plan.next_payment_date",
+        "active_payment_plan.total_balance",
+        "active_payment_plan.status",
+        "annual_prepay.id",
+        "annual_prepay.status",
+        "annual_prepay.monthlyRate",
+        "annual_prepay.termStart",
+        "annual_prepay.termEnd",
+        "annual_prepay.coverageMonths",
+        "annual_prepay.coverageServiceType",
+        "annual_prepay.coverageVisitCount",
+        "annual_prepay.coverageCadence",
+        "annual_prepay_term.id",
+        "annual_prepay_term.status",
+        "annual_prepay_term.monthlyRate",
+        "annual_prepay_term.prepayAmount",
+        "annual_prepay_term.termStart",
+        "annual_prepay_term.termEnd"
+      ],
       "acceptSignals": [
         "credential_table:invoices",
         "credential_table:scheduled_services",
         "write:transaction"
       ],
-      "freeText": {
-        "title": "note"
-      },
       "signals": [
         "credential_table:invoices",
         "credential_table:scheduled_services",
@@ -677,7 +1067,7 @@
     },
     {
       "endpoint": "/admin/invoices/:id/recipients",
-      "reviewed": "Handler + getInvoiceDeliveryRecipients: invoice id, number, customer name, primary contact, sms and email recipients, billing preference or the payer AP contact. Explicit columns; PayerService.attachToInvoice only fills the in-memory invoice. Handler and every followed function read end to end.",
+      "reviewed": "Handler + getInvoiceDeliveryRecipients: invoice id, number, customer name, primary contact, sms and email recipients, billing preference or the payer AP contact. Explicit columns; PayerService.attachToInvoice only fills the in-memory invoice. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -687,6 +1077,25 @@
         "invoice recipients",
         "who gets this invoice",
         "invoice email recipient"
+      ],
+      "keep": [
+        "invoiceId",
+        "invoiceNumber",
+        "customerId",
+        "customerName",
+        "payerBilled",
+        "primaryContact.name",
+        "primaryContact.email",
+        "primaryContact.phone",
+        "primaryContact.role",
+        "smsRecipient.name",
+        "smsRecipient.phone",
+        "smsRecipient.role",
+        "emailRecipient.name",
+        "emailRecipient.email",
+        "emailRecipient.role",
+        "billingPreference.name",
+        "billingPreference.email"
       ],
       "signals": [],
       "unresolved": [],
@@ -740,7 +1149,7 @@
     },
     {
       "endpoint": "/admin/leads",
-      "reviewed": "Handler (admin-leads.js GET /): leads joined to lead_sources, technicians and estimates, leads.* plus source name and type, channel, estimate status and assigned name; filters status (open expands to the working statuses), source_name, channel, search, start_date, end_date, sort, order, page and limit (default 50, max 200); deleted leads are excluded. The estimates join selects only estimates.status (credential_table:estimates is the join, not a token read). The id, source, estimate_attachable and builder_warranty filters are not offered. The row omits the raw Twilio recording URL, the anonymous visitor id and the Google click id. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Free text: transcript_summary and the other note-like keys are withheld by the key-name default; service_interest and extracted_data (typed or spoken lead text) are declared notes. Handler and every followed function read end to end.",
+      "reviewed": "Handler (admin-leads.js GET /): leads joined to lead_sources, technicians and estimates, leads.* plus source name and type, channel, estimate status and assigned name; filters status (open expands to the working statuses), source_name, channel, search, start_date, end_date, sort, order, page and limit (default 50, max 200); deleted leads are excluded. The estimates join selects only estimates.status (credential_table:estimates is the join, not a token read). The id, source, estimate_attachable and builder_warranty filters are not offered. The row omits the raw Twilio recording URL, the anonymous visitor id and the Google click id. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Free text: transcript_summary and the other note-like keys are withheld by the key-name default; service_interest and extracted_data (typed or spoken lead text) are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "channel",
@@ -772,15 +1181,47 @@
         "leads this month",
         "lead pipeline"
       ],
+      "keep": [
+        "leads.*.id",
+        "leads.*.first_name",
+        "leads.*.last_name",
+        "leads.*.phone",
+        "leads.*.email",
+        "leads.*.address",
+        "leads.*.city",
+        "leads.*.zip",
+        "leads.*.status",
+        "leads.*.lead_type",
+        "leads.*.urgency",
+        "leads.*.is_residential",
+        "leads.*.is_commercial",
+        "leads.*.is_qualified",
+        "leads.*.lead_source_id",
+        "leads.*.source_name",
+        "leads.*.source_type",
+        "leads.*.source_channel",
+        "leads.*.estimate_id",
+        "leads.*.estimate_status",
+        "leads.*.customer_id",
+        "leads.*.assigned_to",
+        "leads.*.assigned_name",
+        "leads.*.monthly_value",
+        "leads.*.initial_service_value",
+        "leads.*.waveguard_tier",
+        "leads.*.first_contact_at",
+        "leads.*.response_time_minutes",
+        "leads.*.next_follow_up_at",
+        "leads.*.builder_warranty_expires_on",
+        "leads.*.created_at",
+        "leads.*.updated_at",
+        "total",
+        "page",
+        "limit",
+        "consultationLinksEnabled"
+      ],
       "acceptSignals": [
         "credential_table:estimates"
       ],
-      "freeText": {
-        "service_interest": "note",
-        "extracted_data": "note",
-        "heard_about_prompt": "note",
-        "lead_synopsis": "note"
-      },
       "signals": [
         "credential_table:estimates"
       ],
@@ -795,7 +1236,7 @@
     },
     {
       "endpoint": "/admin/leads/:id",
-      "reviewed": "Handler (admin-leads.js GET /:id): one non-deleted lead with source and assigned technician name (technicians.name only), its activities (lead_activities, newest first) and up to three associated calls (id, direction, duration, recording sid, has_recording flag, transcription, status, time; the raw recording URL stays server-side). Scope is broad on purpose: a lead id is not a customer id, so a task for one customer cannot use it. leadReview (linked history and status reconciliation) is not offered. The row omits the raw recording URL, the anonymous visitor id and the Google click id. credential_field:processing_token is only a whereNull predicate on call_log, never returned. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Free text: transcript_summary, activity description and call transcription are withheld by the key-name default; service_interest, extracted_data and activity metadata are declared notes. Handler and every followed function read end to end.",
+      "reviewed": "Handler (admin-leads.js GET /:id): one non-deleted lead with source and assigned technician name (technicians.name only), its activities (lead_activities, newest first) and up to three associated calls (id, direction, duration, recording sid, has_recording flag, transcription, status, time; the raw recording URL stays server-side). Scope is broad on purpose: a lead id is not a customer id, so a task for one customer cannot use it. leadReview (linked history and status reconciliation) is not offered. The row omits the raw recording URL, the anonymous visitor id and the Google click id. credential_field:processing_token is only a whereNull predicate on call_log, never returned. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Free text: transcript_summary, activity description and call transcription are withheld by the key-name default; service_interest, extracted_data and activity metadata are declared notes. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "params": {
         "id": "uuid"
@@ -814,16 +1255,55 @@
         "lead calls and transcript",
         "what did the lead ask for"
       ],
+      "keep": [
+        "lead.id",
+        "lead.first_name",
+        "lead.last_name",
+        "lead.phone",
+        "lead.email",
+        "lead.address",
+        "lead.city",
+        "lead.zip",
+        "lead.status",
+        "lead.lead_type",
+        "lead.urgency",
+        "lead.is_residential",
+        "lead.is_commercial",
+        "lead.is_qualified",
+        "lead.lead_source_id",
+        "lead.source_name",
+        "lead.source_type",
+        "lead.source_channel",
+        "lead.estimate_id",
+        "lead.customer_id",
+        "lead.assigned_to",
+        "lead.assigned_name",
+        "lead.monthly_value",
+        "lead.initial_service_value",
+        "lead.waveguard_tier",
+        "lead.first_contact_at",
+        "lead.response_time_minutes",
+        "lead.next_follow_up_at",
+        "lead.builder_warranty_expires_on",
+        "lead.created_at",
+        "lead.updated_at",
+        "activities.*.id",
+        "activities.*.lead_id",
+        "activities.*.activity_type",
+        "activities.*.performed_by",
+        "activities.*.created_at",
+        "calls.*.id",
+        "calls.*.direction",
+        "calls.*.duration_seconds",
+        "calls.*.has_recording",
+        "calls.*.transcription_status",
+        "calls.*.created_at"
+      ],
       "acceptSignals": [
         "credential_field:processing_token",
         "credential_table:technicians"
       ],
       "freeText": {
-        "service_interest": "note",
-        "extracted_data": "note",
-        "metadata": "note",
-        "heard_about_prompt": "note",
-        "lead_synopsis": "note",
         "transcription_status": "content"
       },
       "signals": [
@@ -838,7 +1318,7 @@
     },
     {
       "endpoint": "/admin/leads/analytics/by-source",
-      "reviewed": "Handler: leadAttribution.calculateAllSourceROI for a date window: one row per lead source with leads, conversions, cost and revenue totals. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Handler and every followed function read end to end.",
+      "reviewed": "Handler: leadAttribution.calculateAllSourceROI for a date window: one row per lead source with leads, conversions, cost and revenue totals. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "end_date",
@@ -853,6 +1333,25 @@
         "marketing source results",
         "which source brings leads"
       ],
+      "keep": [
+        "sources.*.source.id",
+        "sources.*.source.name",
+        "sources.*.source.source_type",
+        "sources.*.source.channel",
+        "sources.*.source.is_active",
+        "sources.*.totalLeads",
+        "sources.*.conversions",
+        "sources.*.conversionRate",
+        "sources.*.totalCost",
+        "sources.*.totalRevenue",
+        "sources.*.costPerLead",
+        "sources.*.costPerAcquisition",
+        "sources.*.roi",
+        "sources.*.channelSpend",
+        "sources.*.avgResponseTime",
+        "sources.*.startDate",
+        "sources.*.endDate"
+      ],
       "signals": [
         "effect_call:startOfETMonth"
       ],
@@ -861,7 +1360,7 @@
     },
     {
       "endpoint": "/admin/leads/analytics/overview",
-      "reviewed": "Handler: counts, median and mean response times, speed-to-lead backlog gauge and sourced cost and revenue totals for a date window (default: this ET month), from leads aggregates and leadAttribution.calculateAllSourceROI. No lead row is returned. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Handler and every followed function read end to end.",
+      "reviewed": "Handler: counts, median and mean response times, speed-to-lead backlog gauge and sourced cost and revenue totals for a date window (default: this ET month), from leads aggregates and leadAttribution.calculateAllSourceROI. No lead row is returned. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "end_date",
@@ -875,6 +1374,25 @@
         "lead response time",
         "lead roi",
         "cost per lead overview"
+      ],
+      "keep": [
+        "total",
+        "won",
+        "lost",
+        "active",
+        "conversionRate",
+        "avgResponseTime",
+        "medianResponseTime",
+        "recentMedianResponseTime",
+        "avgSpeedToLead",
+        "openUnansweredCount",
+        "speedToLeadSince",
+        "costTotal",
+        "revenue",
+        "cpa",
+        "roi",
+        "startDate",
+        "endDate"
       ],
       "signals": [
         "effect_call:startOfETMonth"
@@ -1072,7 +1590,7 @@
     },
     {
       "endpoint": "/admin/schedule/list",
-      "reviewed": "Handler (admin-schedule.js GET /list): scheduled_services joined to customers and technicians with an explicit column list, filters from, to, status, techId, serviceType, prepaid, search, page and limit (default 25, max 100), add-ons loaded for the page. A single day is from=to=that date; a week is a seven-day range. The list maps no notes column. Handler and every followed function read end to end.",
+      "reviewed": "Handler (admin-schedule.js GET /list): scheduled_services joined to customers and technicians with an explicit column list, filters from, to, status, techId, serviceType, prepaid, search, page and limit (default 25, max 100), add-ons loaded for the page. A single day is from=to=that date; a week is a seven-day range. The list maps no notes column. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "from",
@@ -1097,6 +1615,37 @@
         "visits for a technician",
         "day schedule",
         "week schedule"
+      ],
+      "keep": [
+        "services.*.id",
+        "services.*.customerId",
+        "services.*.customerName",
+        "services.*.scheduledDate",
+        "services.*.serviceType",
+        "services.*.status",
+        "services.*.windowStart",
+        "services.*.windowEnd",
+        "services.*.estimatedDuration",
+        "services.*.estimatedPrice",
+        "services.*.primaryLinePrice",
+        "services.*.prepaidAmount",
+        "services.*.prepaidMethod",
+        "services.*.prepaidAt",
+        "services.*.technicianId",
+        "services.*.technicianName",
+        "services.*.zone",
+        "services.*.address",
+        "services.*.city",
+        "services.*.isRecurring",
+        "services.*.recurringPattern",
+        "services.*.recurringParentId",
+        "services.*.sourceEstimateId",
+        "services.*.payerId",
+        "services.*.selfPayOverride",
+        "total",
+        "page",
+        "pageSize",
+        "totalPages"
       ],
       "acceptSignals": [
         "credential_table:scheduled_services"

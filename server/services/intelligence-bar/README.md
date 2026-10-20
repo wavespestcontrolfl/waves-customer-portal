@@ -78,6 +78,13 @@ consultation-link read mints a link and stays out). Three row fields make that s
   entry; the answer's note lists the key names left out. It is covered by the review: the row is only admitted while its
   handler-chain hash matches. Used for pay and claim tokens, Stripe payment and charge ids, receipt links, signed photo URLs
   and duplicate or internal fields. Gate codes in their own field are returned (earlier owner decision).
+- `keep` (an allow-list, owner ruling 2026-10-20 after Codex #6366 rounds 1 to 3): a row that returns a whole table row or a
+  broad object lists the response key paths it keeps (`invoices.*.status`; `*` is an array item; a list of plain values or a
+  map of numbers is kept whole; `utils/response-projection.js`). Every key not listed is DROPPED (not withheld), so a column
+  added next month never reaches the model until a person reviews it. The kept keys still pass the free-text withholding and
+  the secret scrubber. The generator refuses a kept key that looks like free text (unless the row declares it `content`) and
+  a fixed list of operator-entered fields (payment_reference, profileLabel, tags, competitorName, title, metadata ...).
+  Every row added with the core screens and leads is in keep mode; the rows already on main are not.
 - `keywords`: plain-language phrases `find_admin_reads` matches ("texts with this customer", "unpaid invoices"); they weigh
   like path words.
 Left out, with the reason: the Customer 360 payload (`GET /admin/customers/:id`: its chain reaches the estimate pricing

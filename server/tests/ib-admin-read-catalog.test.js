@@ -707,17 +707,25 @@ describe('the response projection and the finder keywords of a row', () => {
       expect(() => validateReviewedRow({ ...base, omit: bad })).toThrow(/omit/);
     }
   });
+  test('keep is a list of response key paths with no free-text key, validated by the generator', () => {
+    expect(() => validateReviewedRow({ ...base, keep: ['customers.*.id', 'total', 'filters.areas'] })).not.toThrow();
+    for (const bad of [[], 'id', ['a b'], ['id', 'id'], ['a.*'], ['**.id'], ['rows.*.notes'], ['rows.*.profileLabel'], ['rows.*.tags'], ['rows.*.payment_reference'], ['rows.*.competitorName'], ['rows.*.transcription_status'], new Array(161).fill(0).map((_, i) => `k${i}`)]) {
+      expect(() => validateReviewedRow({ ...base, keep: bad })).toThrow(/keep/);
+    }
+    // a free-text-looking key is kept only when the row declares it business reference text
+    expect(() => validateReviewedRow({ ...base, keep: ['calls.*.transcription_status'], freeText: { transcription_status: 'content' } })).not.toThrow();
+  });
   test('keywords are short lower-case phrases', () => {
     expect(() => validateReviewedRow({ ...base, keywords: ['customer profile', 'texts with this customer'] })).not.toThrow();
     for (const bad of [[], 'profile', ['Profile'], ['a;b'], ['x', 'x'], new Array(17).fill(0).map((_, i) => `phrase ${i}`)]) {
       expect(() => validateReviewedRow({ ...base, keywords: bad })).toThrow(/keywords/);
     }
   });
-  test('the committed entries carry exactly their row\'s omit and keywords', () => {
+  test('the committed entries carry exactly their row\'s omit, keep and keywords', () => {
     const rows = new Map(JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed.map(row => [row.endpoint, row]));
     for (const entry of committed.entries) {
       const row = rows.get(entry.endpoint);
-      expect({ endpoint: entry.endpoint, omit: entry.omit, keywords: entry.keywords }).toEqual({ endpoint: entry.endpoint, omit: row.omit, keywords: row.keywords });
+      expect({ endpoint: entry.endpoint, omit: entry.omit, keep: entry.keep, keywords: entry.keywords }).toEqual({ endpoint: entry.endpoint, omit: row.omit, keep: row.keep, keywords: row.keywords });
     }
     expect(committed.entries.filter(entry => entry.omit).length).toBeGreaterThanOrEqual(5);
   });
