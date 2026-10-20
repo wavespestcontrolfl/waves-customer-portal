@@ -305,7 +305,7 @@ async function retireExpiredSteps(trx, rows) {
 // Locks the running task and reads this actor's earlier cards of the task.
 // Returns the card this step already stored (a retry), or null when the step
 // is new; throws when the lease is lost or a preceding action is unresolved.
-async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, stepKey: actionStepKey }) {
+async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, stepKey: actionStepKey, siblingCardIds = null }) {
   const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
     .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
   if (!task) throw new Error('Task execution was superseded');
@@ -315,8 +315,11 @@ async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, s
   const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
     || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
   if (existing) return existing;
-  if (previous.some(row => row.status !== 'confirmed'
-    || !['completed', 'provider_accepted'].includes(executionOutcome(row.result)))) {
+  // GATE_IB_MULTI_CARD: the request's own open cards (ids the route minted a moment ago,
+  // judged independent of this one) are not a preceding unresolved action.
+  const siblings = new Set((siblingCardIds || []).map(String));
+  if (previous.some(row => !(row.status === 'pending' && siblings.has(String(row.id)))
+    && (row.status !== 'confirmed' || !['completed', 'provider_accepted'].includes(executionOutcome(row.result))))) {
     throw new Error('Resolve the preceding action outcome before preparing another write');
   }
   return null;
@@ -420,7 +423,7 @@ async function createPendingAction({ toolName, params, requestedBy, taskId, requ
   if (intent) params = stampRequestStart(params, requestStartedAt);
   const persist = async trx => {
     if (taskId && !inheritedTask) {
-      const existing = await loadTaskStep(trx, { taskId, requestedBy, runnerToken: card.runnerToken, toolName, stepKey: card.stepKey });
+      const existing = await loadTaskStep(trx, { taskId, requestedBy, runnerToken: card.runnerToken, toolName, stepKey: card.stepKey, siblingCardIds: card.siblingCardIds });
       if (existing) return existing;
     }
     const stored = approvedParams || await approvalParams(params, { taskId, toolName });
