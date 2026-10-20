@@ -89,6 +89,23 @@ describe('legacy SSR page: monthly average', () => {
     expect(render(estimate(66.75), marked)).not.toContain('data-monthly-average');
   });
 
+  test('a plan credit: the pre-credit cards no longer cover the total, yet the credit line and a plan average equal to the stored total show', () => {
+    const credit = { label: 'Referral Credit', type: 'FIXED', value: 12, amount: 12, recurringAmount: 12 };
+    // 66.75 + 35.50 = 102.25 before the $1.00/month credit; the stored net is 101.25.
+    const estData = data(tree, lawn);
+    estData.result.manualDiscount = credit;
+    const html = render(estimate(101.25), estData);
+    expect(html).toContain('data-monthly-average-plan');
+    expect(html).toContain('Referral Credit');
+    expect(html).toContain('&minus;$1.00 a month');
+    const rows = [...html.matchAll(/<span>([^<]+)<\/span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">(about \$[\d.,]+ a month)<\/span>/g)].map((m) => cents(m[2]));
+    // The last match is the plan line; the service lines before it, less the $1.00 credit, add up to it.
+    expect(rows.slice(0, -1).reduce((sum, c) => sum + c, 0) - 100).toBe(10125);
+    const plan = html.match(/data-monthly-average-plan[\s\S]*?(about \$[\d.,]+ a month)/);
+    expect(cents(plan[1])).toBe(10125);
+    expect(html.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
+  });
+
   test('withheld when the cards do not reconcile to the stored monthly total', () => {
     expect(render(estimate(80), data(tree, lawn))).not.toContain('data-monthly-average');
   });

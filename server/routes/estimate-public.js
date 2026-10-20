@@ -6448,7 +6448,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${manualDiscount && recurringDisplayManualDiscount > 0 ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>Applied to your plan pricing</strong></div>` : ''}
-      ${supplementalServiceSummaryHtml}
+      ${supplementalServiceSummaryHtml}${ssrAvgSummaryHtml}
     `));
 
   const separatelyBilledOneTimeItems = oneTimeItems.filter((it) => {

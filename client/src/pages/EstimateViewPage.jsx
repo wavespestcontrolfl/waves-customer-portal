@@ -48,7 +48,7 @@ import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, aboutMonth, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
-import { pageMonthlyAverage } from '../lib/estimateMonthlyAverage';
+import { oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
@@ -9066,39 +9066,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // not the annual-prepay choice, not a one-time pick. pageMonthlyAverage
   // returns null whenever the per-service averages cannot be made to add up to
   // the plan's own monthly, and the page then shows nothing new.
-  const monthlyAverage = (() => {
-    if (data?.monthlyAverageEnabled !== true) return null;
-    if (serviceMode !== 'recurring' || estimate.isOneTimeOnly === true || billsMonthly || isCommercialEstimate) return null;
-    if (cta?.terminalState != null || cta?.quoteRequired === true || paymentPreference === 'prepay_annual') return null;
-    const recurringSections = services.filter((section) => section?.isRecurring);
-    const planFrequency = recurringSections.length > 1
-      ? combinedFrequency
-      : selectedFrequencyForSection(recurringSections[0], selected);
-    // A plan-wide credit the server did NOT itemize into the sections is the
-    // one declared difference between the cards and the plan's monthly. It
-    // comes from the SELECTED cadence combo's own credit state (a combo carries
-    // its own manualDiscount and suppression marker; the base row's is stale
-    // for it), and from the base frequency only when no combo is selected.
-    const liveCredit = (discount) => (discount && Number(discount.amount) > 0 ? discount : null);
-    let creditSource = null;
-    if (renderFlags.manualDiscountItemizedInSections !== true) {
-      if (selectedCombo) {
-        creditSource = selectedCombo.manualDiscountSuppressed === true ? null : liveCredit(selectedCombo.manualDiscount);
-      } else if (combinedFrequency?.manualDiscountSuppressed !== true) {
-        creditSource = [combinedFrequency?.manualDiscount, pricing.combinedRecurring?.manualDiscount, pricing.manualDiscount]
-          .map(liveCredit).find(Boolean) || null;
-      }
-    }
-    const creditMonthly = manualDiscountMonthlyAmount(creditSource);
-    return pageMonthlyAverage({
-      enabled: true,
-      services,
-      selected,
-      planFrequency,
-      bundleDiscountPct: Number(pricing.combinedRecurring?.waveGuardDiscountPct) || 0,
-      credit: creditMonthly > 0 ? { label: creditSource.label, monthly: creditMonthly } : null,
-    });
-  })();
+  const monthlyAverage = resolvePageMonthlyAverage({
+    data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
+    services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
+  }, manualDiscountMonthlyAmount);
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -9137,9 +9108,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // one-time breakdown row (a flea treatment). When the estimate offers a
     // one-time option, the breakdown rows are the either/or alternative to the
     // plan, not an extra charge, so they do not count.
-    const hasOneTimeBesidePlan = feeList.some((fee) => Number(fee?.amount) > 0)
-      || (!estimate.showOneTimeOption && (Array.isArray(pricing.oneTimeBreakdown?.items) ? pricing.oneTimeBreakdown.items : [])
-        .some((item) => item && item.kind === 'charge' && Number(item.amount) > 0 && item.quoteRequired !== true));
+    const hasOneTimeBesidePlan = oneTimeBesidePlan({ feeList, estimate, pricing });
     if (mode === 'recurring') {
       return (
         <>
@@ -9188,8 +9157,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 section={section}
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
-                monthlyAverageLine={monthlyAverage && monthlyAverage.byKey[section.key] != null ? aboutMonth(monthlyAverage.byKey[section.key]) : null}
-                monthlyAverageContext={monthlyAverage && !monthlyAverage.model.showPlan ? `${MONTHLY_AVERAGE_CONTEXT}${hasOneTimeBesidePlan ? ' One-time charges are not in the average.' : ''}` : null}
+                monthlyAverageLine={sectionAverageLine(monthlyAverage, section.key)}
+                monthlyAverageContext={singleServiceAverageContext(monthlyAverage, hasOneTimeBesidePlan)}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}

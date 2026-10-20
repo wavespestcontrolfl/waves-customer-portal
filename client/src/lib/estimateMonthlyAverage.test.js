@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pageMonthlyAverage } from './estimateMonthlyAverage';
+import { oneTimeBesidePlan, pageAverageEligible, pageMonthlyAverage, planCreditSource, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from './estimateMonthlyAverage';
 
 // Real-shaped sections: net per-application price + application count + the
 // selected cadence's monthly, exactly what a ServiceSection card reads.
@@ -107,5 +107,69 @@ describe('pageMonthlyAverage', () => {
     expect(pageMonthlyAverage({ enabled: true, services: [legacy], selected: {}, planFrequency: { monthly: 42.3 } })).toBeNull();
     // one-time only: no recurring sections
     expect(pageMonthlyAverage({ enabled: true, services: [{ key: 'wdo', isRecurring: false }], selected: {}, planFrequency: { monthly: 0 } })).toBeNull();
+  });
+});
+
+describe('page decision helpers', () => {
+  const monthlyAmountOf = (d) => Math.round((Number(d.recurringAmount ?? d.amount) / 12) * 100) / 100;
+  const base = () => ({
+    data: { monthlyAverageEnabled: true },
+    serviceMode: 'recurring',
+    estimate: {},
+    billsMonthly: false,
+    isCommercialEstimate: false,
+    cta: { terminalState: null },
+    paymentPreference: null,
+    services: [pest(), lawn()],
+    selected: {},
+    selectedCombo: null,
+    combinedFrequency: { monthly: 72.3 },
+    pricing: { combinedRecurring: { waveGuardDiscountPct: 0.1 } },
+    renderFlags: {},
+  });
+
+  it('resolves the whole decision in one call', () => {
+    const result = resolvePageMonthlyAverage(base(), monthlyAmountOf);
+    expect(result.model.planMonthly).toBe(72.3);
+    expect(result.byKey).toEqual({ pest_control: 30, lawn_care: 42.3 });
+  });
+
+  it('eligibility: gate switch, mode, billing, terminal state, quote, prepay', () => {
+    expect(pageAverageEligible(base())).toBe(true);
+    for (const change of [
+      { data: {} }, { serviceMode: 'one_time' }, { estimate: { isOneTimeOnly: true } }, { billsMonthly: true },
+      { isCommercialEstimate: true }, { cta: { terminalState: 'accepted' } }, { cta: { quoteRequired: true } },
+      { paymentPreference: 'prepay_annual' },
+    ]) {
+      expect(pageAverageEligible({ ...base(), ...change })).toBe(false);
+      expect(resolvePageMonthlyAverage({ ...base(), ...change }, monthlyAmountOf)).toBeNull();
+    }
+  });
+
+  it('credit: the selected combo\'s own state wins; the base frequency only when no combo is selected', () => {
+    const credit = { label: 'Referral Credit', amount: 120, recurringAmount: 120 };
+    expect(planCreditSource({ ...base(), selectedCombo: { manualDiscount: credit } })).toBe(credit);
+    expect(planCreditSource({ ...base(), selectedCombo: { manualDiscount: credit, manualDiscountSuppressed: true } })).toBeNull();
+    expect(planCreditSource({ ...base(), selectedCombo: {}, combinedFrequency: { manualDiscount: credit } })).toBeNull();
+    expect(planCreditSource({ ...base(), combinedFrequency: { manualDiscount: credit } })).toBe(credit);
+    expect(planCreditSource({ ...base(), combinedFrequency: { manualDiscount: credit, manualDiscountSuppressed: true } })).toBeNull();
+    expect(planCreditSource({ ...base(), renderFlags: { manualDiscountItemizedInSections: true }, combinedFrequency: { manualDiscount: credit } })).toBeNull();
+    const result = resolvePageMonthlyAverage({ ...base(), combinedFrequency: { monthly: 62.3 }, selectedCombo: { manualDiscount: credit } }, monthlyAmountOf);
+    expect(result.model.credit).toEqual({ label: 'Referral Credit', monthly: 10 });
+  });
+
+  it('one-time notice and card text helpers', () => {
+    const flea = { kind: 'charge', amount: 150 };
+    expect(oneTimeBesidePlan({ feeList: [{ amount: 99 }], estimate: {}, pricing: {} })).toBe(true);
+    expect(oneTimeBesidePlan({ feeList: [], estimate: {}, pricing: { oneTimeBreakdown: { items: [flea] } } })).toBe(true);
+    expect(oneTimeBesidePlan({ feeList: [], estimate: { showOneTimeOption: true }, pricing: { oneTimeBreakdown: { items: [flea] } } })).toBe(false);
+    expect(oneTimeBesidePlan({ feeList: [], estimate: {}, pricing: {} })).toBe(false);
+    const average = resolvePageMonthlyAverage(base(), monthlyAmountOf);
+    expect(sectionAverageLine(average, 'pest_control')).toBe('about $30.00 a month');
+    expect(sectionAverageLine(null, 'pest_control')).toBeNull();
+    expect(singleServiceAverageContext(average, true)).toBeNull(); // multi: the summary carries it
+    const single = resolvePageMonthlyAverage({ ...base(), services: [pest()], combinedFrequency: null }, monthlyAmountOf);
+    expect(singleServiceAverageContext(single, false)).toBe('Averaged over the year. You pay after each application.');
+    expect(singleServiceAverageContext(single, true)).toBe('Averaged over the year. You pay after each application. One-time charges are not in the average.');
   });
 });
