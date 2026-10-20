@@ -38,10 +38,12 @@ const SCAN_DIRS = [
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
   'ButtonExamples.jsx',        // palette demo page
-  // Print-only work-order document captured to PDF by the headless renderer
-  // (?mode=pdf) — never shown on screen. Print typography runs ~8.5-10pt
-  // like the industry WO formats it mirrors; the 16px screen floor doesn't
-  // apply to paper (owner direction 2026-08-03).
+  // Work-order document captured to PDF by the headless renderer (?mode=pdf).
+  // Print typography runs ~8.5-10pt like the industry WO formats it mirrors;
+  // the screen floor doesn't apply to paper (owner direction 2026-08-03).
+  // Since GATE_REPORT_SIMPLE_WEB the report link also shows it on screen,
+  // scaled by one web zoom; ServiceReportDocument.web-text-floor.test.js
+  // holds that view to the 14px floor instead of this gate.
   'ServiceReportDocument.jsx',
   // Same exemption, same rationale: the estimate document is the ?mode=pdf
   // print artifact (GATE_ESTIMATE_DOC_PDF), modeled on the service-report
