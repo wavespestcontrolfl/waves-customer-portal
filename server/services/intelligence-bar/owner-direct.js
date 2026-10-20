@@ -381,9 +381,17 @@ async function seedDirectCounts(task, dbh = null) {
   return counts;
 }
 
+// GATE_IB_TARGET_RULES_V2: these tools learn whose visit they touch only from the
+// proposal's preview, so a plan made before the previews cannot tell which calls
+// will run direct. They are left out of the plan and counted as they commit
+// (dynamicCapReached): six calls where five name an unknown customer and one a
+// named customer still run that one direct.
+const PREVIEW_CUSTOMER_TOOLS = new Set(['reschedule_appointment', 'assign_technician']);
+
 function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
   for (const toolUse of toolUses || []) {
+    if (ibTargetRulesV2Live() && PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) continue;
     if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint, grounding) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
   return plan;
@@ -398,6 +406,13 @@ function cappedTools(committed, plan) {
     if (committed.has(SEED_FAILED) || (committed.get(toolName) || 0) + n >= threshold) capped.add(toolName);
   }
   return capped;
+}
+
+// The preview-time half of the cap for PREVIEW_CUSTOMER_TOOLS (gate on): refuse
+// once this request has already made its 5 direct edits with the tool.
+function dynamicCapReached(committed, toolName) {
+  if (!ibTargetRulesV2Live() || !PREVIEW_CUSTOMER_TOOLS.has(toolName)) return false;
+  return committed.has(SEED_FAILED) || (committed.get(toolName) || 0) >= DIRECT_EDITS_V2;
 }
 
 function recordDirectCommit(committed, toolName) {
@@ -491,6 +506,14 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
+// The owner prompt states exactly one direct-edit limit: today's (three or more
+// refused) while GATE_IB_TARGET_RULES_V2 is off, the new one (more than 5) while on.
+const LIMIT_SENTENCE_OFF = 'Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.';
+const LIMIT_SENTENCE_ON = `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card.`;
+function ownerDirectPrompt() {
+  return ibTargetRulesV2Live() ? OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_OFF, LIMIT_SENTENCE_ON) : OWNER_DIRECT_PROMPT;
+}
+
 // The owner login with the gate on but GATE_IB_PLATFORM off: nothing commits
 // directly (see the header), so the prompt must stay card-aware — the same
 // voice and target rules, but every write is a one-tap card (Codex r2 P1).
@@ -505,4 +528,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

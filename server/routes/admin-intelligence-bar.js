@@ -3586,7 +3586,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Last, so every shared prefix above stays cacheable across logins. With
     // the platform off nothing commits directly, so the owner block must
     // stay card-aware (Codex r2 P1 on #5563).
-    if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
+    if (ownerDirectCommits) systemPrompt += OwnerDirect.ownerDirectPrompt();
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
     if (ownerDirectCommits && ibTargetRulesV2Live()) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
     // Live page data (current date, schedule stats, etc.) is injected on the
@@ -3870,7 +3870,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
                 if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint, directGrounding)) return null;
-                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult() } } : { direct: true };
+                return directCapped.has(toolUse.name) || OwnerDirect.dynamicCapReached(directCommitsByTool, toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult() } } : { direct: true };
               } : null,
             });
             result = proposed.modelResult;

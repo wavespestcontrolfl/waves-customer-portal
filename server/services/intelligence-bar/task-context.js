@@ -4,6 +4,7 @@
 const db = require('../../models/db');
 const { normalizeEmail } = require('../../utils/contact-normalize');
 const { ibTargetRulesV2Live } = require('../../config/feature-gates');
+const { MAX_LABEL_CHARS } = require('./choice-tools');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'phone', 'updated_at', 'deleted_at'];
@@ -425,6 +426,7 @@ async function typedCustomerIds(prompt, namedResult) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
   const ids = new Set();
+  const contactIds = new Set();
   // Fail closed: a name lookup that hit its limit has rows we never saw, so the
   // rows we did see cannot show that a name or a city picks out one customer.
   // Incomplete name evidence names nobody (a card, never a direct edit).
@@ -464,9 +466,54 @@ async function typedCustomerIds(prompt, namedResult) {
   if (contactLiterals.length > MAX_CONTACT_LITERALS) return [...ids];
   for (const literal of contactLiterals) {
     const found = await owners(literal);
-    if (found.length === 1) ids.add(String(found[0].id));
+    if (found.length === 1) contactIds.add(String(found[0].id));
   }
+  // Name and contact evidence must agree. A name that matched customers and a
+  // phone or email that belongs to someone else is unresolved: it names nobody,
+  // so the edit keeps its card (a phone beside a name may only pick among the
+  // customers that name matched).
+  const nameMatched = new Set((namedResult.matches || []).map(customer => String(customer.id)));
+  if (nameMatched.size && [...contactIds].some(id => !nameMatched.has(id))) return [];
+  for (const id of contactIds) ids.add(id);
+  for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];
+}
+
+// A choice button the bar offers when "Full Name, City" is over the 40 characters a button
+// holds: "First L., City" (first name, last initial, city). The reply is the whole message.
+// It names a customer only when exactly one customer fits all three parts.
+const INITIAL_FORM_RE = /^\s*([\p{L}'-]+)\s+([\p{L}])\.\s*,\s*([\p{L}][\p{L} .'-]*?)\s*$/u;
+async function initialFormIds(prompt) {
+  const match = String(prompt || '').match(INITIAL_FORM_RE);
+  if (!match) return [];
+  const [, first, initial, city] = match.map(part => normalizeName(part));
+  if (!first || !initial || !city) return [];
+  const rows = await db('customers').whereNull('deleted_at')
+    .whereRaw('? = ?', [normalizedStoredName('first_name'), first])
+    .whereRaw('? LIKE ?', [normalizedStoredName('last_name'), `${initial}%`])
+    .whereRaw('? = ?', [normalizedStoredName('city'), city])
+    .limit(2).select('id');
+  return rows.length === 1 ? [String(rows[0].id)] : [];
+}
+
+// The text of the choice button for one same-name customer (GATE_IB_TARGET_RULES_V2).
+// offer_choices drops a label over MAX_LABEL_CHARS, so a long one becomes
+// "First L., City", which initialFormIds resolves back. null = no button can name this
+// customer (no city, still too long, or it looks like another same-name customer's):
+// the bar asks for a phone number or email instead.
+function choiceLabels(customers) {
+  const full = customer => `${[customer.first_name, customer.last_name].filter(Boolean).join(' ')}${customer.city ? `, ${customer.city}` : ''}`;
+  const short = customer => `${customer.first_name} ${String(customer.last_name || '').trim().charAt(0)}., ${customer.city}`;
+  const labels = customers.map((customer) => {
+    if (!customer.city) return null;
+    const whole = full(customer);
+    if (whole.length <= MAX_LABEL_CHARS) return whole;
+    return customer.last_name && !/\s/.test(String(customer.first_name || '').trim()) && short(customer).length <= MAX_LABEL_CHARS ? short(customer) : null;
+  });
+  // A label that two customers share (same city and name, or the same first name,
+  // last initial and city) cannot pick one of them.
+  const key = label => normalizeName(label);
+  return labels.map(label => (label && labels.filter(other => other && key(other) === key(label)).length === 1 ? label : null));
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
@@ -481,7 +528,10 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   let candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
   const v2 = ibTargetRulesV2Live();
-  if (v2 && candidates.length > 1) candidates = await withLastVisit(candidates);
+  if (v2 && candidates.length > 1) {
+    const labels = choiceLabels(named);
+    candidates = (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
+  }
   // Whom this message names (GATE_IB_TARGET_RULES_V2): carried on the context so
   // an owner-direct edit can tell a named customer from one the model found.
   const typed = v2 ? { typedCustomerIds: await typedCustomerIds(prompt, namedResult) } : {};
@@ -1084,7 +1134,7 @@ function sameNameNote(context) {
   if (picked.length === 1) {
     return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${picked[0].city ? `, ${picked[0].city}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
   }
-  return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the ${Math.min(rows.length, 4)} best matches, most recent last_visit first, each as "Full Name, City", and ask which one in one short line. When two of them share a city, a button cannot tell them apart: leave those out of the buttons and ask for their phone number or email instead.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
+  return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the choice_label of the best matches (4 at most), most recent last_visit first, each label exactly as written: it is the button text, and a tap sends it back as the owner's reply. A row whose choice_label is null (no city, or it looks like another row) cannot be a button: leave it out and ask for its phone number or email instead.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
 }
 
 // A sender block inside a customer-scoped task may only target the task

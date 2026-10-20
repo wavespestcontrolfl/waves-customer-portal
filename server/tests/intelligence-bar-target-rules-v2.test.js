@@ -183,6 +183,12 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
         whereRaw: (sql, bindings) => {
           if (/regexp_replace\(coalesce\(phone/.test(sql)) filters.push(row => digits(row.phone) === bindings[0]);
           if (/lower\(coalesce\(email/.test(sql)) filters.push(row => String(row.email || '').toLowerCase() === bindings[0]);
+          // The "First L., City" lookup: normalized first name, last-name prefix and city.
+          if ((sql === '? = ?' || sql === '? LIKE ?') && bindings[0]?.text && /first_name|last_name|city/.test(bindings[0].text)) {
+            const norm = value => String(value || '').toLowerCase().trim();
+            const column = /first_name/.test(bindings[0].text) ? 'first_name' : /last_name/.test(bindings[0].text) ? 'last_name' : 'city';
+            filters.push(row => (sql === '? LIKE ?' ? norm(row[column]).startsWith(String(bindings[1]).replace(/%$/, '')) : norm(row[column]) === bindings[1]));
+          }
           return q;
         },
         orWhereRaw: () => q,
@@ -301,6 +307,45 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(Context.ownerDirectContext(await ask('update Pat Example notes')).sameNameNote).toMatch(/Call offer_choices/);
   });
 
+  test('gate on: a unique name plus a phone or email that belongs to a different customer names nobody (Codex r1 P1)', async () => {
+    process.env[ON] = 'true';
+    customers = [...sameName(1), { ...sameName(1)[0], id: id(400), first_name: 'Other', last_name: 'Person', phone: '9417770000', email: 'other@example.test' }];
+    // Name and contact agree: that customer is named.
+    expect((await ask('update Pat Example 941-555-0100 notes')).typedCustomerIds).toEqual([id(100)]);
+    // The phone or the email is someone else's: unresolved, so neither account is named.
+    expect((await ask('update Pat Example 941-777-0000 notes')).typedCustomerIds).toEqual([]);
+    expect((await ask('update Pat Example other@example.test notes')).typedCustomerIds).toEqual([]);
+    const owner = Context.ownerDirectContext(await ask('update Pat Example 941-777-0000 notes'));
+    for (const customer_id of [id(100), id(400)]) {
+      expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(customer_id === id(100));
+    }
+  });
+
+  test('gate on: a long "Full Name, City" button becomes "First L., City", unique, under 40 characters, and the reply resolves back (Codex r1 P2)', async () => {
+    process.env[ON] = 'true';
+    const { validateChoices } = require('../services/intelligence-bar/choice-tools');
+    const long = (i, city) => ({ ...sameName(1)[0], id: id(500 + i), first_name: 'Bartholomew', last_name: 'Featherstonehaugh', city, phone: `94155502${String(i).padStart(2, '0')}` });
+    customers = [long(0, 'Fort Myers Beach'), long(1, 'Port Charlotte'), long(2, 'Venice'), long(3, 'Venice')];
+    const resolved = await ask('update Bartholomew Featherstonehaugh notes');
+    const labels = resolved.candidates.map(c => c.choice_label);
+    expect(labels).toEqual(['Bartholomew F., Fort Myers Beach', 'Bartholomew F., Port Charlotte', null, null]);
+    // Every label that is offered survives offer_choices, and a tap resolves to exactly that customer.
+    const offered = labels.filter(Boolean);
+    expect(validateChoices({ options: offered })).toEqual(offered);
+    for (const label of offered) {
+      const reply = await ask(label);
+      expect(reply.typedCustomerIds).toEqual([resolved.candidates[labels.indexOf(label)].customer_id]);
+    }
+    // The two Venice customers share a label: no button, a phone or email is asked for.
+    expect(labels[2]).toBeNull();
+    expect(labels[3]).toBeNull();
+    expect(Context.ownerDirectContext(resolved).sameNameNote).toMatch(/choice_label is null/);
+    // A "First L., City" that fits two customers (or none) names nobody.
+    customers = [long(0, 'Fort Myers Beach'), { ...long(1, 'Fort Myers Beach'), last_name: 'Fothergill' }];
+    expect((await ask('Bartholomew F., Fort Myers Beach')).typedCustomerIds).toEqual([]);
+    expect((await ask('Bartholomew F., Sarasota')).typedCustomerIds).toEqual([]);
+  });
+
   test('gate on: a unique name names its customer; the bare phone alone does too', async () => {
     process.env[ON] = 'true';
     customers = sameName(1);
@@ -318,5 +363,56 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(resolved.typedCustomerIds).toEqual([]);
     const grounding = OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved));
     expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
+  });
+});
+
+describe('Codex r1 P2: the direct cap counts calls that actually run direct; the prompt states one limit', () => {
+  const NAMED = id(1), UNNAMED = id(2);
+  const reschedule = n => ({ type: 'tool_use', name: 'reschedule_appointment', input: { appointment_id: id(600 + n), new_date: '2026-11-03' } });
+  const pin = customer_id => ({ pinned_appointment: { id: id(600), customer_id, visit_id: null } });
+
+  test('gate on: six reschedule calls where five name an unknown customer still run the named one direct', () => {
+    process.env[ON] = 'true';
+    const grounding = OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [NAMED], page: { ids: {} } });
+    const calls = [1, 2, 3, 4, 5, 6].map(reschedule);
+    // The plan cannot see the previews, so it counts none of them.
+    const committed = new Map();
+    const capped = OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan(calls, () => true, null, grounding));
+    expect(capped.size).toBe(0);
+    // Each call is judged on its own preview, in order, as it commits.
+    const verdicts = [UNNAMED, UNNAMED, UNNAMED, UNNAMED, UNNAMED, NAMED].map((customer_id) => {
+      const direct = OwnerDirect.executesWithoutCard('reschedule_appointment', calls[0].input, pin(customer_id), null, grounding);
+      if (!direct) return 'card';
+      if (capped.has('reschedule_appointment') || OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')) return 'refused';
+      OwnerDirect.recordDirectCommit(committed, 'reschedule_appointment');
+      return 'direct';
+    });
+    expect(verdicts).toEqual(['card', 'card', 'card', 'card', 'card', 'direct']);
+  });
+
+  test('gate on: after 5 direct reschedules the 6th is refused; other tools and gate off is unchanged', () => {
+    process.env[ON] = 'true';
+    const committed = new Map([['reschedule_appointment', 4]]);
+    expect(OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')).toBe(false);
+    OwnerDirect.recordDirectCommit(committed, 'reschedule_appointment');
+    expect(OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')).toBe(true);
+    expect(OwnerDirect.dynamicCapReached(committed, 'update_lead_status')).toBe(false);
+    delete process.env[ON];
+    expect(OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')).toBe(false);
+    // Gate off: the plan still counts them, as today.
+    expect(OwnerDirect.messageDirectPlan([reschedule(1), reschedule(2)]).get('reschedule_appointment')).toBe(2);
+  });
+
+  test('the owner prompt states exactly one direct-edit limit for the gate state', () => {
+    const limits = prompt => ({ old: /Three or more edits with the same tool/.test(prompt), v2: /More than 5 edits with the same tool/.test(prompt), anyThree: /three or more/i.test(prompt) });
+    // Gate off: today's prompt, byte for byte.
+    expect(OwnerDirect.ownerDirectPrompt()).toBe(OwnerDirect.OWNER_DIRECT_PROMPT);
+    expect(limits(OwnerDirect.ownerDirectPrompt())).toEqual({ old: true, v2: false, anyThree: true });
+    // Gate on: the prompt and the appended rules block agree on 5.
+    process.env[ON] = 'true';
+    const full = OwnerDirect.ownerDirectPrompt() + OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
+    expect(limits(full)).toEqual({ old: false, v2: true, anyThree: false });
+    expect(full).toMatch(/Up to 5 edits with the same tool/);
+    expect(full).toMatch(/for more than 5 records use the bulk tool/);
   });
 });
