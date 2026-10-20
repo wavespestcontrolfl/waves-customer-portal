@@ -113,6 +113,8 @@ function callCandidatesQuery(conn, now) {
     .where('c.v2_extraction_status', 'valid')
     .whereNotNull('c.ai_extraction_enriched')
     .whereNotNull('c.transcription')
+    // Unlinked calls wait for the relinker without taking a batch place (pre-push audit).
+    .whereNotNull('c.customer_id')
     .whereRaw("COALESCE(c.processing_status, '') NOT IN ('voicemail', 'spam', 'processing')")
     // Scheduling status and the non-conversation tests (isRealConversation's own
     // reads: voicemail, spam verdict) run in SQL, before the scan limit, so
