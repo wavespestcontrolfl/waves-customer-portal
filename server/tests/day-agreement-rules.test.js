@@ -233,7 +233,12 @@ describe('stored judgment fields are scrubbed (Codex #6350 r8)', () => {
       at: '2040-03-12T10:30', act: false, kind: 'new_visit', day: null, from_day: null, daypart: 'any',
       service: '123 Palm Tree Dr pest', blockers: ['exact_time_agreed', 'gate code 4417 at 99 Main St'], confidence: 0.4, reason: 'x',
     });
-    expect(a.blockers).toEqual(['exact_time_agreed']);
+    expect(a.blockers).toEqual(['exact_time_agreed', 'other']);
     expect(a.service).not.toMatch(/123|Palm Tree/);
+  });
+
+  test('an act:true answer with an unknown blocker is still skipped as model_blocker', () => {
+    const a = rules.normalizeAgreement({ at: '2040-03-12T10:30', act: true, kind: 'new_visit', day: '2040-03-14', from_day: null, daypart: 'any', service: 'x', blockers: ['customer_declined'], confidence: 0.9, reason: 'x' });
+    expect(a.blockers).toEqual(['other']);
   });
 });

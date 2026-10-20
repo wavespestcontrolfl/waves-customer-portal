@@ -75,9 +75,10 @@ function normalizeAgreement(raw) {
     daypart: isString(a.daypart) ? a.daypart.trim().toLowerCase() : null,
     // Scrubbed like the reason: the service text is stored too (Codex #6350 r8).
     service: text(a.service) ? safeReason(text(a.service)).slice(0, 60) : null,
-    // Only the prompt's own blocker words are kept: a free-text blocker could
-    // carry customer data into the stored judgment (Codex #6350 r8).
-    blockers: (Array.isArray(a.blockers) ? a.blockers : []).filter(isString).map((b) => b.trim().toLowerCase()).filter((b) => BLOCKER_WORDS.has(b)).slice(0, 8),
+    // Only the prompt's own blocker words are stored: a free-text blocker could
+    // carry customer data (Codex #6350 r8). An unknown one is kept as 'other',
+    // so it still blocks the action (fail closed).
+    blockers: (Array.isArray(a.blockers) ? a.blockers : []).filter(isString).map((b) => b.trim().toLowerCase()).map((b) => (BLOCKER_WORDS.has(b) ? b : 'other')).filter((b, i, all) => all.indexOf(b) === i).slice(0, 8),
     confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0,
     reason: safeReason(a.reason),
   };
