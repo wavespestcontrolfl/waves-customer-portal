@@ -264,6 +264,88 @@ function bundleScenario() {
   };
 }
 
+// GATE_ESTIMATE_MONTHLY_AVERAGE fixtures (owner 2026-10-20, option A). Real
+// payload shape: every per-application row carries perTreatment /
+// displayPrice AND visitsPerYear, so the card leads with the per-application
+// price and the monthly average hangs beneath it. pest_average is the single
+// service example ($94 x 4); bundle_average is the owner's multi-service
+// example (lawn 9/yr at $56.40 + pest 4/yr at $90, Silver 10% bundle, $99
+// setup) whose stored monthly total is $72.30.
+function pestAverageScenario() {
+  const base = pestScenario();
+  const row = (perTreatment, visitsPerYear, monthly) => [{
+    service: 'pest_control', label: 'Pest Control', displayPrice: perTreatment, perTreatment, visitsPerYear, monthly,
+  }];
+  return {
+    ...base,
+    pricing: {
+      ...base.pricing,
+      services: [{
+        ...base.pricing.services[0],
+        frequencies: [
+          { ...pestFrequency('quarterly', 'Quarterly', 31.33, 94, 376), perTreatment: 94, perServiceTreatments: row(94, 4, 31.33) },
+          { ...pestFrequency('bi_monthly', 'Bi-monthly', 47, 94, 564), perTreatment: 94, perServiceTreatments: row(94, 6, 47) },
+          { ...pestFrequency('monthly', 'Monthly', 55, 55, 660), perTreatment: 55, perServiceTreatments: row(55, 12, 55) },
+        ],
+      }],
+    },
+  };
+}
+
+function bundleAverageScenario() {
+  const base = bundleScenario();
+  return {
+    ...base,
+    estimate: { ...base.estimate, serviceCategory: 'bundle' },
+    pricing: {
+      ...base.pricing,
+      services: [
+        {
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'quarterly',
+          // Silver 10%: $100 anchor -> $90.00 per application.
+          frequencies: [{
+            key: 'quarterly', label: 'Quarterly', monthly: 30, annual: 360, perVisit: 100, perTreatment: 90, visitsPerYear: 4,
+            perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: 90, perTreatment: 90, visitsPerYear: 4, monthly: 30 }],
+            included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+          }],
+          copy: { priceWording: {} },
+        },
+        {
+          key: 'lawn_care',
+          label: 'Lawn Care',
+          isRecurring: true,
+          isPest: false,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'standard',
+          // Silver 10%: $47.00/mo base -> $42.30/mo = $56.40 per application x 9.
+          frequencies: [{
+            key: 'standard', label: 'Lawn Program', serviceCategory: 'lawn_care', visitsPerYear: 9,
+            monthly: 42.3, monthlyBase: 47, annual: 507.6, billingFrequencyKey: 'monthly', perTreatment: 56.4, billedPerApplication: true,
+            perServiceTreatments: [{ service: 'lawn_care', label: 'Lawn Care', displayPrice: 56.4, perTreatment: 56.4, visitsPerYear: 9, monthly: 42.3 }],
+            included: [
+              { key: 'fert', label: 'Fertilization + weed control', detail: '9 applications/year' },
+              { key: 'pests', label: 'Chinch, sod webworm & turf pest response', detail: null },
+            ],
+            addOns: [],
+          }],
+          copy: { priceWording: {} },
+        },
+      ],
+      frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 72.3, annual: 867.6 }],
+      renderFlags: { ...base.pricing.renderFlags, showWaveGuardSetupFee: true },
+      waveGuardTier: 'Silver',
+      combinedRecurring: { monthlySubtotal: 72.3, annualSubtotal: 867.6, waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1 },
+      setupFee: { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true },
+      oneTimeBreakdown: { total: 99, items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, kind: 'charge' }] },
+    },
+  };
+}
+
 function acceptedScenario() {
   const base = pestScenario();
   return {
@@ -941,6 +1023,8 @@ function longContentScenario() {
 
 const PAYLOADS = {
   pest: pestScenario,
+  pest_average: pestAverageScenario,
+  bundle_average: bundleAverageScenario,
   mosquito: mosquitoScenario,
   tree_shrub: treeShrubScenario,
   termite_bait: termiteBaitScenario,
@@ -1037,6 +1121,8 @@ window.fetch = async (input, init) => {
       ...payload,
       ...(pdfPass && proposal ? { proposal } : {}),
       glassDefault: true,
+      // The harness runs with GATE_ESTIMATE_MONTHLY_AVERAGE on (as dev does).
+      monthlyAverageEnabled: true,
       ...returnVisit,
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,

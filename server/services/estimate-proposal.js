@@ -377,7 +377,10 @@ function sectionKeyForRow(row = {}, candidate = {}) {
 // the plan can't be described this way with confidence: no bundle, a row with
 // an unprovable cadence, or lines that don't reconcile. Failing to the old
 // document beats asserting a billing cadence the customer isn't on.
-function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePricing = null) {
+// Returns { lines, candidate } or null: the lines AND the candidate cadence (a top-level frequency or a service-cadence
+// combo) they were quoted from, so a caller that must describe the SAME plan (the
+// monthly average's credit) reads the candidate the document used, never a guess.
+function perApplicationRecurringResolution(estimate = {}, estimateData = {}, livePricing = null) {
   // An UNLOCKED estimate whose rebuild failed must not silently fall back to
   // the send snapshot — that snapshot may be exactly the retired / below-floor
   // / stale-membership bundle buildPricingBundle exists to reject. Absence of
@@ -422,7 +425,7 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePric
   const orderedForBundle = livePricing && livePricing.snapshotHit !== true ? [] : ordered;
   for (const candidate of orderedForBundle) {
     const lines = perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bundleCredit });
-    if (lines) return lines;
+    if (lines) return { lines, candidate };
   }
   // OUTSTANDING + rebuilt snapshot: nothing matched the stored columns because
   // they are stale by construction (see the authority table above). Quote the
@@ -435,7 +438,7 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePric
       annualTotal: num(fallback.annual),
       bundleCredit,
     });
-    if (lines) return lines;
+    if (lines) return { lines, candidate: fallback };
   }
   return null;
 }
@@ -527,7 +530,7 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
 function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy', livePricing = null } = {}) {
   const perApplicationMode = recurringMode === 'per_application';
   const lineItems = perApplicationMode
-    ? [...(perApplicationRecurringLines(estimate, estimateData, livePricing) || [])]
+    ? [...(perApplicationRecurringResolution(estimate, estimateData, livePricing)?.lines || [])]
     : [];
   const havePerApplicationRecurring = lineItems.length > 0;
   // A per-application plan whose lines could not be derived (no snapshot, or a
@@ -831,7 +834,7 @@ module.exports = {
   normalizePaymentTerms,
   PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,
-  perApplicationRecurringLines,
+  perApplicationRecurringResolution,
   annualizedAmount,
   computeProposalTotals,
   isCommercialProposalData,

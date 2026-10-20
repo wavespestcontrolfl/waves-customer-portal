@@ -44,11 +44,11 @@ const StripeService = require('../services/stripe');
 const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
+const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
 const {
   annualPrepayEligibleForEstimateData,
   buildPricingBundle,
   commercialAcceptDepositExempt,
-  isCommercialAutoAcceptEstimate,
   isPestServiceName,
   shouldPersistPestOnlyRecurringChoice,
   estimateTrenchingReviewRequired,

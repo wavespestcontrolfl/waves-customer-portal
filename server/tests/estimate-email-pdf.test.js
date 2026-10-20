@@ -45,7 +45,6 @@ jest.mock('../routes/estimate-public', () => ({
   estimateTrenchingReviewRequired: jest.fn(() => false),
   resolveAcceptOneTimeTotal: jest.fn(() => 149),
   commercialAcceptDepositExempt: jest.fn(() => false),
-  isCommercialAutoAcceptEstimate: jest.fn(() => false),
 }));
 jest.mock('../services/estimate-delivery-options', () => ({
   commercialLowConfidenceRange: jest.fn(() => ({ hasLowConfidence: false, forceSiteQuote: false })),

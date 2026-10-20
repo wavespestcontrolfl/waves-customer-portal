@@ -2960,6 +2960,20 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_EMAIL_PDF (read at boot; the Railway restart applies it).
   estimateEmailPdf: isProd ? process.env.GATE_ESTIMATE_EMAIL_PDF === 'true' : true,
 
+  // Monthly AVERAGE beside per-application prices on residential estimates
+  // (owner ruling 2026-10-20, "option A"). The per-application price stays the
+  // price; a second, smaller line reads "about $X a month", with the context
+  // "Averaged over the year. You pay after each application." Covers the
+  // delivery email's Estimated price row (and one sentence ahead of its
+  // next-step paragraph), the estimate PDF document and the estimate page.
+  // The plan average equals the stored monthly total; the per-service averages
+  // add up to it to the cent (shared/estimate-monthly-average.cjs). Commercial
+  // proposals, quote-required estimates, one-time-only estimates and
+  // annual-prepay choices are untouched, and "$X/mo" as the PRICE stays banned.
+  // Off or unset in prod: email, PDF and page are byte-identical to today.
+  // Kill switch: unset GATE_ESTIMATE_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
+  estimateMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_MONTHLY_AVERAGE === 'true' : true,
+
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
   // renders a one-line authorization + inline "View terms" drawer directly
   // above Accept (same steps, no extra page) and the accept route records

@@ -47,6 +47,8 @@ import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } fr
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
+import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, aboutMonth, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
+import { oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
@@ -2364,6 +2366,46 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountMonthly)} /mo</strong>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20, option A): the per-service
+// "about $X a month" lines and the plan average for a multi-service plan, so the
+// customer can see the arithmetic. The per-application prices on the cards stay
+// the prices; this is an average of the year ("$X/mo" as THE price stays
+// banned, and the combined "Plan total" ban below is untouched: nothing here is
+// a total the customer pays at once). `model` comes from pageMonthlyAverage and
+// its per-service lines add up to the plan line to the cent; a credit prints as
+// its own negative line.
+export function MonthlyAverageSummary({ model, hasOneTime = false }) {
+  if (!model || !(model.showPlan ?? model.multi)) return null;
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline', fontSize: 16, color: ESTIMATE_TEXT };
+  const num = { fontVariantNumeric: 'tabular-nums', textAlign: 'right' };
+  return (
+    <section data-monthly-average-summary="" style={estimateCard()}>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {model.services.map((service) => (
+          <div key={service.key} style={row}>
+            <span>{service.label}</span>
+            <span style={num}>{aboutMonth(service.monthly)}</span>
+          </div>
+        ))}
+        {model.credit ? (
+          <div style={row}>
+            <span>{model.credit.label}</span>
+            <span style={num}>{fmtMoneySigned(-model.credit.monthly)} a month</span>
+          </div>
+        ) : null}
+        <div data-monthly-average-plan="" style={{ ...row, fontWeight: 700, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>
+          <span>{monthlyAveragePlanLabel(model)}</span>
+          <span style={num}>{aboutMonth(model.planMonthly)}</span>
+        </div>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+        {MONTHLY_AVERAGE_CONTEXT}
+        {hasOneTime ? ' One-time charges are not in the average.' : ''}
+      </div>
     </section>
   );
 }
@@ -5215,6 +5257,11 @@ export function ServiceSection({
   // a current monthly member whose accept preserves membership billing. Either
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
+  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "about $X a month" line for this
+  // service (and the one-time context sentence on a single-service page).
+  // Null with the gate off, so the card is unchanged.
+  monthlyAverageLine = null,
+  monthlyAverageContext = null,
   waveGuardDiscountPct = null,
   memberPerApplicationSavings = null,
   selectedFrequencyKey,
@@ -5442,6 +5489,8 @@ export function ServiceSection({
             // for both, the combined total IS the charge. Mirrors the SSR
             // recurringBilledMonthly fork (codex #3128 r4/r6).
             suppressCombinedTotal={section.key === 'bundle' && !billsMonthly}
+            monthlyAverageLine={monthlyAverageLine}
+            monthlyAverageContext={monthlyAverageContext}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -9011,6 +9060,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // billedPerApplication flags); absent → false → today's behavior.
   const billsMonthly = isCommercialEstimate || cta?.monthlyBilled === true;
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
+  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the monthly average beside
+  // the per-application prices. Server switch (absent with the gate off) AND an
+  // open, recurring, per-application plan: not commercial, not billed monthly,
+  // not the annual-prepay choice, not a one-time pick. pageMonthlyAverage
+  // returns null whenever the per-service averages cannot be made to add up to
+  // the plan's own monthly, and the page then shows nothing new.
+  const monthlyAverage = resolvePageMonthlyAverage({
+    data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
+    services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
+  }, manualDiscountMonthlyAmount);
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -9044,6 +9103,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: readOnlyPreview }
         : null
     );
+    // Charges that sit beside the plan and never enter the monthly average
+    // (GATE_ESTIMATE_MONTHLY_AVERAGE): a setup / first-visit fee, or an ADDITIVE
+    // one-time breakdown row (a flea treatment). When the estimate offers a
+    // one-time option, the breakdown rows are the either/or alternative to the
+    // plan, not an extra charge, so they do not count.
+    const hasOneTimeBesidePlan = oneTimeBesidePlan({ feeList, estimate, pricing });
     if (mode === 'recurring') {
       return (
         <>
@@ -9092,6 +9157,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 section={section}
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
+                monthlyAverageLine={sectionAverageLine(monthlyAverage, section.key)}
+                monthlyAverageContext={singleServiceAverageContext(monthlyAverage, hasOneTimeBesidePlan)}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
@@ -9332,6 +9399,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               plan-level guarantee claim. The non-glass fallback rendered dead
               code in prod (glass active for all categories) and contradicted
               the standing dedupe ruling. */}
+
+          {(monthlyAverage?.model.showPlan) && mode === 'recurring' ? (
+            <MonthlyAverageSummary
+              model={monthlyAverage.model}
+              hasOneTime={hasOneTimeBesidePlan}
+            />
+          ) : null}
 
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
 

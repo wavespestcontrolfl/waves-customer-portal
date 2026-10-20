@@ -60,6 +60,8 @@ function acceptBookingGateToken(estimate) {
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
+const monthlyAverageShared = require('../../shared/estimate-monthly-average.cjs');
+const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
 const { classifyTermiteScope } = require('../../shared/estimate-termite-scope.cjs');
 const {
   collapseMirroredRows,
@@ -6283,9 +6285,57 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // evidence resolver as that chokepoint \u2014 this render has no fresh engine
   // result of its own, so it reads stored evidence only (no second arg).
   const treeShrubPalmCount = treeShrubPalmCountForEstData(estData);
+  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the legacy page (use_v2_view
+  // = false rows, the GrowthBook control) prints the same "about $X a month"
+  // line under each per-application card, the plan summary for two or more
+  // services (or a credited one) and the context sentence, from the SAME shared
+  // builder as the email, the PDF and the React page. Withheld (null) with the
+  // gate off, for quote-required / one-time-only / accepted / declined /
+  // commercial / monthly-billed plans, and whenever the cards do not reconcile
+  // to the stored monthly total, so the HTML is then byte-identical to before.
+  const ssrMonthlyAverage = (() => {
+    if (!featureGates.isEnabled('estimateMonthlyAverage')) return null;
+    if (quoteRequired || isOneTimeOnly || locked || est.status === 'declined' || commercialProposal
+      || recurringBilledMonthly || commercialManualAccept) return null;
+    if (!billingServiceRows.length || !billingServiceRows.every((row) => row.price != null && row.visits > 0)) return null;
+    // The plan average IS the stored monthly total.
+    if (Math.abs(Number(est.monthlyTotal || 0) - monthlyTotal) > 0.005) return null;
+    return monthlyAverageShared.buildMonthlyAverage({
+      services: billingServiceRows.map((row, i) => ({ key: String(i), label: row.name, perApplication: row.price, visits: row.visits })),
+      planMonthly: monthlyTotal,
+      credit: manualDiscountMonthly > 0 ? { label: manualDiscount?.label, monthly: manualDiscountMonthly } : null,
+      bundleDiscountPct: billingServiceRows.length > 1 ? estimateTierDiscount : 0,
+    });
+  })();
+  const ssrAvgAttrs = `data-monthly-average data-avg-pref-off="${Number(prefMonthlyOff || 0)}"`;
+  const ssrAvgLineHtml = (index) => (ssrMonthlyAverage
+    ? `<div class="day-price" ${ssrAvgAttrs}>${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.services[index].monthly))}</div>`
+    : '');
+  // One-time charges beside the plan: a setup / bait-station fee, or an ADDITIVE
+  // one-time row (same exclusions as the "billed separately" list: the WaveGuard
+  // setup is counted by its fee, and the either/or one-time choice is not extra).
+  const ssrAvgAdditiveOneTime = ssrMonthlyAverage && oneTimeItems.some((it) => {
+    if (isWaveGuardSetupOneTimeItem(it)) return false;
+    if (canChooseOneTime && isOneTimePestChoiceItem(it)) return false;
+    if (canChooseOneTime && oneTimeChoiceCategory && oneTimeChoiceCategory !== 'pest_control'
+      && isOneTimeChoiceItemForCategory(it, oneTimeChoiceCategory)) return false;
+    return it.quoteRequired !== true && oneTimeItemAmount(it) > 0;
+  });
+  const ssrAvgOneTime = ssrMonthlyAverage
+    && ((showMembershipFee && membershipFee > 0 && !membershipSetupWaivedForExistingCustomer) || rodentSetupDueToday > 0 || ssrAvgAdditiveOneTime);
+  const ssrAvgContext = `${monthlyAverageShared.CONTEXT_LINE}${ssrAvgOneTime ? ' One-time charges are not in the average.' : ''}`;
+  const ssrAvgSummaryHtml = !ssrMonthlyAverage ? '' : (ssrMonthlyAverage.showPlan ? `
+      <div ${ssrAvgAttrs} data-mode-only="recurring" style="margin-top:16px;padding:14px 16px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;font-size:16px;color:#1B2C5B;max-width:900px">
+        ${ssrMonthlyAverage.services.map((svc) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(svc.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.aboutMonth(svc.monthly))}</span></div>`).join('')}
+        ${ssrMonthlyAverage.credit ? `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(ssrMonthlyAverage.credit.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">&minus;${fmtMoney(ssrMonthlyAverage.credit.monthly)} a month</span></div>` : ''}
+        <div data-monthly-average-plan style="display:flex;justify-content:space-between;gap:12px;padding:8px 0 4px;margin-top:4px;border-top:1px solid #1B2C5B;font-weight:700"><span>${escapeHtml(monthlyAverageShared.planLabel(ssrMonthlyAverage))}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.planMonthly))}</span></div>
+        <div style="margin-top:8px;font-size:14px;color:#475569;line-height:1.5">${escapeHtml(ssrAvgContext)}</div>
+      </div>` : `
+      <div class="day-price" ${ssrAvgAttrs} data-mode-only="recurring">${escapeHtml(ssrAvgContext)}</div>`);
   const servicePriceCardsHtml = billingServiceRows
     .filter((row) => row.price != null)
     .map((row) => {
+      const rowIndex = billingServiceRows.indexOf(row);
       const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
       const day = row.visits > 0 ? Math.round((row.price * row.visits / 365) * 100) / 100 : null;
       const dayPriceHtml = day != null
@@ -6309,7 +6359,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             <span class="num" data-service-card-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span>
             <span class="per">application</span>
             <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
-          </div>
+          </div>${ssrAvgLineHtml(rowIndex)}
           ${savings > 0 && !commercialManualAccept ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
           ${day != null ? `<div class="day-price">${dayPriceCopy}</div>` : ''}
         </section>`;
@@ -6358,7 +6408,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <span class="num" data-service-card-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span>
           <span class="per">application</span>
           <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
-        </div>
+        </div>${ssrAvgLineHtml(0)}
         ${savings > 0 && !commercialManualAccept ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
         ${day != null ? `<div class="day-price">That\u2019s just ${dayPriceHtml}/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
       </div>`;
@@ -6382,7 +6432,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       </div>
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
     ` : (isOneTimeOnly ? '' : (serviceCardsCoverRecurringTotal ? `
-      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
+      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}${ssrAvgSummaryHtml}
     ` : recurringBilledMonthly ? `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
@@ -6398,7 +6448,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${manualDiscount && recurringDisplayManualDiscount > 0 ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>Applied to your plan pricing</strong></div>` : ''}
-      ${supplementalServiceSummaryHtml}
+      ${supplementalServiceSummaryHtml}${ssrAvgSummaryHtml}
     `));
 
   const separatelyBilledOneTimeItems = oneTimeItems.filter((it) => {
@@ -7655,7 +7705,7 @@ ${shellQuestionsBar()}
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
       el.textContent = fmt(Math.round((adjusted * visits / 365) * 100) / 100);
-    });
+    });${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(prefOff);' : ''}
   };
 
   document.querySelectorAll('.ai-satellite').forEach((img) => {
@@ -7807,7 +7857,26 @@ ${shellQuestionsBar()}
     return context;
   }
 
-  function syncPaymentSetupCards() {
+${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is computed for the server-rendered
+  // preferences and a pay-per-application plan. A preference change re-prices
+  // the cards client-side, and the annual prepay choice is not "pay after each
+  // application", so either one hides the average rather than restate it. The
+  // prepay test reads the RETAINED booking state (pending or picked), never a
+  // one-shot flag, so it stays hidden through the slot reservation and the
+  // "Confirm annual prepay" step and only returns when the choice is cleared.
+  function syncMonthlyAverageVisibility(prefOff) {
+    const root = document.documentElement;
+    if (prefOff != null) root.dataset.avgPrefOff = String(prefOff);
+    let prepay = false;
+    try { prepay = bookingState.pendingPref === 'prepay_annual' || bookingState.pickedPref === 'prepay_annual'; } catch (e) { prepay = false; }
+    document.querySelectorAll('[data-monthly-average]').forEach((el) => {
+      const base = Number(el.dataset.avgPrefOff || 0);
+      const current = root.dataset.avgPrefOff === undefined ? base : Number(root.dataset.avgPrefOff);
+      el.style.display = (prepay || current !== base) ? 'none' : '';
+    });
+  }
+
+` : ''}  function syncPaymentSetupCards() {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null);' : ''}
     document.querySelectorAll('[data-payment-setup]').forEach((btn) => {
       const selected = bookingState.pendingPref === btn.dataset.paymentSetup;
       btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
@@ -7885,7 +7954,7 @@ ${shellQuestionsBar()}
     return STANDARD_NO_PAYMENT_COPY + ' Choose a service window to continue.';
   }
 
-  function updatePaymentSetupSummary(pref) {
+  function updatePaymentSetupSummary(pref) {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null);' : ''}
     const summary = document.getElementById('payment-setup-summary');
     if (!summary) return;
     const bookingTitle = document.getElementById('booking-title');
@@ -7908,7 +7977,7 @@ ${shellQuestionsBar()}
     }
   }
 
-  function resetPaymentSetupSummary() {
+  function resetPaymentSetupSummary() {${ssrMonthlyAverage ? ' syncMonthlyAverageVisibility(null);' : ''}
     const summary = document.getElementById('payment-setup-summary');
     if (summary) summary.style.display = 'none';
     const bookingTitle = document.getElementById('booking-title');
@@ -9788,28 +9857,11 @@ async function handleEstimateView(req, res, next) {
 // GET /api/estimates/:token — customer views estimate (no auth) — server-rendered HTML
 router.get('/:token', handleEstimateView);
 
-// Auto-priced commercial lawn/tree estimates are approval-only: no bookable
-// slot, no booking deposit/card, and no auto-scheduling — the team confirms
-// scope on-site, schedules, and invoices. They CAN prepay the year at the
-// standard 5% discount (there is no WaveGuard setup fee on commercial). Mirrors
-// estimate-slots-public's isCommercialAutoEstimate — keep both in sync.
-function isCommercialAutoAcceptEstimate(estimate = {}) {
-  let data = estimate.estimate_data;
-  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
-  data = data || {};
-  if (data.commercialEstimatedPricing === true) return true;
-  const isCommercialSvc = (s) => {
-    const k = String(s?.service || s?.serviceKey || s?.name || '').toLowerCase();
-    return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
-  };
-  const lineItems = Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : [];
-  if (lineItems.some((li) => li && li.estimatedPricing === true && isCommercialSvc(li) && Number(li.annual) > 0)) return true;
-  const recurringRows = [
-    ...(Array.isArray(data.result?.recurring?.services) ? data.result.recurring.services : []),
-    ...(Array.isArray(data.recurring?.services) ? data.recurring.services : []),
-  ];
-  return recurringRows.some(isCommercialSvc);
-}
+// Auto-priced commercial lawn/tree estimates are approval-only: the canonical
+// classifier (estimate_data.commercialEstimatedPricing marker, estimated-pricing
+// commercial lines, commercial recurring rows) lives in
+// services/estimate-commercial-identity.js so the monthly average and every
+// other consumer read the same decision. Imported at the top of this file.
 
 // DISPLAY-ONLY commercial identity for scoped one-time rows priced under
 // GATE_COMMERCIAL_ONETIME_SCOPED (codex #3594 r2 P1): those rows keep ordinary
@@ -30157,6 +30209,21 @@ async function composeEstimateDataPayload(estimate, {
           livePricing: proposalBilling?.livePricing || null,
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
+        // GATE_ESTIMATE_MONTHLY_AVERAGE: the inputs the document needs to print
+        // "about $X a month" under each per-application line. Null (key absent)
+        // with the gate off, for any plan that is not purely per application, and
+        // whenever the lines do not reconcile to the stored monthly total, so the
+        // document is byte-identical to today in all of those cases.
+        const monthlyAverage = proposalBilling?.billsPerApplication === true
+          ? require('../services/estimate-monthly-average').monthlyAverageFor({
+            estimate,
+            proposal: proposalForView,
+            bundle: proposalBilling.livePricing?.bundle || estimateDataForIntelligence?.sendSnapshot?.pricingBundle || null,
+            livePricing: proposalBilling.livePricing || null,
+            // The page's own state (accepted / declined / expired by the pin / quote_required), so the document never prints an average the page suppresses.
+            terminalState: ctaTerminalState,
+          })
+          : null;
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
@@ -30203,6 +30270,7 @@ async function composeEstimateDataPayload(estimate, {
             })),
           })),
           totals: computeProposalTotals(proposalForView),
+          ...(monthlyAverage ? { monthlyAverage: monthlyAverage.inputs } : {}),
           // Structured agreement sections (slice 1A-i) — projected
           // field-by-field like everything above (the stored block is
           // admin-authored and may grow internal fields the token holder
@@ -30504,6 +30572,11 @@ async function composeEstimateDataPayload(estimate, {
       ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload(acceptanceTermsScope) } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
+      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "about $X a month"
+      // under its per-application prices (it derives the figures from the
+      // selected cadence itself, so only the switch rides here). Absent, not
+      // false, with the gate off ⇒ response byte-identical to today.
+      ...(featureGates.isEnabled('estimateMonthlyAverage') ? { monthlyAverageEnabled: true } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical
       // (absent, not false). Draft previews never offer it (a request row
@@ -31352,7 +31425,6 @@ module.exports.estimateReferralCardFor = estimateReferralCardFor;
 module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
 module.exports.requestedFirstVisitFromRow = requestedFirstVisitFromRow;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
-module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.isCommercialOneTimePricedEstimate = isCommercialOneTimePricedEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.isNonBillableOneTimeRow = isNonBillableOneTimeRow;

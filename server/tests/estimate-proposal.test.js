@@ -362,7 +362,7 @@ describe('isCommercialProposalData', () => {
 });
 
 describe('per-application synthesis (owner rule 2026-07-31: residential bills per application or annual prepay, never a flat monthly)', () => {
-  const { perApplicationRecurringLines, annualizedAmount } = require('../services/estimate-proposal');
+  const { perApplicationRecurringResolution, annualizedAmount } = require('../services/estimate-proposal');
 
   // Shaped like the 2026-07-31 customer report: bi-monthly lawn plan,
   // $540/yr = $90/application x 6, whose PDF previously printed
@@ -391,7 +391,7 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
     ...estimate,
     estimate_data: { sendSnapshot: { pricingBundle: bundle } },
   });
-  const lines = (estimate) => perApplicationRecurringLines(estimate, estimate.estimate_data);
+  const lines = (estimate) => perApplicationRecurringResolution(estimate, estimate.estimate_data)?.lines ?? null;
 
   it('quotes the accepted cadence per application, not per month', () => {
     const out = lines(lawnEstimate);
@@ -550,7 +550,7 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
 
   it('returns null with no bundle (the legacy document still renders a number)', () => {
     const bare = { monthly_total: 120, annual_total: 1440, estimate_data: {} };
-    expect(perApplicationRecurringLines(bare, bare.estimate_data)).toBeNull();
+    expect(perApplicationRecurringResolution(bare, bare.estimate_data)?.lines ?? null).toBeNull();
     expect(normalizeProposal(bare).buildings[0].lineItems[0].frequency).toBe('monthly');
   });
 
@@ -627,7 +627,7 @@ describe('per-application mode with no derivable lines', () => {
 // ── PRICING AUTHORITY (#3120 r4/r6/r7) ──────────────────────────────────────
 // The four states the document can be quoted from, each with its own anchor.
 describe('pricing authority by estimate state', () => {
-  const { perApplicationRecurringLines } = require('../services/estimate-proposal');
+  const { perApplicationRecurringResolution } = require('../services/estimate-proposal');
 
   const rebuilt = {
     key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care',
@@ -649,7 +649,7 @@ describe('pricing authority by estimate state', () => {
   const live = { bundle: { frequencies: [rebuilt] }, defaultCandidate: rebuilt };
 
   it('OUTSTANDING + rebuilt snapshot: quotes the rebuilt plan, not the retired one', () => {
-    const out = perApplicationRecurringLines(base, base.estimate_data, live);
+    const out = perApplicationRecurringResolution(base, base.estimate_data, live)?.lines ?? null;
     expect(out).toHaveLength(1);
     expect(out[0].unitPrice).toBe(90);
     expect(out[0].visitsPerYear).toBe(6);
@@ -658,14 +658,14 @@ describe('pricing authority by estimate state', () => {
 
   it('OUTSTANDING: rejects a default candidate that does not add up to its own annual', () => {
     const incoherent = { ...rebuilt, annual: 700 };
-    expect(perApplicationRecurringLines(base, base.estimate_data, {
+    expect(perApplicationRecurringResolution(base, base.estimate_data, {
       bundle: { frequencies: [incoherent] }, defaultCandidate: incoherent,
-    })).toBeNull();
+    })?.lines ?? null).toBeNull();
   });
 
   it('LOCKED + matching snapshot: quotes the frozen snapshot, never today prices', () => {
     // No livePricing => locked. The snapshot reconciles to the frozen columns.
-    const out = perApplicationRecurringLines(base, base.estimate_data);
+    const out = perApplicationRecurringResolution(base, base.estimate_data)?.lines ?? null;
     expect(out[0].unitPrice).toBe(60);
     expect(out[0].visitsPerYear).toBe(4);
   });
@@ -690,32 +690,32 @@ describe('pricing authority by estimate state', () => {
         },
       },
     };
-    expect(perApplicationRecurringLines(accepted, accepted.estimate_data)).toBeNull();
+    expect(perApplicationRecurringResolution(accepted, accepted.estimate_data)?.lines ?? null).toBeNull();
   });
 
   it('OUTSTANDING + rebuilt: skips stale-total matching entirely', () => {
     // A non-default live cadence that coincidentally matches the stale columns
     // must NOT win — acceptance with no selectedFrequency takes the default.
     const coincidental = { ...retiredSnapshot, key: 'other_tier' };
-    const out = perApplicationRecurringLines(base, base.estimate_data, {
+    const out = perApplicationRecurringResolution(base, base.estimate_data, {
       bundle: { frequencies: [coincidental, rebuilt] },
       defaultCandidate: rebuilt,
       snapshotHit: false,
-    });
+    })?.lines ?? null;
     expect(out[0].unitPrice).toBe(90);
   });
 
   it('OUTSTANDING + snapshot served: stored-total matching still applies', () => {
-    const out = perApplicationRecurringLines(base, base.estimate_data, {
+    const out = perApplicationRecurringResolution(base, base.estimate_data, {
       bundle: { frequencies: [retiredSnapshot, rebuilt] },
       defaultCandidate: rebuilt,
       snapshotHit: true,
-    });
+    })?.lines ?? null;
     expect(out[0].unitPrice).toBe(60);
   });
 
   it('UNRESOLVED: never falls back to the snapshot the route refused to serve', () => {
-    expect(perApplicationRecurringLines(base, base.estimate_data, { unresolved: true })).toBeNull();
+    expect(perApplicationRecurringResolution(base, base.estimate_data, { unresolved: true })?.lines ?? null).toBeNull();
   });
 });
 

@@ -82,7 +82,6 @@ jest.mock('../services/recurring-card-on-file', () => ({
   completeRecurringCardEnrollment: jest.fn(),
 }));
 jest.mock('../routes/estimate-public', () => ({
-  isCommercialAutoAcceptEstimate: jest.fn(() => false),
   findLinkedUpcomingAppointment: jest.fn(async () => ({ id: 'appt_test' })),
 }));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
