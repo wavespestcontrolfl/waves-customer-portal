@@ -71,6 +71,11 @@ jest.mock('../services/estimate-learning', () => ({ recordSentLearningEvent: jes
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/triage-auto-resolve', () => ({ deliveredEstimateScope: jest.fn(() => ({ lines: [] })) }));
+jest.mock('../services/estimate-proposal-billing', () => ({
+  estimateSoldAsAnnualPrepay: jest.fn(async () => false),
+  resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: false, livePricing: null })),
+  documentPrintsRateReviewTerms: jest.fn(async () => false),
+}));
 jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   buildEstimateProposalEmailAttachmentPreferred: jest.fn(async () => ({ filename: 'synthetic-proposal.pdf', content: 'c3ludGhldGlj', type: 'application/pdf' })),
   buildEstimateEmailPdfAttachment: jest.fn(async () => null),

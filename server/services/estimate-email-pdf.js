@@ -140,12 +140,48 @@ async function linkedAppointmentState(row) {
   };
 }
 
-// What the fence compares: the estimates row's content and the linked
-// appointment state. Group membership is NOT part of it: a grouped estimate is
+// The live billing state the document prints by (codex #6343 r13): the page
+// resolves the customer's billing lane (billing_mode, membership), the estimate's
+// annual-prepay term and, for a per-application lane, the live pricing bundle at
+// render time, and none of those live on the estimates row. So the fence
+// resolves them the same way the document route does, on a CLONE (the
+// resolution reconciles a membership snapshot onto the row it is handed, and
+// the caller's row is the object the row fingerprint reads), and compares a
+// canonical projection of what the document prints from them: the lane, the
+// prepay fact, the live-pricing outcome, the totals after reconciliation, the
+// normalized proposal lines and the rate-review decision. Everything in it is a
+// pure function of stored state (no clock, no ids minted per call), so an
+// unchanged state never vetoes itself. An unreadable prepay lookup throws like
+// any other fence read failure; the lane and pricing lookups report an
+// inconclusive answer in their own fail-safe value (legacy copy), which the
+// projection records as it is.
+async function billingState(row) {
+  const billing = require('./estimate-proposal-billing');
+  const { normalizeProposal } = require('./estimate-proposal');
+  const estimate = structuredClone(row);
+  if (await billing.estimateSoldAsAnnualPrepay(estimate) === null) throw new Error('billing state unreadable: prepay lookup failed');
+  const context = await billing.resolveProposalBillingContext(estimate);
+  const live = context?.livePricing || null;
+  const proposal = normalizeProposal(estimate, {
+    recurringMode: context?.billsPerApplication === true ? 'per_application' : 'legacy',
+    livePricing: live,
+  });
+  return {
+    billsPerApplication: context?.billsPerApplication === true,
+    live: live ? { unresolved: live.unresolved === true, snapshotHit: live.snapshotHit === true } : null,
+    totals: [estimate.monthly_total, estimate.annual_total, estimate.accepted_frequency_key].map((v) => (v == null ? null : String(v))),
+    proposal,
+    printsRateReviewTerms: (await billing.documentPrintsRateReviewTerms(estimate, { billing: context })) === true,
+  };
+}
+
+// What the fence compares: the estimates row's content, the linked
+// appointment state and the live billing state the document prints by. Group membership is NOT part of it: a grouped estimate is
 // never a valid baseline (codex #6343 r10), so handoffBlockReason refuses any
 // grouped estimate outright instead of comparing against a captured verdict.
 async function fullFingerprint(row, opts) {
-  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}`;
+  const billing = crypto.createHash('sha256').update(canonical(await billingState(row))).digest('hex');
+  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}|${billing}`;
 }
 
 // The address an email actually goes to must still be the estimate's current

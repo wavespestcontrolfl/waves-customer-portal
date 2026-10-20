@@ -16,6 +16,11 @@ jest.mock('../routes/estimate-public', () => ({
   findLinkedUpcomingAppointment: jest.fn(async () => null),
   adoptionServiceModesForContract: jest.fn(() => []),
 }));
+jest.mock('../services/estimate-proposal-billing', () => ({
+  estimateSoldAsAnnualPrepay: jest.fn(async () => false),
+  resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: false, livePricing: null })),
+  documentPrintsRateReviewTerms: jest.fn(async () => false),
+}));
 jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: jest.fn(async () => null) }));
 jest.mock('../utils/estimate-claim-sql', () => ({
   estimateOffCustomerSurface: jest.fn(() => false),
@@ -806,5 +811,135 @@ describe('the destination must still be the estimate\'s recipient (pre-push audi
     readsRow(row(), row({ customer_email: null }));
     const check = await handoffCheck(await open());
     await expect(check({ database: db })).rejects.toMatchObject({ reason: 'recipient_changed' });
+  });
+});
+
+describe('the live billing state is part of the fence (codex #6343 r13)', () => {
+  const billing = require('../services/estimate-proposal-billing');
+  const PER_APPLICATION = { billsPerApplication: true, livePricing: { bundle: { frequencies: [] }, defaultCandidate: null, snapshotHit: true } };
+  const MONTHLY = { billsPerApplication: false, livePricing: null };
+  let build;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockReset();
+    require('../routes/estimate-public').findLinkedUpcomingAppointment.mockResolvedValue(null);
+    billing.estimateSoldAsAnnualPrepay.mockReset();
+    billing.estimateSoldAsAnnualPrepay.mockResolvedValue(false);
+    billing.resolveProposalBillingContext.mockReset();
+    billing.resolveProposalBillingContext.mockImplementation(async () => ({ ...MONTHLY }));
+    billing.documentPrintsRateReviewTerms.mockReset();
+    billing.documentPrintsRateReviewTerms.mockResolvedValue(false);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+  });
+  afterEach(() => build.mockRestore());
+
+  // Follow-up path: the billing context at render is `atRender`, at the handoff `atHandoff`.
+  async function followUp(atRender, atHandoff, { rows = [row(), row()] } = {}) {
+    readsRow(...rows);
+    billing.resolveProposalBillingContext.mockImplementationOnce(async () => structuredClone(atRender));
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(open.attachments).toEqual([ATTACHMENT]);
+    let check;
+    await open.withProviderHandoff(async (_d, b) => { check = b; });
+    billing.resolveProposalBillingContext.mockImplementationOnce(async () => structuredClone(atHandoff));
+    return check({ database: db });
+  }
+
+  test('two resolutions of the same unchanged state give the same fingerprint (no self-veto), even as fresh objects each time', async () => {
+    await expect(followUp(MONTHLY, MONTHLY)).resolves.toEqual({ ok: true });
+    await expect(followUp(PER_APPLICATION, PER_APPLICATION)).resolves.toEqual({ ok: true });
+    // Many resolutions in a row, each a new object, never differ.
+    readsRow(row(), row());
+    billing.resolveProposalBillingContext.mockImplementation(async () => structuredClone(PER_APPLICATION));
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await open.withProviderHandoff(async (_d, b) => { check = b; });
+    for (let i = 0; i < 3; i += 1) {
+      readsRow(row());
+      await expect(check({ database: db })).resolves.toEqual({ ok: true });
+    }
+  });
+
+  test('a billing mode change between render and handoff vetoes the PDF', async () => {
+    await expect(followUp(MONTHLY, PER_APPLICATION)).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+    await expect(followUp(PER_APPLICATION, MONTHLY)).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+
+  test('a live-pricing outcome change (rebuild failed, or snapshot rejected) vetoes it too', async () => {
+    const unresolved = { billsPerApplication: true, livePricing: { unresolved: true } };
+    await expect(followUp(PER_APPLICATION, unresolved)).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    const rebuilt = { billsPerApplication: true, livePricing: { ...PER_APPLICATION.livePricing, snapshotHit: false } };
+    await expect(followUp(PER_APPLICATION, rebuilt)).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+  });
+
+  test('a change in the rate-review decision, or in the totals the resolution reconciles onto the row, vetoes it', async () => {
+    readsRow(row(), row());
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await open.withProviderHandoff(async (_d, b) => { check = b; });
+    billing.documentPrintsRateReviewTerms.mockResolvedValueOnce(true);
+    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    readsRow(row());
+    // A membership change makes the resolution reprice the clone (the way the page's reconcile does).
+    billing.resolveProposalBillingContext.mockImplementationOnce(async (estimate) => { estimate.monthly_total = 49; return { ...MONTHLY }; });
+    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+  });
+
+  test('the resolution runs on a clone: the row the fingerprint reads is never mutated', async () => {
+    const fresh = row();
+    readsRow(fresh);
+    billing.resolveProposalBillingContext.mockImplementation(async (estimate) => { estimate.monthly_total = 'MUTATED'; estimate.estimate_data.injected = true; return { ...MONTHLY }; });
+    await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(fresh.monthly_total).toBe(59);
+    expect(fresh.estimate_data).not.toHaveProperty('injected');
+  });
+
+  test('an unreadable prepay lookup at the handoff is a tagged check failure, not a pass; at render it means no PDF', async () => {
+    readsRow(row(), row());
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await open.withProviderHandoff(async (_d, b) => { check = b; });
+    billing.estimateSoldAsAnnualPrepay.mockResolvedValueOnce(null);
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+    // A thrown billing read fails the same way.
+    readsRow(row());
+    billing.resolveProposalBillingContext.mockRejectedValueOnce(new Error('db down'));
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+
+    build.mockClear();
+    readsRow(row());
+    billing.estimateSoldAsAnnualPrepay.mockResolvedValueOnce(null);
+    const noPdf = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(noPdf.attachments).toEqual([]);
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('the delivery fence carries it: a billing mode change during the render vetoes the send', async () => {
+    const draft = () => row({ status: 'sending' });
+    billing.resolveProposalBillingContext.mockImplementationOnce(async () => ({ ...MONTHLY }));
+    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
+    let check;
+    await fence.withProviderHandoff(async (_d, b) => { check = b; });
+    readsRow(draft());
+    billing.resolveProposalBillingContext.mockImplementationOnce(async () => structuredClone(PER_APPLICATION));
+    await expect(check({ database: db })).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    readsRow(draft());
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+
+  test('the no-file fence keeps no fingerprint: a billing change does not stop a link-only email', async () => {
+    build.mockResolvedValue(null);
+    readsRow(row(), row());
+    const open = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(open.attachments).toEqual([]);
+    let check;
+    await open.withProviderHandoff(async (_d, b) => { check = b; });
+    billing.resolveProposalBillingContext.mockImplementation(async () => structuredClone(PER_APPLICATION));
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
   });
 });
