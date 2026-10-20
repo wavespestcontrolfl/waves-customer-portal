@@ -137,10 +137,13 @@ async function linkedAppointmentState(row) {
   };
 }
 
-// What the fence compares: the estimates row's content plus the linked
-// appointment state.
+// What the fence compares: the estimates row's content, the linked appointment
+// state, and whether the estimate is in a multi-property group (a sibling
+// unarchived during the render makes the document one property's of a group:
+// codex #6343 r9).
 async function fullFingerprint(row, opts) {
-  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}`;
+  const grouped = await module.exports.estimateInMultiPropertyGroup(row);
+  return `${rowFingerprint(row, opts)}|${canonical(await linkedAppointmentState(row))}|group:${grouped}`;
 }
 
 // The address an email actually goes to must still be the estimate's current

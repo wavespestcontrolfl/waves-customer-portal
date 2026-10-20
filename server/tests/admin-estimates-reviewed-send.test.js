@@ -1977,6 +1977,55 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
       expect(email.sendTemplate).not.toHaveBeenCalled();
     });
 
+    describe('SMTP fallback previews record the same decision (codex #6343 r9)', () => {
+      const gate = () => require('../services/email-fallback-gate').smtpFallbackAllowed;
+      let priorPassword;
+      beforeEach(() => {
+        priorPassword = process.env.GOOGLE_SMTP_PASSWORD;
+        process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-password';
+        sendgrid.isConfigured.mockReturnValue(false);
+        gate().mockReturnValue(true);
+        row.status = 'draft';
+      });
+      afterEach(() => {
+        gate().mockReturnValue(false);
+        sendgrid.isConfigured.mockReturnValue(true);
+        if (priorPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+        else process.env.GOOGLE_SMTP_PASSWORD = priorPassword;
+      });
+
+      test('the SMTP preview carries pdfCopy only when true, and its content hash is the same either way', async () => {
+        setGates(true);
+        const on = (await invoke('/:id/send-preview', 'get')).body.messages.email;
+        setGates(false);
+        const off = (await invoke('/:id/send-preview', 'get')).body.messages.email;
+        expect(on).toMatchObject({ provider: 'smtp', pdfCopy: true });
+        expect(off.provider).toBe('smtp');
+        expect(off).not.toHaveProperty('pdfCopy');
+        expect(on.contentHash).toBe(off.contentHash);
+        expect(on.text).toBe(off.text);
+      });
+
+      test('a reviewed SMTP send attaches the file it was reviewed with; one reviewed without the decision does not', async () => {
+        setGates(true);
+        const reviewed = (await invoke('/:id/send-preview', 'get')).body.messages;
+        row.status = 'sending';
+        const sendMail = jest.fn(async () => ({}));
+        require('nodemailer').createTransport.mockReturnValueOnce({ sendMail });
+        const result = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: reviewed });
+        expect(result.channels.email).toMatchObject({ ok: true, provider: 'smtp_fallback', pdfAttached: true });
+        expect(sendMail.mock.calls[0][0].attachments).toEqual([expect.objectContaining({ filename: PDF.filename, contentType: 'application/pdf' })]);
+
+        row.status = 'sending';
+        const sendMail2 = jest.fn(async () => ({}));
+        require('nodemailer').createTransport.mockReturnValueOnce({ sendMail: sendMail2 });
+        const { pdfCopy: _dropped, ...withoutDecision } = reviewed.email;
+        const legacy = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: { ...reviewed, email: withoutDecision } });
+        expect(legacy.channels.email.ok).toBe(true);
+        expect(sendMail2.mock.calls[0][0].attachments).toBeUndefined();
+      });
+    });
+
     test('a sms-only send is not held up by an email PDF decision', async () => {
       setGates(false);
       const result = await router.sendEstimateNow(structuredClone(row), 'sms', {

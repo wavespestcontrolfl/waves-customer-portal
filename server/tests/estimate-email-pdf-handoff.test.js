@@ -403,6 +403,61 @@ describe('prepareDeliveryPdfCopy: the delivery send\'s whole PDF step (codex #63
   });
 });
 
+describe('a sibling unarchived during the render vetoes the handoff (codex #6343 r9)', () => {
+  let build;
+  let group;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(ATTACHMENT);
+    group = jest.spyOn(emailPdf, 'estimateInMultiPropertyGroup');
+  });
+  afterEach(() => { build.mockRestore(); group.mockRestore(); });
+
+  test('follow-up: ungrouped at render, grouped at the handoff', async () => {
+    readsRow(row(), row());
+    group.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(o.attachments).toEqual([ATTACHMENT]);
+    let check;
+    await o.withProviderHandoff(async (_d, b) => { check = b; });
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+
+  test('follow-up: still ungrouped at the handoff passes', async () => {
+    readsRow(row(), row());
+    group.mockResolvedValue(false);
+    const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    let check;
+    await o.withProviderHandoff(async (_d, b) => { check = b; });
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+
+  test('delivery: ungrouped when the fence is built, grouped at the handoff', async () => {
+    const draft = () => row({ status: 'sending' });
+    group.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
+    let check;
+    await fence.withProviderHandoff(async (_d, b) => { check = b; });
+    readsRow(draft());
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+  });
+
+  test('delivery: the same ungrouped state at both ends passes', async () => {
+    const draft = () => row({ status: 'sending' });
+    group.mockResolvedValue(false);
+    const fence = await emailPdf.deliveryPdfFence(draft(), { recipient: 'lead@example.com' });
+    let check;
+    await fence.withProviderHandoff(async (_d, b) => { check = b; });
+    readsRow(draft());
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+});
+
 describe('grouped estimates carry no PDF (codex #6343 r6)', () => {
   let build;
   beforeEach(() => {

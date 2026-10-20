@@ -905,13 +905,16 @@ async function buildEstimateSendPreview(estimate) {
   }, {}, { noVariants: true, audit: false });
   let email = null;
   const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
+  // The reviewed PDF decision, recorded on SendGrid AND SMTP-fallback previews
+  // (the SMTP email has no note line, but the file rides along the same way): a
+  // review or schedule without it means "no PDF" at send time.
+  const pdfCopy = !proposalMode && await emailPdfCopy().deliveryPdfCopyDecision(estimate);
   if (library?.activeVersion) {
     // GATE_ESTIMATE_EMAIL_PDF: the reviewer sees the PDF line the customer
     // gets when the copy is attached. The note is a payload variable, not
     // template text, so the reviewed contentHash (a template-version hash)
     // is unaffected; the messageVersion covers the previewed text, and the
     // send re-runs this same builder, so a review and its send agree.
-    const pdfCopy = !proposalMode && await emailPdfCopy().deliveryPdfCopyDecision(estimate);
     const pdfNote = pdfCopy ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
     const rendered = EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
@@ -924,7 +927,8 @@ async function buildEstimateSendPreview(estimate) {
     email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
-    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex') };
+    // The content hash is of the SMTP content alone (no note), so it is unchanged.
+    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex'), ...(pdfCopy ? { pdfCopy: true } : {}) };
   }
   const messages = { sms: sms || null, email };
   const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
