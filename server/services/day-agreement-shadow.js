@@ -52,7 +52,8 @@ const RECENT_MS = 3 * HOUR_MS;
 const QUIET_MS = 30 * 60 * 1000;
 const THREAD_DAYS = 14;
 const THREAD_MESSAGES = 50;
-const MESSAGE_CHARS = 600;
+// A longer text skips the thread, like a long call (pre-push audit P1).
+const MESSAGE_CHARS = 2000;
 // A longer call is skipped, never judged on a cut transcript: a later
 // withdrawal or change would be invisible (pre-push audit P1).
 const TRANSCRIPT_CHARS = 30000;
@@ -99,6 +100,10 @@ function callCandidatesQuery(conn, now) {
     .whereNotNull('c.ai_extraction_enriched')
     .whereNotNull('c.transcription')
     .whereRaw("COALESCE(c.processing_status, '') NOT IN ('voicemail', 'spam', 'processing')")
+    // The scheduling status filter runs in SQL, before the scan limit, so
+    // ineligible calls never crowd eligible ones out (pre-push audit P1). The
+    // extraction may be stored as a JSON string inside the jsonb column.
+    .whereRaw(`(CASE WHEN jsonb_typeof(c.ai_extraction_enriched::jsonb) = 'string' THEN (c.ai_extraction_enriched::jsonb #>> '{}')::jsonb ELSE c.ai_extraction_enriched::jsonb END) -> 'scheduling' ->> 'status' IN (${[...SCHEDULING_STATUSES].map(() => '?').join(', ')})`, [...SCHEDULING_STATUSES])
     .whereRaw("NOT EXISTS (SELECT 1 FROM day_agreement_decisions d WHERE d.source_key = 'call:' || c.id::text || '#0')")
     .orderBy('c.processed_at', 'asc')
     .limit(CALL_SCAN_LIMIT)
@@ -187,9 +192,13 @@ async function threadLines(conn, customerId, digits, now) {
     .orderBy('created_at', 'desc').orderBy('id', 'desc')
     .limit(200)
     .select('direction', 'from_phone', 'to_phone', 'message_type', 'message_body', 'created_at');
-  return rows
+  const thread = rows
     .filter((r) => digitsOf(r.direction === 'inbound' ? r.from_phone : r.to_phone) === digits)
-    .slice(0, THREAD_MESSAGES).reverse().map(messageLine).filter(Boolean);
+    .slice(0, THREAD_MESSAGES).reverse();
+  return {
+    lines: thread.map(messageLine).filter(Boolean),
+    truncated: thread.some((r) => String(r.message_body || '').replace(/\s+/g, ' ').trim().length > MESSAGE_CHARS),
+  };
 }
 
 function callSource(row) {
@@ -203,10 +212,11 @@ function callSource(row) {
 }
 
 async function smsSource(conn, row, now) {
+  const thread = row.customer_id ? await threadLines(conn, row.customer_id, row.digits, now) : { lines: [], truncated: false };
   return {
     kind: 'sms', key: `sms:${row.digits}:${row.id}`, callLogId: null, phoneDigits: row.digits,
     customerId: row.customer_id || null, agreedAt: new Date(row.created_at),
-    lines: row.customer_id ? await threadLines(conn, row.customer_id, row.digits, now) : [],
+    lines: thread.lines, truncated: thread.truncated,
     label: 'This is a text thread, oldest first. Times are Eastern. CUSTOMER lines are texts from the customer; WAVES lines are texts from Waves, with the automated message type in brackets.',
   };
 }
@@ -344,7 +354,7 @@ async function decideMoment(conn, src, index, agreement, ctx) {
 async function processSource(conn, src, ctx) {
   if (!src.customerId) return { rows: [skipRow(src, 0, 'no_customer')] };
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
-  if (src.truncated) return { rows: [skipRow(src, 0, 'transcript_too_long')] };
+  if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };
   const lines = await visitLines(conn, src.customerId, src.agreedAt, ctx.now);
   const parts = prompts.buildDayAgreementPrompt({
     sourceLabel: src.label, todayET: ctx.todayET, weekdayET: WEEKDAYS[etParts(ctx.now).dayOfWeek], visits: lines, lines: src.lines,

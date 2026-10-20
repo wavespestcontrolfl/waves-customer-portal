@@ -383,6 +383,16 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect(prompt).not.toMatch(/Thursday/);
     });
 
+    test('a thread with a text longer than the cap is skipped without a model call (pre-push audit P1)', async () => {
+      const customerId = await customer();
+      await text(customerId, `We can come Wednesday. ${'More details here. '.repeat(150)}`, 98, { direction: 'outbound' });
+      await text(customerId, 'Wednesday works', 45);
+      const dispatch = answering(agreement());
+      await sweep({ dispatch, findSlots: jest.fn() });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect((await decisions())[0]).toMatchObject({ verdict: 'skip', skip_reason: 'message_too_long' });
+    });
+
     test('which threads are candidates: day word, 3 hour window, 30 quiet minutes either way, latest inbound only', async () => {
       const customerId = await customer();
       const wanted = await text(customerId, 'sat is fine', 45);

@@ -239,11 +239,11 @@ describe('message and call context lines', () => {
   test('a message line carries the ET stamp, the speaker label with the automated type, and a scrubbed, clipped body', () => {
     const line = internals.messageLine({
       direction: 'outbound', message_type: 'reminder', created_at: new Date('2040-03-12T15:00:00Z'),
-      message_body: `Your visit is Wednesday. Card 4111 1111 1111 1111 ${'x'.repeat(900)}`,
+      message_body: `Your visit is Wednesday. Card 4111 1111 1111 1111 ${'x'.repeat(2500)}`,
     });
     expect(line.startsWith('[Mon 2040-03-12 11:00] WAVES (reminder): Your visit is Wednesday.')).toBe(true);
     expect(line).not.toContain('4111 1111 1111 1111');
-    expect(line.length).toBeLessThan(700);
+    expect(line.length).toBeLessThan(2100); // clipped at MESSAGE_CHARS (the thread is skipped as message_too_long anyway)
     expect(internals.messageLine({ direction: 'inbound', created_at: NOW, message_body: '   ' })).toBeNull();
     expect(internals.messageLine({ direction: 'inbound', created_at: NOW, message_body: 'Tuesday works' })).toContain('CUSTOMER: Tuesday works');
   });
