@@ -96,7 +96,11 @@ async function confirmedContacts(customer, conn = db) {
   if (!slots.length) return [];
   const { optinHeldPhoneKeys } = require('./recipient-optin');
   const held = (await optinHeldPhoneKeys([customer.id], { dbh: conn })).get(String(customer.id));
-  return held ? slots.filter((c) => !held.has(phoneKey(c.phone))) : slots;
+  const confirmed = held ? slots.filter((c) => !held.has(phoneKey(c.phone))) : slots;
+  // The contact's own choice (contact login, GATE_CONTACT_LOGIN): a contact
+  // who turned service reports off gets no report text. A failed read on
+  // the transaction handle throws like the opt-in read above (retry).
+  return require('./contact-notification-prefs').filterContactsByOwnPrefs(confirmed, customer.id, 'service_completed', { channel: 'sms', dbh: conn });
 }
 
 // The street the report is about: the visit's own address when it has one,

@@ -2017,6 +2017,8 @@ const TwilioService = {
     const { getPrimaryContact } = require("./customer-contact");
     const enRouteUnfiltered = getAppointmentContacts(customer, prefs);
     let contacts = await filterRecipientsByOptin(enRouteUnfiltered, customer.id);
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
+    contacts = await require("./contact-notification-prefs").filterContactsByOwnPrefs(contacts, customer.id, "tech_en_route", { channel: "sms" });
     // Hold emptied a NON-empty list: fall back to the primary account
     // holder (their own consent is validated at send time) — an email-less
     // customer must still get the en-route notice somewhere (#2956 r9).
@@ -2260,7 +2262,10 @@ const TwilioService = {
     // notice; #2956 codex r5).
     const { filterRecipientsByOptin } = require("./recipient-optin");
     const unfilteredContacts = getAppointmentContacts(customer, prefs);
-    const contacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
+    const contacts = await require("./contact-notification-prefs").filterContactsByOwnPrefs(
+      await filterRecipientsByOptin(unfilteredContacts, customer.id), customer.id, "tech_arrived", { channel: "sms" },
+    );
     if (channel === "sms" && !contacts.length && !unfilteredContacts.length) {
       return { success: false, suppressed: true, reason: "no_contacts" };
     }

@@ -245,7 +245,9 @@ export function AuthProvider({ children }) {
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
       // Cancelled accounts never mount the bell, including on a fresh launch.
-      if (data?.cancelled === true) void clearNativeBadge();
+      // Neither does a contact session (GATE_CONTACT_LOGIN): the bell rows
+      // carry the holder's billing.
+      if (data?.cancelled === true || data?.actor?.kind === 'contact') void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
       const propertyReadSeq = ++propertyReadSeqRef.current;
@@ -277,8 +279,10 @@ export function AuthProvider({ children }) {
       }
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
-      // app only; no-op on web). See native/nativePush.js.
-      flushNativePushToken();
+      // app only; no-op on web). See native/nativePush.js. Never for a
+      // contact session: push rows are keyed by customer, so the device
+      // would receive the holder's billing pushes (the route 403s anyway).
+      if (data?.actor?.kind !== 'contact') flushNativePushToken();
     } catch (err) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
       // token that has since been replaced would clear the NEW session's
@@ -577,6 +581,9 @@ export function AuthProvider({ children }) {
       loading,
       error,
       isAuthenticated: !!customer,
+      // Contact session (GATE_CONTACT_LOGIN): an on-location contact signed
+      // in with their own number — the shell narrows to Visits + Documents.
+      isContact: customer?.actor?.kind === 'contact',
       sendCode,
       verifyCode,
       switchProperty,

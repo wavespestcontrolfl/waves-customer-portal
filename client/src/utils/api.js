@@ -640,6 +640,18 @@ export class ApiClient {
     return this.request('/notifications/property-preferences');
   }
 
+  // Contact session (GATE_CONTACT_LOGIN): the on-location contact's own choices.
+  getContactNotificationPrefs() {
+    return this.request('/notifications/contact-preferences');
+  }
+
+  updateContactNotificationPrefs(prefs) {
+    return this.request('/notifications/contact-preferences', {
+      method: 'PUT',
+      body: JSON.stringify(prefs),
+    });
+  }
+
   updatePropertyNotificationPrefs(customerId, prefs) {
     return this.request(`/notifications/property-preferences/${customerId}`, {
       method: 'PUT',

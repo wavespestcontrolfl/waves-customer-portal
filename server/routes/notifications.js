@@ -696,6 +696,149 @@ const PREF_KEY_TO_COLUMN = Object.fromEntries(
 );
 const PREF_COLUMN_TO_KEY = Object.fromEntries(Object.entries(PREF_KEY_TO_COLUMN).map(([key, col]) => [col, key]));
 
+// =========================================================================
+// Contact session (GATE_CONTACT_LOGIN): the on-location contact's OWN
+// notification choices — the six purposes the account texts contacts about,
+// each with a delivery choice, plus text / email master switches. Effective
+// values overlay the contact's row on the account's: a purpose the holder
+// turned off account-wide reads as off and LOCKED (the contact cannot turn it
+// back on — choices only narrow). Only a contact session reaches these; the
+// holder manages contacts through /property-preferences.
+// =========================================================================
+const CONTACT_PREF_KEY_BY_COLUMN = {
+  appointment_confirmation: 'appointmentConfirmation',
+  service_reminder_72h: 'serviceReminder72h',
+  service_reminder_24h: 'serviceReminder24h',
+  tech_en_route: 'techEnRoute',
+  tech_arrived: 'techArrived',
+  service_completed: 'serviceCompleted',
+};
+const CONTACT_CHANNEL_KEY_BY_COLUMN = {
+  appointment_confirmation_channel: 'appointmentConfirmationChannel',
+  service_reminder_72h_channel: 'serviceReminder72hChannel',
+  service_reminder_24h_channel: 'serviceReminder24hChannel',
+  en_route_channel: 'enRouteChannel',
+  tech_arrived_channel: 'techArrivedChannel',
+  service_complete_channel: 'serviceCompleteChannel',
+};
+const CONTACT_CHANNEL_VALUES = ['sms', 'email', 'both'];
+
+async function contactPreferencePayload(req) {
+  const ContactPrefs = require('../services/contact-notification-prefs');
+  const contact = req.contactSession;
+  const [accountRow, own, optin] = await Promise.all([
+    db('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null),
+    ContactPrefs.getContactPrefRow(req.customerId, contact.phone),
+    db('recipient_optin').where({ customer_id: req.customerId, phone_key: contact.phoneKey }).first('status').catch(() => null),
+  ]);
+  const account = accountRow || {};
+  const preferences = {};
+  const accountOff = {};
+  for (const [col, key] of Object.entries(CONTACT_PREF_KEY_BY_COLUMN)) {
+    const holderOff = account[col] === false;
+    accountOff[key] = holderOff;
+    preferences[key] = !holderOff && own?.[col] !== false;
+  }
+  for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) {
+    preferences[key] = CONTACT_CHANNEL_VALUES.includes(own?.[col]) ? own[col] : 'both';
+  }
+  preferences.smsEnabled = own?.sms_enabled !== false;
+  preferences.emailEnabled = own?.email_enabled !== false;
+  // The report rule (customer-contact.js slotWithheldFromReports) decides
+  // whether this contact ever gets the visit's findings; the card says so
+  // instead of offering a report toggle that would never fire.
+  const { withAccountPrimaryContact, slotWithheldFromReports } = require('../services/customer-contact');
+  const reportsWithheld = slotWithheldFromReports(await withAccountPrimaryContact(req.customer), contact);
+  return {
+    contact: { name: contact.name || '', phone: contact.phone, email: contact.email || '', slot: contact.slot },
+    preferences,
+    accountOff,
+    emailAvailable: !!contact.email,
+    reportsWithheld,
+    contactReportTexts: contactReportTextsOn(),
+    consentAttestedAt: own?.consent_attested_at || null,
+    smsOptin: optin?.status || 'none',
+    consentVersion: SERVICE_CONTACT_CONSENT_VERSION,
+  };
+}
+
+router.get('/contact-preferences', async (req, res, next) => {
+  try {
+    if (!req.contactSession) return res.status(403).json({ error: 'Contact sessions only', code: 'CONTACT_SESSION_ONLY' });
+    res.json(await contactPreferencePayload(req));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/contact-preferences', async (req, res, next) => {
+  try {
+    if (!req.contactSession) return res.status(403).json({ error: 'Contact sessions only', code: 'CONTACT_SESSION_ONLY' });
+    const contact = req.contactSession;
+    const schema = Joi.object({
+      ...Object.fromEntries(Object.values(CONTACT_PREF_KEY_BY_COLUMN).map((key) => [key, Joi.boolean()])),
+      ...Object.fromEntries(Object.values(CONTACT_CHANNEL_KEY_BY_COLUMN).map((key) => [key, Joi.string().valid(...CONTACT_CHANNEL_VALUES)])),
+      smsEnabled: Joi.boolean(),
+      emailEnabled: Joi.boolean(),
+      // The contact's own attestation that they agree to receive service
+      // texts at this number (SERVICE_CONTACT_CONSENT_VERSION). Owner ruling
+      // 2026-10-20: stands in for the YES reply on a pending or undelivered
+      // opt-in ask only — never over a STOP.
+      consentAttested: Joi.boolean(),
+    }).min(1);
+    const updates = await schema.validateAsync(req.body || {});
+    const patch = {};
+    for (const [col, key] of Object.entries(CONTACT_PREF_KEY_BY_COLUMN)) if (updates[key] !== undefined) patch[col] = updates[key];
+    for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) if (updates[key] !== undefined) patch[col] = updates[key];
+    if (updates.smsEnabled !== undefined) patch.sms_enabled = updates.smsEnabled;
+    if (updates.emailEnabled !== undefined) patch.email_enabled = updates.emailEnabled;
+    // An email choice needs an address on file for this contact — otherwise
+    // "email only" silently means nothing arrives.
+    if (!contact.email) {
+      for (const col of Object.keys(CONTACT_CHANNEL_KEY_BY_COLUMN)) {
+        if (patch[col] === 'email') return res.status(400).json({ error: 'Add an email address with the account holder before choosing email delivery.' });
+      }
+    }
+    // Turning texts on (any text-capable choice) requires the attestation
+    // when none is on file yet — the same consent rail as the holder's save.
+    const enablesTexts = updates.smsEnabled === true
+      || Object.values(CONTACT_PREF_KEY_BY_COLUMN).some((key) => updates[key] === true)
+      || Object.values(CONTACT_CHANNEL_KEY_BY_COLUMN).some((key) => ['sms', 'both'].includes(updates[key]));
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    const existing = await ContactPrefs.getContactPrefRow(req.customerId, contact.phone);
+    if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) {
+      return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });
+    }
+    if (updates.consentAttested === true) patch.consent_attested_at = new Date();
+
+    await withCustomerCommsLock(db, req.customerId, async (trx) => {
+      await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
+      if (updates.consentAttested !== true) return;
+      // The in-app attestation confirms THIS customer's pending or
+      // undelivered ask for this phone. ask_failed included (the ask never
+      // reached them, but they have now agreed in the app); declined (STOP)
+      // left alone — carrier START is the only way back. Lock order as
+      // markRecipientOptin: the customers rows first, in id order, then the
+      // opt-in rows (#5467).
+      const { onRecipientConfirmed } = require('../services/recipient-optin');
+      const customerIds = (await trx('recipient_optin').where({ phone_key: contact.phoneKey }).whereNotNull('customer_id').select('customer_id'))
+        .map((r) => r.customer_id).sort();
+      if (customerIds.length) await trx('customers').whereIn('id', customerIds).orderBy('id').forUpdate().select('id');
+      const confirmed = await trx('recipient_optin')
+        .where({ customer_id: req.customerId, phone_key: contact.phoneKey })
+        .whereIn('status', ['pending', 'ask_failed'])
+        .update({ status: 'confirmed', confirmed_at: new Date(), updated_at: new Date() })
+        .catch((err) => { if (err && err.code === '42P01') return 0; throw err; });
+      if (confirmed) await onRecipientConfirmed(contact.phoneKey, { dbh: trx });
+    });
+
+    logger.info(`Contact notification prefs updated for ${req.customerId} (slot ${contact.slot}): ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
+    res.json({ success: true, ...(await contactPreferencePayload(req)) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/property-preferences', async (req, res, next) => {
   try {
     // Shadow mode (GATE_APP_PROPERTY_TEXTS off): the sends still follow the
@@ -1042,6 +1185,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           ...consentUpdates,
           updated_at: new Date(),
         });
+        // A removed contact's own notification choices go with them
+        // (contact login, GATE_CONTACT_LOGIN).
+        await require('../services/contact-notification-prefs')
+          .pruneContactNotificationPrefs(trx, req.params.customerId, contacts.map((c) => c.phone));
       });
       savedContacts = contacts.map(serviceContactPayload);
       if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };

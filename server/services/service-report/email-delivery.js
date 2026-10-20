@@ -575,7 +575,16 @@ async function sendServiceReportV1Email(recordId, {
     // The account's role decides who may read the findings: retry, never guess.
     return { ok: false, transient: true, reason: 'account_role_unavailable', error: `Account role unavailable: ${err.message}` };
   }
-  const recipients = getServiceReportEmailRecipients(reportCustomer, prefs || {});
+  // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow the
+  // slot emails further; an unreadable choices table is the same transient
+  // non-decision as an unreadable prefs row (retry, never a terminal skip).
+  let recipients;
+  try {
+    recipients = await require('../contact-notification-prefs')
+      .filterReportEmailRecipientsByContactPrefs(getServiceReportEmailRecipients(reportCustomer, prefs || {}), reportCustomer);
+  } catch (err) {
+    return { ok: false, transient: true, reason: 'prefs_unavailable', error: `Contact notification choices unavailable: ${err.message}` };
+  }
   if (!recipients.length) {
     // A transient notification_prefs lookup failure (PREFS_UNAVAILABLE) is
     // not a decision at all — it must NOT be reported the same way as a

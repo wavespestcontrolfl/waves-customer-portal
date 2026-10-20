@@ -104,10 +104,71 @@ const CANCELLED_READ_ROUTES = [
   ['POST', '/api/customer/activity/heartbeat'],
 ];
 
-function cancelledReadRoute(req) {
+function routeListed(req, list) {
   const full = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '') || '/';
-  return CANCELLED_READ_ROUTES.some(([method, path]) => method === req.method
+  return list.some(([method, path]) => method === req.method
     && (path instanceof RegExp ? path.test(full) : path === full));
+}
+
+function cancelledReadRoute(req) {
+  return routeListed(req, CANCELLED_READ_ROUTES);
+}
+
+// Contact login (GATE_CONTACT_LOGIN): an on-location contact signed in with
+// their own number holds a CONTACT session on the account holder's row. The
+// ONLY routes it may reach — every one a read the Visits / Documents tabs
+// render from, plus the contact's own notification choices and the activity
+// beacons. Owner ruling 2026-10-20: view only — no confirm, no reschedule,
+// no requests. Nothing here reads billing, cards, credits, referrals, the
+// holder's preferences or contacts, or subscribes a device (push rows are
+// keyed by customer, so a contact device would get the holder's billing
+// pushes). Anything not listed answers 403 ACCOUNT_HOLDER_ONLY (not 401, so
+// the client never reads it as a dead session). Extend deliberately.
+const CONTACT_SESSION_ROUTES = [
+  ['GET', '/api/auth/me'],
+  ['GET', '/api/auth/properties'],
+  ['GET', '/api/schedule'],
+  ['GET', '/api/schedule/next'],
+  // NOT /account-next or /properties-next: those list the account's OTHER
+  // profiles and saved houses; a contact session lists one entry, so the
+  // client never asks.
+  ['GET', '/api/services'],
+  ['GET', '/api/services/stats/summary'],
+  ['GET', /^\/api\/services\/[^/]+$/],
+  // The documents handlers narrow a contact session to service reports and
+  // answer nothing at all for a contact the report rule withholds from.
+  ['GET', '/api/documents'],
+  ['GET', /^\/api\/documents\/service-report\/[^/]+$/],
+  ['GET', /^\/api\/documents\/[^/]+\/download$/],
+  ['GET', '/api/tracking/active'],
+  ['GET', '/api/tracking/today'],
+  ['GET', '/api/tracking/maps-key'],
+  ['GET', '/api/notifications/contact-preferences'],
+  ['PUT', '/api/notifications/contact-preferences'],
+  ['POST', '/api/customer/activity/page-view'],
+  ['POST', '/api/customer/activity/push-open'],
+  ['POST', '/api/customer/activity/heartbeat'],
+];
+
+function contactSessionRoute(req) {
+  return routeListed(req, CONTACT_SESSION_ROUTES);
+}
+
+function contactLoginLive() {
+  try {
+    return require('../config/feature-gates').contactLoginLive();
+  } catch {
+    return false;
+  }
+}
+
+// The contact slot a session claim names on this customer row, or null when
+// the claim no longer holds (gate off, contact removed or replaced, the
+// number now the holder's own). Pure apart from the gate read.
+function contactSessionFor(customer, contactKey) {
+  if (!contactKey || !contactLoginLive()) return null;
+  const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
+  return findServiceContactSlotByPhoneKey(customer, contactKey);
 }
 
 function refreshExpiryDate(token) {
@@ -136,8 +197,9 @@ async function insertRefreshRecord(
   jti = crypto.randomUUID(),
   parentJti = null,
   propertyId = null,
+  contactKey = null,
 ) {
-  const refreshToken = generateRefreshToken(customerId, accountId, { jti, familyId, propertyId });
+  const refreshToken = generateRefreshToken(customerId, accountId, { jti, familyId, propertyId, contactKey });
   const expiresAt = refreshExpiryDate(refreshToken);
   await executor(REFRESH_TABLE).insert({
     jti,
@@ -190,11 +252,11 @@ async function ensureSelfAccountRow(trx, customerId, accountId) {
 }
 
 /** Create a durable, revocable refresh-token family for a login session. */
-async function createRefreshSession(customerId, accountId = null) {
+async function createRefreshSession(customerId, accountId = null, { contactKey = null } = {}) {
   return db.transaction(async (trx) => {
     const resolvedAccountId = accountId || customerId;
     await ensureSelfAccountRow(trx, customerId, resolvedAccountId);
-    return insertRefreshRecord(trx, customerId, resolvedAccountId);
+    return insertRefreshRecord(trx, customerId, resolvedAccountId, undefined, undefined, null, null, contactKey);
   });
 }
 
@@ -235,6 +297,22 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     }
     if (options.expectedAccountId && String(accountId) !== String(options.expectedAccountId)) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+    }
+
+    // Contact session (GATE_CONTACT_LOGIN): the family stays bound to the
+    // phone it was minted for. It rotates only while the gate is on, the
+    // row is ACTIVE (no cancelled allowance: a churned account's contacts
+    // have nothing to see) and the number still occupies a contact slot —
+    // the holder removing the contact ends the session here. A profile
+    // switch is never a contact's to make.
+    const contactKey = decoded.contactKey || null;
+    if (contactKey) {
+      if (customer.active !== true || !contactSessionFor(customer, contactKey)) {
+        return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+      }
+      if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {
+        return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+      }
     }
 
     let nextCustomer = customer;
@@ -352,8 +430,9 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       nextJti,
       row.jti,
       nextPropertyId,
+      contactKey,
     );
-    return { ok: true, ...next, customer: nextCustomer, accountId, propertyId: nextPropertyId };
+    return { ok: true, ...next, customer: nextCustomer, accountId, propertyId: nextPropertyId, contactKey };
   });
 
   if (result.code === 'REFRESH_TOKEN_REUSED') {
@@ -521,6 +600,23 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
       return res.status(401).json({ error: 'Invalid token account' });
     }
 
+    // Contact session (GATE_CONTACT_LOGIN). Fail closed on every request:
+    // gate off, an inactive row (no cancelled allowance), or a number that
+    // no longer occupies a contact slot all end the session with a 401; a
+    // route outside CONTACT_SESSION_ROUTES answers 403 so the client keeps
+    // the session and simply never shows that surface.
+    req.contactSession = null;
+    if (decoded.contactKey) {
+      const contact = customer.active === true ? contactSessionFor(customer, decoded.contactKey) : null;
+      if (!contact) {
+        return res.status(401).json({ error: 'Customer not found or inactive' });
+      }
+      if (!contactSessionRoute(req)) {
+        return res.status(403).json({ error: 'This part of the portal is for the account holder.', code: 'ACCOUNT_HOLDER_ONLY' });
+      }
+      req.contactSession = contact;
+    }
+
     req.customer = customer;
     req.customerId = customer.id;
     // Anything other than active === true counts as inactive (the column is
@@ -591,7 +687,7 @@ function authenticateAllowInactive(req, res, next) {
 /**
  * Generate JWT for a customer
  */
-function generateToken(customerId, accountId = null, sessionId = null, { propertyId = null } = {}) {
+function generateToken(customerId, accountId = null, sessionId = null, { propertyId = null, contactKey = null } = {}) {
   return jwt.sign(
     {
       customerId,
@@ -599,6 +695,9 @@ function generateToken(customerId, accountId = null, sessionId = null, { propert
       sessionId: sessionId || undefined,
       // Selected saved property (customer_properties.id) — absent = primary.
       propertyId: propertyId || undefined,
+      // Contact session (GATE_CONTACT_LOGIN): the last-10 phone key of the
+      // on-location contact this session belongs to — absent = the holder.
+      contactKey: contactKey || undefined,
     },
     config.jwt.secret,
     // Customer access tokens are deliberately short-lived. Existing signed
@@ -619,6 +718,7 @@ function generateRefreshToken(customerId, accountId = null, options = {}) {
       jti,
       familyId,
       propertyId: options.propertyId || undefined,
+      contactKey: options.contactKey || undefined,
     },
     config.jwt.secret,
     { expiresIn: config.jwt.refreshExpiry }
@@ -645,6 +745,9 @@ async function resolveBearerCustomer(req) {
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
     if (decoded.type === 'refresh' || !decoded.customerId) return null;
+    // A contact session is never "the verified customer" for a public
+    // booking or confirm flow — only the holder books.
+    if (decoded.contactKey) return null;
     const customer = await db('customers')
       .where({ id: decoded.customerId, active: true })
       .whereNull('deleted_at')
@@ -673,5 +776,5 @@ module.exports = {
   revokeRefreshSession,
   rotateRefreshSession,
   verifyRefreshCredential,
-  _test: { CONCURRENT_ROTATION_GRACE_MS, CANCELLED_READ_ROUTES, cancelledReadRoute },
+  _test: { CONCURRENT_ROTATION_GRACE_MS, CANCELLED_READ_ROUTES, cancelledReadRoute, CONTACT_SESSION_ROUTES, contactSessionRoute },
 };

@@ -110,6 +110,50 @@ async function activeCustomerByPhone(phone) {
   return rows.find((row) => sessionCustomerAdmitted(row)) || null;
 }
 
+// Contact login (GATE_CONTACT_LOGIN): the ACTIVE customer row that lists this
+// number as an on-location contact. Strict active=true — no cancelled
+// allowance. When several rows list the same person, the primary profile
+// wins, then the oldest, deterministically (owner 2026-10-20: no chooser).
+// Consulted only after the holder lookup found nothing: a number that is
+// someone's own account always signs in as that account.
+async function contactCustomerByPhone(phone) {
+  const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
+  const last10 = normalizePhoneDigits(phone);
+  if (last10.length < 10) return null;
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .where({ active: true })
+    .where(function anySlot() {
+      for (const col of ['service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+        this.orWhereRaw(`regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') LIKE ?`, [`%${last10}`]);
+      }
+    })
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('created_at', 'asc')
+    .limit(10);
+  for (const row of rows) {
+    const contact = findServiceContactSlotByPhoneKey(row, last10);
+    if (contact) return { customer: row, contact };
+  }
+  return null;
+}
+
+// Who a phone number signs in as: { customer, contact } — contact null for
+// the account holder. Used by BOTH send-code and verify-code so a contact's
+// code is actually sent and then accepted.
+async function resolveLoginIdentity(phone) {
+  const holder = await activeCustomerByPhone(phone);
+  if (holder) return { customer: holder, contact: null };
+  if (!require('../config/feature-gates').contactLoginLive()) return null;
+  return contactCustomerByPhone(phone);
+}
+
+// What /auth/me and verify-code tell the client about WHO is signed in.
+function actorPayload(contact) {
+  if (!contact) return { kind: 'holder' };
+  return { kind: 'contact', slot: contact.slot, name: contact.name || '', phone: contact.phone, email: contact.email || '' };
+}
+
 function authCustomerPayload(customer) {
   return {
     id: customer.id,
@@ -327,7 +371,8 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
     }
 
     // Check customer exists — but DO NOT leak existence in the response.
-    const customer = await activeCustomerByPhone(phone);
+    const identity = await resolveLoginIdentity(phone);
+    const customer = identity?.customer || null;
 
     if (customer) {
       try {
@@ -378,24 +423,29 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     }
     if (reviewBypass) logger.info('[auth] review-login verify-code bypass used');
 
-    const customer = await activeCustomerByPhone(phone);
+    const identity = await resolveLoginIdentity(phone);
+    const customer = identity?.customer || null;
 
     if (!customer) {
       return res.status(401).json(invalidResponse);
     }
 
+    const contact = identity.contact || null;
+    const contactKey = contact ? contact.phoneKey : null;
     const accountId = accountIdForCustomer(customer);
-    const refreshSession = await createRefreshSession(customer.id, accountId);
-    const token = generateToken(customer.id, accountId, refreshSession.familyId);
+    const refreshSession = await createRefreshSession(customer.id, accountId, { contactKey });
+    const token = generateToken(customer.id, accountId, refreshSession.familyId, { contactKey });
     const refreshToken = refreshSession.refreshToken;
 
-    logger.info(`[auth] customer login success: id=${customer.id}`);
+    logger.info(`[auth] customer login success: id=${customer.id}${contact ? ` (contact slot ${contact.slot})` : ''}`);
 
     res.json({
       token,
       refreshToken,
       customer: authCustomerPayload(customer),
-      properties: await accountPropertiesForCustomer(customer),
+      actor: actorPayload(contact),
+      // A contact session lists only the row it belongs to (no switcher).
+      properties: contact ? [propertyPayload(customer)] : await accountPropertiesForCustomer(customer),
     });
   } catch (err) {
     next(err);
@@ -424,7 +474,10 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid refresh token', code });
     }
 
-    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId, { propertyId: rotated.propertyId || null });
+    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId, {
+      propertyId: rotated.propertyId || null,
+      contactKey: rotated.contactKey || null,
+    });
     res.json({ token: newToken, refreshToken: rotated.refreshToken });
   } catch (err) {
     // Every invalid-token case returns an explicit 401 above — anything
@@ -470,6 +523,39 @@ router.post('/logout', refreshLimiter, async (req, res, next) => {
 router.get('/me', authenticate, async (req, res, next) => {
   try {
   const customer = req.customer;
+  // Contact session (GATE_CONTACT_LOGIN): the contact's own identity on the
+  // property they are a contact for. No referral code, credits, prepay,
+  // rate, or the holder's own phone/email — nothing the Billing / Refer
+  // tabs would render — and no holder notification prefs (the contact's
+  // choices live on /notifications/contact-preferences).
+  if (req.contactSession) {
+    const contact = req.contactSession;
+    const [contactFirst, ...contactRest] = String(contact.name || '').trim().split(/\s+/).filter(Boolean);
+    return res.json({
+      id: customer.id,
+      accountId: customer.account_id,
+      profileLabel: customer.profile_label,
+      isPrimaryProfile: customer.is_primary_profile,
+      firstName: contactFirst || '',
+      lastName: contactRest.join(' '),
+      email: contact.email || '',
+      phone: contact.phone,
+      address: {
+        line1: customer.address_line1,
+        line2: customer.address_line2,
+        city: customer.city,
+        state: customer.state,
+        zip: customer.zip,
+      },
+      tier: customer.waveguard_tier,
+      memberSince: customer.member_since,
+      cancelled: false,
+      cancelledAt: null,
+      actor: actorPayload(contact),
+      notificationPrefs: null,
+      propertyScope: { enabled: false, propertyId: null, closed: false },
+    });
+  }
   const [prefs, annualPrepay, creditLedger] = await Promise.all([
     db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null),
     annualPrepayForCustomer(customer.id),
@@ -527,6 +613,7 @@ router.get('/me', authenticate, async (req, res, next) => {
     cancelledAt: req.customerInactive === true && customer.churned_at
       ? etCalendarDayOf(customer.churned_at)
       : null,
+    actor: actorPayload(null),
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,
@@ -578,6 +665,12 @@ router.put('/credit-preference', authenticate, async (req, res, next) => {
 // simply gets the profile list it already understands.
 router.get('/properties', authenticate, async (req, res, next) => {
   try {
+    // A contact session lists only the row it belongs to — no sibling
+    // profiles, no saved-property list (a switch mints credentials the
+    // contact may not hold).
+    if (req.contactSession) {
+      return res.json({ properties: [propertyPayload(req.customer)] });
+    }
     // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
     // customer-wide, /auth/me reports the scope disabled) — it keeps the
     // profile list so no saved-property label dresses customer-wide visits.

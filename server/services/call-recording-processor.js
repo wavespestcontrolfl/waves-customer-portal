@@ -22433,8 +22433,10 @@ const CallRecordingProcessor = {
                       }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
-                      const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
-                        getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
+                      // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
+                      const extraContacts = !v2SmsConsentExplicit ? [] : (await require('./contact-notification-prefs').filterContactsByOwnPrefs(
+                        await filterRecipientsByOptin(getAppointmentContacts(freshCustomer || {}, prefsRow), customerId),
+                        customerId, 'appointment_confirmation', { channel: 'sms' },
                       )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));

@@ -583,7 +583,8 @@ describe('the portal card mentions the report text under the gate, with the cond
   test('the server flag is the gate; the card says "when your own visit-complete texts are on"', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes/notifications.js'), 'utf8');
     expect(source).toMatch(/function contactReportTextsOn\(\) \{\s+return require\('\.\.\/config\/feature-gates'\)\.contactReportTextLive\(\);/);
-    expect(source.match(/contactReportTexts: contactReportTextsOn\(\),/g)).toHaveLength(2);
+    // Both holder payloads plus the contact's own card (contact login).
+    expect(source.match(/contactReportTexts: contactReportTextsOn\(\),/g)).toHaveLength(3);
     const card = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/pages/PortalPage.jsx'), 'utf8');
     expect(card).toMatch(/appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit/);
   });

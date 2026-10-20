@@ -4431,6 +4431,144 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   );
 }
 
+// Contact session (GATE_CONTACT_LOGIN): the on-location contact's OWN
+// notification choices (GET/PUT /notifications/contact-preferences) in place
+// of the holder's Reminder Settings + contacts cards. Choices only narrow: a
+// purpose the account holder turned off reads off and locked. Turning texts
+// on needs the contact's own consent statement once (the server refuses
+// otherwise); that attestation also stands in for the YES reply on a pending
+// opt-in text (owner 2026-10-20).
+const CONTACT_PREF_ROWS = [
+  { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'Appointment updates', desc: 'Bookings, changes and cancellations', icon: 'calendar' },
+  { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '3-day reminder', desc: 'A reminder three days before the visit', icon: 'clock' },
+  { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: 'Day-before reminder', desc: 'A reminder the day before the visit', icon: 'bell' },
+  { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'On the way', desc: 'Live technician tracking', icon: 'truck' },
+  { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Technician arrival', desc: 'An alert when the technician reaches the property', icon: 'door' },
+  { key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service reports', desc: 'The report after each completed visit', icon: 'document' },
+];
+const CONTACT_CHANNEL_OPTIONS = [
+  { value: 'both', label: 'Text & Email' },
+  { value: 'sms', label: 'Text' },
+  { value: 'email', label: 'Email' },
+];
+export function ContactNotificationCard({ customer, card, sectionTitle, muted, subtle }) {
+  const [data, setData] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [locked, setLocked] = useState({});
+  const [consentChecked, setConsentChecked] = useState(false);
+  const load = useCallback(() => api.getContactNotificationPrefs()
+    .then((d) => { setData(d); setFailed(false); })
+    .catch(() => setFailed(true)), []);
+  useEffect(() => { void load(); }, [load]);
+
+  const prefs = data?.preferences || {};
+  const accountOff = data?.accountOff || {};
+  const attested = !!data?.consentAttestedAt;
+  const phone = data?.contact?.phone || customer?.phone || '';
+  const rows = CONTACT_PREF_ROWS.filter((r) => r.key !== 'serviceCompleted' || !data?.reportsWithheld);
+  // Any change that can only mean "text me" needs the attestation on file.
+  const enablesTexts = (patch) => Object.entries(patch).some(([k, v]) => (k === 'smsEnabled' && v === true)
+    || (CONTACT_PREF_ROWS.some((r) => r.key === k) && v === true)
+    || (CONTACT_PREF_ROWS.some((r) => r.channelKey === k) && ['sms', 'both'].includes(v)));
+  const save = async (lockKey, patch) => {
+    if (locked[lockKey]) return;
+    const needsConsent = !attested && enablesTexts(patch);
+    if (needsConsent && !consentChecked) {
+      showCustomerAlert('Please confirm the text-message consent statement first.');
+      return;
+    }
+    setLocked((prev) => ({ ...prev, [lockKey]: true }));
+    const before = data;
+    setData((prev) => (prev ? { ...prev, preferences: { ...prev.preferences, ...patch } } : prev));
+    try {
+      const next = await api.updateContactNotificationPrefs(needsConsent ? { ...patch, consentAttested: true } : patch);
+      setData(next);
+    } catch (err) {
+      setData(before);
+      showCustomerAlert(err?.message || 'Could not update your notifications. Please try again.');
+      console.error(err);
+    } finally {
+      setLocked((prev) => ({ ...prev, [lockKey]: false }));
+    }
+  };
+
+  if (failed && !data) {
+    return (
+      <section data-glass="card" style={{ ...card, padding: 20 }}>
+        <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Your notifications</div>
+        <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
+          Your notification choices couldn&apos;t be loaded.
+          <button data-glass-accent="" type="button" onClick={load} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+        </div>
+      </section>
+    );
+  }
+  if (!data) return null;
+  const channelOptions = data.emailAvailable ? CONTACT_CHANNEL_OPTIONS : CONTACT_CHANNEL_OPTIONS.filter((o) => o.value !== 'email');
+  return (
+    <section data-glass="card" style={{ ...card, overflow: 'hidden' }} data-testid="contact-notification-card">
+      <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
+        <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Your notifications</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Updates for this property</div>
+        <p style={{ margin: '4px 0 0', fontSize: 16, lineHeight: 1.5, color: muted }}>
+          Choose which updates reach you{phone ? ` at ${phone}` : ''}. The account holder decides what this property sends; you can turn yours off or pick how they reach you.
+        </p>
+        {data.reportsWithheld && (
+          <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.5, color: muted }}>Service reports for this property go to the account holder.</p>
+        )}
+      </div>
+      <div style={{ padding: '4px 18px 12px' }}>
+        <div data-reminder-row="" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', padding: '12px 0', borderBottom: '1px solid #E7E2D7', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
+            <GlassTile name="smartphone" size={34} />
+            <NotificationLabelDisclosure label="Text messages" description="Off stops every text to your number; email updates are unaffected." />
+          </div>
+          <GoldSwitch on={prefs.smsEnabled !== false} disabled={!!locked.smsEnabled} onChange={() => save('smsEnabled', { smsEnabled: prefs.smsEnabled === false })} label="Text messages" />
+        </div>
+        {rows.map((p, i) => {
+          const holderOff = accountOff[p.key] === true;
+          const isOn = !holderOff && prefs[p.key] !== false;
+          return (
+            <div key={p.key} data-reminder-row="" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', padding: '12px 0', borderBottom: i < rows.length - 1 ? '1px solid #E7E2D7' : 'none', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
+                <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Icon name={p.icon} size={18} strokeWidth={1.75} />
+                </span>
+                <div style={{ minWidth: 0 }}>
+                  <NotificationLabelDisclosure label={p.label} description={p.desc} />
+                  {holderOff && (
+                    <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Turned off for this property by the account holder</div>
+                  )}
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 'auto', flex: '0 0 auto', justifyContent: 'flex-end' }}>
+                <CustomerSelect
+                  value={prefs[p.channelKey] || 'both'}
+                  onChange={(e) => save(p.channelKey, { [p.channelKey]: e.target.value })}
+                  disabled={holderOff || !isOn || !!locked[p.channelKey]}
+                  aria-label={`Delivery method for ${p.label}`}
+                >
+                  {channelOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </CustomerSelect>
+                <GoldSwitch on={isOn} disabled={holderOff || !!locked[p.key]} onChange={() => save(p.key, { [p.key]: !isOn })} label={p.label} />
+              </div>
+            </div>
+          );
+        })}
+        {!attested && (
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 0 4px', borderTop: '1px solid #E7E2D7', fontSize: 14, lineHeight: 1.5, color: B.glassNavy, cursor: 'pointer' }}>
+            <input type="checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} style={{ width: 20, height: 20, marginTop: 2, flexShrink: 0 }} />
+            <span>
+              I agree to receive service text messages from Waves Pest Control{phone ? ` at ${phone}` : ''} about this property. Message and data rates may apply. Reply STOP to opt out.
+              {data.smsOptin === 'pending' && ' We also sent you a text asking you to confirm; agreeing here confirms it.'}
+            </span>
+          </label>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, selectedProperty = null, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   // The entry this session is scoped to (saved-property key, else the profile
   // id). Falls back to the profile for callers that do not pass one.
@@ -4448,6 +4586,12 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // property-preference control writes through blocked routes, so those
   // sections are hidden rather than shown broken.
   const cancelledAccount = customer?.cancelled === true;
+  // Contact session (GATE_CONTACT_LOGIN): the schedule READS stay; Confirm,
+  // Reschedule and requests are the holder's (owner 2026-10-20: view only),
+  // and the holder's preference + contact cards are replaced by the
+  // contact's own notification card (ContactNotificationCard).
+  const contactSession = !cancelledAccount && customer?.actor?.kind === 'contact';
+  const readOnlyVisits = cancelledAccount || contactSession;
   const scheduleRead = usePortalRead('schedule', () => api.getSchedule(90));
   const { loading, error: loadError } = scheduleRead;
   // A read scoped to a different house than this tab shows is stale: re-read
@@ -4545,10 +4689,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Refresh visit data independently: a return to the app must never replace
   // unsaved service-contact edits or race an in-flight preference save.
   const loadSchedulePreferences = useCallback(() => Promise.all([
-    cancelledAccount
+    readOnlyVisits
       ? Promise.resolve({ data: null, failed: false })
       : api.getNotificationPrefs().then(data => ({ data, failed: false })).catch(() => ({ data: null, failed: true })),
-    cancelledAccount
+    readOnlyVisits
       ? Promise.resolve({ data: null, failed: false })
       : api.getPropertyNotificationPrefs().then(data => ({ data, failed: false })).catch(() => ({ data: null, failed: true })),
   ]).then(([prefsResult, propertyPrefsData]) => {
@@ -4556,7 +4700,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     setPrefs(prefsResult.data);
     setPropertyPrefsError(propertyPrefsData.failed);
     if (propertyPrefsData.data) setPropertyPrefs(propertyPrefsData.data.properties || []);
-  }), [cancelledAccount]);
+  }), [readOnlyVisits]);
   useEffect(() => { void loadSchedulePreferences(); }, [loadSchedulePreferences]);
 
   const handleToggle = async (key) => {
@@ -4904,7 +5048,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     // C4 (codex GH r4 P1): a cancelled session is read-only — confirming is
     // a write (its route is not widened for cancelled reads), so no button.
     // The Confirmed badge above still renders: it is pure status display.
-    if (cancelledAccount) return null;
+    // A contact session is view-only too (owner 2026-10-20).
+    if (readOnlyVisits) return null;
     const busy = !!confirmingIds[s.id];
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
@@ -5018,7 +5163,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               server-side too. The Confirmed badge (status display) stays. */}
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
-            {!cancelledAccount && (
+            {!readOnlyVisits && (
               <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
                 ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
                 fontSize: 14, position: 'relative',
@@ -5063,8 +5208,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             the date tile already says when). */}
         <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           {renderConfirmBtn(s, true)}
-          {/* C4: no Reschedule mutation control for a cancelled session. */}
-          {!cancelledAccount && (
+          {/* C4: no Reschedule mutation control for a cancelled or contact session. */}
+          {!readOnlyVisits && (
             <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
               ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
               fontSize: 14, position: 'relative',
@@ -5182,12 +5327,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <PortalStatePanel
           icon="leaf"
           eyebrow="Upcoming Visits"
-          title={cancelledAccount ? 'No visits scheduled' : 'No upcoming services scheduled'}
+          title={readOnlyVisits ? 'No visits scheduled' : 'No upcoming services scheduled'}
           message={cancelledAccount
             ? 'Your plan is cancelled, so no visits are scheduled. Your past service records remain available.'
-            : "Nothing is on your calendar yet. Request a visit and we'll get you scheduled."}
-          actionLabel={cancelledAccount ? undefined : 'Request a Visit'}
-          onAction={cancelledAccount ? undefined : onRequestVisit}
+            : contactSession
+              ? 'Nothing is on the calendar for this property yet. You will see upcoming visits here as they are booked.'
+              : "Nothing is on your calendar yet. Request a visit and we'll get you scheduled."}
+          actionLabel={readOnlyVisits ? undefined : 'Request a Visit'}
+          onAction={readOnlyVisits ? undefined : onRequestVisit}
           actionStyle={primaryButton}
         />
       )}
@@ -5262,7 +5409,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       {/* Notification Preferences — when the prefs request failed, say so
           with a retry instead of silently omitting the section (the schedule
           above stays fully usable). */}
-      {prefsError && !prefs && !cancelledAccount && (
+      {contactSession && <ContactNotificationCard customer={customer} card={card} sectionTitle={sectionTitle} muted={muted} subtle={subtle} />}
+
+      {prefsError && !prefs && !readOnlyVisits && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
@@ -5271,7 +5420,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           </div>
         </section>
       )}
-      {prefs && !cancelledAccount && (
+      {prefs && !readOnlyVisits && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
@@ -5436,7 +5585,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         </section>
       )}
 
-      {propertyPrefs.length > 0 && !cancelledAccount && (
+      {propertyPrefs.length > 0 && !readOnlyVisits && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             {(propertyPrefs.length > 1 || perPropertyTexts) ? (
@@ -13768,8 +13917,13 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
 }
 
 function DocumentsTab({ customer, onSwitchTab }) {
-  const termiteBondsRead = usePortalRead('termite-bonds', () => api.getTermiteBond()
-    .then(d => d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null));
+  // Contact session (GATE_CONTACT_LOGIN): the server lists service reports
+  // only. The termite-bond read and every share action are the holder's
+  // (their routes answer 403), so neither is attempted or offered.
+  const contactSession = customer?.actor?.kind === 'contact';
+  const termiteBondsRead = usePortalRead('termite-bonds', () => (contactSession
+    ? Promise.resolve(null)
+    : api.getTermiteBond().then(d => d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null)));
   const termiteBonds = termiteBondsRead.verified ? termiteBondsRead.data : null;
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -14555,6 +14709,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               // — not a cancelled read, so the button would only 401. Docs
               // with their own view URL share without the API and stay.
               const canShare = doc.shareable !== false
+                && !contactSession
                 && !(customer?.cancelled === true && !doc.viewUrl && !doc.isProjectReport);
               const canDownload = !!(canOpen || doc.downloadUrl || (doc.isAutoGenerated && doc.linkedServiceRecordId));
               const meta = [
@@ -15928,6 +16083,11 @@ const MORE_TABS = [
 // state + restart), visit history, billing (pay what is owed), documents.
 // Everything else needs an active plan and its reads are not widened.
 const CANCELLED_TABS = ['plan', 'visits', 'billing', 'documents'];
+// Contact session (GATE_CONTACT_LOGIN): an on-location contact signed in with
+// their own number sees the schedule, visit history, tracking and service
+// reports — nothing billing, plan, referral or property related (those routes
+// answer 403 ACCOUNT_HOLDER_ONLY). Visits is home.
+const CONTACT_TABS = ['visits', 'documents'];
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
 function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
@@ -16695,6 +16855,16 @@ export default function PortalPage() {
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
   // cancelled banner, and hides every action that creates work.
   const cancelledAccount = customer?.cancelled === true;
+  // Contact session (GATE_CONTACT_LOGIN): /auth/me reports actor.kind
+  // 'contact' — the shell narrows to CONTACT_TABS and hides every action
+  // that creates work or reads the holder's billing (same mechanics as the
+  // cancelled narrowing; the cancelled branch wins when both apply).
+  const contactSession = !cancelledAccount && customer?.actor?.kind === 'contact';
+  // The tabs this session may mount (null = every tab) and where a blocked
+  // deep link lands.
+  const allowedTabs = cancelledAccount ? CANCELLED_TABS : contactSession ? CONTACT_TABS : null;
+  const homeTab = cancelledAccount ? 'plan' : 'visits';
+  const tabBlocked = (tab) => !!allowedTabs && !allowedTabs.includes(tab);
   // Rollback applies to this mounted session, including tab/property navigation.
   const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') !== '0');
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
@@ -16723,7 +16893,7 @@ export default function PortalPage() {
   // 401 and churn the refresh token before the redirect effect runs. Clamp
   // synchronously; the effect below still handles later customer changes.
   const [activeTab, setActiveTab] = useState(
-    cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
+    tabBlocked(initialTab) ? homeTab : initialTab,
   );
   // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
   usePortalActivity(activeTab, `${customer?.id ?? ''}:${sessionEpoch}`);
@@ -16745,7 +16915,7 @@ export default function PortalPage() {
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
-  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest && !cancelledAccount);
+  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest && !cancelledAccount && !contactSession);
   // Tab navigation writes the URL and back/forward adopts it, so a refresh
   // returns to the same tab (the deep-link parser above already reads
   // ?tab=) and the browser Back button walks portal tabs instead of
@@ -16795,11 +16965,11 @@ export default function PortalPage() {
     // this a disallowed deep link (?tab=property, ?tab=refer) mounts the
     // blocked tab and fires its 401'ing reads before the redirect effect
     // catches up (codex GH r8 P2).
-    if (cancelledAccount && !CANCELLED_TABS.includes(urlTab)) urlTab = 'plan';
+    if (tabBlocked(urlTab)) urlTab = homeTab;
     const svc = params.get('service');
     setPlanFocusService(urlTab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null);
     setActiveTab(prev => (prev === urlTab ? prev : urlTab));
-  }, [location.search, cancelledAccount]);
+  }, [location.search, cancelledAccount, contactSession]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
@@ -16824,18 +16994,17 @@ export default function PortalPage() {
     const target = SERVICE_CATALOG.some(s => s.id === svcId) ? `/?tab=plan&service=${svcId}` : '/?tab=plan';
     if (window.location.pathname + window.location.search !== target) navigate(target);
   };
-  const cancelledPrimaryTabs = PRIMARY_TABS.filter(t => CANCELLED_TABS.includes(t.id));
-  const cancelledMoreTabs = MORE_TABS.filter(t => CANCELLED_TABS.includes(t.id));
-  const headerNavItems = cancelledAccount
-    ? [...cancelledPrimaryTabs, ...cancelledMoreTabs]
-    : [...PRIMARY_TABS, ...MORE_TABS];
-  // A cancelled account never lands on a tab it cannot read — Home (and any
-  // deep link outside CANCELLED_TABS) redirects to the cancelled plan page.
+  // The narrowed nav for a cancelled or contact session; the full nav otherwise.
+  const narrowedPrimaryTabs = allowedTabs ? PRIMARY_TABS.filter(t => allowedTabs.includes(t.id)) : PRIMARY_TABS;
+  const narrowedMoreTabs = allowedTabs ? MORE_TABS.filter(t => allowedTabs.includes(t.id)) : MORE_TABS;
+  const headerNavItems = [...narrowedPrimaryTabs, ...narrowedMoreTabs];
+  // A narrowed session never lands on a tab it cannot read — Home (and any
+  // deep link outside its tabs) redirects to its home tab.
   useEffect(() => {
-    if (!cancelledAccount || CANCELLED_TABS.includes(activeTab)) return;
-    setActiveTab('plan');
-    syncTabUrl('plan');
-  }, [cancelledAccount, activeTab]);
+    if (!tabBlocked(activeTab)) return;
+    setActiveTab(homeTab);
+    syncTabUrl(homeTab);
+  }, [cancelledAccount, contactSession, activeTab]);
   const headerNavButton = (tab) => {
     const isActive = activeTab === tab.id;
     return (
@@ -16878,10 +17047,10 @@ export default function PortalPage() {
   // the feature is live (404 hides both). reportIssuePrefill carries the
   // category/location/note/photos a "Request service" next-step hands to
   // the New Request form.
-  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount);
+  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount && !contactSession);
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
-  const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount;
+  const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
   // property/account switch (sessionEpoch — another tab, or this one) does
   // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
@@ -17042,7 +17211,7 @@ export default function PortalPage() {
   const activePropertyAddress = activeProperty
     ? formatPropertyAddress(activeProperty)
     : (propertyUnavailable || (selectedProperty && activePropertyId !== customer.id) ? '' : formatPropertyAddress(customer));
-  const accountMenuItems = (cancelledAccount ? (items) => items.filter(i => CANCELLED_TABS.includes(i.tab)) : (items) => items)([
+  const accountMenuItems = (allowedTabs ? (items) => items.filter(i => allowedTabs.includes(i.tab)) : (items) => items)([
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
     { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
     { icon: 'calendar', label: 'Visits', sub: 'Upcoming and completed service', tab: 'visits', action: () => switchTab('visits') },
@@ -17055,9 +17224,9 @@ export default function PortalPage() {
   const accountSupportActions = [
     { icon: 'phone', label: 'Call', href: 'tel:+19412975749' },
     { icon: 'chat', label: 'Text', href: 'sms:+19412975749' },
-    // Request + Chat need an active plan (C4): a cancelled account keeps
-    // Call / Text only.
-    ...(cancelledAccount ? [] : [
+    // Request + Chat need an active plan (C4) and the account holder: a
+    // cancelled account or a contact session keeps Call / Text only.
+    ...(cancelledAccount || contactSession ? [] : [
       { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
       { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
     ]),
@@ -17130,7 +17299,7 @@ export default function PortalPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexShrink: 0 }}>
           {/* The header Request button creates work — hidden for a cancelled
               account (C4), which keeps Call / Text in the account menu. */}
-          {!isMobileShell && !cancelledAccount && (
+          {!isMobileShell && !cancelledAccount && !contactSession && (
             <button
               type="button"
               onClick={() => setShowReportIssue(true)}
@@ -17160,7 +17329,7 @@ export default function PortalPage() {
           {/* The bell polls /customer-notifications/unread-count every 30s —
               not a cancelled read, so mounting it for a cancelled session
               would burn the refresh-token allowance on guaranteed 401s. */}
-          {!cancelledAccount && <NotificationBell type="customer" />}
+          {!cancelledAccount && !contactSession && <NotificationBell type="customer" />}
           <div ref={menuRef} style={{ position: 'relative' }}>
             <button
               type="button"
@@ -17499,7 +17668,9 @@ export default function PortalPage() {
                     </span>
                     <span style={{ fontSize: 14, fontWeight: 700 }}>Sign Out</span>
                   </button>
-                  <button
+                  {/* Account deletion is the holder's (a contact session's
+                      DELETE /auth/account answers 403). */}
+                  {!contactSession && <button
                     type="button"
                     onClick={async () => {
                       setShowMenu(false);
@@ -17544,7 +17715,7 @@ export default function PortalPage() {
                       <Icon name="warning" size={16} strokeWidth={2} />
                     </span>
                     <span style={{ fontSize: 14, fontWeight: 700 }}>Delete Account</span>
-                  </button>
+                  </button>}
                 </div>
               </div>
             )}
@@ -17600,7 +17771,7 @@ export default function PortalPage() {
           </nav>
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
-          onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
+          onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
@@ -17609,7 +17780,7 @@ export default function PortalPage() {
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
-        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
+        }} onRequestVisit={cancelledAccount || contactSession ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
@@ -17631,8 +17802,8 @@ export default function PortalPage() {
           onOpenMore={() => setShowMoreSheet(true)}
           moreActive={showMoreSheet}
           moreButtonRef={moreButtonRef}
-          tabs={cancelledAccount ? cancelledPrimaryTabs : PRIMARY_TABS}
-          moreTabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
+          tabs={narrowedPrimaryTabs}
+          moreTabs={narrowedMoreTabs}
         />
       )}
       {isMobileShell && showMoreSheet && (
@@ -17640,10 +17811,10 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
-          onRequest={cancelledAccount ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowReportIssue(true); }}
-          onChat={cancelledAccount ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowChat(true); }}
+          onRequest={cancelledAccount || contactSession ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowReportIssue(true); }}
+          onChat={cancelledAccount || contactSession ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowChat(true); }}
           onOpenPhotoId={photoIdAvailable ? () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowMoreSheet(false); } : null}
-          tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
+          tabs={narrowedMoreTabs}
         />
       )}
 

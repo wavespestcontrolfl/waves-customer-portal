@@ -128,7 +128,7 @@ async function loadCustomer(customerId) {
 // failed property read under enforcement reads as prefs-unavailable.
 const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
 
-async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
+async function resolveRecipients(customer, { scheduledServiceId = null, eventType = null } = {}) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
   // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
@@ -178,10 +178,31 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   // mislabels the email (phone-only buyer/tenant slots made this common).
   const primary = getPrimaryContact(customer);
   const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
+  // The contact's OWN choices (contact login, GATE_CONTACT_LOGIN): a slot
+  // whose phone declined this purpose by email is left out of BOTH loops
+  // below. Same fail-closed posture as an unreadable prefs row: hold.
+  const ContactPrefs = require('./contact-notification-prefs');
+  const emailColumn = ContactPrefs.columnForEmailEvent(eventType);
+  let declinedSlotRoles = new Set();
+  if (ContactPrefs.contactPrefsLive()) {
+    let rows;
+    try {
+      rows = await ContactPrefs.loadContactPrefRows(customer.id);
+    } catch (err) {
+      const held = new Error(`contact notification choices unreadable for customer ${customer.id}: ${err.message}`);
+      held.code = PROPERTY_PREFS_UNAVAILABLE;
+      throw held;
+    }
+    const keyOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    declinedSlotRoles = new Set(getServiceContactSlots(customer)
+      .filter((s) => s.phone && rows.has(keyOf(s.phone)) && !ContactPrefs.contactAllows(rows.get(keyOf(s.phone)), emailColumn, 'email'))
+      .map((s) => s.role));
+  }
   // skipConsentGate: the consent artifact attests to receiving TEXTS; email
   // routing follows notification prefs alone (see the recipient spec in
   // tests/appointment-email-recipients.test.js).
   for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
+    if (declinedSlotRoles.has(c.role)) continue;
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
     if (ownEmail) add(ownEmail, c.name);
     else add(primary.email, primary.name);
@@ -189,7 +210,10 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
-  for (const slot of getServiceContactSlots(customer)) add(slot.email, slot.name);
+  for (const slot of getServiceContactSlots(customer)) {
+    if (declinedSlotRoles.has(slot.role)) continue;
+    add(slot.email, slot.name);
+  }
   // Last resort: the primary customer email (e.g. email-only customer with no
   // appointment phone contacts at all).
   if (!recipients.length) {
@@ -296,7 +320,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
 
   let recipients;
   try {
-    recipients = await resolveRecipients(customer, { scheduledServiceId });
+    recipients = await resolveRecipients(customer, { scheduledServiceId, eventType });
   } catch (err) {
     if (err?.code !== PROPERTY_PREFS_UNAVAILABLE) throw err;
     // Held, not skipped: the next scan re-resolves — and like the reminders'

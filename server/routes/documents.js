@@ -572,10 +572,30 @@ async function redirectToStoredDocument(doc, res) {
 }
 
 // =========================================================================
+// Contact session (GATE_CONTACT_LOGIN): the report rule for on-location
+// contacts (customer-contact.js slotWithheldFromReports — a tenant, or an
+// occupant on a property-manager account) also decides what the contact's
+// OWN session may read. Fail closed: a secondary profile whose account role
+// cannot be read counts as managed, so the contact sees nothing.
+async function contactReportsWithheld(req) {
+  if (!req.contactSession) return false;
+  const { withAccountPrimaryContact, slotWithheldFromReports } = require('../services/customer-contact');
+  const row = await withAccountPrimaryContact(req.customer);
+  return slotWithheldFromReports(row, req.contactSession);
+}
+
+// =========================================================================
 // GET /api/documents — all documents for authenticated customer
 // =========================================================================
 router.get('/', authenticate, async (req, res, next) => {
   try {
+    // A contact session lists SERVICE REPORTS only — no stored documents
+    // (agreements, invoices), no inspection or compliance reports — and
+    // nothing at all when the report rule withholds from this contact.
+    const contactOnly = !!req.contactSession;
+    if (contactOnly && await contactReportsWithheld(req)) {
+      return res.json({ documents: {}, total: 0 });
+    }
     // Pagination — caps total result size to prevent runaway payloads for
     // long-tenured customers with years of service history.
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
@@ -841,8 +861,12 @@ router.get('/', authenticate, async (req, res, next) => {
     }
     const [{ count: serviceReportCount }] = await serviceCountQuery.count('id as count');
 
-    const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs];
-    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length;
+    const allDocs = contactOnly
+      ? [...autoGenDocs, ...projectDocs.filter((d) => d.documentType === 'service_report')]
+      : [...formattedDocs, ...autoGenDocs, ...projectDocs];
+    const totalOnFile = contactOnly
+      ? parseInt(serviceReportCount, 10) + projectDocs.filter((d) => d.documentType === 'service_report').length
+      : parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length;
     const grouped = {};
     for (const d of allDocs) {
       if (!grouped[d.documentType]) grouped[d.documentType] = [];
@@ -860,6 +884,8 @@ router.get('/', authenticate, async (req, res, next) => {
 // =========================================================================
 router.get('/service-report/:serviceRecordId', authenticate, async (req, res, next) => {
   try {
+    // 404 (not 403) for a withheld contact so the record isn't signposted.
+    if (await contactReportsWithheld(req)) return res.status(404).json({ error: 'Service record not found' });
     const service = await db('service_records')
       .where({ 'service_records.id': req.params.serviceRecordId, 'service_records.customer_id': req.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
@@ -941,6 +967,8 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
 // =========================================================================
 router.get('/:id/download', authenticate, async (req, res, next) => {
   try {
+    // Stored documents (agreements, invoices) are never a contact's to read.
+    if (req.contactSession) return res.status(404).json({ error: 'Document not found' });
     const doc = await db('customer_documents')
       .where({ id: req.params.id, customer_id: req.customerId })
       .first();

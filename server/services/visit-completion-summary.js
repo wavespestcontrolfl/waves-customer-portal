@@ -28,6 +28,15 @@ async function summarySmsRecipient(customer, opts) {
     .some((slot) => slot.phone && key(slot.phone) === key(recipient.phone) && slotWithheldFromReports(customer, slot))) {
     return { ...primary, role: 'primary' };
   }
+  // The contact's own choice (contact login, GATE_CONTACT_LOGIN): a slot-1
+  // contact who turned service reports off is skipped for the holder.
+  if (recipient?.role === 'service_contact') {
+    const ContactPrefs = require('./contact-notification-prefs');
+    if (ContactPrefs.contactPrefsLive()
+      && !ContactPrefs.contactAllows(await ContactPrefs.getContactPrefRow(customer.id, recipient.phone, opts), 'service_completed', 'sms')) {
+      return { ...primary, role: 'primary' };
+    }
+  }
   return recipient;
 }
 const { invoiceAmountDue, isInvoiceCollectibleStatus, isQueueSendClaimToken, SUMMARY_TEXT_PLANNED_ERROR } = require('./invoice-helpers');
@@ -735,9 +744,11 @@ async function summaryEmailSuppressed(email, database = db) {
 
 // The customer's Email Messages kill switch and the Service Complete Report
 // toggle both apply; the SMS leg honors the latter through the sender policy.
-function summaryEmailRecipients(customer, prefs) {
+async function summaryEmailRecipients(customer, prefs) {
   if (prefs?.email_enabled === false || prefs?.service_completed === false) return [];
-  return getServiceReportEmailRecipients(customer, prefs);
+  // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
+  return require('./contact-notification-prefs')
+    .filterReportEmailRecipientsByContactPrefs(getServiceReportEmailRecipients(customer, prefs), customer);
 }
 
 // One recipient's dispatch through the library and the locked handoff.
@@ -820,7 +831,7 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
   if (abandoned) await abandoned();
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
-  const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
+  const recipients = visible ? await summaryEmailRecipients(customer, prefs) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
     const { messages } = await summaryEmailEvidence(scope, database);
@@ -944,7 +955,7 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
   if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
-  const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
+  const current = (await summaryEmailRecipients(customer, prefs)).some((recipient) => recipient.email.toLowerCase() === email);
   if (!current) return { ok: false, reason: 'visit_summary_recipient_changed' };
   if (await summaryEmailSuppressed(String(destination || email).trim().toLowerCase(), database)) {
     return { ok: false, reason: 'visit_summary_recipient_suppressed' };

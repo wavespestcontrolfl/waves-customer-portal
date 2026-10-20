@@ -449,6 +449,31 @@ async function withAccountPrimaryContact(row, opts = {}) {
   return withAccountPrimaryFallback(row, primary);
 }
 
+// Last-10-digit key of a phone ('' when none) — the identity recipient_optin
+// and the contact-login session claim both use.
+function phoneKeyOf(value) {
+  return clean(value).replace(/\D/g, '').slice(-10);
+}
+
+// The on-location contact slot a phone key occupies on this customer row
+// (contact login, GATE_CONTACT_LOGIN): the FIRST slot whose phone matches,
+// never a slot whose phone is the account holder's own number (that person
+// signs in as the holder). Null when the key is not a contact here.
+// `slot` is 1-based (the column family), `role` the slot's sender label.
+function findServiceContactSlotByPhoneKey(customer, phoneKey) {
+  const key = phoneKeyOf(phoneKey);
+  if (!customer || !key || key.length < 10) return null;
+  if (phoneKeyOf(customer.phone) === key) return null;
+  const slots = getServiceContactSlots(customer);
+  for (let i = 0; i < slots.length; i += 1) {
+    const slot = slots[i];
+    if (slot.phone && phoneKeyOf(slot.phone) === key) {
+      return { slot: i + 1, name: slot.name, phone: slot.phone, email: slot.email, role: slot.role, contactRole: slot.contactRole, phoneKey: key };
+    }
+  }
+  return null;
+}
+
 // True if this customer has a distinct service contact configured (any slot).
 // Used by audit tools + the admin UI to surface a "Service contact: …" chip.
 function hasDistinctServiceContact(customer) {
@@ -474,6 +499,8 @@ module.exports = {
   getServiceContact,
   getServiceContactSmsRecipient,
   getServiceContactSlots,
+  findServiceContactSlotByPhoneKey,
+  phoneKeyOf,
   isServiceContactRole,
   slotWithheldFromReports,
   withAccountPrimaryContactStrict,
