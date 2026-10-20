@@ -6,8 +6,15 @@ const backfill = require('../../scripts/backfill-call-commitments');
 
 describe('backfill-call-commitments', () => {
   test('parseArgs: dry run by default, --apply opts in, limit defaults to 100', () => {
-    expect(backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18'])).toEqual({ from: '2026-10-15', to: '2026-10-18', apply: false, limit: 100 });
+    expect(backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18'])).toEqual({ from: '2026-10-15', to: '2026-10-18', apply: false, limit: 100, offset: 0 });
     expect(backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18', '--apply', '--limit', '5'])).toMatchObject({ apply: true, limit: 5 });
+  });
+
+  test('parseArgs: --offset pages a large range; it must be a whole number (Codex #6346 r5)', () => {
+    expect(backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18', '--offset', '100'])).toMatchObject({ offset: 100 });
+    expect(() => backfill.parseArgs(['--from', '2026-10-15', '--to', '2026-10-18', '--offset', '-1'])).toThrow(/whole number/);
+    const sql = backfill.candidateQuery(require('knex')({ client: 'pg' }), { start: new Date(), end: new Date(), limit: 5, offset: 10 }).toString();
+    expect(sql).toMatch(/order by "c"\."created_at" asc, "c"\."id" asc limit 5 offset 10/);
   });
 
   test('parseArgs: a supplied --limit must be a positive whole number (Codex #6346 r2)', () => {

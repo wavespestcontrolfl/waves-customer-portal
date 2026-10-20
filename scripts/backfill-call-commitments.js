@@ -13,6 +13,7 @@
  *   node scripts/backfill-call-commitments.js --from 2026-10-15 --to 2026-10-18 --apply
  *       Runs the pipeline's own commitments step for each call, one at a time.
  *   --limit N   cap candidate calls (default 100, either mode)
+ *   --offset N  skip the first N candidates (ordered by call time, then id) to page a large range
  *
  * --from / --to are inclusive ET calendar dates (YYYY-MM-DD).
  *
@@ -69,11 +70,15 @@ function parseArgs(argv) {
   // whole positive integer, so a typo never widens a paid replay (Codex #6346 r2).
   const raw = argv.includes('--limit') ? String(val('--limit') ?? '') : null;
   if (raw !== null && !/^[1-9]\d*$/.test(raw)) throw new Error('--limit must be a positive whole number');
+  // --offset pages through a range larger than --limit (Codex #6346 r5).
+  const rawOffset = argv.includes('--offset') ? String(val('--offset') ?? '') : '0';
+  if (!/^(0|[1-9]\d*)$/.test(rawOffset)) throw new Error('--offset must be a whole number');
   return {
     from: val('--from'),
     to: val('--to'),
     apply: argv.includes('--apply'),
     limit: raw === null ? DEFAULT_LIMIT : Number(raw),
+    offset: Number(rawOffset),
   };
 }
 
@@ -100,7 +105,7 @@ function etRange(from, to) {
 // Read-only. Same exclusions the pipeline uses for "a live two-way call":
 // voicemail by call_outcome / answered_by / processing_status, spam by
 // processing_status, the relay sandbox source, and a held processing claim.
-function candidateQuery(dbh, { start, end, limit }) {
+function candidateQuery(dbh, { start, end, limit, offset = 0 }) {
   const { whereNotSandboxCall } = require('../server/services/voice-agent/relay-protocol');
   return dbh('call_log as c')
     .modify((q) => whereNotSandboxCall(q, 'c.source'))
@@ -113,6 +118,8 @@ function candidateQuery(dbh, { start, end, limit }) {
     .whereRaw("COALESCE(c.ai_extraction_enriched ->> 'call_nature', '') <> 'voicemail_message'")
     .whereRaw('LENGTH(COALESCE(c.transcription, \'\')) >= ?', [MIN_TRANSCRIPT_CHARS])
     .orderBy('c.created_at', 'asc')
+    .orderBy('c.id', 'asc')
+    .offset(offset)
     .limit(limit)
     .select('c.id', 'c.created_at');
 }
@@ -150,17 +157,24 @@ async function runPipelineStep(dbh, id, { recordCommitmentsStep = require('../se
   return { ran: true, rows: Number(rows?.n || 0), omittedLinkPromises: summary.omittedLinkPromises || 0 };
 }
 
-async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = console.log, find = findCandidates, step = runPipelineStep, gateLive = null } = {}) {
+// The run's header: what it covers, and where the next page starts (a full
+// page may have more behind it).
+function logPage(log, { apply, count, from, to, offset, limit }) {
+  log(`${apply ? 'APPLY' : 'DRY RUN (no writes)'}: ${count} candidate call(s), ET ${from} to ${to}, offset ${offset}, limit ${limit}`);
+  log(`  next page: --offset ${offset + count} (${count < limit ? 'this was the last page' : 'run again to continue'})`);
+}
+
+async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, offset = 0, log = console.log, find = findCandidates, step = runPipelineStep, gateLive = null } = {}) {
   const { start, end } = etRange(from, to);
   const totals = { candidates: 0, ran: 0, withRows: 0, noRows: 0, skipped: 0, failed: 0 };
   let candidates;
   // Dry run (and the candidate read of an apply) is one READ ONLY transaction.
   await dbh.transaction(async (trx) => {
     await trx.raw('SET TRANSACTION READ ONLY');
-    candidates = await find(trx, { start, end, limit });
+    candidates = await find(trx, { start, end, limit, offset });
   });
   totals.candidates = candidates.length;
-  log(`${apply ? 'APPLY' : 'DRY RUN (no writes)'}: ${candidates.length} candidate call(s), ET ${from} to ${to}, limit ${limit}`);
+  logPage(log, { apply, count: candidates.length, from, to, offset, limit });
 
   if (!apply) {
     for (const c of candidates) log(`  would run  ${id8(c.id)}  ${etDateString(new Date(c.created_at))}`);
