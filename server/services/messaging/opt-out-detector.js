@@ -40,29 +40,25 @@ const OPT_OUT_PATTERNS = [
 // A bare "no text(s)" / "no messages" stays a stop request almost everywhere ("No texts please",
 // "Can I get no texts from you?", "No texts, only calls?"). It is NOT one only when the sentence
 // reports, in the past tense, a text that never came, as a complaint did on 2026-10-19 ("I got the
-// confirmation but no text that day" unsubscribed the customer twice). A request is never a past
-// report, so only past-tense evidence counts:
-//   - a past receiving or reporting word just before it ("got no text", "there was no message",
-//     "there's been no text", "have had no texts"); a bare "been" is not one ("My preference has
-//     been no texts" is a request);
-//   - an arrival verb just after it ("no text came", "no text messages arrived"); a time word or
-//     "were sent" is not evidence ("I said no texts yesterday", "I asked that no messages were
-//     sent to me" are requests);
+// confirmation but no text that day" unsubscribed the customer twice). The evidence:
+//   - a receiving or reporting word just before it ("got no text", "there was no message",
+//     "there's been no text", "have had no texts"; a bare "been" or "was" is not one);
+//   - an arrival verb just after it ("no text came", "no text messages arrived"; a time word or
+//     "were sent" is not one);
 //   - "that day" just after it, with a receiving verb (got, received, saw, heard) earlier in the
-//     same clause ("I had said no texts that day" is a request).
-// None of these counts after a conditional or request word earlier in the sentence ("if",
-// "unless", "rather", "wish", "prefer", "want", "need", "ask", "request", "like"): "I would prefer
-// it if I received no texts" and "I got your confirmation, but I want no texts that day" are
-// requests. A strong request word anywhere in the
-// sentence ("please", "anymore", "from now on") keeps it a stop request. Sentences end at . ! ? ;
-// or a line break; a comma does not end one. "No more texts" stays a stop request anywhere
-// (OPT_OUT_PATTERNS above).
+//     same comma clause.
+// No evidence counts after a conditional, request or speech word earlier in the sentence (if,
+// unless, rather, wish, prefer, want, need, ask, request, like, say, tell): "I would prefer it if I
+// received no texts" and "I received your confirmation but I said no texts that day" are requests.
+// A strong request word in the sentence ("please", "anymore", "from now on") keeps it a request.
+// Sentences end at . ! ? ; or a line break; a comma does not end one. "No more texts" stays a stop
+// request anywhere (OPT_OUT_PATTERNS above).
 const NO_TEXTS = /\bno\s+(?:text\s+messages?|texts?|messages?|sms)\b/gi;
 const PAST_REPORT_JUST_BEFORE = /\b(?:got|gotten|received|saw|seen|heard|had|there(?:'s|\s+has|\s+have)\s+been|there\s+(?:was|were)|(?:was|were)\s+there)\s+$/i;
 const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
-const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like)\b/i;
+const REQUEST_CONTEXT_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred|want|wants|wanted|need|needs|needed|ask|asks|asked|request|requests|requested|like|say|says|said|tell|tells|told)\b/i;
 const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|it|asap|already|just)\b/gi;
 const STOP_LANGUAGE = /\b(?:stop(?!\s+(?:by|over|in|at|back))|stopp|unsubscribe|unsub|opt[\s-]?out|revoke|leave\s+me\s+alone|lose\s+my\s+number|take\s+me\s+off|remove\s+me|(?:don'?t|do\s+not)\s+(?:text|message|contact|call|send|email|bother))\b/i;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
