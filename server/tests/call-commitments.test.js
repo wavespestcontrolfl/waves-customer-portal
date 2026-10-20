@@ -864,7 +864,7 @@ describe('a historical replay never records a reschedule-link promise (Codex #63
   test('a live pass records it as before', async () => {
     const { trx, conn, modelClient } = setup();
     const out = await recordCallCommitments({ conn, call, transcript, procToken: 'tok', modelClient });
-    expect(out.omittedLinkPromises).toBeUndefined();
+    expect(out.omittedLinkPromises).toBe(0);
     expect(reachedWrite(trx)).toBe(true);
   });
 });
@@ -1132,6 +1132,12 @@ describe('the model pass falls back to OpenAI when Anthropic cannot answer (call
   test('one leg dropping every claim while the other fails at the provider is a failure, not an empty answer (Codex #6346 r4)', async () => {
     global.fetch = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
     const create = jest.fn(async () => ({ content: [{ type: 'text', text: ungrounded }] }));
+    await expect(extractCommitmentsWithModel(transcript, { client: { messages: { create } } })).rejects.toThrow(/all_providers_failed/);
+  });
+
+  test('an unparseable primary and an all-dropped backup is a failure, not an empty answer (pre-push audit)', async () => {
+    global.fetch = jest.fn(async () => openaiBody(ungrounded));
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: 'no JSON here' }] }));
     await expect(extractCommitmentsWithModel(transcript, { client: { messages: { create } } })).rejects.toThrow(/all_providers_failed/);
   });
 

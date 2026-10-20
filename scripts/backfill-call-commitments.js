@@ -174,6 +174,7 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
     totals.failed = candidates.length;
     return totals;
   }
+  const ranCalls = [];
   for (const c of candidates) {
     try {
       // Replay traffic, kept out of the live policy's fallback/failure rates (Codex #6346 r2).
@@ -186,12 +187,17 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
       }
       totals.ran += 1;
       if (out.rows > 0) totals.withRows += 1; else totals.noRows += 1;
-      log(`  ran        ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  rows=${out.rows}${out.omittedLinkPromises ? '  link promise not recorded: office to handle' : ''}`);
+      log(`  ran        ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  rows=${out.rows}`);
+      ranCalls.push({ id: c.id, out });
     } catch (err) {
       totals.failed += 1;
       log(`  failed     ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${String(err?.code || 'error')}`);
     }
   }
+  // Promised reschedule links a replay did not record: the office sends them by hand.
+  const linkOmitted = ranCalls.filter((r) => r.out.omittedLinkPromises).map((r) => id8(r.id));
+  totals.linkPromisesNotRecorded = linkOmitted.length;
+  log(`  reschedule links promised but NOT recorded (office to handle): ${linkOmitted.length} ${linkOmitted.join(', ')}`);
   log(`  ran ${totals.ran} (rows written for ${totals.withRows}, nothing promised or still unreadable for ${totals.noRows}), skipped ${totals.skipped}, failed ${totals.failed}`);
   return totals;
 }

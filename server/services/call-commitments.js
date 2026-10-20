@@ -866,9 +866,9 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
     // Unusable answers from every leg that answered: the same skipped
     // outcomes the single-provider pass reported.
     // Every leg dropped all its claims: an answer with nothing usable, as before.
-    // Only when EVERY leg answered and dropped everything; a provider failure
-    // on any leg keeps the failure (Codex #6346 r4).
-    const everyLegAnswered = (result.failures || []).every((f) => f.validator);
+    // Only when EVERY leg answered and dropped everything; a provider, parse
+    // or schema failure on any leg keeps the failure (Codex #6346 r4).
+    const everyLegAnswered = (result.failures || []).every((f) => f.reason === 'invalid_output');
     if (lastRejection?.code === 'all_dropped' && everyLegAnswered) return commitmentsResult(lastRejection.grounded, lastRejection.model, startedAt);
     if (lastRejection && lastRejection.code !== 'all_dropped') {
       const { code, ...detail } = lastRejection;
@@ -1166,7 +1166,7 @@ async function recordCallCommitments({
   procGeneration = null,
   modelClient = null,
   runModel = true,
-  historicalReplay = false,
+  historicalReplay,
 } = {}) {
   const summary = { seeds: 0, model: 0, written: 0, dropped: 0, ownershipLost: false, skipped: null };
   try {
@@ -1197,9 +1197,10 @@ async function recordCallCommitments({
     // whose open row a live worker would act on: a send_reschedule_link row
     // created days after its call reads as post-activation and would text the
     // customer a stale link (Codex #6346 r4 P1). The caller lists those calls.
-    const recordable = historicalReplay ? [...seeds, ...modelItems].filter((item) => item.kind !== 'send_reschedule_link') : [...seeds, ...modelItems];
-    if (historicalReplay) summary.omittedLinkPromises = seeds.length + modelItems.length - recordable.length;
-    const items = recordable.map((item) => ({
+    const replayOmits = (item) => historicalReplay && item.kind === 'send_reschedule_link';
+    const omitted = [...seeds, ...modelItems].filter(replayOmits);
+    summary.omittedLinkPromises = omitted.length;
+    const items = [...seeds, ...modelItems].filter((item) => !replayOmits(item)).map((item) => ({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
