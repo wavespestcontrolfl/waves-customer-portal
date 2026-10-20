@@ -419,6 +419,20 @@ describe('contact session — lifecycle', () => {
     expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: holder.body.refreshToken })).status).toBe(200);
   });
 
+  test('a still-valid ACCESS token of a revoked family is refused on every request, even once the number is back in a slot (codex r8 P2)', async () => {
+    const contact = await login(CONTACT_PHONE);
+    const holder = await login(HOLDER_PHONE);
+    expect((await call('GET', '/api/auth/me', bearerOf(contact.body.token))).status).toBe(200);
+    // The holder removed the contact (family revoked by the save) and re-added
+    // the same number before the 15-minute access token expired.
+    await auth.revokeRemovedContactRefreshSessions((table) => builder(table), 'cust-holder', [TENANT_PHONE]);
+    expect((await call('GET', '/api/auth/me', bearerOf(contact.body.token))).status).toBe(401);
+    expect((await call('GET', '/api/schedule?days=90', bearerOf(contact.body.token))).status).toBe(401);
+    expect((await call('GET', '/api/auth/me', bearerOf(holder.body.token))).status).toBe(200);
+    // A fresh OTP login mints a new family and works.
+    expect((await call('GET', '/api/auth/me', bearerOf((await login(CONTACT_PHONE)).body.token))).status).toBe(200);
+  });
+
   test('the contact moving to another slot keeps the session (the claim is the phone, not the slot)', async () => {
     const first = await login(CONTACT_PHONE);
     Object.assign(tables.customers[0], {

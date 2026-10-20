@@ -151,6 +151,11 @@ async function declinedEmailSlotRoles(customer, eventType, { dbh = db } = {}) {
   const column = columnForEmailEvent(eventType);
   const rows = await loadContactPrefRows(customer.id, { dbh });
   for (const slot of getServiceContactSlots(customer)) {
+    // A slot with no email of its own is emailed at the HOLDER's address
+    // (appointment-email.js resolveRecipients): the contact's email switch
+    // governs the contact's own inbox, never the holder's fallback
+    // (codex #6363 r8 P2).
+    if (!slot.email) continue;
     const row = slot.phone ? rows.get(phoneKey(slot.phone)) : null;
     if (row && !contactAllows(row, column, 'email')) declined.add(slot.role);
   }
@@ -227,7 +232,10 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
 async function rerouteForContactEmailOptOut(customerId, email, { dbh = db } = {}) {
   const current = String(email || '').trim().toLowerCase();
   if (!contactPrefsLive() || !customerId || !current) return { email: email || null, rerouted: false };
-  const customer = await dbh('customers').where({ id: customerId }).first().catch(() => null);
+  // The lookup's failure propagates (codex #6363 r8 P1): the callers' own
+  // error handling retries or holds the send; a swallowed error here would
+  // mail a contact whose switch may be off.
+  const customer = await dbh('customers').where({ id: customerId }).first();
   if (!customer) return { email, rerouted: false };
   const slotEmail = String(customer.service_contact_email || '').trim().toLowerCase();
   if (!slotEmail || slotEmail !== current) return { email, rerouted: false };
@@ -257,6 +265,11 @@ async function pruneContactNotificationPrefs(trx, customerId, contacts = []) {
     for (const col of Object.values(CHANNEL_COLUMN_FOR)) {
       if (!emailLess.length) break;
       await trx(TABLE).where({ customer_id: customerId, [col]: 'email' }).whereIn('phone_key', emailLess).update({ [col]: null, updated_at: new Date() });
+    }
+    // The email master switch too: with no address of their own, "email off"
+    // would only ever suppress the holder's fallback address (codex r8 P2).
+    if (emailLess.length) {
+      await trx(TABLE).where({ customer_id: customerId, email_enabled: false }).whereIn('phone_key', emailLess).update({ email_enabled: null, updated_at: new Date() });
     }
   } catch (err) {
     if (err && err.code === '42P01') return;

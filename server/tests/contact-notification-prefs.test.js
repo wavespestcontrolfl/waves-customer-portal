@@ -157,6 +157,17 @@ describe('filterReportEmailRecipientsByContactPrefs (service-report email)', () 
   });
 });
 
+describe('declinedEmailSlotRoles (appointment email)', () => {
+  test('only a slot with its OWN email can decline email; a phone-only slot is emailed at the holder\'s address regardless of its switch (codex r8)', async () => {
+    rows = [
+      { customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false },
+      { customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false },
+    ];
+    const declined = await ContactPrefs.declinedEmailSlotRoles({ ...CUSTOMER, service_contact_email: '' }, 'appointment.confirmation');
+    expect([...declined]).toEqual(['service_contact_2']);
+  });
+});
+
 describe('contactDeclinesChannel (single-recipient resolvers: review outreach)', () => {
   test('a service contact whose master switch is off declines that channel; the other channel and the holder never do', async () => {
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202', sms_enabled: false, email_enabled: true }];
@@ -194,6 +205,15 @@ describe('rerouteForContactEmailOptOut (deferred sends: automation steps, queued
     expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'Sam@Example.com')).toEqual({ email: 'pat@example.com', rerouted: true });
     wireCustomer({ ...CUSTOMER, email: '' });
     expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: null, rerouted: true });
+  });
+
+  test('a failed customer lookup propagates — the caller retries or holds, never mails the contact (codex r8 P1)', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      return { where: () => ({ first: async () => { throw new Error('timeout'); } }) };
+    });
+    await expect(ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).rejects.toThrow('timeout');
   });
 
   test('passes through: the holder\'s own address, an unmatched address, a contact with email on, and the gate off', async () => {
@@ -236,6 +256,19 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
     expect(rows[0]).toEqual(expect.objectContaining({ en_route_channel: null, service_complete_channel: 'sms', tech_arrived_channel: null }));
     expect(rows[1].en_route_channel).toBe('email');
     expect(rows[2].en_route_channel).toBe('email');
+  });
+
+  test('a kept phone whose slot lost its email also loses a stale "email off" master switch (it would only suppress the holder\'s fallback address — codex r8)', async () => {
+    rows = [
+      { customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false },
+      { customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false },
+    ];
+    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+      { phone: '+19415550202', email: '' },
+      { phone: '+19415550303', email: 'terry@example.com' },
+    ]);
+    expect(rows[0].email_enabled).toBeNull();
+    expect(rows[1].email_enabled).toBe(false);
   });
 
   test('an empty slot list clears every row of that customer only', async () => {

@@ -181,6 +181,31 @@ function contactSessionFor(customer, contactKey) {
   return findServiceContactSlotByPhoneKey(customer, contactKey);
 }
 
+// A contact ACCESS token outlives the holder's removal by up to its 15-minute
+// expiry; the removal revoked the refresh FAMILY the token was minted in
+// (revokeRemovedContactRefreshSessions), so re-adding the number must not let
+// that bearer back in (codex #6363 r8 P2). Null = admitted; otherwise the
+// response to send. Fail closed: an unreadable table is a retryable 503, not
+// a session the client reads as dead and not an admission.
+async function contactFamilyRevocation(familyId) {
+  if (!familyId) return null;
+  let revoked;
+  try {
+    revoked = await db(REFRESH_TABLE).where({ family_id: familyId }).whereNotNull('revoked_at').first('family_id');
+  } catch (err) {
+    logger.warn(`[auth] contact family check failed: ${err.message}`);
+    return { status: 503, body: { error: 'Sign-in is temporarily unavailable. Please try again.', code: 'CONTACT_SESSION_UNAVAILABLE' } };
+  }
+  return revoked ? { status: 401, body: { error: 'Customer not found or inactive' } } : null;
+}
+
+// The slot admission plus the family check, for the access-token path.
+async function admitContactAccessToken(req, customer, decoded) {
+  const admission = admitContactSession(req, customer, decoded.contactKey);
+  if (!admission.contact) return admission;
+  return (await contactFamilyRevocation(decoded.sessionId)) || admission;
+}
+
 // Admission of a CONTACT access token on this request. Fail closed on every
 // request: gate off, an inactive row (no cancelled allowance), or a number
 // that no longer occupies a contact slot all end the session (401); a route
@@ -656,7 +681,7 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
     // Contact session (GATE_CONTACT_LOGIN) — see admitContactSession.
     req.contactSession = null;
     if (decoded.contactKey) {
-      const admission = admitContactSession(req, customer, decoded.contactKey);
+      const admission = await admitContactAccessToken(req, customer, decoded);
       if (!admission.contact) return res.status(admission.status).json(admission.body);
       req.contactSession = admission.contact;
     }

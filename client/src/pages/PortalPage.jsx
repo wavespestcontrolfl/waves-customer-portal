@@ -4451,10 +4451,20 @@ const CONTACT_CHANNEL_OPTIONS = [
   { value: 'sms', label: 'Text' },
   { value: 'email', label: 'Email' },
 ];
-// Any change that can only mean "text me" needs the attestation on file.
-const contactPatchEnablesTexts = (patch) => Object.entries(patch).some(([k, v]) => (k === 'smsEnabled' && v === true)
-  || (CONTACT_PREF_ROWS.some((r) => r.key === k) && v === true)
-  || (CONTACT_PREF_ROWS.some((r) => r.channelKey === k) && ['sms', 'both'].includes(v)));
+// Does this save OPEN a text path — a purpose that will now text the contact
+// (holder has it on, contact has it on, delivery text-capable, texts not
+// switched off) that was closed before? Only that needs the attestation:
+// the same rule the server applies (textPathsOpened), evaluated on the
+// EFFECTIVE preferences so re-enabling an email-only purpose, or a purpose
+// while texts are off, never demands text consent (codex #6363 r8 P2).
+const contactPatchEnablesTexts = (patch, data) => {
+  const before = data?.preferences || {};
+  const after = { ...before, ...patch };
+  const holderOff = data?.accountOff || {};
+  const textPath = (p, r) => holderOff[r.key] !== true && p[r.key] !== false && p.smsEnabled !== false
+    && [undefined, null, 'both', 'sms'].includes(p[r.channelKey]);
+  return CONTACT_PREF_ROWS.some((r) => textPath(after, r) && !textPath(before, r));
+};
 
 // The contact card's state machine: the read, the optimistic save with its
 // per-control lock and rollback, and the attestation — kept apart from the
@@ -4481,7 +4491,7 @@ function useContactNotificationPrefs() {
     try { await fn(); } finally { busyRef.current = false; setBusy(false); }
   };
   const save = (patch) => {
-    const needsConsent = !attested && contactPatchEnablesTexts(patch);
+    const needsConsent = !attested && contactPatchEnablesTexts(patch, data);
     if (needsConsent && !consentChecked) {
       showCustomerAlert('Please confirm the text-message consent statement first.');
       return undefined;

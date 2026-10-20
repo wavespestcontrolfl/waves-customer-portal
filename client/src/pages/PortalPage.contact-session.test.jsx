@@ -175,6 +175,20 @@ describe('ContactNotificationCard', () => {
     await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenLastCalledWith({ smsEnabled: false }));
   });
 
+  it('re-enabling an email-only purpose, or any purpose while texts are off, needs no consent statement (the effective text path does not open — codex r8)', async () => {
+    const state = { ...contactPrefs(), preferences: { ...contactPrefs().preferences, techEnRoute: false, enRouteChannel: 'email', techArrived: false, smsEnabled: false } };
+    api.getContactNotificationPrefs.mockResolvedValue(state);
+    api.updateContactNotificationPrefs.mockImplementation(async (patch) => ({ ...state, preferences: { ...state.preferences, ...patch } }));
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    fireEvent.click(screen.getByRole('switch', { name: 'On the way' }));
+    await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenCalledWith({ techEnRoute: true }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'On the way' })).toHaveAttribute('aria-checked', 'true'));
+    fireEvent.click(screen.getByRole('switch', { name: 'Technician arrival' }));
+    await waitFor(() => expect(api.updateContactNotificationPrefs).toHaveBeenLastCalledWith({ techArrived: true }));
+    expect(alerts.showCustomerAlert).not.toHaveBeenCalled();
+  });
+
   it('a failed attestation un-ticks the statement and says so', async () => {
     api.updateContactNotificationPrefs.mockRejectedValueOnce(new Error('offline'));
     await renderSchedule(contactCustomer);

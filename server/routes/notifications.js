@@ -1304,10 +1304,17 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         });
         // Same prune as the list save: a replaced slot-1 person's own choices
         // (and attestation) and sessions go with them (codex #6363 r2 P2).
+        // The survivors are read from the LOCKED row (codex r8 P2): a full
+        // contact edit that committed slot 2/3 between the unlocked read and
+        // this lock must not have its new contact pruned and signed out.
+        const lockedSurvivors = [2, 3]
+          .map((n) => ({ phone: String(legacyLockedBefore[`service_contact${n}_phone`] || '').trim(), email: String(legacyLockedBefore[`service_contact${n}_email`] || '').trim() }))
+          .filter((c) => c.phone || c.email);
+        const lockedPostSave = [{ phone: contact.phone, email: contact.email }, ...lockedSurvivors];
         await require('../services/contact-notification-prefs')
-          .pruneContactNotificationPrefs(trx, req.params.customerId, postSave);
+          .pruneContactNotificationPrefs(trx, req.params.customerId, lockedPostSave);
         await require('../middleware/auth')
-          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, postSave.map((c) => c.phone));
+          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, lockedPostSave.map((c) => c.phone));
       });
       if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
       // Same events as the list save — the legacy shape must not be a
