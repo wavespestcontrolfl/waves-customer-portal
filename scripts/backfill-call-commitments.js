@@ -168,14 +168,10 @@ async function run({ dbh, from, to, apply = false, limit = DEFAULT_LIMIT, log = 
   for (const c of candidates) {
     try {
       const out = await step(dbh, c.id, deps);
-      if (out.failed) {
-        totals.failed += 1;
-        log(`  failed     ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${out.reason}`);
-        continue;
-      }
       if (!out.ran) {
-        totals.skipped += 1;
-        log(`  skipped    ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${out.reason}`);
+        const outcome = out.failed ? 'failed' : 'skipped';
+        totals[outcome] += 1;
+        log(`  ${outcome.padEnd(10)} ${id8(c.id)}  ${etDateString(new Date(c.created_at))}  ${out.reason}`);
         continue;
       }
       totals.ran += 1;
