@@ -48,11 +48,7 @@ function waterInLine({ inches, hours, sameDay }) {
 // with no stored rule beside it). It reads like a recorded product instruction that earns no weekly plan credit:
 // the line is also the customer's own task, so the hero and Ask Waves state it once.
 function waterInAftercare(rule, reentry) {
-  if (rule && rule.hold) {
-    // No claim and a hold on the visit: no watering line at all (not neutral, so no "No special watering" and no plan swap).
-    return { watering: '', reentry, waterInRequired: false, neutral: false };
-  }
-  const line = rule && waterInLine(rule);
+  const line = rule && !rule.hold && waterInLine(rule);
   if (!line) return null;
   return {
     watering: line,
@@ -65,6 +61,12 @@ function waterInAftercare(rule, reentry) {
     neutral: false,
     evidenceSource: 'product_instruction',
   };
+}
+
+// The neutral "No special watering" line, unless a product on the visit holds watering: then no line at all. Only the
+// neutral copy is suppressed; recorded product notes, the hold/review verdict and the plan warning are built as before.
+function neutralWatering(rule, line) {
+  return rule && rule.hold ? '' : line;
 }
 
 // The sheet's granular default keys off this (client/src/lib product method default). Absent while the gate is off.
@@ -163,6 +165,7 @@ function reportCleanup1020PdfSignature() {
 module.exports = {
   waterInRuleOf,
   waterInAftercare,
+  neutralWatering,
   methodCorrectionKey,
   isGranularProduct,
   correctedMethod,

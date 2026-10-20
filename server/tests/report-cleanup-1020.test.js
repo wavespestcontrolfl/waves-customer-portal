@@ -5,7 +5,7 @@ const featureGates = require('../config/feature-gates');
 const cleanup = require('../services/service-report/report-cleanup-1020');
 const { buildLawnReportV2, buildAftercare } = require('../services/service-report/lawn-report-v2');
 const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
-const { aftercareCustomerTask, aftercareVerdict } = require('../services/service-report/lawn-aftercare');
+const { aftercareCustomerTask, aftercareVerdict, wateringPlanCondition } = require('../services/service-report/lawn-aftercare');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { inferServiceReportApplicationMethod } = require('../services/complete-scheduled-service');
 const { completionMethod } = require('../services/lawn-completion-defaults');
@@ -85,6 +85,22 @@ describe('item 1: a visit with a water-in product never says "No special waterin
     expect(v2.aftercare.watering).toBe('');
     gateOff();
     expect(cleanup.waterInRuleOf([product('Test Herbicide', HOLD)])).toBeNull();
+  });
+
+  test('a recorded "Do not irrigate" note keeps its note, its review verdict and its plan warning beside a hold', () => {
+    gateOn();
+    const apps = [{ product: { name: 'Test Herbicide', irrigation_notes: 'Do not irrigate for 24 hours' } }];
+    const plan = { title: 'Weekly plan', visitInPlanWeek: true };
+    const withHold = buildAftercare(apps, { instruction: null, weekPlan: plan, waterInRule: { hold: true } });
+    const before = buildAftercare(apps, { instruction: null, weekPlan: plan });
+    expect(withHold).toEqual(before);
+    expect(withHold.watering).toMatch(/Do not irrigate for 24 hours/);
+    expect(aftercareVerdict(withHold)).toBe('review');
+    expect(wateringPlanCondition(withHold, plan)).toMatch(/Confirm the product watering directions/);
+    expect(aftercareCustomerTask(withHold, plan)).toMatch(/Confirm the product watering directions/);
+    // Only the neutral copy is suppressed: no notes and a hold = no line; no hold = the neutral line.
+    expect(buildAftercare([], { instruction: null, waterInRule: { hold: true } }).watering).toBe('');
+    expect(buildAftercare([], { instruction: null, waterInRule: null }).watering).toMatch(/^No special watering/);
   });
 
   test('water-in beside a product with no rule (no hold) gives the water-in line', () => {

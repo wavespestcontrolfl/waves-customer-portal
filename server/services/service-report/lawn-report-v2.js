@@ -579,8 +579,9 @@ function buildAftercare(applications, opts = {}) {
   } else {
     // Non-label fallback — the report rewrites it to defer to the weekly
     // plan when one is on the card (see buildLawnReportV2).
-    watering = NEUTRAL_AFTERCARE;
-    neutral = true;
+    // GATE_REPORT_CLEANUP_1020: a hold on the visit prints no neutral line (an empty line is not neutral copy).
+    watering = cleanup1020.neutralWatering(opts.waterInRule, NEUTRAL_AFTERCARE);
+    neutral = watering !== '';
   }
   return normalizeLawnAftercare(
     { watering, reentry, waterInRequired, neutral },
