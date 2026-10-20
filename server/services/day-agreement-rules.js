@@ -10,6 +10,7 @@
  */
 
 const MIN_CONFIDENCE = 0.7;
+const AT_FORM = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?$/;
 const BLOCKER_WORDS = new Set(require('./prompts/day-agreement-v1').BLOCKERS);
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const KINDS = ['new_visit', 'move'];
@@ -72,7 +73,9 @@ function normalizeAgreement(raw) {
   const day = (v) => (validDay(v) ? v.trim() : null);
   const confidence = Number(a.confidence);
   return {
-    at: text(a.at),
+    // Stored only in the clock form the prompt asks for; any other text is null,
+    // so a copied phone number or address never lands in judged (Codex #6350 r14).
+    at: AT_FORM.test(text(a.at) || '') ? text(a.at) : null,
     act: a.act === true,
     kind: KINDS.includes(lower(a.kind)) ? lower(a.kind) : null,
     day: day(a.day),

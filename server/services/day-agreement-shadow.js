@@ -606,6 +606,9 @@ async function refreshSmsSource(conn, src, ctx) {
 
 async function processSource(conn, src, ctx) {
   if (src.kind === 'sms' && !(await refreshSmsSource(conn, src, ctx))) return { leave: true };
+  // An unlinked call may be linked later by the hourly call-log relinker: leave it
+  // unrecorded so a later tick can judge it inside the 3 hour window (Codex #6350 r14).
+  if (!src.customerId && src.kind === 'call') return { leave: true };
   if (!src.customerId) return { rows: [skipRow(src, 0, 'no_customer')] };
   if (!src.lines.length) return { rows: [skipRow(src, 0, 'no_text')] };
   if (src.truncated) return { rows: [skipRow(src, 0, src.kind === 'call' ? 'transcript_too_long' : 'message_too_long')] };

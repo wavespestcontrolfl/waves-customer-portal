@@ -230,12 +230,15 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       expect((await decisions())[0]).toMatchObject({ verdict: 'skip', skip_reason: 'transcript_too_long' });
     });
 
-    test('a call with no linked customer is recorded as a skip without a model call', async () => {
-      await call(null);
-      const dispatch = jest.fn();
-      expect(await sweep({ dispatch })).toMatchObject({ judged: 1, skip: 1 });
+    test('a call with no linked customer is left unrecorded, then judged once the relinker links it (Codex #6350 r14)', async () => {
+      const callId = await call(null);
+      const dispatch = answering(agreement());
+      expect(await sweep({ dispatch, findSlots: jest.fn() })).toMatchObject({ judged: 0 });
       expect(dispatch).not.toHaveBeenCalled();
-      expect(await decisions()).toEqual([expect.objectContaining({ verdict: 'skip', skip_reason: 'no_customer', judged: null, model: null })]);
+      expect(await decisions()).toEqual([]);
+      await trx('call_log').where({ id: callId }).update({ customer_id: await customer() });
+      await sweep({ dispatch, findSlots: jest.fn(async () => ({ slots: [slot(dayPlus(2), '09:00', await technician())] })) });
+      expect(dispatch).toHaveBeenCalledTimes(1);
     });
 
     test('a move names the one confirmed visit on the old day; two visits on that day make it ambiguous', async () => {

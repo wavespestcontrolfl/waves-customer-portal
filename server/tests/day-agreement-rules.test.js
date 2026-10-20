@@ -268,6 +268,11 @@ describe('stored judgment fields are scrubbed (Codex #6350 r8)', () => {
     expect(a.service).not.toMatch(/123|Palm Tree/);
   });
 
+  test('an at that is not the clock form is stored as null, for act:false too (Codex #6350 r14)', () => {
+    expect(rules.normalizeAgreement({ at: '941-555-0142', act: false }).at).toBeNull();
+    expect(rules.normalizeAgreement({ at: '2040-03-12T10:30', act: false }).at).toBe('2040-03-12T10:30');
+  });
+
   test('an act:true answer with an unknown blocker is still skipped as model_blocker', () => {
     const a = rules.normalizeAgreement({ at: '2040-03-12T10:30', act: true, kind: 'new_visit', day: '2040-03-14', from_day: null, daypart: 'any', service: 'x', blockers: ['customer_declined'], confidence: 0.9, reason: 'x' });
     expect(a.blockers).toEqual(['other']);
