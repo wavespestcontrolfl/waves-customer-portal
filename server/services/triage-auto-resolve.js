@@ -36,6 +36,11 @@
  *   - address flags → a visit COMPLETED after the card for a single-property
  *     customer whose on-file street matches every address the call named
  *
+ *   - booking_time_conflict / booking_out_of_hours → the visit this call
+ *     booked (the card's scheduled_service_id, source_call_log_id = the call)
+ *     was completed, or its day has passed with the visit still live
+ *     (2026-10-19 audit: calls fcc1aa1c, 08c56b2a, b0c32964, 714b22a8)
+ *
  *   RESOLVE ON STAFF WORK (same evidence gate — a person did the work by hand
  *   after the card was filed. The ONLY thing waived against the rules above is
  *   the link to the call; the card's own ask must still be answered. 2026-10-05
@@ -183,6 +188,7 @@ const RULE_NOTES = {
   callback_spam: 'Auto-resolved: the office called this voicemail back and reached a solicitor; the ask is moot.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
+  visit_passed: 'Auto-resolved: the visit this call booked was completed, or its day has passed; the overlap / out-of-hours note is moot.',
   house_number_adopted: 'Auto-resolved: the customer record now carries the house number the caller stated; the disagreement is settled.',
 };
 
@@ -1133,6 +1139,12 @@ const CLASSIFY_RULES = [
       // disputed number: another booking covering the ask says nothing
       // about that visit's address — staff settle it (codex r38 P1).
       && !parseMaybeJson(item.payload)?.retained_service_id },
+  // The overlap / out-of-hours note is about ONE visit's slot. Once that visit
+  // is done, or its day is behind us, nobody can act on it (2026-10-19 audit:
+  // four of these stayed open on completed visits). Evidence arm
+  // loadSlotNoteVisitEvidence proves the visit is the call's own and done.
+  { rule: 'visit_passed', action: 'resolve',
+    when: (item, ev) => BOOKING_SLOT_NOTE_CODES.has(item.reason_code) && ev?.slot_note_visit_done === true },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
@@ -1225,8 +1237,14 @@ function loadCandidateItems(conn, itemIds = null) {
   return q;
 }
 
+// Time-sanity notes the booking pass files on the visit it just created
+// (call-recording-processor: an overlap with another visit, or a visit that
+// starts or runs past close). Advisory; they describe one visit's slot.
+const BOOKING_SLOT_NOTE_CODES = new Set(['booking_time_conflict', 'booking_out_of_hours']);
+
 const EVIDENCE_CODES = new Set([
   'quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed',
+  ...BOOKING_SLOT_NOTE_CODES,
   ...ADDRESS_MOOT_CODES,
   // callback_spam: the asks a return call would have answered.
   ...require('./call-triage-flags').CALLBACK_SPAM_MOOT_CODES,
@@ -2599,6 +2617,48 @@ function loadStaffAddressEvidence(facts, flag) {
   }
 }
 
+// booking_time_conflict / booking_out_of_hours → the visit the card names
+// (payload.scheduled_service_id, and the +14d follow-up child when the card
+// records one) is this call's own booking (source_call_log_id = the call for
+// the primary) and is done: completed, or its ET day is before today with the
+// visit still live (LIVE_BOOKING_STATUSES: never cancelled / rescheduled /
+// skipped / no_show). A card that names no visit, a visit that is gone or
+// belongs to another call, or one visit still ahead keeps the card.
+async function loadSlotNoteVisitEvidence(conn, items, flag, now) {
+  const idOf = (v) => (v === undefined || v === null || v === '' ? null : String(v));
+  const wanted = new Map(); // card id -> { primary, followUp, tags }
+  for (const item of items) {
+    const payload = BOOKING_SLOT_NOTE_CODES.has(item.reason_code) && item.status === 'open' ? (parseMaybeJson(item.payload) || {}) : null;
+    const primary = idOf(payload?.scheduled_service_id);
+    if (!primary) continue;
+    // Which of the call's visits the card is about (Codex #6347 r3): the
+    // conflict rows tag each clash 'primary' or 'follow_up'; a card with no
+    // tags (an out-of-hours note, an in-transaction fallback row) is about the
+    // primary only.
+    const tags = new Set([].concat(payload.conflicting_visits || []).map((v) => v?.overlaps_visit || 'primary'));
+    // Time-sanity warnings are about the primary's slot, beside any clash tags.
+    if ([].concat(payload.time_sanity_flags || []).length) tags.add('primary');
+    wanted.set(item.id, { primary, followUp: idOf(payload.follow_up?.scheduled_service_id), tags: tags.size ? tags : new Set(['primary']) });
+  }
+  if (!wanted.size) return;
+  const ids = [...new Set([...wanted.values()].flatMap((w) => [w.primary, w.followUp].filter(Boolean)))];
+  const rows = await conn('scheduled_services').whereIn('id', ids).select('id', 'status', 'scheduled_date', 'source_call_log_id');
+  const byId = new Map(rows.map((r) => [String(r.id), r]));
+  const today = etCalendarDayOf(now);
+  const done = (v) => Boolean(v) && (v.status === 'completed'
+    || (LIVE_BOOKING_STATUSES.has(v.status) && toDate(v.scheduled_date) && etCalendarDayOf(v.scheduled_date) < today));
+  for (const item of items) {
+    const w = wanted.get(item.id);
+    // The primary proves the card is this call's booking; only the visits the
+    // card names must be done. A follow-up clash with no follow-up id on the
+    // card cannot be checked (byId.get(null) is undefined), so it stays open.
+    const primary = w && byId.get(w.primary);
+    if (!primary || String(primary.source_call_log_id) !== String(item.call_log_id)) continue;
+    const named = [...w.tags].map((t) => (t === 'follow_up' ? byId.get(w.followUp) : primary));
+    if (named.every(done)) flag(item.id, 'slot_note_visit_done');
+  }
+}
+
 // Per-item proof map for the evidence rules — the four arms above over the
 // open evidence-coded cards. Empty when the evidence gate is off.
 // `ignoreGate`: the verdict-time coverage check (admin-triage
@@ -2606,7 +2666,7 @@ function loadStaffAddressEvidence(facts, flag) {
 // NIGHTLY evidence resolution is switched on — with the gate off an
 // empty map filed a duplicate booking task for an appointment that
 // already existed (codex #4666 r22 P1).
-async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
+async function loadEvidence(conn, items, { ignoreGate = false, now = new Date() } = {}) {
   const evidence = new Map();
   const { isEnabled } = require('../config/feature-gates');
   const flag = (id, key) => {
@@ -2631,6 +2691,7 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   await loadEmailEvidence(conn, candidates, flag);
   await loadUnambiguousEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
+  await loadSlotNoteVisitEvidence(conn, candidates, flag, now);
   const visitFacts = await loadVisitFacts(conn, candidates);
   loadVisitEvidence(visitFacts, flag, { ignoreGate });
   await loadStaffBookedEvidence(conn, visitFacts, flag);
@@ -2640,7 +2701,7 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
 
 async function sweep({ now = new Date(), only = null } = {}) {
   const items = await loadCandidateItems(db);
-  const evidence = await loadEvidence(db, items);
+  const evidence = await loadEvidence(db, items, { now });
 
   const decisions = [];
   for (const item of items) {
@@ -2705,7 +2766,7 @@ async function sweep({ now = new Date(), only = null } = {}) {
     // reloaded inside the transaction.
     const freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
     const freshById = new Map(freshRows.map((r) => [r.id, r]));
-    const freshEvidence = await loadEvidence(trx, freshRows);
+    const freshEvidence = await loadEvidence(trx, freshRows, { now });
     const reverified = applied.filter((d) => {
       const fresh = freshById.get(d.item.id);
       if (!fresh) return false; // no longer open — lost the race
