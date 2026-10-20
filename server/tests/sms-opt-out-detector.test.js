@@ -82,6 +82,9 @@ describe('SMS opt-out detector', () => {
     'I got no text. STOP',
     'There was no message; unsubscribe',
     'I got no text that day.\nStop',
+    'I got no text, STOP',
+    'I got no text. STOP please',
+    'I got no text. Please stop',
     'no more texts',
     'Please, no more messages.',
     'No more text messages',
@@ -102,6 +105,7 @@ describe('SMS opt-out detector', () => {
     'No text messages arrived',
     "There's been no text all week",
     'I got no text that day. Please call me.',
+    'I got no text that day, can the tech stop by tomorrow',
   ])('"no text" that reports a missing text in the past tense is not opt_out: %s', (body) => {
     expect(detectSmsOptCommand(body)).toEqual({ action: null });
   });

@@ -61,6 +61,7 @@ const PAST_ARRIVAL_AFTER = /^\s+(?:came|arrived|showed\s+up|went\s+out)\b/i;
 const THAT_DAY_AFTER = /^\s+that\s+day\b/i;
 const PAST_RECEIVING_EARLIER = /\b(?:got|gotten|received|saw|heard)\b/i;
 const CONDITIONAL_EARLIER = /\b(?:if|unless|rather|wish|prefer|prefers|preferred)\b/i;
+const KEYWORD_FILLER = /\b(?:please|pls|plz|thanks|thank\s+you|thx|now|it|asap|already|just)\b/gi;
 const STRONG_REQUEST = /\b(?:please|pls|plz|anymore|any\s+more|from\s+now\s+on|ever\s+again)\b/i;
 
 function sentencesOf(body) {
@@ -87,10 +88,11 @@ function asksForNoTexts(body) {
   const sentences = sentencesOf(body);
   const kinds = sentences.map(noTextsKind);
   if (kinds.includes('request')) return true;
-  // A missing-text report is exempt, but not when another sentence is a plain opt-out keyword
-  // ("I got no text. STOP"): the exact-keyword check above only reads a whole message.
-  return kinds.includes('report') && sentences.some((text) => {
-    const keyword = compactKeyword(text);
+  // A missing-text report is exempt, but not when a clause of the message is a plain opt-out
+  // keyword, with polite words around it ("I got no text, STOP", "I got no text. Please stop"):
+  // the exact-keyword check above only reads a whole message. "can the tech stop by" is no keyword.
+  return kinds.includes('report') && String(body || '').split(/[.!?;,\n\r]+/).some((clause) => {
+    const keyword = compactKeyword(clause.replace(KEYWORD_FILLER, ' '));
     return EXACT_OPT_OUT.has(keyword) || /^STO+P+$/.test(keyword);
   });
 }
