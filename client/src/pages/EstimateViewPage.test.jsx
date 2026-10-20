@@ -2709,7 +2709,7 @@ describe('OneTimePriceCard fallback (pre-push P0 on #3521)', () => {
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the page prints "about $X a
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the page prints "$X a
 // month" under each per-application price, one plan line for several services,
 // and the context line once. /data carries monthlyAverageEnabled only with the
 // gate on; without it the page is as before.
@@ -2775,7 +2775,7 @@ describe('monthly average beside per-application prices', () => {
       expect(el).not.toBeNull();
       return el;
     });
-    expect(line.textContent).toBe('about $31.33 a month');
+    expect(line.textContent).toBe('$31.33 a month');
     expect(screen.getAllByText('$94.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Averaged over the year. You pay after each application.')).toHaveLength(1);
     expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
@@ -2790,8 +2790,8 @@ describe('monthly average beside per-application prices', () => {
       return el;
     });
     const rows = [...summary.querySelectorAll('div > div')].map((el) => el.textContent);
-    expect(rows).toContain('Pest Controlabout $30.00 a month');
-    expect(rows).toContain('Lawn Careabout $42.30 a month');
+    expect(rows).toContain('Pest Control$30.00 a month');
+    expect(rows).toContain('Lawn Care$42.30 a month');
     const plan = summary.querySelector('[data-monthly-average-plan]').textContent;
     expect(plan).toContain('Your plan averages (10% bundle savings included)');
     expect(cents(plan.split(')')[1])).toBe(7230);
@@ -2925,7 +2925,7 @@ describe('monthly average beside per-application prices', () => {
       ],
     };
     const { container, rerender } = render(<MonthlyAverageSummary model={model} />);
-    const lines = [...container.querySelectorAll('div > div')].filter((el) => !el.hasAttribute('data-monthly-average-plan') && /^[A-Za-z&\s]+about/.test(el.textContent));
+    const lines = [...container.querySelectorAll('div > div')].filter((el) => !el.hasAttribute('data-monthly-average-plan') && /^[A-Za-z&\s]+\$/.test(el.textContent));
     expect(lines.reduce((sum, el) => sum + cents(el.textContent), 0)).toBe(cents(container.querySelector('[data-monthly-average-plan]').textContent.split(')')[1]));
     rerender(<MonthlyAverageSummary model={{ ...model, credit: { label: 'Referral Credit', monthly: 2.08 } }} hasOneTime />);
     expect(container.textContent).toContain('Referral Credit');

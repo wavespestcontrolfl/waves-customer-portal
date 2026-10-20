@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { RATE_REVIEW_TERMS_LINE, copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
-import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, aboutMonth, buildMonthlyAverage, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
+import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, buildMonthlyAverage, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import {
   glassCtaMicroForKeys,
   glassRowInclusions,
@@ -387,7 +387,7 @@ export default function EstimateProposalDocument({ data, token }) {
     || correctiveWork.some((work) => work.taxable === true)
     || programList.some((program) => program.taxable === true);
   const taxRatePct = Number(totals.taxRate) > 0 ? (Number(totals.taxRate) * 100).toFixed(2) : null;
-  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "about $X a month" under
+  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "$X a month" under
   // each per-application line, plus one plan line when there are two or more
   // services. The server sends the inputs only when the gate is on and the
   // lines reconcile to the stored monthly total; the shared builder (also used
@@ -592,7 +592,7 @@ export default function EstimateProposalDocument({ data, token }) {
                       {showsLineBasis(item) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
                       {monthlyAverage?.byLine.get(item) ? (
                         <span data-monthly-average-line="" style={{ display: 'block', color: MUTED, fontVariantNumeric: 'tabular-nums' }}>
-                          {aboutMonth(monthlyAverage.byLine.get(item).monthly)}
+                          {monthlyText(monthlyAverage.byLine.get(item).monthly)}
                         </span>
                       ) : ''}
                     </span>
@@ -649,7 +649,7 @@ export default function EstimateProposalDocument({ data, token }) {
                     <div data-monthly-average-plan="" style={{ display: 'flex', justifyContent: 'space-between', gap: 14, padding: '3px 0' }}>
                       <span style={{ color: INK, fontWeight: 700 }}>{monthlyAveragePlanLabel(monthlyAverage.model)}</span>
                       <span style={{ fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-                        {aboutMonth(monthlyAverage.model.planMonthly)}
+                        {monthlyText(monthlyAverage.model.planMonthly)}
                       </span>
                     </div>
                   ) : null}

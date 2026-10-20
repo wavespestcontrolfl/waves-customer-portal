@@ -1,4 +1,4 @@
-import { CONTEXT_LINE, aboutMonth, buildMonthlyAverage } from '@estimate-monthly-average';
+import { CONTEXT_LINE, monthlyText, buildMonthlyAverage } from '@estimate-monthly-average';
 import { perApplicationBilledMonthly, perApplicationNetForFrequency, perApplicationVisitsForFrequency } from '../components/estimate/PriceCard';
 
 /**
@@ -136,10 +136,10 @@ export function oneTimeBesidePlan({ feeList, estimate, pricing }) {
   return rows.some((item) => item && item.kind === 'charge' && Number(item.amount) > 0 && item.quoteRequired !== true);
 }
 
-/** The "about $X a month" line for one section, or null. */
+/** The "$X a month" line for one section, or null. */
 export function sectionAverageLine(monthlyAverage, sectionKey) {
   const amount = monthlyAverage?.byKey?.[sectionKey];
-  return amount == null ? null : aboutMonth(amount);
+  return amount == null ? null : monthlyText(amount);
 }
 
 /** The context sentence a single-service card carries (the plan summary carries it otherwise). */

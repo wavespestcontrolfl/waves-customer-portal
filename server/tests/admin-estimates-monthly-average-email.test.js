@@ -103,21 +103,21 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     mockBilling.ctx = { billsPerApplication: true, livePricing: null };
   });
 
-  test('single service: "$94.00 per application · about $31.33 a month" plus the context line', async () => {
+  test('single service: "$94.00 per application · $31.33 a month" plus the context line', async () => {
     const average = await emailAverageParts(pestEstimate);
     expect(average).toEqual({
-      priceLine: '$94.00 per application · about $31.33 a month',
+      priceLine: '$94.00 per application · $31.33 a month',
       note: 'Averaged over the year. You pay after each application.',
     });
     const payload = estimateEmailPayload({ estimate: pestEstimate, firstName: 'Pat', viewUrl: 'u', priceLine: moneySummary(pestEstimate), average });
-    expect(payload.price_summary).toBe('$94.00 per application · about $31.33 a month');
+    expect(payload.price_summary).toBe('$94.00 per application · $31.33 a month');
     expect(payload.next_step_summary).toBe(`Averaged over the year. You pay after each application. ${DEFAULT_NEXT}`);
   });
 
   test('multi service: the plan average equals the stored monthly total; setup stays out of it', async () => {
     const average = await emailAverageParts(bundleEstimate);
     expect(average).toEqual({
-      priceLine: 'Priced per application · plan averages about $72.30 a month',
+      priceLine: 'Priced per application · plan averages $72.30 a month',
       note: 'Averaged over the year, bundle savings included. You pay after each application. One-time setup $99.00, not in the average.',
     });
     expect(parseFloat(bundleEstimate.monthly_total)).toBe(72.3);
@@ -181,7 +181,7 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
       } } },
     };
     const average = await emailAverageParts(withFlea);
-    expect(average.priceLine).toBe('Priced per application · plan averages about $72.30 a month');
+    expect(average.priceLine).toBe('Priced per application · plan averages $72.30 a month');
     expect(average.note).toContain('One-time charges $249.00, not in the average.');
     expect(average.note).not.toContain('One-time setup');
   });

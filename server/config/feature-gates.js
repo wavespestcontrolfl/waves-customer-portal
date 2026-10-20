@@ -2964,7 +2964,7 @@ const gates = {
 
   // Monthly AVERAGE beside per-application prices on residential estimates
   // (owner ruling 2026-10-20, "option A"). The per-application price stays the
-  // price; a second, smaller line reads "about $X a month", with the context
+  // price; a second, smaller line reads "$X a month", with the context
   // "Averaged over the year. You pay after each application." Covers the
   // delivery email's Estimated price row (and one sentence ahead of its
   // next-step paragraph), the estimate PDF document and the estimate page.

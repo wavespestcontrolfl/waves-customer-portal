@@ -108,7 +108,7 @@ describe('emailParts', () => {
     expect(model.services[0].monthly).toBe(31.33);
     expect(model.planMonthly).toBe(21.33);
     const parts = emailParts(model);
-    expect(parts.priceLine).toBe('$94.00 per application · about $21.33 a month');
+    expect(parts.priceLine).toBe('$94.00 per application · $21.33 a month');
     expect(parts.note).toContain('referral credit included');
     expect(parts.priceLine).not.toContain('31.33');
   });
@@ -116,7 +116,7 @@ describe('emailParts', () => {
   test('single service keeps the per-application price first', () => {
     const model = buildMonthlyAverage({ services: [{ key: 'pest', label: 'Pest Control', perApplication: 94, visits: 4 }], planMonthly: 31.33 });
     expect(emailParts(model)).toEqual({
-      priceLine: '$94.00 per application · about $31.33 a month',
+      priceLine: '$94.00 per application · $31.33 a month',
       note: 'Averaged over the year. You pay after each application.',
     });
   });
@@ -131,7 +131,7 @@ describe('emailParts', () => {
       bundleDiscountPct: 0.1,
     });
     expect(emailParts(model, { amount: 99, setup: true })).toEqual({
-      priceLine: 'Priced per application · plan averages about $72.30 a month',
+      priceLine: 'Priced per application · plan averages $72.30 a month',
       note: 'Averaged over the year, bundle savings included. You pay after each application. One-time setup $99.00, not in the average.',
     });
     expect(emailParts(model, { amount: 99, setup: false }).note).toContain('One-time charges $99.00, not in the average.');
@@ -293,7 +293,7 @@ describe('monthlyAverageFor (server decision)', () => {
 
 describe('reviewedAverageStale (reviewed and scheduled sends)', () => {
   const { reviewedAverageStale, averageText } = require('../services/estimate-monthly-average');
-  const parts = { priceLine: '$94.00 per application · about $31.33 a month', note: 'Averaged over the year. You pay after each application.' };
+  const parts = { priceLine: '$94.00 per application · $31.33 a month', note: 'Averaged over the year. You pay after each application.' };
   const reviewed = (email) => ({ sms: null, email });
 
   test('the recorded copy is the price row and the context sentence', () => {

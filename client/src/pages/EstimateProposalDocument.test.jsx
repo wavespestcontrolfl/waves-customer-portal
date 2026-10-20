@@ -935,7 +935,7 @@ describe('Next steps text size', () => {
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "about $X a month" under each
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "$X a month" under each
 // per-application line, one plan line for two or more services. The server ships
 // proposal.monthlyAverage only with the gate on and a reconciling plan, so an
 // absent key is the gate-off document.
@@ -978,7 +978,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const text = container.textContent;
     expect(text).toContain('Pest Control — 4 applications/yr');
     expect(text).toContain('$94.00');
-    expect(text).toContain('about $31.33 a month');
+    expect(text).toContain('$31.33 a month');
     expect(text.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
     expect(text).not.toContain('Your plan averages');
   });
@@ -987,9 +987,9 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const { container } = render(<EstimateProposalDocument data={docData(bundle)} token="tok-123" />);
     const text = container.textContent;
     const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
-    expect(perLine).toEqual(['about $42.30 a month', 'about $30.00 a month']);
+    expect(perLine).toEqual(['$42.30 a month', '$30.00 a month']);
     expect(text).toContain('Your plan averages (10% bundle savings included)');
-    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $72.30 a month');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$72.30 a month');
     const cents = (s) => Math.round(parseFloat(s.match(/\$([\d.,]+)/)[1].replace(/,/g, '')) * 100);
     expect(perLine.reduce((sum, s) => sum + cents(s), 0)).toBe(7230);
     // One-time charges stay out of the average and are said so; the combined
@@ -1010,8 +1010,8 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     });
     const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
     const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
-    expect(perLine).toEqual(['about $35.50 a month', 'about $11.06 a month', 'about $43.77 a month']);
-    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $90.33 a month');
+    expect(perLine).toEqual(['$35.50 a month', '$11.06 a month', '$43.77 a month']);
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$90.33 a month');
   });
 
   it('a plan credit prints as its own negative line', () => {
@@ -1022,7 +1022,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const text = render1(data);
     expect(text).toContain('Referral Credit');
     expect(text).toContain('−$10.00 a month');
-    expect(text).toContain('about $62.30 a month');
+    expect(text).toContain('$62.30 a month');
   });
 
   it('single service with a plan credit: the credit and plan lines make the arithmetic visible', () => {
@@ -1032,9 +1032,9 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     });
     const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
     const text = container.textContent;
-    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('about $31.33 a month');
+    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('$31.33 a month');
     expect(text).toContain('−$10.00 a month');
-    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $21.33 a month');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$21.33 a month');
   });
 
   it('gate off (no monthlyAverage from the server): the document is exactly as before', () => {
