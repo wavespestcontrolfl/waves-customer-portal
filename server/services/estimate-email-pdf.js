@@ -219,11 +219,18 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
     if (!openForPdf(fresh, validThrough || fresh?.expires_at, now)) return NONE;
     if (recipient && !sameRecipient(fresh.customer_email, recipient)) return NONE;
     const pdf = require('./pdf/estimate-doc-pdf');
+    // The fingerprint is of the row as the database returned it, taken before
+    // anything else touches the object (the builder works on clones).
+    const fingerprint = rowFingerprint(fresh);
     const attachment = await pdf.buildEstimateEmailPdfAttachment(fresh, { validThrough: validThrough || fresh.expires_at || null });
     if (!attachment) return NONE;
-    const fingerprint = rowFingerprint(fresh);
     return {
       attachments: [attachment],
+      // Call with the sendTemplate result: records the rate review disclosure
+      // only once the provider accepted the email that carried the file.
+      recordDelivered: async (result) => {
+        if (result?.sent === true && result.providerAccepted === true) await pdf.recordEmailedPdfDisclosure(attachment, estimateId);
+      },
       payload: { estimate_pdf_note: pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp },
       // Pass to sendTemplate: the final fence for the permanent copy.
       withProviderHandoff: pdfProviderHandoff(estimateId, fingerprint, { validThrough, recipient }),

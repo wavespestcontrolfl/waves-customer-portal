@@ -76,14 +76,41 @@ function DocButton({ href, primary = false, children, testId }) {
   );
 }
 
-export function DocActions({ cta, authoredProposal, estimateUrl, estimateNumber }) {
+// Next-steps paragraphs: 14px, the repo's floor for customer-surface text
+// (codex #6343 r5).
+const NEXT_STEP_P = { margin: '3px 0', fontSize: 14, lineHeight: 1.5, color: INK };
+
+// The server's acceptance contract (data.estimate.acceptance.mode) decides what
+// the online page offers; the document must not advertise an action the page
+// does not. Labels are the EstimateViewPage's own wording for each mode:
+//   standard_slot_pick (or no contract)  Accept & pick a start date
+//   existing_appointment                 Confirm appointment
+//   invoice_only                         Accept + send invoice
+//   commercial_site_confirmation         Approve estimate (staff schedules)
+//   contact_office / quote_required / inspection_request / anything else
+//                                        no online accept: call or email only
+export const ACCEPT_MODE_LABELS = Object.freeze({
+  standard_slot_pick: 'Accept & pick a start date',
+  existing_appointment: 'Confirm appointment',
+  invoice_only: 'Accept + send invoice',
+  commercial_site_confirmation: 'Approve estimate',
+});
+
+export function acceptanceModeOf(data) {
+  const mode = data?.estimate?.acceptance?.mode;
+  return typeof mode === 'string' && mode ? mode : 'standard_slot_pick';
+}
+
+export function DocActions({ cta, authoredProposal, estimateUrl, estimateNumber, acceptanceMode = 'standard_slot_pick' }) {
   const canSelfBook = !authoredProposal && cta.quoteRequired !== true && cta.reviewBeforeBooking !== true;
   let primaryLabel = 'View estimate online';
   if (cta.terminalState === 'accepted') primaryLabel = 'See your visit details';
   // Declined and expired estimates refuse acceptance online — never advertise
   // an action the accept route rejects (codex #6343 r1).
   else if (cta.terminalState === 'declined' || cta.terminalState === 'expired') primaryLabel = null;
-  else if (canSelfBook) primaryLabel = 'Accept & pick a start date';
+  // Modes that cannot be accepted online (contact_office, inspection_request, …)
+  // get call/email only, never an "Accept" button (codex #6343 r5).
+  else if (canSelfBook) primaryLabel = ACCEPT_MODE_LABELS[acceptanceMode] || null;
   return (
     <div className="doc-keep" data-testid="doc-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
       {primaryLabel ? <DocButton href={estimateUrl} primary testId="doc-action-online">{primaryLabel}</DocButton> : null}
@@ -223,6 +250,7 @@ export default function EstimateProposalDocument({ data, token }) {
   const estimate = data?.estimate || {};
   const proposal = data?.proposal || null;
   const cta = data?.cta || {};
+  const acceptanceMode = acceptanceModeOf(data);
   const totals = proposal?.totals || {};
   const isCommercial = cta.commercialProposal === true
     || cta.commercialAutoPriced === true
@@ -482,7 +510,7 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         </div>
 
-        <DocActions cta={cta} authoredProposal={authoredProposal} estimateUrl={estimateUrl} estimateNumber={estimateNumber} />
+        <DocActions cta={cta} authoredProposal={authoredProposal} estimateUrl={estimateUrl} estimateNumber={estimateNumber} acceptanceMode={acceptanceMode} />
 
         {/* Property scope (slice 1A-i) — the estimator-captured facts the
             price was scoped against. Authored proposals only; absent →
@@ -736,18 +764,18 @@ export default function EstimateProposalDocument({ data, token }) {
               review-gated ones can't self-book — none of them may be told to
               "approve online". */}
           {cta.terminalState === 'accepted' ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+            <p style={NEXT_STEP_P}>
               This estimate has been approved — your live estimate at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a> has your visit details.
               Questions? Call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
             </p>
           ) : cta.terminalState === 'declined' ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+            <p style={NEXT_STEP_P}>
               This estimate was declined. Changed your mind? Call {WAVES_SUPPORT_PHONE_DISPLAY} and
               we&rsquo;ll refresh the numbers with you.
             </p>
           ) : cta.terminalState === 'expired' ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+            <p style={NEXT_STEP_P}>
               This estimate has expired. Call{' '}
               <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: NAVY }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a> and
               we&rsquo;ll refresh the numbers with you.
@@ -758,29 +786,52 @@ export default function EstimateProposalDocument({ data, token }) {
             // per-proposal override lands as one slice with its authoring
             // path so the PDF can never name a different contact than the
             // page it links to (codex #3297 r1/r3).
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+            <p style={NEXT_STEP_P}>
               {WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
               questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
               Your live estimate stays available at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
             </p>
           ) : cta.quoteRequired === true || cta.reviewBeforeBooking === true ? (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+            <p style={NEXT_STEP_P}>
               Our team will confirm the final details and scheduling with you — call{' '}
               {WAVES_SUPPORT_PHONE_DISPLAY} any time. Your live estimate stays available at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
             </p>
+          ) : acceptanceMode === 'contact_office' ? (
+            // The page's own wording (AcceptanceModeCard): no online accept.
+            <p style={NEXT_STEP_P}>
+              Call <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: NAVY }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a> to
+              finish this renewal &mdash; no appointment is needed, and we&rsquo;ll set up your invoice and
+              activate your coverage. You can also email{' '}
+              <a href={mailtoHref(estimateNumber)} style={{ color: NAVY }}>{WAVES_EMAIL}</a>. Your estimate is
+              online at <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
+            </p>
+          ) : !ACCEPT_MODE_LABELS[acceptanceMode] ? (
+            // quote_required / inspection_request / any mode the page does not
+            // let the customer accept online: the team finishes it.
+            <p style={NEXT_STEP_P}>
+              Our team will confirm the final details and scheduling with you &mdash; call{' '}
+              {WAVES_SUPPORT_PHONE_DISPLAY} any time. Your live estimate stays available at{' '}
+              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
+            </p>
           ) : (
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              To go ahead, tap <strong>Accept &amp; pick a start date</strong> above, call{' '}
+            <p style={NEXT_STEP_P}>
+              To go ahead, tap <strong>{ACCEPT_MODE_LABELS[acceptanceMode]}</strong> above, call{' '}
               <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: NAVY }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>, or email{' '}
-              <a href={mailtoHref(estimateNumber)} style={{ color: NAVY }}>{WAVES_EMAIL}</a> &mdash; we&rsquo;ll
-              pick a start date with you. Your estimate is online at{' '}
+              <a href={mailtoHref(estimateNumber)} style={{ color: NAVY }}>{WAVES_EMAIL}</a>
+              {acceptanceMode === 'standard_slot_pick' ? ' — we’ll pick a start date with you.' : null}
+              {acceptanceMode === 'existing_appointment' ? ' — your appointment stays as scheduled.' : null}
+              {acceptanceMode === 'invoice_only' ? ' — no appointment is needed, and we’ll send your invoice by text and email.' : null}
+              {acceptanceMode === 'commercial_site_confirmation'
+                ? ' — after you approve, a Waves team member reaches out to schedule your service, and your account manager confirms the exact price on a quick site visit before your first invoice.'
+                : null}
+              {' '}Your estimate is online at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
             </p>
           )}
           {!cta.terminalState && validThroughText ? (
-            <p data-testid="doc-valid-through-line" style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+            <p data-testid="doc-valid-through-line" style={NEXT_STEP_P}>
               Price valid through {validThroughText}.
             </p>
           ) : null}

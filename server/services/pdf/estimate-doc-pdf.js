@@ -232,51 +232,70 @@ async function renderWhileNotBusy(estimate, { validThrough, render, sleep, attem
 }
 
 // A customer-emailed PDF is a disclosure to the customer exactly like the
-// /:token/pdf download. The headless pass renders with a signed pin, which
-// skips the served-disclosure write inside composeEstimateDataPayload, so the
-// evidence must be durable BEFORE the render (the /pdf route's pre-render step,
-// ensureRateReviewTermsEvidenceBeforeRender): an acceptance that follows the
-// emailed document then still freezes the rate-review line the customer
-// received. Returns the row to render and whether the line is withheld because
-// its evidence is unproven. Never throws; fail closed (withhold).
-async function rateReviewEvidenceForEmail(estimate) {
+// /:token/pdf download, but its evidence is written only AFTER the provider
+// accepted the email that carried it (recordEmailedPdfDisclosure below): the
+// documented rule is that a missed marker costs a frozen document its line,
+// while an EXTRA marker (written for a render that failed, a fence veto or a
+// provider rejection) would give an older-tab acceptance a line the customer
+// never saw. So before the render this only CHECKS whether the document will
+// print the line, on clones: billing resolution reconciles a membership
+// snapshot onto the row it is handed, and the caller's row is the one the
+// handoff fence fingerprints. Unknown (the check threw) fails closed: no PDF.
+async function rateReviewCheckForEmail(estimate) {
   try {
     const billingMod = require('../estimate-proposal-billing');
-    const billing = await billingMod.resolveProposalBillingContext(estimate);
-    return await billingMod.ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
+    const billing = await billingMod.resolveProposalBillingContext(structuredClone(estimate));
+    const prints = await billingMod.documentPrintsRateReviewTerms(structuredClone(estimate), { billing });
+    return { prints: prints === true };
   } catch (e) {
-    logger.warn(`[estimate-doc-pdf] rate review evidence check failed for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
-    return { estimate, withholdRateReviewTerms: true };
+    logger.warn(`[estimate-doc-pdf] rate review check failed for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
+    return { unknown: true };
   }
 }
 
-// Returns a SendGrid attachment, or null. Never throws. When the rate-review
-// evidence cannot be proven durable there is NO attachment: the browser
-// renderer reads the row itself and cannot be told to withhold the line, and
-// there is no pdfkit fallback for this copy, so the email goes out without it.
+// Returns a SendGrid attachment, or null. Never throws. No attachment when the
+// rate-review check is unknown: the browser renderer reads the row itself and
+// cannot be told to withhold the line, and there is no pdfkit fallback for
+// this copy, so the email goes out without it. An attachment whose document
+// prints the line carries a non-enumerable `rateReviewServed` flag (never
+// serialized to the provider) for recordEmailedPdfDisclosure.
 async function buildEstimateEmailPdfAttachment(estimate, { validThrough = null, render = null, sleep = null, attempts = EMAIL_PDF_BUSY_ATTEMPTS, delayMs = EMAIL_PDF_BUSY_DELAY_MS } = {}) {
   try {
     if (!estimateEmailPdfEnabled()) return null;
-    const evidence = await rateReviewEvidenceForEmail(estimate);
-    if (evidence.withholdRateReviewTerms) {
-      logger.warn(`[estimate-doc-pdf] email PDF withheld for estimate ${estimate?.id}: rate review evidence unproven`);
-      return null;
-    }
-    // The row the evidence step returns: a row that froze under it renders as it is now.
-    const documentEstimate = evidence.estimate || estimate;
-    const buffer = await renderWhileNotBusy(documentEstimate, { validThrough, render, sleep, attempts, delayMs });
+    const check = await rateReviewCheckForEmail(estimate);
+    if (check.unknown) return null;
+    const buffer = await renderWhileNotBusy(estimate, { validThrough, render, sleep, attempts, delayMs });
     if (!buffer || !buffer.length) return null;
-    return {
-      filename: estimateEmailPdfFilename(documentEstimate),
+    const attachment = {
+      filename: estimateEmailPdfFilename(estimate),
       content: Buffer.from(buffer).toString('base64'),
       type: 'application/pdf',
       disposition: 'attachment',
     };
+    if (check.prints) Object.defineProperty(attachment, 'rateReviewServed', { value: true, enumerable: false });
+    return attachment;
   } catch (e) {
     try {
       logger.warn(`[estimate-doc-pdf] email PDF skipped for estimate ${estimate?.id}: ${sanitizeRenderError(e)}`);
     } catch { /* logging must not turn a skipped PDF into a failed send */ }
     return null;
+  }
+}
+
+// Call after the provider ACCEPTED the email that carried `attachment`. Marks
+// estimate_data.rateReviewTermsServed when that document printed the line, via
+// recordRateReviewTermsServedOutcome (SQL-guarded: never touches a frozen
+// estimate; an accept that landed first makes it a zero-row no-op). Never
+// throws; a missed marker only costs a frozen document its line.
+async function recordEmailedPdfDisclosure(attachment, estimateId) {
+  if (!attachment?.rateReviewServed || !estimateId) return 'skipped';
+  try {
+    const row = await require('../../models/db')('estimates').where({ id: estimateId }).first();
+    if (!row) return 'failed';
+    return await require('../estimate-proposal-billing').recordRateReviewTermsServedOutcome(row);
+  } catch (e) {
+    logger.warn(`[estimate-doc-pdf] rate review disclosure not recorded for estimate ${estimateId}: ${sanitizeRenderError(e)}`);
+    return 'failed';
   }
 }
 
@@ -308,6 +327,7 @@ module.exports = {
   buildEstimateDocEmailAttachment,
   buildEstimateProposalEmailAttachmentPreferred,
   buildEstimateEmailPdfAttachment,
+  recordEmailedPdfDisclosure,
   estimateEmailPdfEnabled,
   ESTIMATE_EMAIL_PDF_NOTES,
   estimateEmailPdfFilename,

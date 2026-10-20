@@ -136,57 +136,113 @@ describe('buildEstimateEmailPdfAttachment', () => {
   });
 });
 
-describe('the emailed PDF records its rate review disclosure first (PR #6343 pre-push P1)', () => {
+describe('the emailed PDF records its rate review disclosure only after delivery (codex #6343 r5)', () => {
   const billingMod = require('../services/estimate-proposal-billing');
   const bytes = Buffer.from('%PDF-synthetic');
   const noSleep = jest.fn(async () => {});
   let resolveBilling;
+  let prints;
   let ensure;
+  let outcome;
   beforeEach(() => {
     jest.clearAllMocks();
     setGates(true);
     resolveBilling = jest.spyOn(billingMod, 'resolveProposalBillingContext').mockResolvedValue({ livePricing: null });
-    ensure = jest.spyOn(billingMod, 'ensureRateReviewTermsEvidenceBeforeRender').mockImplementation(async (estimate) => ({ estimate, withholdRateReviewTerms: false }));
+    prints = jest.spyOn(billingMod, 'documentPrintsRateReviewTerms').mockResolvedValue(true);
+    ensure = jest.spyOn(billingMod, 'ensureRateReviewTermsEvidenceBeforeRender');
+    outcome = jest.spyOn(billingMod, 'recordRateReviewTermsServedOutcome').mockResolvedValue('persisted');
   });
-  afterEach(() => { resolveBilling.mockRestore(); ensure.mockRestore(); });
+  afterEach(() => { resolveBilling.mockRestore(); prints.mockRestore(); ensure.mockRestore(); outcome.mockRestore(); });
 
-  test('the evidence step runs before the render, with the resolved billing lane, and the render gets the row it returns', async () => {
-    const frozenRow = { ...ESTIMATE, status: 'accepted' };
-    ensure.mockResolvedValue({ estimate: frozenRow, withholdRateReviewTerms: false });
-    const order = [];
-    ensure.mockImplementation(async (estimate) => { order.push('evidence'); return { estimate: frozenRow, withholdRateReviewTerms: false }; });
-    const render = jest.fn(async () => { order.push('render'); return bytes; });
-    const out = await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { validThrough: new Date('2099-01-01T00:00:00Z'), render, sleep: noSleep });
+  test('before the render it only checks: nothing is written, and the checks run on clones', async () => {
+    const seen = [];
+    resolveBilling.mockImplementation(async (row) => { row.monthly_total = 'MUTATED'; seen.push(row); return { livePricing: null }; });
+    const render = jest.fn(async () => bytes);
+    const out = await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render, sleep: noSleep });
     expect(out).toMatchObject({ type: 'application/pdf' });
-    expect(order).toEqual(['evidence', 'render']);
-    expect(ensure).toHaveBeenCalledWith(ESTIMATE, { billing: { livePricing: null } });
-    expect(render).toHaveBeenCalledWith(frozenRow, { validThrough: new Date('2099-01-01T00:00:00Z') });
+    expect(out.rateReviewServed).toBe(true);
+    expect(Object.keys(out)).not.toContain('rateReviewServed');
+    expect(outcome).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    // The caller's row is untouched; the render gets that row.
+    expect(ESTIMATE.monthly_total).toBeUndefined();
+    expect(seen[0]).not.toBe(ESTIMATE);
+    expect(render).toHaveBeenCalledWith(ESTIMATE, { validThrough: null });
+  });
+
+  test('a document that will not print the line carries no flag, so nothing is ever recorded for it', async () => {
+    prints.mockResolvedValue(false);
+    const out = await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render: async () => bytes, sleep: noSleep });
+    expect(out.rateReviewServed).toBeUndefined();
+    expect(await pdf.recordEmailedPdfDisclosure(out, ESTIMATE.id)).toBe('skipped');
+    expect(outcome).not.toHaveBeenCalled();
   });
 
   test.each([
-    ['the evidence write is unproven', () => ensure.mockResolvedValue({ estimate: ESTIMATE, withholdRateReviewTerms: true })],
-    ['the evidence step throws', () => ensure.mockRejectedValue(new Error('db down'))],
+    ['the check throws', () => prints.mockRejectedValue(new Error('db down'))],
     ['the billing lane cannot be resolved', () => resolveBilling.mockRejectedValue(new Error('db down'))],
-  ])('no attachment and no render when %s (the browser renderer cannot withhold the line)', async (_label, arrange) => {
+  ])('no attachment and no render when %s (unknown fails closed)', async (_label, arrange) => {
     arrange();
     const render = jest.fn(async () => bytes);
     expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render, sleep: noSleep })).toBeNull();
     expect(render).not.toHaveBeenCalled();
   });
 
-  test('the follow-up path (openEstimateEmailPdf) gets the same step and sends no file when it withholds', async () => {
-    db.mockReset();
-    const open = { ...ESTIMATE, status: 'sent', archived_at: null, expires_at: new Date(Date.now() + 5 * 86400000) };
-    db.mockImplementation(() => { const b = {}; b.where = jest.fn(() => b); b.first = jest.fn(async () => open); return b; });
-    ensure.mockResolvedValue({ estimate: open, withholdRateReviewTerms: true });
-    expect(await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' })).toEqual({ attachments: [], payload: {} });
-    expect(ensure).toHaveBeenCalledWith(expect.objectContaining({ id: ESTIMATE.id }), { billing: { livePricing: null } });
+  test('a failed render writes nothing', async () => {
+    expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render: async () => { throw new Error('x'); }, sleep: noSleep })).toBeNull();
+    expect(outcome).not.toHaveBeenCalled();
   });
 
-  test('gate off: the evidence step does not run at all', async () => {
+  describe('recordDelivered on the follow-up path', () => {
+    const open = { ...ESTIMATE, customer_email: 'lead@example.com', status: 'sent', archived_at: null, expires_at: new Date(Date.now() + 5 * 86400000) };
+    let build;
+    beforeEach(() => {
+      db.mockReset();
+      db.mockImplementation(() => { const b = {}; b.where = jest.fn(() => b); b.first = jest.fn(async () => open); return b; });
+      const attachment = { filename: 'Waves-Estimate-EST-2026-0512.pdf', content: 'AA==', type: 'application/pdf', disposition: 'attachment' };
+      Object.defineProperty(attachment, 'rateReviewServed', { value: true, enumerable: false });
+      build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockResolvedValue(attachment);
+    });
+    afterEach(() => build.mockRestore());
+
+    test('writes the marker only when the provider accepted', async () => {
+      const copy = await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.viewed_followup' });
+      expect(copy.attachments).toHaveLength(1);
+      expect(outcome).not.toHaveBeenCalled();
+      for (const result of [{ sent: false, aborted: true }, { sent: true, deduped: true, providerAccepted: false }, { sent: true, providerAccepted: false }, undefined]) {
+        await copy.recordDelivered(result);
+      }
+      expect(outcome).not.toHaveBeenCalled();
+      await copy.recordDelivered({ sent: true, providerAccepted: true });
+      expect(outcome).toHaveBeenCalledTimes(1);
+      expect(outcome).toHaveBeenCalledWith(open);
+    });
+
+    test('a send with no PDF has nothing to record', async () => {
+      prints.mockResolvedValue(true);
+      const copy = await openEstimateEmailPdf({ estimateId: ESTIMATE.id, templateKey: 'estimate.deposit_abandoned' });
+      expect(copy.recordDelivered).toBeUndefined();
+    });
+
+    test('sendDualChannel records after an accepted send and not after a rejected or aborted one', async () => {
+      const est = { id: ESTIMATE.id, customer_email: 'lead@example.com', customer_phone: null, customer_id: null, address: '1 Example Street' };
+      const leg = { templateKey: 'estimate.viewed_followup', stage: 'viewed_followup', payload: { first_name: 'Sam' } };
+      const sendTemplate = require('../services/email-template-library').sendTemplate;
+      sendTemplate.mockResolvedValueOnce({ sent: false, aborted: true, boundaryBlocked: true });
+      await _private.sendDualChannel(est, { email: leg });
+      sendTemplate.mockRejectedValueOnce(new Error('SendGrid 400'));
+      await _private.sendDualChannel(est, { email: leg });
+      expect(outcome).not.toHaveBeenCalled();
+      sendTemplate.mockResolvedValueOnce({ sent: true, providerAccepted: true });
+      await _private.sendDualChannel(est, { email: leg });
+      expect(outcome).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('gate off: nothing is checked or recorded', async () => {
     setGates(false);
     expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render: jest.fn(), sleep: noSleep })).toBeNull();
-    expect(ensure).not.toHaveBeenCalled();
+    expect(resolveBilling).not.toHaveBeenCalled();
   });
 });
 

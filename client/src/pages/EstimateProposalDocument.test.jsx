@@ -770,3 +770,138 @@ describe('EstimateProposalDocument', () => {
     expect(text).not.toContain('(NaN');
   });
 });
+
+// codex #6343 r5: the document follows the server's acceptance contract
+// (data.estimate.acceptance.mode), using EstimateViewPage's own wording, and
+// never advertises an online action the page does not offer.
+describe('acceptance mode', () => {
+  const RESIDENTIAL = {
+    ...BASE_DATA,
+    estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL' },
+    proposal: {
+      ...BASE_DATA.proposal,
+      enabled: false,
+      synthesized: true,
+      title: 'Service Proposal',
+      buildings: [{ name: '123 Palm Way', note: null, lineItems: [{ description: 'Quarterly Pest Control', quantity: 1, unitPrice: 150, amount: 150, frequency: 'quarterly', frequencyLabel: 'Quarterly', taxable: false }] }],
+      totals: { annualRecurring: 600, monthlyEquivalent: 50, oneTime: 0, totalTax: 0, firstYearTotal: 600, hasTax: false, isMultiBuilding: false },
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  };
+  const withMode = (acceptance, cta = {}) => ({
+    ...RESIDENTIAL,
+    estimate: { ...RESIDENTIAL.estimate, ...(acceptance === undefined ? {} : { acceptance }) },
+    cta: { ...RESIDENTIAL.cta, ...cta },
+  });
+  const view = (data) => {
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    return {
+      container,
+      text: container.textContent,
+      button: container.querySelector('[data-testid="doc-action-online"]'),
+      nextSteps: [...container.querySelectorAll('p')].find((p) => /go ahead|Call .*renewal|Our team will confirm/.test(p.textContent)),
+    };
+  };
+
+  it('standard (or no contract at all): Accept & pick a start date, with the start-date promise', () => {
+    for (const acceptance of [undefined, { mode: 'standard_slot_pick', ctaLabel: 'Pick appointment' }]) {
+      const v = view(withMode(acceptance));
+      expect(v.button.textContent).toBe('Accept & pick a start date');
+      expect(v.nextSteps.textContent).toContain('tap Accept & pick a start date above');
+      expect(v.nextSteps.textContent).toContain('pick a start date with you');
+    }
+  });
+
+  it('existing_appointment: Confirm appointment, and no start-date promise', () => {
+    const v = view(withMode({ mode: 'existing_appointment', ctaLabel: 'Confirm invoice option' }));
+    expect(v.button.textContent).toBe('Confirm appointment');
+    expect(v.text).not.toContain('Accept & pick a start date');
+    expect(v.nextSteps.textContent).toContain('tap Confirm appointment above');
+    expect(v.nextSteps.textContent).toContain('your appointment stays as scheduled');
+    expect(v.nextSteps.textContent).not.toMatch(/start date/);
+  });
+
+  it('invoice_only: Accept + send invoice, no appointment and no start-date promise', () => {
+    const v = view(withMode({ mode: 'invoice_only', ctaLabel: 'Accept estimate' }));
+    expect(v.button.textContent).toBe('Accept + send invoice');
+    expect(v.nextSteps.textContent).toContain('tap Accept + send invoice above');
+    expect(v.nextSteps.textContent).toContain('no appointment is needed');
+    expect(v.nextSteps.textContent).toContain('send your invoice by text and email');
+    expect(v.nextSteps.textContent).not.toMatch(/start date/);
+  });
+
+  it('commercial_site_confirmation: Approve estimate, and the team schedules after approval', () => {
+    const v = view(withMode({ mode: 'commercial_site_confirmation', ctaLabel: 'Approve estimate' }));
+    expect(v.button.textContent).toBe('Approve estimate');
+    expect(v.nextSteps.textContent).toContain('tap Approve estimate above');
+    expect(v.nextSteps.textContent).toContain('a Waves team member reaches out to schedule your service');
+    expect(v.nextSteps.textContent).toContain('confirms the exact price on a quick site visit');
+    expect(v.nextSteps.textContent).not.toMatch(/pick a start date/);
+  });
+
+  it('contact_office: no online button, call and email only, in the page\'s wording', () => {
+    const v = view(withMode({ mode: 'contact_office', ctaLabel: 'Call Waves' }));
+    expect(v.button).toBeNull();
+    expect(v.container.querySelector('[data-testid="doc-action-call"]')).not.toBeNull();
+    expect(v.container.querySelector('[data-testid="doc-action-email"]')).not.toBeNull();
+    expect(v.text).not.toContain('Accept');
+    expect(v.text).not.toContain('tap ');
+    expect(v.nextSteps.textContent).toContain('to finish this renewal');
+    expect(v.nextSteps.textContent).toContain('no appointment is needed');
+    expect(v.nextSteps.textContent).toContain('set up your invoice and activate your coverage');
+  });
+
+  it.each(['quote_required', 'inspection_request', 'some_future_mode'])('%s: no online accept either (never advertise what the page does not offer)', (mode) => {
+    const v = view(withMode({ mode, ctaLabel: 'Call Waves' }));
+    expect(v.button).toBeNull();
+    expect(v.text).not.toContain('Accept & pick a start date');
+    expect(v.nextSteps.textContent).toContain('Our team will confirm the final details');
+  });
+
+  it('terminal states and review/quote gating still outrank the mode', () => {
+    const accepted = view(withMode({ mode: 'invoice_only' }, { terminalState: 'accepted' }));
+    expect(accepted.button.textContent).toBe('See your visit details');
+    expect(accepted.text).toContain('has been approved');
+    const expired = view(withMode({ mode: 'existing_appointment' }, { terminalState: 'expired' }));
+    expect(expired.button).toBeNull();
+    const review = view(withMode({ mode: 'invoice_only' }, { reviewBeforeBooking: true }));
+    expect(review.button.textContent).toBe('View estimate online');
+  });
+
+  // The accepted-estimate record uses data.acceptance (the recorded terms),
+  // a different object from estimate.acceptance (the contract): do not confuse them.
+  it('reads the contract from estimate.acceptance, not from the accepted-terms record', () => {
+    const v = view({ ...withMode(undefined), acceptance: { mode: 'contact_office' } });
+    expect(v.button.textContent).toBe('Accept & pick a start date');
+  });
+});
+
+describe('Next steps text size', () => {
+  const sizes = (data) => {
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const header = [...container.querySelectorAll('div')].find((d) => d.textContent === 'Next steps');
+    const paragraphs = [...header.parentElement.querySelectorAll('p')];
+    return paragraphs.map((p) => p.style.fontSize);
+  };
+  const open = { ...BASE_DATA, cta: { commercialProposal: false }, proposal: { ...BASE_DATA.proposal, enabled: false } };
+
+  it('every Next steps paragraph is 14px in every branch, including the valid-through and expired lines', () => {
+    const branches = [
+      open,
+      { ...open, cta: { terminalState: 'accepted' } },
+      { ...open, cta: { terminalState: 'declined' } },
+      { ...open, cta: { terminalState: 'expired' } },
+      BASE_DATA, // authored proposal
+      { ...open, cta: { quoteRequired: true } },
+      { ...open, estimate: { ...open.estimate, acceptance: { mode: 'contact_office' } } },
+      { ...open, estimate: { ...open.estimate, acceptance: { mode: 'invoice_only' } } },
+    ];
+    for (const data of branches) {
+      const found = sizes(data);
+      expect(found.length).toBeGreaterThan(0);
+      expect(found.every((size) => size === '14px')).toBe(true);
+    }
+    // The open branch carries the valid-through line as a second paragraph.
+    expect(sizes(open)).toHaveLength(2);
+  });
+});

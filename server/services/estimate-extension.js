@@ -674,6 +674,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         });
         if (result?.sent) {
           emailResult = { sent: true };
+          await pdfCopy.recordDelivered?.(result);
         } else if (result?.deduped) {
           emailResult = { sent: false, reason: 'deduped' };
         } else {

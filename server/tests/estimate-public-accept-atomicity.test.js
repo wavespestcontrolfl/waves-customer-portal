@@ -2006,55 +2006,93 @@ sent_at: '2026-09-20T12:00:00.000Z',
     expect(renderedBilling.withholdRateReviewTerms).toBe(true);
   });
 
-  // PR #6343 pre-push P1: the customer-emailed PDF is rendered with a signed
-  // pin, which skips the served-disclosure write inside the data projection,
-  // so the builder writes the evidence itself BEFORE the render.
-  describe('the estimate PDF emailed to the customer records its rate review disclosure', () => {
+  // PR #6343 pre-push P1 + codex r5: the customer-emailed PDF is rendered with
+  // a signed pin, which skips the served-disclosure write inside the data
+  // projection. The builder only CHECKS before the render; the marker is
+  // written AFTER the provider accepted the email that carried the file, so a
+  // failed render, a fence veto or a provider rejection leaves no marker for an
+  // older-tab acceptance to promote.
+  describe('the estimate PDF emailed to the customer records its rate review disclosure after delivery', () => {
     const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const docPdf = () => require('../services/pdf/estimate-doc-pdf');
     const documentData = () => JSON.stringify({
       lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
       result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
     });
     const stampOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'));
-    const build = (render) => require('../services/pdf/estimate-doc-pdf')
-      .buildEstimateEmailPdfAttachment(structuredClone(storedEstimate()), { render, sleep: async () => {} });
+    const servedMarker = () => JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed;
+    const build = (render) => docPdf().buildEstimateEmailPdfAttachment(structuredClone(storedEstimate()), { render, sleep: async () => {} });
+    const okRender = () => jest.fn(async () => Buffer.from('%PDF-synthetic'));
+    const seedOpen = (n) => seed({ id: `est-email-pdf-${n}`, token: `tok-email-pdf-${n}-x0123456789`, sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData() });
 
-    test('the marker is durable before the render, and an acceptance after the email stamps the frozen document', async () => {
+    test('building and rendering the PDF writes nothing; the marker appears only after delivery, and an acceptance after it stamps the frozen document', async () => {
       mockGateState.acceptanceTerms = false;
-      seed({ id: 'est-email-pdf-1', token: 'tok-email-pdf-1-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData() });
-      let markerAtRender;
-      const render = jest.fn(async () => {
-        markerAtRender = JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed;
-        return Buffer.from('%PDF-synthetic');
-      });
+      seedOpen(1);
+      let markerAtRender = 'unset';
+      const render = jest.fn(async () => { markerAtRender = servedMarker(); return Buffer.from('%PDF-synthetic'); });
       const attachment = await build(render);
       expect(attachment).toMatchObject({ type: 'application/pdf' });
-      expect(render).toHaveBeenCalledTimes(1);
-      expect(markerAtRender).toBe(RATE_REVIEW_TERMS_VERSION);
-      expect(stampOps()).toHaveLength(0);
-      // The customer opens nothing else; the plan is accepted after the email.
+      // Never serialized to the provider, but there for the post-delivery write.
+      expect(attachment.rateReviewServed).toBe(true);
+      expect(Object.keys(attachment)).not.toContain('rateReviewServed');
+      expect(JSON.stringify(attachment)).not.toContain('rateReviewServed');
+      expect(markerAtRender).toBeUndefined();
+      expect(servedMarker()).toBeUndefined();
+      // The provider rejected / the send never happened: an older-tab accept gains no line.
       conversionOk();
       expect((await putAccept('tok-email-pdf-1-x0123456789', {})).status).toBe(200);
+      expect(stampOps()).toHaveLength(0);
+
+      // A delivered send: now the evidence is durable and the accept stamps it.
+      seedOpen(2);
+      const delivered = await build(okRender());
+      await expect(docPdf().recordEmailedPdfDisclosure(delivered, 'est-email-pdf-2')).resolves.toBe('persisted');
+      expect(servedMarker()).toBe(RATE_REVIEW_TERMS_VERSION);
+      conversionOk();
+      expect((await putAccept('tok-email-pdf-2-x0123456789', {})).status).toBe(200);
       expect(stampOps()).toHaveLength(1);
       expect(JSON.parse(storedEstimate().estimate_data).rateReviewDisclosedAtAccept).toBe(true);
     });
 
-    test('when the evidence write fails there is no attachment, no render, and no marker', async () => {
-      seed({ id: 'est-email-pdf-2', token: 'tok-email-pdf-2-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData() });
-      db.__state.onTable = (table) => { if (table === 'estimates') throw new Error('db down'); };
-      const render = jest.fn(async () => Buffer.from('%PDF-synthetic'));
-      const attachment = await build(render);
-      db.__state.onTable = null;
+    test('a render that fails writes nothing', async () => {
+      seedOpen(3);
+      const attachment = await build(jest.fn(async () => { throw new Error('browser down'); }));
       expect(attachment).toBeNull();
-      expect(render).not.toHaveBeenCalled();
-      expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+      expect(servedMarker()).toBeUndefined();
     });
 
-    test('a frozen estimate: nothing is written, and the document renders as the frozen row', async () => {
-      seed({ id: 'est-email-pdf-3', token: 'tok-email-pdf-3-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData() });
-      const render = jest.fn(async () => Buffer.from('%PDF-synthetic'));
-      expect(await build(render)).not.toBeNull();
-      expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    test('when the rate review check cannot be answered there is no attachment and no render', async () => {
+      seedOpen(4);
+      const billingMod = require('../services/estimate-proposal-billing');
+      const check = jest.spyOn(billingMod, 'documentPrintsRateReviewTerms').mockRejectedValueOnce(new Error('db down'));
+      const render = okRender();
+      const attachment = await build(render);
+      check.mockRestore();
+      expect(attachment).toBeNull();
+      expect(render).not.toHaveBeenCalled();
+      expect(servedMarker()).toBeUndefined();
+    });
+
+    test('an estimate that froze before the write is never touched (the SQL guard), and a document without the line records nothing', async () => {
+      seed({ id: 'est-email-pdf-5', token: 'tok-email-pdf-5-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData() });
+      const frozenDoc = await build(okRender());
+      expect(frozenDoc.rateReviewServed).toBeUndefined();
+      await expect(docPdf().recordEmailedPdfDisclosure(frozenDoc, 'est-email-pdf-5')).resolves.toBe('skipped');
+      // Built while open, frozen by an accept before the provider accepted: no write.
+      seedOpen(6);
+      const openDoc = await build(okRender());
+      storedEstimate().status = 'accepted';
+      storedEstimate().price_locked_at = '2026-09-21T00:00:00.000Z';
+      await expect(docPdf().recordEmailedPdfDisclosure(openDoc, 'est-email-pdf-6')).resolves.toBe('frozen');
+      expect(servedMarker()).toBeUndefined();
+    });
+
+    test('a failed marker write never throws', async () => {
+      seedOpen(7);
+      const doc = await build(okRender());
+      db.__state.onTable = (table) => { if (table === 'estimates') throw new Error('db down'); };
+      await expect(docPdf().recordEmailedPdfDisclosure(doc, 'est-email-pdf-7')).resolves.toBe('failed');
+      db.__state.onTable = null;
     });
   });
 

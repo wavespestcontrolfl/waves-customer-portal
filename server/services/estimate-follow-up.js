@@ -578,6 +578,7 @@ async function sendDualChannel(est, { sms, email }) {
         attempted = true;
       } else if (result?.sent) {
         attempted = true;
+        await pdfCopy.recordDelivered?.(result);
       }
     } catch (e) {
       const message = EmailTemplateLibrary.redactEmailAddresses(e.message);

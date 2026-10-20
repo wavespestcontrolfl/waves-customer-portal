@@ -203,6 +203,30 @@ describe('what the fence hashes (codex #6343 r2)', () => {
   });
 });
 
+describe('a live-repriced estimate does not veto itself (codex #6343 r5)', () => {
+  test('the fingerprint is of the row as the database returned it, even if the builder mutates the object it was handed', async () => {
+    jest.clearAllMocks();
+    db.mockReset();
+    setGates(true);
+    claimSql.estimateOffCustomerSurface.mockReturnValue(false);
+    claimSql.callSideBlockForEstimateData.mockResolvedValue(null);
+    persistence.staleCallLinkageReason.mockResolvedValue(null);
+    // What resolveProposalBillingContext used to do to the row it was handed.
+    const build = jest.spyOn(pdf, 'buildEstimateEmailPdfAttachment').mockImplementation(async (rowArg) => {
+      rowArg.monthly_total = 1;
+      rowArg.estimate_data = { ...rowArg.estimate_data, membershipSnapshot: { reconciled: true } };
+      return ATTACHMENT;
+    });
+    readsRow(row(), row());
+    const o = await emailPdf.openEstimateEmailPdf({ estimateId: ID, templateKey: 'estimate.viewed_followup' });
+    expect(o.attachments).toEqual([ATTACHMENT]);
+    let check;
+    await o.withProviderHandoff(async (_d, b) => { check = b; });
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+    build.mockRestore();
+  });
+});
+
 describe('the expiry check at the fence (codex #6343 r2)', () => {
   let build;
   beforeEach(() => {

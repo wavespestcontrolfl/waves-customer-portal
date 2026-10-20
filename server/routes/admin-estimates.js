@@ -3109,6 +3109,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             if (!emailPdfAttachment) channels.email.warning = 'The PDF copy could not be attached; the email went out with the link only.';
           }
           if (result.ok && result.providerAccepted) {
+            // The provider accepted the email that carried the PDF: only now is
+            // its rate review disclosure evidence (never throws).
+            if (emailPdfAttachment) await require('../services/pdf/estimate-doc-pdf').recordEmailedPdfDisclosure(emailPdfAttachment, estimate.id);
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }

@@ -74,6 +74,7 @@ jest.mock('../services/triage-auto-resolve', () => ({ deliveredEstimateScope: je
 jest.mock('../services/pdf/estimate-doc-pdf', () => ({
   buildEstimateProposalEmailAttachmentPreferred: jest.fn(async () => ({ filename: 'synthetic-proposal.pdf', content: 'c3ludGhldGlj', type: 'application/pdf' })),
   buildEstimateEmailPdfAttachment: jest.fn(async () => null),
+  recordEmailedPdfDisclosure: jest.fn(async () => 'persisted'),
   ESTIMATE_EMAIL_PDF_NOTES: { delivery: 'Synthetic delivery PDF note.', followUp: 'Synthetic follow-up PDF note.' },
 }));
 jest.mock('../routes/estimate-public', () => ({
