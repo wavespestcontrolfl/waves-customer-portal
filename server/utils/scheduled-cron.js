@@ -12,11 +12,21 @@ const { AsyncLocalStorage } = require('async_hooks');
 // request-vs-scheduled flag through every shared entry point.
 const tickContext = new AsyncLocalStorage();
 
+// node-cron 3 checks each task once a second, and with
+// recoverMissedExecutions off (its default) it fires a tick only when that
+// check lands inside the matching second. When the top-of-hour herd blocks
+// the event loop past it, the check lands a second late and the tick is
+// dropped with no log and no job_health row. On 2026-10-18 the 4:00 AM ET
+// geo-grid scan and newsletter ingestion both vanished that way while the
+// health cleanup at the same minute ran. Recovery fires the matching second
+// late instead; node-cron still fires each occurrence at most once, and
+// only seconds missed since the task's previous check (never across a
+// restart) are replayed.
 function schedule(expression, task, options) {
   return nodeCron.schedule(
     expression,
     (...args) => tickContext.run({ scheduled: true }, () => task(...args)),
-    options,
+    { recoverMissedExecutions: true, ...options },
   );
 }
 
