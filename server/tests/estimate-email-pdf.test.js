@@ -78,7 +78,8 @@ describe('buildEstimateEmailPdfAttachment', () => {
     const out = await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { validThrough: new Date('2099-01-01T00:00:00Z'), render, sleep: noSleep });
     expect(out).toEqual({ filename: 'Waves-Estimate-EST-2026-0512.pdf', content: pdfBytes.toString('base64'), type: 'application/pdf', disposition: 'attachment' });
     expect(out.filename).not.toMatch(/Synthetic|Customer/);
-    expect(render).toHaveBeenCalledWith(ESTIMATE, { validThrough: new Date('2099-01-01T00:00:00Z') });
+    // Only the emailed copy asks the render to fail on a failed image.
+    expect(render).toHaveBeenCalledWith(ESTIMATE, { validThrough: new Date('2099-01-01T00:00:00Z'), failOnImageErrors: true });
   });
 
   test('falls back to a short id when the estimate has no number', () => {
@@ -113,6 +114,13 @@ describe('buildEstimateEmailPdfAttachment', () => {
     expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render, sleep: noSleep })).toBeNull();
     expect(render).toHaveBeenCalledTimes(3);
     expect(noSleep).toHaveBeenCalledTimes(2);
+  });
+
+  test('a render that reports a failed image (tagged error) yields no attachment, so the send goes out link-only (codex #6343 r12)', async () => {
+    const failed = Object.assign(new Error('estimate document had 1 image(s) that failed to load'), { code: 'estimate_doc_image_failed', imageFailures: 1 });
+    const render = jest.fn().mockRejectedValue(failed);
+    await expect(pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render, sleep: noSleep })).resolves.toBeNull();
+    expect(render).toHaveBeenCalledTimes(1);
   });
 
   test('any other failure returns null at once, never throws, and logs without the token or the link', async () => {
@@ -169,7 +177,7 @@ describe('the emailed PDF records its rate review disclosure only after delivery
     // The caller's row is untouched; the render gets that row.
     expect(ESTIMATE.monthly_total).toBeUndefined();
     expect(seen[0]).not.toBe(ESTIMATE);
-    expect(render).toHaveBeenCalledWith(ESTIMATE, { validThrough: null });
+    expect(render).toHaveBeenCalledWith(ESTIMATE, { validThrough: null, failOnImageErrors: true });
   });
 
   test('a document that will not print the line carries no flag, so nothing is ever recorded for it', async () => {

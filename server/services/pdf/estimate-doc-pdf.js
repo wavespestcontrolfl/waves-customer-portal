@@ -125,12 +125,33 @@ async function withDocumentPdfCapacity(render) {
   }
 }
 
-async function renderEstimateDocumentPdf(estimate, { validThrough = null } = {}) {
+// `failOnImageErrors` (opt-in; only the emailed copy passes it): the document
+// counts its failed remote images (the satellite snapshot) into
+// window.__WAVES_PDF_IMAGE_FAILURES and drops them, which is right for the
+// download route (a document without a map beats no document) but not for a
+// permanent emailed copy, so there the render throws a tagged error instead and
+// the send goes out without the file (codex #6343 r12).
+async function renderEstimateDocumentPdf(estimate, { validThrough = null, failOnImageErrors = false } = {}) {
   if (!estimate?.token) throw new Error('estimate token required for document render');
-  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough }));
+  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough, failOnImageErrors }));
 }
 
-async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } = {}) {
+// The page's own count of images that failed to load, read after the render;
+// null when unknown (an older page bundle, or the page cannot be read), which
+// never fails a render.
+async function pageImageFailures(page) {
+  try {
+    // globalThis === window in the page context; spelled this way so the
+    // server-side lint (no browser globals) accepts the in-page function.
+    return await page.evaluate(() => (
+      typeof globalThis.__WAVES_PDF_IMAGE_FAILURES === 'number' ? globalThis.__WAVES_PDF_IMAGE_FAILURES : null
+    ));
+  } catch {
+    return null;
+  }
+}
+
+async function renderEstimateDocumentPdfInner(estimate, { validThrough = null, failOnImageErrors = false } = {}) {
   const url = estimateDocumentUrl(estimate.token, { validThrough });
   const browser = await launchBrowser();
   let page = null;
@@ -147,6 +168,12 @@ async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } 
       headerTemplate: '<div></div>',
       footerTemplate: '<div style="font-size:8px; width:100%; text-align:center; color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
     });
+    if (failOnImageErrors) {
+      const failures = await pageImageFailures(page);
+      if (failures > 0) {
+        throw Object.assign(new Error(`estimate document had ${failures} image(s) that failed to load`), { code: 'estimate_doc_image_failed', imageFailures: failures });
+      }
+    }
     return Buffer.from(pdf);
   } finally {
     if (page) await page.close().catch(() => {});
@@ -226,7 +253,8 @@ async function renderWhileNotBusy(estimate, { validThrough, render, sleep, attem
   const wait = sleep || defaultSleep;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await doRender(estimate, { validThrough });
+      // Only the emailed copy asks the render to fail on a failed image.
+      return await doRender(estimate, { validThrough, failOnImageErrors: true });
     } catch (e) {
       if (e?.code !== 'estimate_doc_render_busy' || attempt >= attempts) throw e;
       await wait(delayMs);

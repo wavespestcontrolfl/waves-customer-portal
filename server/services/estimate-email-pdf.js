@@ -313,7 +313,7 @@ async function openEstimateEmailPdf({ estimateId, templateKey, validThrough = nu
       // Call with the sendTemplate result: records the rate review disclosure
       // only once the provider accepted the email that carried the file.
       recordDelivered: async (result) => {
-        if (result?.sent === true && result.providerAccepted === true) await pdf.recordEmailedPdfDisclosure(attachment, estimateId);
+        if (result?.sent === true && freshAcceptedSend(result)) await pdf.recordEmailedPdfDisclosure(attachment, estimateId);
       },
       payload: { estimate_pdf_note: pdf.ESTIMATE_EMAIL_PDF_NOTES.followUp },
       // Pass to sendTemplate: the final fence for the permanent copy.
@@ -364,8 +364,9 @@ function vetoFromTemplateResult(result) {
 //   note             the payload note ('' when no file is attached)
 //   templateOptions  sendTemplate options carrying the fence (the fence rides
 //                    the send with the file or without it)
-//   vetoFromResult   spread into the result: a sendTemplate result the fence
-//                    aborted becomes a failed result the operator sees ({} else)
+//   resultExtras     spread into the result: what the send reports (deduped,
+//                    has_attachments) and, when the fence aborted it, a failed
+//                    result the operator sees
 //   assertSmtpFence  the same fence for the SMTP path; throws the operator
 //                    message, which the sender reports as a failed channel
 function deliverySendPieces(pdf) {
@@ -373,7 +374,14 @@ function deliverySendPieces(pdf) {
   return {
     note: pdf?.note || '',
     templateOptions: fence ? { withProviderHandoff: fence.withProviderHandoff } : {},
-    vetoFromResult: (result) => vetoFromTemplateResult(result) || {},
+    // Spread into sendEstimateEmail's result: the facts annotate/recordDelivered
+    // read (`deduped`, and the earlier message's has_attachments when the library
+    // returned it), plus the fence veto when the fence aborted the send.
+    resultExtras: (result) => ({
+      ...(result?.deduped === true ? { deduped: true } : {}),
+      ...(typeof result?.message?.has_attachments === 'boolean' ? { messageHasAttachments: result.message.has_attachments } : {}),
+      ...(vetoFromTemplateResult(result) || {}),
+    }),
     assertSmtpFence: async () => {
       if (!fence) return;
       try {
@@ -383,6 +391,26 @@ function deliverySendPieces(pdf) {
       }
     },
   };
+}
+
+const NO_FILE_WARNING = 'The PDF copy could not be attached; the email went out with the link only.';
+
+// A send that really reached the provider just now: sent and accepted, and not
+// an answer from an earlier send (a deduped result).
+function freshAcceptedSend(sendResult) {
+  return !!sendResult && sendResult.ok !== false && sendResult.providerAccepted === true && sendResult.deduped !== true;
+}
+
+// Whether the file went out, for the channel result: true only for a fresh
+// provider-accepted send that carried it; false when that send had none; for a
+// deduped answer, what the earlier message persisted (has_attachments) or
+// undefined (unknown) when the result does not say; undefined when the send was
+// not a fresh accepted attempt either.
+function attachmentOutcome(attachment, sendResult) {
+  if (sendResult?.deduped === true) {
+    return typeof sendResult.messageHasAttachments === 'boolean' ? sendResult.messageHasAttachments : undefined;
+  }
+  return freshAcceptedSend(sendResult) ? !!attachment : undefined;
 }
 
 // The manual delivery send's whole PDF-copy step, in one place so the sender
@@ -406,15 +434,20 @@ async function prepareDeliveryPdfCopy({ freshEstimate, sendTo, validThrough = nu
   // `annotate(channel)` stamps the operator-visible result on a successful email
   // channel; `recordDelivered()` records the rate review disclosure once the
   // provider accepted. Both are plain calls so the sender gains no branching.
+  // `sendResult` is sendEstimateEmail's result (with the facts deliverySendPieces
+  // adds). What went out is read from it, never assumed: a fresh provider-accepted
+  // attempt carried the file; a deduped result reports what the earlier send
+  // persisted (has_attachments), and when that is unknown nothing is claimed.
   const finish = (copy) => ({
     ...copy,
-    annotate: (channel) => {
+    annotate: (channel, sendResult) => {
       if (!copy.expected || !channel?.ok) return;
-      channel.pdfAttached = !!copy.attachment;
-      if (copy.warning) channel.warning = copy.warning;
+      const attached = attachmentOutcome(copy.attachment, sendResult);
+      if (attached !== undefined) channel.pdfAttached = attached;
+      if (attached === false) channel.warning = NO_FILE_WARNING;
     },
-    recordDelivered: async () => {
-      if (copy.attachment) await require('./pdf/estimate-doc-pdf').recordEmailedPdfDisclosure(copy.attachment, freshEstimate.id);
+    recordDelivered: async (sendResult) => {
+      if (copy.attachment && freshAcceptedSend(sendResult)) await require('./pdf/estimate-doc-pdf').recordEmailedPdfDisclosure(copy.attachment, freshEstimate.id);
     },
   });
   const none = finish({ expected: false, attachment: null, note: '', fence: null, warning: null });
@@ -432,7 +465,7 @@ async function prepareDeliveryPdfCopy({ freshEstimate, sendTo, validThrough = nu
   // without a document fingerprint.
   const opts = { validThrough, recipient: sendTo, delivery: true };
   const noFileFence = { withProviderHandoff: pdfProviderHandoff(freshEstimate.id, null, opts), boundaryCheck: pdfBoundaryCheck(freshEstimate.id, null, opts) };
-  const expected = finish({ expected: true, attachment: null, note: '', fence: noFileFence, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
+  const expected = finish({ expected: true, attachment: null, note: '', fence: noFileFence, warning: NO_FILE_WARNING });
   try {
     const fence = await deliveryPdfFence(freshEstimate, { recipient: sendTo, validThrough });
     if (!fence) return expected;

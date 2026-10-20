@@ -1867,6 +1867,29 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
     expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
   });
 
+  test.each([
+    ['persisted without a file', { has_attachments: false }, { pdfAttached: false, warning: expect.stringMatching(/PDF copy could not be attached/) }],
+    ['persisted with a file', { has_attachments: true }, { pdfAttached: true }],
+    ['not reported', { provider_message_id: 'earlier' }, null],
+  ])('a deduped answer (the earlier message %s) never claims the new render went out and records no disclosure (codex #6343 r12)', async (_label, message, expected) => {
+    setGates(true);
+    docPdf.recordEmailedPdfDisclosure.mockClear();
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, message });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email.ok).toBe(true);
+    if (expected) expect(result.channels.email).toMatchObject(expected);
+    else expect(result.channels.email).not.toHaveProperty('pdfAttached');
+    expect(docPdf.recordEmailedPdfDisclosure).not.toHaveBeenCalled();
+  });
+
+  test('a fresh provider-accepted send records the disclosure once and says the file went out', async () => {
+    setGates(true);
+    docPdf.recordEmailedPdfDisclosure.mockClear();
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
+    expect(docPdf.recordEmailedPdfDisclosure).toHaveBeenCalledTimes(1);
+  });
+
   test('a commercial proposal keeps its own PDF path and never gets the estimate copy', async () => {
     setGates(true);
     row.estimate_data = { proposal: { enabled: true, validThrough: '2099-12-21',

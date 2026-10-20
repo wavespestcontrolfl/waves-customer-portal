@@ -982,7 +982,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' , ...pdfPieces.vetoFromResult(result) };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' , ...pdfPieces.resultExtras(result) };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -3083,11 +3083,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           channels.email = result.ok
             ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
-          pdfCopy.annotate(channels.email);
+          pdfCopy.annotate(channels.email, result);
           if (result.ok && result.providerAccepted) {
             // The provider accepted the email that carried the PDF: only now is
             // its rate review disclosure evidence (never throws).
-            await pdfCopy.recordDelivered();
+            await pdfCopy.recordDelivered(result);
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }

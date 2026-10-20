@@ -365,33 +365,80 @@ describe('prepareDeliveryPdfCopy: the delivery send\'s whole PDF step (codex #63
     expect(await prepare({ reviewedMessages: { email: { pdfCopy: true } } })).toMatchObject({ expected: true, attachment: ATTACHMENT });
   });
 
-  test('annotate stamps the channel result only for a successful channel that was expected to carry the file', async () => {
+  const ACCEPTED = { ok: true, providerAttempted: true, providerAccepted: true };
+
+  test('annotate: pdfAttached is true only for a fresh provider-accepted send that carried the file', async () => {
     const withFile = await prepare();
     const ok = { ok: true };
-    withFile.annotate(ok);
+    withFile.annotate(ok, ACCEPTED);
     expect(ok).toEqual({ ok: true, pdfAttached: true });
+    // A failed channel, an unexpected copy and a missing result are never annotated.
     const failed = { ok: false };
-    withFile.annotate(failed);
+    withFile.annotate(failed, ACCEPTED);
     expect(failed).toEqual({ ok: false });
-    const noFile = await prepare({ sendTo: 'old@example.com' });
-    const warned = { ok: true };
-    noFile.annotate(warned);
-    expect(warned).toEqual({ ok: true, pdfAttached: false, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
-    const unexpected = await prepare({ proposalMode: true });
     const untouched = { ok: true };
-    unexpected.annotate(untouched);
+    (await prepare({ proposalMode: true })).annotate(untouched, ACCEPTED);
     expect(untouched).toEqual({ ok: true });
+    const noResult = { ok: true };
+    withFile.annotate(noResult);
+    expect(noResult).toEqual({ ok: true });
+    // An ok send that was not a provider-accepted attempt: nothing is claimed.
+    const unaccepted = { ok: true };
+    withFile.annotate(unaccepted, { ok: true, providerAccepted: false });
+    expect(unaccepted).toEqual({ ok: true });
   });
 
-  test('recordDelivered records the disclosure for the attachment it built, and does nothing without one', async () => {
+  test('annotate: no file built means false plus the warning, on a fresh accepted send', async () => {
+    const noFile = await prepare({ sendTo: 'old@example.com' });
+    const warned = { ok: true };
+    noFile.annotate(warned, ACCEPTED);
+    expect(warned).toEqual({ ok: true, pdfAttached: false, warning: 'The PDF copy could not be attached; the email went out with the link only.' });
+  });
+
+  test('annotate: a deduped answer reports the earlier message\'s persisted has_attachments, or nothing when unknown, never true by assumption', async () => {
+    const withFile = await prepare();
+    for (const [extras, expected] of [
+      [{ messageHasAttachments: true }, { ok: true, pdfAttached: true }],
+      [{ messageHasAttachments: false }, { ok: true, pdfAttached: false, warning: 'The PDF copy could not be attached; the email went out with the link only.' }],
+      [{}, { ok: true }],
+    ]) {
+      const channel = { ok: true };
+      withFile.annotate(channel, { ok: true, deduped: true, providerAccepted: false, ...extras });
+      expect(channel).toEqual(expected);
+    }
+    // Even a deduped result that carries providerAccepted (a superseded attempt) is not a fresh send.
+    const superseded = { ok: true };
+    withFile.annotate(superseded, { ok: true, deduped: true, providerAccepted: true });
+    expect(superseded).toEqual({ ok: true });
+  });
+
+  test('recordDelivered records for a fresh accepted send only; a deduped result, an unaccepted one or none never records', async () => {
     const spy = jest.spyOn(pdf, 'recordEmailedPdfDisclosure').mockResolvedValue('persisted');
-    await (await prepare()).recordDelivered();
+    const copy = await prepare();
+    await copy.recordDelivered(ACCEPTED);
+    expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith(ATTACHMENT, ID);
     spy.mockClear();
-    await (await prepare({ proposalMode: true })).recordDelivered();
-    await (await prepare({ sendTo: 'old@example.com' })).recordDelivered();
+    for (const result of [
+      { ok: true, deduped: true, providerAccepted: true },
+      { ok: true, deduped: true, providerAccepted: false },
+      { ok: true, providerAccepted: false },
+      { ok: false, providerAccepted: true },
+      undefined,
+    ]) await copy.recordDelivered(result);
+    await (await prepare({ proposalMode: true })).recordDelivered(ACCEPTED);
+    await (await prepare({ sendTo: 'old@example.com' })).recordDelivered(ACCEPTED);
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+
+  test('resultExtras: deduped and the earlier message\'s has_attachments travel on the result; a fence abort becomes a failed result', async () => {
+    const { resultExtras } = emailPdf.deliverySendPieces(undefined);
+    // A fresh send adds nothing: the channel result stays byte-identical to today.
+    expect(resultExtras({ sent: true })).toEqual({});
+    expect(resultExtras({ sent: true, deduped: true, message: { has_attachments: true } })).toEqual({ deduped: true, messageHasAttachments: true });
+    expect(resultExtras({ sent: true, deduped: true, message: {} })).toEqual({ deduped: true });
+    expect(resultExtras({ aborted: true, boundaryBlocked: true })).toMatchObject({ ok: false, vetoedAtHandoff: true });
   });
 
   test('an address that is not the row\'s, a render that returns nothing or throws, or a failed fence read: expected but no file, with the warning', async () => {
