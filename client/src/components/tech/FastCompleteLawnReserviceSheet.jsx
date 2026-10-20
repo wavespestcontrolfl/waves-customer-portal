@@ -246,7 +246,7 @@ function lastVisitRows(products, lastVisit, ctx) {
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, stockAdvisory: false, lastVisit: null, customerRequest: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, stockAdvisory: false, oneTap: false, lastVisit: null, customerRequest: null,
   visitIdentity: null, visit: null, wrapUp: false,
 };
 
@@ -259,6 +259,8 @@ function methodContext(data) {
     // WaveGuard lawn callbacks: the server records a 0-stock shortfall as an
     // advisory and completes, so the sheet shows the flag but never holds.
     stockAdvisory: data?.stockAdvisory === true,
+    // GATE_ONE_TAP_REPORT: no note read for products (the server says so with `oneTap: true`).
+    oneTap: data?.oneTap === true,
   };
 }
 
@@ -555,7 +557,9 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
   // note's mic goes to our own transcriber, and one tap reads the products out of
   // the note onto the rows, each to confirm. Off, the sheet is as it was.
   const noteClip = useNoteClip({ enabled: voiceFillEnabled, request, serviceId: service?.id, onText: appendNote });
-  const voice = useLawnVoiceFill({ enabled: voiceFillEnabled, request, serviceId: service?.id, products, ctx });
+  // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17): no AI read of the note for products, so no fill tap
+  // and nothing to confirm; the note's mic stays.
+  const voice = useLawnVoiceFill({ enabled: voiceFillEnabled && !ctx.oneTap, request, serviceId: service?.id, products, ctx });
   const lastVisitCommon = useMemo(() => (Array.isArray(ctx.lastVisit?.products) ? ctx.lastVisit.products : [])
     .map((p) => ({ productId: p.productId, usualUnit: p.amountUnit || null, usualAmount: p.totalAmount ?? null })), [ctx.lastVisit]);
   const picker = useProductPicker({

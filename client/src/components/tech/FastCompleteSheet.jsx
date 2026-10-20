@@ -429,8 +429,9 @@ function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
 // The identity the server re-checks under its lock. The report flow's pay
 // link and review ask follow whether the visit is a free callback, so that
 // flow echoes it too.
-// The one-tap report (`oneTap`) runs only on a visit of a recurring series, so that flow echoes the series too: a
-// visit the office took out of its series since the sheet opened is refused and reopened as today's sheet.
+// The one-tap report (`oneTap`) runs on a visit of a recurring series or a re-service, so that flow echoes the series
+// too (a re-service's callback flag and service already ride in the identity): a visit the office took out of its
+// series since the sheet opened is refused and reopened as the sheet it now gets.
 function sheetVisitIdentity(visit, reportFlow, oneTap) {
   return reportFlow && typeof visit.isCallback === 'boolean'
     ? { ...recapVisitIdentity(visit), isCallback: visit.isCallback, ...(oneTap ? { isRecurring: visit.isRecurring === true } : {}) }
@@ -448,10 +449,10 @@ const wrapUpGateOf = (data) => data?.wrapUp === true;
 // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17): the recurring pest report sheet writes on the rating tap, reads no note for
 // products, lets a 0-in-stock product through and takes typed feet where no trace is saved. The server says so with `oneTap: true`.
 const oneTapGateOf = (data) => data?.oneTap === true;
-// It runs on the plain recurring pest report that opens with the house mix on the sheet. A visit that starts with no
-// products (an initial cleanout) keeps the note's products read, and a lane or typed record, a re-service and a
-// stop's part (prepare mode) keep the sheet as it was.
-const oneTapOf = ({ ctx, mode, isReservice, sharedNote }) => ctx.oneTap === true && ctx.houseMix === true && !mode && !isReservice && sharedNote == null;
+// It runs on the plain pest report (a visit of a recurring series or a re-service: the server sends `oneTap` for no
+// other) that opens with the house mix on the sheet. A visit that starts with no products (an initial cleanout) keeps
+// the note's products read, and a lane or typed record and a stop's part (prepare mode) keep the sheet as it was.
+const oneTapOf = ({ ctx, mode, sharedNote }) => ctx.oneTap === true && ctx.houseMix === true && !mode && sharedNote == null;
 // Typed feet count only as a whole number above 0.
 const wholeFeetOf = (text) => (/^\d+$/.test(String(text).trim()) && Number(text) > 0 ? Number(text) : null);
 
@@ -1871,7 +1872,7 @@ function ReportFlowForm({
   const recordState = useVisitRecord(service, request, form.note);
   const { lane, mode, record } = recordState;
   // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17).
-  const oneTap = oneTapOf({ ctx, mode, isReservice, sharedNote });
+  const oneTap = oneTapOf({ ctx, mode, sharedNote });
   // The server refused the completion because the property's stations changed
   // since they were read: the sheet loads them again and reads the note again.
   const { errorCode: submitCode } = submission;

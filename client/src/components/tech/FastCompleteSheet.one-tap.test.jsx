@@ -5,9 +5,10 @@
 //  - the note is not read for products (its facts are still read);
 //  - a product at 0 in stock still holds, as without the gate (the server refuses a pest deduction below zero);
 //  - the trace is optional: typed feet cover a perimeter spray with no saved trace.
-// A re-service (and, with it, every lane, typed, station and prepare path), a first
-// cleanout that opens with no house mix, and a context without the key keep the sheet
-// as it was (FastCompleteSheet.report-flow.test.jsx).
+// A re-service gets the same sheet (the server sends the key for a recurring series or
+// a re-service only). Every lane, typed, station and prepare path, a first cleanout that
+// opens with no house mix, and a context without the key keep the sheet as it was
+// (FastCompleteSheet.report-flow.test.jsx).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -31,7 +32,7 @@ const REGULAR = {
   // As the server sends them: a free callback or not, and a visit of a recurring series (the one-tap scope).
   serviceKey: 'pest_general_quarterly', status: 'confirmed', isCallback: false, isRecurring: true,
 };
-const RESERVICE = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' };
+const RESERVICE = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service', isRecurring: false };
 const REPORT = ['WHAT WE FOUND', 'Ants on the counter.', '', 'WHAT WE DID AND WHY', 'We treated the kitchen.', '', 'WHAT TO EXPECT', 'Fewer ants.', '', "WHAT'S NEXT", 'Wipe the counters.'].join('\n');
 const NOTE = 'Ants on the kitchen counter, light. Sprayed around the outside of the house.';
 const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], pests: ['ants'] };
@@ -283,11 +284,28 @@ describe('one-tap: the visit identity echoes the series', () => {
   });
 });
 
-describe('one-tap: not a plain recurring pest report', () => {
-  test('a re-service keeps its sheet: the tap writes nothing, the note is read for products, the trace hold stays', async () => {
-    const request = makeRequest({ service: RESERVICE, facts: PERIMETER });
+describe('one-tap: a re-service', () => {
+  const openReservice = async (request) => {
     render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Control Re-Service' }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
     await screen.findByText(/Taurus SC/);
+  };
+
+  test('gets the one-tap sheet: the tap writes, the note is not read for products, typed feet cover an untraced spray', async () => {
+    const request = makeRequest({ service: RESERVICE, facts: PERIMETER });
+    await openReservice(request);
+    writeNote();
+    tapRating();
+    await waitFor(() => expect(reportCalls(request)).toHaveLength(1));
+    await openReport();
+    expect(reportCalls(request)).toHaveLength(1);
+    expect(request.bodies('/voice-fill/products')).toEqual([]);
+    expect(screen.getByText('Type the feet you sprayed, or trace it.')).toBeTruthy();
+    expect(screen.getByLabelText('Feet sprayed')).toBeTruthy();
+  });
+
+  test('a context without the key keeps the re-service sheet as it was', async () => {
+    const request = makeRequest({ service: RESERVICE, facts: PERIMETER, context: {} });
+    await openReservice(request);
     writeNote();
     tapRating();
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -296,7 +314,9 @@ describe('one-tap: not a plain recurring pest report', () => {
     expect(request.bodies('/voice-fill/products')).toEqual([{ note: NOTE }]);
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
   });
+});
 
+describe('one-tap: not a plain recurring pest report', () => {
   test('a first cleanout opens with no house mix: the tap writes nothing and Generate still reads the note for products', async () => {
     const CLEANOUT = { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' };
     const request = makeRequest({ service: CLEANOUT });
