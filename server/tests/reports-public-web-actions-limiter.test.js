@@ -23,7 +23,6 @@ jest.mock('@aws-sdk/client-s3', () => ({ S3Client: jest.fn().mockImplementation(
 jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 jest.mock('../routes/photo-id', () => ({
   photoIdLimiters: {
-    perCustomerLimiter: (req, res, next) => next(),
     sharedDailyLimiter: (req, res, next) => next(),
   },
   runCustomerPhotoId: jest.fn(),

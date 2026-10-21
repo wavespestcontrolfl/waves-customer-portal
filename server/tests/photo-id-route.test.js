@@ -2522,27 +2522,37 @@ test('preview signing failure retains the photo ID, emits a safe diagnostic and 
 describe('runCustomerPhotoId (report-token entry)', () => {
   const { runCustomerPhotoId } = require('../routes/photo-id');
 
-  test('runs the typed handler for the report customer: same row, same coverage check, URL stays in the reply for the caller to drop', async () => {
+  test('runs the typed handler for the report customer and STORES NOTHING: no row, no S3 photos', async () => {
     mockReserviceAccess.mockResolvedValue({ token: 'tok-pest', lanes: ['pest'] });
     const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
     expect(reply.status).toBe(200);
     expect(reply.body.next_step.kind).toBe('reservice');
+    expect(TABLES.pest_identifications).toHaveLength(0);
+    expect(mockStoreFunnelPhotos).not.toHaveBeenCalled();
+  });
+
+  test.each([['lawn', 'lawn_diagnostics'], ['tree_shrub', 'tree_shrub_assessments']])('%s: no row and no photos either', async (type, table) => {
+    const reply = await runCustomerPhotoId({ type, customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(reply.status).toBe(200);
+    expect(reply.body.type).toBe(type);
+    expect(TABLES[table]).toHaveLength(0);
+    expect(mockStoreFunnelPhotos).not.toHaveBeenCalled();
+    expect(mockStoreTreeShrubPhotos).not.toHaveBeenCalled();
+  });
+
+  test('the portal route still stores its row and photos (history unchanged)', async () => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(200);
+    });
     expect(TABLES.pest_identifications).toHaveLength(1);
-    expect(TABLES.pest_identifications[0]).toEqual(expect.objectContaining({ customer_id: CUSTOMER_ID, mode: 'customer', source: 'portal', property_id: null }));
-    expect(mockStoreFunnelPhotos).toHaveBeenCalledWith(expect.objectContaining({ table: 'pest_identification_photos' }));
+    expect(mockStoreFunnelPhotos).toHaveBeenCalledTimes(1);
   });
 
   test('a secondary-property visit reads as "request", never "reservice", even when the plan covers the lane', async () => {
     mockReserviceAccess.mockResolvedValue({ token: 'tok-pest', lanes: ['pest'] });
     const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL], isSecondary: true });
     expect(reply.body.next_step.kind).toBe('request');
-  });
-
-  test('lawn type runs the lawn handler', async () => {
-    const reply = await runCustomerPhotoId({ type: 'lawn', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
-    expect(reply.status).toBe(200);
-    expect(reply.body.type).toBe('lawn');
-    expect(TABLES.lawn_diagnostics).toHaveLength(1);
   });
 
   test('bad input is refused before any vision call', async () => {

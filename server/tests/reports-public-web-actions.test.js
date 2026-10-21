@@ -56,7 +56,6 @@ jest.mock('../services/service-report/cross-sell', () => ({
 }));
 jest.mock('../routes/photo-id', () => ({
   photoIdLimiters: {
-    perCustomerLimiter: jest.fn((req, res, next) => next()),
     sharedDailyLimiter: jest.fn((req, res, next) => next()),
   },
   runCustomerPhotoId: jest.fn(),
@@ -228,6 +227,24 @@ describe('web-actions: photo answers', () => {
   });
 });
 
+// In-memory stand-in for the service_report_events rows the per-token photo quota counts.
+let events = [];
+function fakeTrx(rows) {
+  const trx = (table) => {
+    if (table !== 'service_report_events') throw new Error(`Unexpected trx table: ${table}`);
+    let filters = {};
+    const q = {
+      where(cond) { if (cond && typeof cond === 'object') filters = { ...filters, ...cond }; return q; },
+      count() { return q; },
+      first: async () => ({ n: rows.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).length }),
+      insert: async (row) => { rows.push(row); },
+    };
+    return q;
+  };
+  trx.raw = async () => {};
+  return trx;
+}
+
 function mockDb(overrides = {}) {
   const record = {
     id: 'service-1',
@@ -242,6 +259,8 @@ function mockDb(overrides = {}) {
   };
   // param gate first, then the /data join read
   const serviceRead = chain({ first: jest.fn().mockResolvedValueOnce({ id: 'service-1', structured_notes: null }).mockResolvedValueOnce(record) });
+  events = [];
+  db.transaction = async (callback) => callback(fakeTrx(events));
   db.mockImplementation((table) => {
     if (table === 'service_records') return serviceRead;
     if (table === 'service_records as sr') return chain({ first: jest.fn().mockResolvedValue(record) });
@@ -382,7 +401,7 @@ describe('POST /reports/:token/photo-check', () => {
       const res = await post(baseUrl, { photos: [JPEG(2000)] });
       expect(res.status).toBe(404);
     });
-    expect(photoId.photoIdLimiters.perCustomerLimiter).not.toHaveBeenCalled();
+    expect(photoId.photoIdLimiters.sharedDailyLimiter).not.toHaveBeenCalled();
     expect(photoId.runCustomerPhotoId).not.toHaveBeenCalled();
   });
 
@@ -409,7 +428,7 @@ describe('POST /reports/:token/photo-check', () => {
     expect(photoId.runCustomerPhotoId).not.toHaveBeenCalled();
   });
 
-  test('covered answer: shared limiters ran for the report customer, handler got the lawn type, token never returned', async () => {
+  test('covered answer: shared daily limiter ran, handler got the lawn type, token never returned', async () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { photos: [JPEG(2000)] });
       expect(res.status).toBe(200);
@@ -422,9 +441,8 @@ describe('POST /reports/:token/photo-check', () => {
       });
       expect(JSON.stringify(body)).not.toMatch(/standing-token/);
     });
-    const [limiterReq] = photoId.photoIdLimiters.perCustomerLimiter.mock.calls[0];
-    expect(limiterReq.customer).toEqual({ id: 'customer-1' });
     expect(photoId.photoIdLimiters.sharedDailyLimiter).toHaveBeenCalledTimes(1);
+    expect(photoId.photoIdLimiters.perCustomerLimiter).toBeUndefined(); // the portal's per-customer quota is never used
     expect(photoId.runCustomerPhotoId).toHaveBeenCalledWith(expect.objectContaining({
       type: 'lawn', customerId: 'customer-1', isSecondary: false,
     }));
@@ -465,5 +483,63 @@ describe('POST /reports/:token/photo-check', () => {
       expect(res.status).toBe(503);
       expect((await res.json()).error).toContain(PHONE);
     });
+  });
+});
+
+describe('POST /reports/:token/photo-check quota and storage', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setGates();
+    mockDb();
+    photoId.runCustomerPhotoId.mockResolvedValue({ status: 200, body: { result: { observations: 'ok' }, next_step: { kind: 'request' } } });
+    homeCheck = jest.spyOn(webActions, 'visitIsAtPrimaryHome').mockResolvedValue(true);
+  });
+  afterEach(() => homeCheck.mockRestore());
+
+  test('its own quota per report token: 5 checks a day, then 429 with no handler call', async () => {
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 5; i += 1) expect((await post(baseUrl, { photos: [JPEG(2000)] })).status).toBe(200);
+      const sixth = await post(baseUrl, { photos: [JPEG(2000)] });
+      expect(sixth.status).toBe(429);
+      expect((await sixth.json()).error).toContain(PHONE);
+    });
+    expect(photoId.runCustomerPhotoId).toHaveBeenCalledTimes(5);
+    expect(photoId.photoIdLimiters.sharedDailyLimiter).toHaveBeenCalledTimes(5); // an over-quota request never reaches the shared budget
+    expect(events.filter((e) => e.event_name === 'report_photo_check_call')).toHaveLength(5);
+  });
+
+  test('an invalid body spends neither the token quota nor the shared daily budget', async () => {
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 12; i += 1) {
+        expect((await post(baseUrl, { photos: [] })).status).toBe(400);
+        expect((await post(baseUrl, { photos: [JPEG(760 * 1024)] })).status).toBe(413);
+      }
+      for (let i = 0; i < 5; i += 1) expect((await post(baseUrl, { photos: [JPEG(2000)] })).status).toBe(200);
+    });
+    expect(photoId.photoIdLimiters.sharedDailyLimiter).toHaveBeenCalledTimes(5);
+    expect(events).toHaveLength(5);
+  });
+
+  test('another report token has its own quota', async () => {
+    events.push(...Array.from({ length: 5 }, () => ({ event_name: 'report_photo_check_call', service_record_id: 'someone-else', ip_hash: 'x' })));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { photos: [JPEG(2000)] })).status).toBe(200);
+    });
+  });
+
+  test('the quota is counted in service_report_events only, never in portal photo ID tables', async () => {
+    await withServer(async (baseUrl) => { await post(baseUrl, { photos: [JPEG(2000)] }); });
+    const tables = db.mock.calls.map(([table]) => table);
+    expect(tables.some((t) => /pest_identifications|lawn_diagnostics|tree_shrub_assessments/.test(t))).toBe(false);
+  });
+
+  test('a quota count failure fails closed with the phone line and no handler call', async () => {
+    db.transaction = async () => { throw new Error('db down'); };
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { photos: [JPEG(2000)] });
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toContain(PHONE);
+    });
+    expect(photoId.runCustomerPhotoId).not.toHaveBeenCalled();
   });
 });

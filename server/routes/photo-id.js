@@ -331,6 +331,16 @@ async function resolvePropertyScope(req, { strict = false } = {}) {
   }
 }
 
+// Stores one submission (its row, then its photos) for the portal. A report-token photo
+// check (runCustomerPhotoId sets req._ephemeral) stores NOTHING: no row, no S3 photos, so a
+// forwarded report link can never write into the account's portal photo history.
+async function storeSubmission(req, insertRow, storePhotos) {
+  if (req._ephemeral) return { id: null, created_at: null };
+  const row = await insertRow();
+  await storePhotos(row);
+  return row;
+}
+
 // ── Pest ─────────────────────────────────────────────────────────────────
 
 function pestPublicResult(contract) {
@@ -537,8 +547,8 @@ async function handlePest(req, res, {
     note,
     location,
   };
-  const row = issueAssociation.enabled
-    ? await savePestSubmission({
+  const row = await storeSubmission(req, async () => (issueAssociation.enabled
+    ? savePestSubmission({
       issueId: issueAssociation.issueId,
       customerId: req.customer.id,
       propertyId,
@@ -546,15 +556,13 @@ async function handlePest(req, res, {
       observedOn: issueAssociation.observedOn,
       submission,
     })
-    : (await db('pest_identifications').insert(submission).returning(['id', 'created_at']))[0];
-
-  await storeFunnelPhotos({
+    : (await db('pest_identifications').insert(submission).returning(['id', 'created_at']))[0]), (saved) => storeFunnelPhotos({
     table: 'pest_identification_photos',
     fkColumn: 'identification_id',
-    rowId: row.id,
+    rowId: saved.id,
     keyPrefix: 'pestid/customer',
     photos: photoInputs,
-  });
+  }));
 
   const pestResult = pestPublicResult(contract);
   const lane = pestReserviceLane(contract);
@@ -922,7 +930,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   const merged = composites.length ? mergeLawnComposites(composites) : {};
   const lawnResult = lawnPublicResult(merged);
 
-  const [row] = await db('lawn_diagnostics').insert({
+  const row = await storeSubmission(req, async () => (await db('lawn_diagnostics').insert({
     mode: 'customer',
     status: 'analyzed',
     source: 'portal',
@@ -938,15 +946,13 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
     ai_summary: lawnResult.observations ? String(lawnResult.observations).slice(0, 2000) : null,
     note,
     location,
-  }).returning(['id', 'created_at']);
-
-  await storeFunnelPhotos({
+  }).returning(['id', 'created_at']))[0], (saved) => storeFunnelPhotos({
     table: 'lawn_diagnostic_photos',
     fkColumn: 'diagnostic_id',
-    rowId: row.id,
+    rowId: saved.id,
     keyPrefix: 'lawnfunnel/customer',
     photos: photoInputs,
-  });
+  }));
 
   const noUsableScores = merged.turf_density == null && merged.weed_coverage == null && merged.color_health == null;
   // codex GH r2 (cloud) P1: usable turf/color scores existing is not the
@@ -1121,7 +1127,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   const anyTracking = (preview.trackingCount || 0) > 0;
   const unreliable = partial || anyTracking;
 
-  const [row] = await db('tree_shrub_assessments').insert({
+  const row = await storeSubmission(req, async () => (await db('tree_shrub_assessments').insert({
     customer_id: req.customer.id,
     property_id: propertyId,
     service_date: etDateString(),
@@ -1145,14 +1151,12 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
     note,
     location,
     ...(v2Result ? { result_v2: JSON.stringify(v2Result.v2), v2_internal: JSON.stringify(v2Result.internal) } : {}),
-  }).returning(['id', 'created_at']);
-
-  await storeTreeShrubCustomerPhotos({
-    assessmentId: row.id,
+  }).returning(['id', 'created_at']))[0], (saved) => storeTreeShrubCustomerPhotos({
+    assessmentId: saved.id,
     customerId: req.customer.id,
     keyPrefix: 'treeshrub/customer',
     photos: photoInputs,
-  });
+  }));
 
   const noUsableScores = treeResult.scores.overall == null;
   const access = await reserviceStreamlineAccess(req.customer.id);
@@ -1517,8 +1521,9 @@ router.get('/:type/:id', async (req, res, next) => {
 
 // GATE_REPORT_WEB_ACTIONS (owner 2026-10-20): the simple web service report's
 // "Seen something since?" button runs THESE handlers for the report's customer,
-// so the customer gets the same read, the same stored row and the same coverage
-// check as the portal photo ID, with no second pipeline. The caller (the report
+// so the customer gets the same read and the same coverage check as the portal photo
+// ID, with no second pipeline. It stores nothing (req._ephemeral: no row, no S3 photos),
+// so a report link never writes into the account's portal photo history. The caller (the report
 // route) owns auth (the report token), the gate and the limiters; this only
 // prepares the photos exactly as POST /:type does (data URL split, HEIC/odd JPEG
 // transcode) and calls the typed handler with a response shim that captures the
@@ -1543,7 +1548,7 @@ async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = fa
     json(body) { captured.body = body; return res; },
   };
   const req = {
-    customer: { id: customerId }, customerId, _photoInputs: photoInputs, body: {},
+    customer: { id: customerId }, customerId, _photoInputs: photoInputs, body: {}, _ephemeral: true,
   };
   await handler(req, res, {
     note: null,
@@ -1556,7 +1561,7 @@ async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = fa
 }
 
 module.exports = router;
-// The report route shares the portal photo ID's per-customer and daily limiters,
-// so one customer has one photo-check quota whichever page they use.
-module.exports.photoIdLimiters = { perCustomerLimiter, sharedDailyLimiter };
+// The report route shares the portal photo ID's daily vision-spend limiter; its quota per
+// customer is its own (per report token), so a report link never spends the portal's 10 a day.
+module.exports.photoIdLimiters = { sharedDailyLimiter };
 module.exports.runCustomerPhotoId = runCustomerPhotoId;

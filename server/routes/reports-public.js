@@ -247,20 +247,24 @@ const reportLimiter = rateLimit({
 // A failed transaction keeps the fixed-rule answer: no count, no model call.
 const REPORT_ASK_DAILY = { report: 40, ip: 120 };
 const REPORT_ASK_CALL_EVENT = 'report_ask_model_call';
-async function reserveSharedReportAskBudget(service, ipHash, dbConn = db) {
+// Web report photo checks (GATE_REPORT_WEB_ACTIONS) have their own quota per report token
+// (and per IP), counted in the same rows; the customer's portal photo quota is never spent.
+const REPORT_PHOTO_DAILY = { report: 5, ip: 20 };
+const REPORT_PHOTO_CALL_EVENT = 'report_photo_check_call';
+async function reserveSharedReportCallBudget(service, ipHash, { event, caps, lock }, dbConn = db) {
   return dbConn.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-ask:${service.id}`]);
-    if (ipHash) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-ask-ip:${ipHash}`]);
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${lock}:${service.id}`]);
+    if (ipHash) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${lock}-ip:${ipHash}`]);
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const used = async (where) => Number((await trx('service_report_events')
-      .where({ event_name: REPORT_ASK_CALL_EVENT, ...where }).where('occurred_at', '>=', since).count('* as n').first())?.n || 0);
+      .where({ event_name: event, ...where }).where('occurred_at', '>=', since).count('* as n').first())?.n || 0);
     // occurred_at: the table indexes (service_record_id, occurred_at) and (event_name, occurred_at).
-    if (await used({ service_record_id: service.id }) >= REPORT_ASK_DAILY.report) return false;
-    if (ipHash && await used({ ip_hash: ipHash }) >= REPORT_ASK_DAILY.ip) return false;
+    if (await used({ service_record_id: service.id }) >= caps.report) return false;
+    if (ipHash && await used({ ip_hash: ipHash }) >= caps.ip) return false;
     await trx('service_report_events').insert({
       service_record_id: service.id,
       customer_id: service.customer_id || null,
-      event_name: REPORT_ASK_CALL_EVENT,
+      event_name: event,
       channel: 'public_report',
       metadata: '{}',
       ip_hash: ipHash,
@@ -268,6 +272,9 @@ async function reserveSharedReportAskBudget(service, ipHash, dbConn = db) {
     return true;
   });
 }
+const reserveSharedReportAskBudget = (service, ipHash, dbConn = db) => reserveSharedReportCallBudget(
+  service, ipHash, { event: REPORT_ASK_CALL_EVENT, caps: REPORT_ASK_DAILY, lock: 'report-ask' }, dbConn,
+);
 async function reportAskBudgetFor(service, req, deps = {}) {
   const ipHash = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
   try {
@@ -2035,9 +2042,11 @@ router.post('/:token/ask', async (req, res, next) => {
 // POST /api/reports/:token/photo-check — the simple web report's "Seen something
 // since?" button (GATE_REPORT_WEB_ACTIONS, owner 2026-10-20). Auth is the report
 // token, as on /ask. The route runs the EXISTING customer photo ID handlers for
-// the report's customer (routes/photo-id.js runCustomerPhotoId): same read, same
-// stored row, same plan-coverage check, and it SHARES that route's per-customer
-// (10 a day) and daily vision-spend limiters. Body: { photos: [one data URL] },
+// the report's customer (routes/photo-id.js runCustomerPhotoId): same read and same
+// plan-coverage check, but it STORES NOTHING (no row, no S3 photo: a forwarded link
+// never writes portal history). Its quota is its own, 5 a day per report token (and 20
+// per IP), counted AFTER the body is validated and BEFORE the shared daily vision-spend
+// limiter; the customer's portal photo quota is never spent. Body: { photos: [one data URL] },
 // at most 750 KB (the page shrinks the photo first), inside the app's 1 MB JSON
 // parser, so no large-body parser is opened to a token holder. Answers fixed
 // sentences only. Sends nothing to a customer and books nothing: a covered answer
@@ -2065,32 +2074,50 @@ async function resolveWebPhotoCustomer(req, res, next) {
       return res.status(404).json({ error: 'Report not found' });
     }
     req.reportPhotoService = service;
-    // The shared photo ID limiters key on req.customer.id.
-    req.customer = { id: service.customer_id };
     return next();
   } catch (err) { return next(err); }
 }
 // Lazy: photo-id.js pulls in the vision services, which a report read never needs.
 const lazyPhotoIdLimiter = (name) => (req, res, next) => require('./photo-id').photoIdLimiters[name](req, res, next);
 
-router.post('/:token/photo-check', resolveWebPhotoCustomer, lazyPhotoIdLimiter('perCustomerLimiter'), lazyPhotoIdLimiter('sharedDailyLimiter'), async (req, res, next) => {
+// The body is checked BEFORE any quota counts, so a malformed request never spends one.
+function validateWebPhotoBody(req, res, next) {
+  const { validateRequestPhotos, decodedBase64Bytes } = require('../utils/request-photo-validation');
+  const photos = req.body?.photos;
+  if (!Array.isArray(photos) || photos.length !== 1) return res.status(400).json({ error: 'Attach one photo.' });
+  const validated = validateRequestPhotos(photos);
+  if (!validated.ok) return res.status(validated.status || 400).json({ error: validated.error });
+  if (decodedBase64Bytes(photos[0].slice(photos[0].indexOf(',') + 1)) > WEB_PHOTO_MAX_BYTES) {
+    return res.status(413).json({ error: `That photo is too large. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.` });
+  }
+  req.reportPhotoDataUrls = validated.photos;
+  return next();
+}
+
+// Own quota per report token (5 a day) and per IP, counted before the shared daily vision-spend
+// limiter so one leaked link cannot drain the global budget. Fail closed on a count failure.
+async function reserveWebPhotoQuota(req, res, next) {
+  try {
+    const ipHash = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
+    const ok = await reserveSharedReportCallBudget(req.reportPhotoService, ipHash, { event: REPORT_PHOTO_CALL_EVENT, caps: REPORT_PHOTO_DAILY, lock: 'report-photo' });
+    if (!ok) return res.status(429).json({ error: `You've reached today's photo-check limit for this report. Call ${WAVES_SUPPORT_PHONE_DISPLAY} if you need help right away.` });
+    return next();
+  } catch (err) {
+    logger.warn(`[reports-public] photo check quota unavailable: ${err.message}`);
+    return res.status(503).json({ error: `We could not check this photo right now. Call ${WAVES_SUPPORT_PHONE_DISPLAY}.` });
+  }
+}
+
+router.post('/:token/photo-check', resolveWebPhotoCustomer, validateWebPhotoBody, reserveWebPhotoQuota, lazyPhotoIdLimiter('sharedDailyLimiter'), async (req, res, next) => {
   try {
     res.setHeader('Cache-Control', 'no-store');
-    const { validateRequestPhotos, decodedBase64Bytes } = require('../utils/request-photo-validation');
-    const photos = req.body?.photos;
-    if (!Array.isArray(photos) || photos.length !== 1) return res.status(400).json({ error: 'Attach one photo.' });
-    const validated = validateRequestPhotos(photos);
-    if (!validated.ok) return res.status(validated.status || 400).json({ error: validated.error });
-    if (decodedBase64Bytes(photos[0].slice(photos[0].indexOf(',') + 1)) > WEB_PHOTO_MAX_BYTES) {
-      return res.status(413).json({ error: `That photo is too large. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.` });
-    }
     const service = req.reportPhotoService;
     const webActions = require('../services/service-report/web-actions');
     const type = webActions.photoTypeForLine(service.service_line || detectServiceLine(service.service_type));
     const reply = await require('./photo-id').runCustomerPhotoId({
       type,
       customerId: service.customer_id,
-      dataUrls: validated.photos,
+      dataUrls: req.reportPhotoDataUrls,
       // Coverage is offered only for a visit PROVABLY at the home (unit-aware, linked
       // properties and creating estimates included): the re-service picker books the
       // on-file address. Anything unproven reads as a secondary property, so no "covered".
