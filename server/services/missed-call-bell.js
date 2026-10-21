@@ -99,11 +99,13 @@ async function isRobodialerWave(row) {
     .whereRaw(NANP_DIGITS_SQL('from_phone'))
     .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
     // An unlinked call from a number on any customer phone slot is no robodialer.
-    .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE ${LAST10_SQL('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => LAST10_SQL(`cu.${c}`)).join(', ')}))`)
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE cu.deleted_at IS NULL AND ${LAST10_SQL('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => LAST10_SQL(`cu.${c}`)).join(', ')}))`)
     .countDistinct({ n: db.raw(LAST10_SQL('from_phone')) })
     .first();
   if (Number(found?.n || 0) < WAVE_MIN_NUMBERS) return false;
+  // Live customers only, as findKnownCallerCustomer reads them (Codex #6379 r2).
   const customer = await db('customers')
+    .whereNull('deleted_at')
     .whereRaw(`? IN (${CUSTOMER_PHONE_COLS.map(LAST10_SQL).join(', ')})`, [digits])
     .first('id');
   return !customer;

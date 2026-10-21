@@ -147,6 +147,16 @@ jest.setTimeout(30000);
     expect(await isRobodialerWave(row)).toBe(false);
   });
 
+  test('a soft-deleted customer record does not make a number known (Codex #6379 r2)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row, call('+19415550101', 60), call('+19415550202', 60)]);
+    await database('customers').insert([
+      { id: randomUUID(), first_name: 'Sample', last_name: 'Gone', phone: '+19415550303', deleted_at: new Date() },
+      { id: randomUUID(), first_name: 'Sample', last_name: 'Gone', phone: '+19415550202', deleted_at: new Date() },
+    ]);
+    expect(await isRobodialerWave(row)).toBe(true);
+  });
+
   test('block calls older than 14 days do not count', async () => {
     const row = call('+19415550303', 10);
     await database('call_log').insert([row, call('+19415550101', 60 * 24 * 15), call('+19415550202', 60 * 24 * 16)]);
