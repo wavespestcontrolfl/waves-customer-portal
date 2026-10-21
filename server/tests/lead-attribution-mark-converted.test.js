@@ -59,6 +59,15 @@ describe('markConverted claims', () => {
     expect(bridgeLeadFunnelStage.mock.invocationCallOrder[0]).toBeLessThan(settleRepeatFunnelRow.mock.invocationCallOrder[0]);
   });
 
+  test('the estimate backfill gets an approved id set only when the caller gives one (the Intelligence Bar card)', async () => {
+    const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
+    mockFirstRow = { id: 'lead-manual', estimate_id: null, phone: null, email: null };
+    await markConverted('lead-manual', { customerId: 'c1' });
+    expect(linkLeadEstimatesToCustomer).toHaveBeenLastCalledWith({ lead: mockFirstRow, customerId: 'c1' });
+    await markConverted('lead-manual', { customerId: 'c1', approvedEstimateIds: ['e-1'] });
+    expect(linkLeadEstimatesToCustomer).toHaveBeenLastCalledWith({ lead: mockFirstRow, customerId: 'c1', approvedEstimateIds: ['e-1'] });
+  });
+
   test('an estimate-scoped conversion (deposit_paid / acceptance) hands the estimate to the settlement so a root linked to another estimate is never booked for it (pre-push P1 on 1ea5d47)', async () => {
     mockRepeatRow = null;
     await markConverted('lead-rep', { customerId: 'c1', estimateId: 'e-B' });

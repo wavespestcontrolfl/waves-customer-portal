@@ -771,10 +771,15 @@ describe('ships dark', () => {
     };
     walk(root);
     expect(hits.sort()).toEqual([
+      // GATE_REPORT_WEB_PROGRAM: the web program line judges a score only when the assessment's photo confidence
+      // (deriveAssessmentConfidence, photoQualityForConfidence, COMPARABLE_LEVELS) allows a comparison. It reads
+      // those confidence helpers, never a progress state or direction.
+      'routes/reports-public.js',
       'scripts/replay-lawn-progress.js',
       // P19b: the paired-photo recheck reads ONLY photoIsUsable (the engine's own
       // adequate / limited photo cut points), so "usable" cannot drift from it.
       'services/lawn-paired-recheck.js',
+      'services/service-report/lawn-program-promise.js',
       'services/service-report/report-data.js',
     ]);
   });

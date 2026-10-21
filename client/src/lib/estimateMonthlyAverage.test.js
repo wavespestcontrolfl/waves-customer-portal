@@ -165,7 +165,7 @@ describe('page decision helpers', () => {
     expect(oneTimeBesidePlan({ feeList: [], estimate: { showOneTimeOption: true }, pricing: { oneTimeBreakdown: { items: [flea] } } })).toBe(false);
     expect(oneTimeBesidePlan({ feeList: [], estimate: {}, pricing: {} })).toBe(false);
     const average = resolvePageMonthlyAverage(base(), monthlyAmountOf);
-    expect(sectionAverageLine(average, 'pest_control')).toBe('about $30.00 a month');
+    expect(sectionAverageLine(average, 'pest_control')).toBe('$30.00 a month');
     expect(sectionAverageLine(null, 'pest_control')).toBeNull();
     expect(singleServiceAverageContext(average, true)).toBeNull(); // multi: the summary carries it
     const single = resolvePageMonthlyAverage({ ...base(), services: [pest()], combinedFrequency: null }, monthlyAmountOf);

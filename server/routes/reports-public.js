@@ -53,6 +53,59 @@ function glassWebLive(simpleWeb, gates) {
   return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
 }
 
+// GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): each key rides only a live simple-web view
+// of a lawn record; a partial gates module reads as off.
+function webExtraLive(simpleWeb, gates, reader) {
+  return simpleWeb === true && typeof gates[reader] === 'function' && gates[reader]();
+}
+
+// Program line (idea 9). Recurring lawn plan visits only, judged from the frozen completion identity. The month is
+// counted from the first row of the PROPERTY-scoped history (lawn-assessment-history, with move resets), never from the
+// payload's trend: with GATE_LAWN_PROPERTY_HISTORY off that trend is customer-wide, so a moved customer's new home
+// would read months into the program. No verified property history = no line. Best-effort.
+async function attachProgramPromise(v1Data, service) {
+  try {
+    const assessment = v1Data.lawnAssessment;
+    if (v1Data.serviceLine !== 'lawn' || service.is_callback || !assessment || assessment.assessmentId == null) return;
+    const { isRecurringLawnPlanKey } = require('../services/service-report/lawn-program-line');
+    let serviceData = service.service_data;
+    if (typeof serviceData === 'string') serviceData = JSON.parse(serviceData);
+    if (!isRecurringLawnPlanKey(serviceData && serviceData.completedServiceKey)) return;
+    const row = await db('lawn_assessments').where({ id: assessment.assessmentId }).first();
+    if (!row) return;
+    const history = await require('../services/lawn-assessment-history').historyForAssessment(row, { knex: db });
+    if (!history || !history.scope || !history.scope.propertyId || !history.current || !history.rows.length) return;
+    // The scores are photo reads: the same confidence the progress engine uses decides whether they can be judged.
+    const photos = await db('lawn_assessment_photos').where({ assessment_id: row.id, customer_visible: true });
+    const { deriveAssessmentConfidence, photoQualityForConfidence } = require('../services/service-report/lawn-progress');
+    let divergenceFlags = row.divergence_flags;
+    if (typeof divergenceFlags === 'string') {
+      try { divergenceFlags = JSON.parse(divergenceFlags); } catch { divergenceFlags = []; }
+    }
+    const promise = require('../services/service-report/lawn-program-promise').buildProgramPromise({
+      scores: assessment.scores,
+      firstDate: history.rows[0].visit_date,
+      visitDate: history.current.visit_date,
+      confidence: deriveAssessmentConfidence({
+        photos: photos.map(photoQualityForConfidence),
+        divergenceFlags,
+      }),
+    });
+    if (promise) v1Data.programPromise = { monthLine: promise.monthLine, items: promise.items.map(({ key, label, state, sentence }) => ({ key, label, state, sentence })) };
+  } catch { /* best-effort: the report renders without the line */ }
+}
+
+// Live chip (idea 10). Built from this request's own rain read, never stored; only the sentence and a state word leave.
+async function attachLiveChip(v1Data, chipInputs) {
+  try {
+    if (v1Data.serviceLine !== 'lawn' || !chipInputs || !chipInputs.completedAt) return;
+    const chip = await require('../services/service-report/lawn-live-chip').resolveLiveChip({
+      ...chipInputs, fetchForecast: require('../services/service-report/application-conditions').fetchPropertyForecast,
+    });
+    if (chip) v1Data.liveChip = { state: chip.state, text: chip.text };
+  } catch { /* best-effort: no chip */ }
+}
+
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
 // solely when the request carries a valid staff JWT — the report page
@@ -504,6 +557,11 @@ async function buildServiceReportV1ResponseData(service, token, {
   // OPT-IN on the same terms (GATE_LAWN_WATER_IN_RAIN): only the /data render and the PDF render print the
   // lawn watering banner, so only they pay for the rain lookup. /ask and /map.svg never do.
   lawnWaterInRain = false,
+  // GATE_REPORT_WEB_LIVE_CHIP: an out-param the lawn report build fills with the chip's inputs (completion time,
+  // coordinates, products, frozen watering instruction). Internal; never reaches the payload.
+  liveChipOut,
+  // OPT-IN on the same terms (GATE_REPORT_WEB_SLIDER): only the live simple-web /data render shows the then-and-now slider.
+  lawnSlider = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -526,6 +584,8 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnPhotoFindings,
     lawnRainfastWatch,
     lawnWaterInRain,
+    liveChipOut,
+    lawnSlider,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2720,6 +2780,11 @@ router.get('/:token/data', async (req, res, next) => {
       const simpleWeb = mode === 'live' && !suppressedTypedReport(service)
         && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
       const buildMode = simpleWeb ? 'pdf' : mode;
+      const programLive = webExtraLive(simpleWeb, reportGates, 'reportWebProgramLive');
+      // The out-param also carries the view's one shared weather read (the banner's water-in coverage and the chip use it).
+      const liveChipOut = webExtraLive(simpleWeb, reportGates, 'reportWebLiveChipLive')
+        ? { series: require('../services/service-report/lawn-live-chip').createSharedSeries(require('../services/service-report/application-conditions').fetchPropertyForecast) }
+        : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
@@ -2728,6 +2793,9 @@ router.get('/:token/data', async (req, res, next) => {
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
         lawnWaterInRain: true,
+        liveChipOut,
+        // GATE_REPORT_WEB_SLIDER: asked for only on a live simple-web view.
+        lawnSlider: simpleWeb && typeof reportGates.reportWebSliderLive === 'function' && reportGates.reportWebSliderLive(),
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2774,6 +2842,10 @@ router.get('/:token/data', async (req, res, next) => {
       // GATE_REPORT_WEB_ACTIONS (owner 2026-10-20): the finding offer tile and the
       // photo button. Live simple-web views only; absent key = byte-identical payload.
       await attachWebActions(service, v1Data, { db, gates: reportGates, simpleWeb });
+      // GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): live simple-web view only, each its own
+      // key. Absent key = byte-identical payload; the PDF build never reaches here.
+      if (programLive) await attachProgramPromise(v1Data, service);
+      if (liveChipOut) await attachLiveChip(v1Data, liveChipOut);
       return res.json(v1Data);
     }
 
