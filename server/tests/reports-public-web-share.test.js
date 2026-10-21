@@ -319,6 +319,53 @@ describe('dark share-photo answers before every limiter (real limiters)', () => 
     expect(webShare.readSharePhoto).not.toHaveBeenCalled();
   });
 
+  test.each(['GET', 'HEAD'])('30 dark %s requests with a malformed token are all 404 with privacy headers and no row read', async (method) => {
+    await withServer(async (baseUrl) => {
+      const paths = ['not-a-token', 'short', `${VALID_TOKEN}zz`, '%00', 'A'.repeat(64)];
+      for (let i = 0; i < 30; i += 1) {
+        const res = await fetch(`${baseUrl}/reports/${paths[i % paths.length]}/share-photo${i % 2 ? '/' : ''}`, { method });
+        expect(res.status).toBe(404);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+        await res.arrayBuffer();
+      }
+    });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('30 dark HEAD requests with a valid token are all 404 with privacy headers and no row read', async () => {
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 30; i += 1) {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/share-photo${i % 2 ? '/' : ''}`, { method: 'HEAD' });
+        expect(res.status).toBe(404);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+      }
+    });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('live gate: 30 malformed-token GET and HEAD requests are 404 with headers, read no row and spend no limiter budget', async () => {
+    gates.reportWebShareLive.mockReturnValue(true);
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 30; i += 1) {
+        const res = await fetch(`${baseUrl}/reports/not-a-token${i}/share-photo`, { method: i % 2 ? 'HEAD' : 'GET' });
+        expect(res.status).toBe(404);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+        await res.arrayBuffer();
+      }
+      expect(db).not.toHaveBeenCalled();
+      // The same address still has its full budget: a valid-token read is served, not 429.
+      db.mockReset();
+      mockDbFor([paramGateRecord(), fullRecord()]);
+      webShare.findShareFrontPhoto.mockResolvedValue({ s3_key: 'lawn/front.jpg', zone: 'front' });
+      webShare.readSharePhoto.mockResolvedValue(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+      const ok = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/share-photo`);
+      expect(ok.status).toBe(200);
+    });
+  });
+
   test('dark probes do not spend the report limiter budget of the same address', async () => {
     mockDbFor([paramGateRecord(), fullRecord()]);
     await withServer(async (baseUrl) => {

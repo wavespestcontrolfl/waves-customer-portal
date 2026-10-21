@@ -281,7 +281,9 @@ async function reportAskBudgetFor(service, req, deps = {}) {
 // 404 would then go out without these headers.
 const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
 // The lawn card's photo (GATE_REPORT_WEB_SHARE) carries the same headers on every outcome, 404 and 429 included.
-const REPORT_SHARE_PHOTO_PATH_RE = /^\/[a-f0-9]{32}\/share-photo\/?$/i;
+// ANY token segment matches (a malformed one too), so no probe of the path can skip the headers or the guard below.
+const REPORT_SHARE_PHOTO_PATH_RE = /^\/([^/]+)\/share-photo\/?$/i;
+const REPORT_SHARE_PHOTO_TOKEN_RE = /^[a-f0-9]{32}$/i;
 function reportsAskPrivacyHeaders(req, res, next) {
   const path = req.path || '';
   if (REPORT_ASK_PATH_RE.test(path) || REPORT_SHARE_PHOTO_PATH_RE.test(path)) {
@@ -292,9 +294,12 @@ function reportsAskPrivacyHeaders(req, res, next) {
 }
 // Dark lawn-card photo (GATE_REPORT_WEB_SHARE): a generic 404 BEFORE every limiter (the global /api one,
 // reportLimiter, sharePhotoLimiter) and before the token param read, so a dark probe spends no budget and
-// reads no row. Mounted app-level too (server/index.js), like the estimate map-image guard.
+// reads no row. GET and HEAD, any token segment. While live, a malformed token (not 32 hex) gets the same
+// 404 here, so it spends no limiter budget and reads no row either. Mounted app-level too (server/index.js),
+// like the estimate map-image guard.
 function reportSharePhotoPreGuard(req, res, next) {
-  if (req.method === 'GET' && REPORT_SHARE_PHOTO_PATH_RE.test(req.path || '') && !webShareService.webShareEnabled()) {
+  const match = (req.method === 'GET' || req.method === 'HEAD') ? REPORT_SHARE_PHOTO_PATH_RE.exec(req.path || '') : null;
+  if (match && (!webShareService.webShareEnabled() || !REPORT_SHARE_PHOTO_TOKEN_RE.test(match[1]))) {
     return res.status(404).json({ error: 'Not found' });
   }
   return next();
