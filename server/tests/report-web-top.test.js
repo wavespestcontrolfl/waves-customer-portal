@@ -172,6 +172,37 @@ describe('buildWebTop', () => {
     expect('hold' in (buildWebTop({ serviceLine: 'pest', applicationMade: false, dynamicContext: { reentry: { targets: [] } }, typedReport: { todaysResult: { nextStep: 'Trim.' } } }))).toBe(false);
   });
 
+  test('termite: the dashboard\u2019s primary move shows when the typed step is absent or says no action; a suppressed re-service skips it', () => {
+    const move = { title: 'Recheck the bait stations.', dueLabel: 'next month' };
+    const termiteReportV2 = { source: 'primary', primaryMove: move };
+    expect(buildWebTop({ serviceLine: 'termite', termiteReportV2 }).action).toBe('Recheck the bait stations. (next month)');
+    expect(buildWebTop({ serviceLine: 'termite', termiteReportV2, typedReport: { todaysResult: { nextStep: 'No action needed.' } } }).action).toBe('Recheck the bait stations. (next month)');
+    expect(buildWebTop({ serviceLine: 'pest', termiteReportV2: { source: 'companion', primaryMove: move } }).action).toBe('Recheck the bait stations. (next month)');
+    expect(buildWebTop({ serviceLine: 'termite', termiteReportV2, reserviceReport: { outcome: 'customer_declined' } })).toBeNull();
+  });
+
+  test('lawn score: the previous score is the assessment just before this one, even when two share a date', () => {
+    const data = lawn();
+    // two assessments on Oct 20 collapse to one point in the V2 strip; the raw rows keep both
+    data.reportV2.trends.overall = [{ label: 'Sep 1', value: 60 }, { label: 'Oct 20', value: 72 }];
+    data.reportV2.snapshot.overallScore = 72;
+    data.lawnAssessment = { trend: [{ date: '2026-09-01', overallScore: 60 }, { date: '2026-10-20', overallScore: 65 }, { date: '2026-10-20', overallScore: 72 }] };
+    expect(buildWebTop(data).score).toEqual({ value: 72, previous: 65 });
+    // the strip stays the date-collapsed series
+    expect(buildWebTop(data).trend).toHaveLength(2);
+  });
+
+  test('lawn score: "starting score" only when no earlier scored assessment exists; unscored rows are skipped', () => {
+    const data = lawn();
+    data.lawnAssessment = { trend: [{ overallScore: 72 }] };
+    expect(buildWebTop(data).score.previous).toBeNull();
+    data.lawnAssessment = { trend: [{ overallScore: 58 }, { overallScore: null }, { overallScore: 72 }] };
+    expect(buildWebTop(data).score.previous).toBe(58);
+    // no raw rows in the payload: the strip's second-last point is the fallback
+    delete data.lawnAssessment;
+    expect(buildWebTop(data).score.previous).toBe(72);
+  });
+
   describe('non-lawn action reads every V2 source the document reads, in its order', () => {
     test('tree & shrub: the V2 snapshot customerAction', () => {
       expect(buildWebTop({ serviceLine: 'tree_shrub', reportV2: { snapshot: { customerAction: 'Water the new shrubs twice a week.' } } }).action).toBe('Water the new shrubs twice a week.');

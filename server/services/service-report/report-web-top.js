@@ -42,6 +42,16 @@ function treated(data) {
   return data.applicationMade === true || data.treatmentPerformed === true || data.applicationMade === null;
 }
 
+// The score at the assessment just before this one. lawnAssessment.trend has one row per assessment, in order, current
+// last, from the same (property-scoped) history the report builds; the V2 strip collapses assessments that share a date,
+// so two the same day would compare a visit with itself. Falls back to the strip only when the raw rows are absent.
+function previousScore(data, series) {
+  const raw = Array.isArray(data.lawnAssessment?.trend) ? data.lawnAssessment.trend : null;
+  if (!raw) return series.length >= 2 ? series[series.length - 2].value : null;
+  const scored = raw.map((row) => finiteScore(row?.overallScore)).filter((n) => n != null);
+  return scored.length >= 2 ? scored[scored.length - 2] : null;
+}
+
 /** Lawn only: { score: { value, previous }, trend } from the V2 snapshot and its score history. */
 function lawnScore(data) {
   const value = finiteScore(data.reportV2?.snapshot?.overallScore);
@@ -49,7 +59,7 @@ function lawnScore(data) {
   const series = (Array.isArray(data.reportV2?.trends?.overall) ? data.reportV2.trends.overall : [])
     .map((point) => ({ label: String(point?.label || ''), value: finiteScore(point?.value) }))
     .filter((point) => point.label && point.value != null);
-  const out = { score: { value, previous: series.length >= 2 ? series[series.length - 2].value : null } };
+  const out = { score: { value, previous: previousScore(data, series) } };
   if (series.length >= 2) out.trend = series.slice(-TREND_POINTS);
   const note = sentence(data.reportV2?.trends?.seasonalNote, 240);
   if (out.trend && note) out.trendNote = note;
@@ -95,7 +105,8 @@ const moveText = (move) => sentence(move?.title ? [move.title, move.why, move.im
 function nextStepCandidates(data) {
   const termite = data.termiteReportV2;
   const outcome = data.reserviceReport?.outcome;
-  const primary = Boolean(termite) && termite.source !== 'companion' && !['inspection_only', 'customer_declined'].includes(outcome);
+  const suppressed = ['inspection_only', 'customer_declined'].includes(outcome);
+  const primary = Boolean(termite) && termite.source !== 'companion' && !suppressed;
   const typed = data.typedReport?.todaysResult?.nextStep;
   const ownFindings = new Set((data.findings || []).map((f) => String(f?.recommendation || '').trim()).filter(Boolean));
   return [
@@ -103,6 +114,8 @@ function nextStepCandidates(data) {
     ...(Array.isArray(data.recommendations) ? data.recommendations : []).filter((r) => !ownFindings.has(String(r || '').trim())),
     moveText(data.pestReportV2?.primaryMove),
     moveText(data.mosquitoReportV2?.primaryMove),
+    // the document reads a termite dashboard's primary move for a companion too, unless the re-service applied nothing
+    termite && !suppressed ? moveText(termite.primaryMove) : null,
     data.reportV2?.snapshot?.customerAction,
   ].map((text) => sentence(text, 240)).filter(Boolean);
 }
