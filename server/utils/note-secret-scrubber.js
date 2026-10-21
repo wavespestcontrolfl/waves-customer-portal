@@ -48,14 +48,18 @@ const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi;
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;
 const URL_USERINFO_RE = /^(https?:\/\/[^\s/:@?#]*:)[^\s/@?#]+@/i;
-const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.[\]-]+)=([^&#\s"'<>\\]*)/g;
+const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=([^&#\s"'<>\\]*)/g;
 // Credential names that are not credential words as a field name but are as a
 // query key (the same short list signed-link-redaction.js keeps for links).
 const EXTRA_QUERY_KEYS = new Set(['key', 'auth', 'sid', 'ticket', 'pwd', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'awsaccesskeyid', 'key-pair-id']);
 const SSN_RE = /(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])/g;
 const LONG_RUN_RE = /[A-Za-z0-9+/_-]{32,}={0,2}/g;
 
-function isCredentialQueryKey(key) {
+// A query name may be percent-encoded ("%74oken" is "token" to the server);
+// malformed encoding fails closed (the value is removed).
+function isCredentialQueryKey(rawKey) {
+  let key;
+  try { key = decodeURIComponent(rawKey.replace(/\+/g, ' ')); } catch { return true; }
   const lower = key.toLowerCase();
   if (EXTRA_QUERY_KEYS.has(lower) || EXTRA_QUERY_KEYS.has(lower.replace(/[^a-z0-9-]/g, ''))) return true;
   return lower.startsWith('x-amz-') || lower.startsWith('x-goog-') || isCredentialName(key);

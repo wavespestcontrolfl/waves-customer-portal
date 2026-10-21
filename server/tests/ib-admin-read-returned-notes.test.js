@@ -49,6 +49,8 @@ const SHAPES = {
   'SSN pattern': ['123-45-' + '6789', '123-45-6789'],
   'URL token param': ['https://portal.example.test/file?token=' + 'abc123xyz', 'abc123xyz'],
   'URL signature param': ['https://files.example.test/a.pdf?X-Amz-Signature=' + 'deadbeef01', 'deadbeef01'],
+  'URL percent-encoded token name': ['https://portal.example.test/file?%74oken=' + 'abc123xyz', 'abc123xyz'],
+  'URL malformed-encoding name': ['https://portal.example.test/file?%zz=' + 'abc123xyz', 'abc123xyz'],
   'URL key param': ['https://api.example.test/v1?key=' + 'hunter22', 'hunter22'],
   'URL user:password': ['https://admin:' + 'hunter22@host.example.test/x', 'hunter22'],
 };
