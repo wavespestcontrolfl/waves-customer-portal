@@ -47,6 +47,7 @@ function freshState() {
     }],
     customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample' }],
     scheduled_services: [],
+    projects: [],
     technicians: [{ id: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' }],
   };
 }
@@ -54,15 +55,17 @@ function freshState() {
 // A small knex stand-in: plain-object where filters the seeded rows. Any write throws.
 function makeDb() {
   return (table) => {
-    const q = { wheres: [], single: false };
+    const q = { wheres: [], ins: [], single: false };
     const rows = () => {
-      const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v))));
+      const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
+        && q.ins.every(([k, vals]) => vals.includes(row[k])));
       return q.single ? found[0] : found;
     };
     const b = new Proxy({}, {
       get(_t, prop) {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(rows).then(res, rej);
         if (prop === 'where') return (arg) => { if (arg && typeof arg === 'object') q.wheres.push(arg); return b; };
+        if (prop === 'whereIn') return (k, vals) => { q.ins.push([k, vals]); return b; };
         if (prop === 'first') return () => { q.single = true; return b; };
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
         return () => b;
@@ -306,6 +309,29 @@ describe('refusals', () => {
     state.invoices[0].scheduled_service_id = 'sv-1';
     state.scheduled_services.push({ id: 'sv-1', status: 'cancelled' });
     expect(await preview()).toMatchObject({ code: 'visit_terminal' });
+  });
+
+  test.each(['held', 'releasing'])('an invoice a %s report waits on is refused at the preview and at Confirm (it would release the report to the customer)', async (status) => {
+    const clean = await preview();
+    state.projects.push({ id: 'p1', invoice_id: INV, report_hold_status: status });
+    const res = await preview();
+    expect(res).toMatchObject({ code: 'payment_releases_report_unsupported' });
+    expect(res.error).toBe('Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page.');
+    expect(await confirm(clean)).toMatchObject({ code: 'payment_releases_report_unsupported', preview_changed: true });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a report already released, or held for a different invoice, does not block', async () => {
+    state.projects.push({ id: 'p1', invoice_id: INV, report_hold_status: 'released' }, { id: 'p2', invoice_id: 'other', report_hold_status: 'held' });
+    expect(await preview()).toMatchObject({ preview: true });
+  });
+
+  test('a held-report lookup that fails refuses (fail closed)', async () => {
+    const base = makeDb();
+    db.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return base(table); });
+    const res = await preview();
+    expect(res).toMatchObject({ code: 'payment_releases_report_unsupported' });
+    expect(res.error).toMatch(/could not check/);
   });
 
   test('target errors: both or neither of id and number, a bad id, an unknown invoice', async () => {
