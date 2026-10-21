@@ -70,3 +70,58 @@ describe('withTranscodeSlot', () => {
     expect(await work(false)).toBe('done'); // nothing leaked
   });
 });
+
+describe('withTranscodeSlot hands a released slot straight to the next waiter', () => {
+  const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('in a burst of 8 callers with interleaved releases the running count never passes 2, and every caller runs', async () => {
+    const gates = Array.from({ length: 8 }, deferred);
+    let running = 0;
+    let peak = 0;
+    const started = [];
+    const calls = gates.map((gate, i) => withTranscodeSlot(async () => {
+      running += 1;
+      peak = Math.max(peak, running);
+      started.push(i);
+      await gate.promise;
+      running -= 1;
+      return i;
+    }));
+    await tick();
+    expect(started).toEqual([0, 1]); // only the first two run; the rest wait
+    // release in an interleaved order while new callers keep arriving between a release and the waiter's wake-up
+    const late = [];
+    for (const i of [1, 0, 3, 2, 5, 4]) {
+      gates[i].resolve();
+      // two microtask hops: the late caller runs after the releaser's finally has run and before the woken waiter's
+      // continuation, the exact window a slot that is released and then re-taken would leak through
+      late.push(Promise.resolve().then(() => {}).then(() => withTranscodeSlot(async () => { running += 1; peak = Math.max(peak, running); await tick(); running -= 1; return 'late'; })));
+      await tick();
+      expect(running).toBeLessThanOrEqual(MAX_CONCURRENT_TRANSCODES);
+    }
+    gates[6].resolve();
+    gates[7].resolve();
+    const results = await Promise.all([...calls, ...late]);
+    expect(peak).toBeLessThanOrEqual(MAX_CONCURRENT_TRANSCODES);
+    expect(results.slice(0, 8)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(results.filter((r) => r === 'late')).toHaveLength(6);
+    // nothing leaked: a fresh caller runs at once
+    let ran = false;
+    await withTranscodeSlot(async () => { ran = true; });
+    expect(ran).toBe(true);
+  });
+
+  test('a waiter holding a handed-off slot that throws still frees it for the next', async () => {
+    const hold = [deferred(), deferred()];
+    const holders = hold.map((d) => withTranscodeSlot(() => d.promise));
+    const failing = withTranscodeSlot(async () => { throw new Error('boom'); });
+    const after = withTranscodeSlot(async () => 'after');
+    await tick();
+    hold[0].resolve();
+    await expect(failing).rejects.toThrow('boom');
+    await expect(after).resolves.toBe('after');
+    hold[1].resolve();
+    await Promise.all(holders);
+  });
+});

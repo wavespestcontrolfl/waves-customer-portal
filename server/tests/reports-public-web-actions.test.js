@@ -714,6 +714,64 @@ describe('the finding tile tap rechecks its gates', () => {
     expect(writes).toEqual([]);
   });
 
+  test('the finding changes between the preflight and the write: the in-transaction recheck refuses with 409 and no request or estimate', async () => {
+    jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
+    const txWrites = [];
+    const txTouched = [];
+    const makeTrx = () => {
+      const trx = (table) => {
+        txTouched.push(table);
+        const q = {
+          where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
+          first: async () => (table === 'customers' || table === 'service_records' ? { id: 'x' } : undefined),
+          update: async () => { txWrites.push(`update:${table}`); return 1; },
+          insert: (row) => { txWrites.push(`insert:${table}`); return { returning: async () => [{ id: 'req-1', ...row }] }; },
+        };
+        return q;
+      };
+      trx.raw = async () => {};
+      return trx;
+    };
+    db.transaction = async (callback) => callback(makeTrx());
+    // first build (the preflight) shows the weeds insight; the next (inside the transaction) no longer does
+    let builds = 0;
+    buildReportV1Data.mockImplementation(async () => {
+      builds += 1;
+      return { serviceLine: 'lawn', reportV2: { insights: builds === 1 ? [insight('weeds')] : [insight('weeds', 'healthy')] }, pdfUrl: '/x', applications: [] };
+    });
+    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
+    await withServer(async (baseUrl) => {
+      const res = await tap(baseUrl, matching);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/no longer available/);
+    });
+    expect(builds).toBe(2); // preflight + the recheck under the lock
+    expect(txTouched).toContain('customers'); // it did reach the write transaction
+    expect(txTouched).toContain('service_records'); // ...and locked the service row
+    expect(txWrites).toEqual([]); // no service request, no event, no estimate
+    expect(txTouched).not.toContain('service_requests');
+    expect(txTouched).not.toContain('estimates');
+  });
+
+  test('the finding still stands at the recheck: the write goes ahead (control for the refusal above)', async () => {
+    jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
+    const txWrites = [];
+    const trx = (table) => {
+      const q = {
+        where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
+        first: async () => (table === 'customers' || table === 'service_records' ? { id: 'x' } : undefined),
+        update: async () => 1,
+        insert: (row) => { txWrites.push(table); return { returning: async () => [{ id: 'req-1', ...row }] }; },
+      };
+      return q;
+    };
+    trx.raw = async () => {};
+    db.transaction = async (callback) => callback(trx);
+    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
+    await withServer(async (baseUrl) => { await tap(baseUrl, matching); });
+    expect(txWrites).toContain('service_requests');
+  });
+
   test('a tap whose kind or service the table does not pair is refused even while the finding stands', async () => {
     await withServer(async (baseUrl) => {
       expect((await tap(baseUrl, { ...TILE_META, kind: 'shrub_pests' })).status).toBe(409);

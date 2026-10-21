@@ -1443,6 +1443,35 @@ function loadReportServiceRow(token) {
     .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 }
 
+// Re-derives the web tile's structured decision from a fresh build of the CURRENT report (PDF mode, as /data builds a
+// simple web view). true = the same kind of finding still stands for the same service; false = it does not (or the
+// report is a callback or internal-only now); null = no such service_report_v1 record (the caller's own 404 applies).
+// The build asks for none of the /data render's live-only opt-ins (offers, plan card, lawn lighting, ...): the table's
+// categories do not depend on them, and each of those stays opted into by the render alone.
+async function webTileStillStands(token, metadata) {
+  const service = await loadReportServiceRow(token);
+  if (!service || service.report_template_version !== 'service_report_v1') return null;
+  const current = await buildServiceReportV1ResponseData(service, token, { mode: 'pdf', staffViewer: false });
+  return !current.internalOnly && current.isCallback !== true
+    && require('../services/service-report/web-actions').findingKinds(current)
+      .some((row) => row.kind === metadata.kind && row.family === metadata.serviceKey);
+}
+
+// The web tile's tap re-checks, INSIDE the write transaction and under the service row's lock, that the finding still
+// stands (webTileTapGate's preflight is only the cheap early refusal). A stale tab then creates no request and no
+// estimate; the drift error maps to the same 409 as a stale offer. Other taps get no options.
+function webTileWriteOptions(service, token, metadata) {
+  if (metadata.source !== require('../services/service-report/web-actions').WEB_TILE_SOURCE) return {};
+  return {
+    revalidate: async (trx) => {
+      await trx('service_records').where({ id: service.id }).forUpdate().first('id');
+      if ((await webTileStillStands(token, metadata)) !== true) {
+        throw Object.assign(new Error('web tile no longer stands'), { clickEstimateDrift: true });
+      }
+    },
+  };
+}
+
 // The web report tile's tap is a cross_sell_requested event that names the tile; while either of the tile's
 // gates is dark, or the visit is a callback, the tap answers the same 409 as a stale offer, before any recompute or write.
 async function webTileTapGate(req, res, next) {
@@ -1461,20 +1490,16 @@ async function webTileTapGate(req, res, next) {
     if (record?.is_callback === true) return stale();
     // The tap must still match the CURRENT report: re-derive the tile's structured decision (the same table /data uses)
     // from a fresh build, and refuse unless the same kind of finding still stands for the same service. A stale tab can
-    // therefore never create a request or an estimate for a finding the report no longer shows. The build asks for none
-    // of the /data render's live-only opt-ins (offers, plan card, lawn lighting, ...): the table's categories do not
-    // depend on them, and each of those stays opted into by the render alone.
-    const service = await loadReportServiceRow(req.params.token);
-    if (!service || service.report_template_version !== 'service_report_v1') return next();
-    let current;
+    // therefore never create a request or an estimate for a finding the report no longer shows. (The write transaction
+    // repeats this check under its lock; this early refusal is the cheap path.)
+    let stands;
     try {
-      current = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', staffViewer: false });
+      stands = await webTileStillStands(req.params.token, metadata);
     } catch (err) {
       logger.warn(`[reports-public] tile tap re-derive failed: ${err.message}`);
       return res.status(503).json({ error: 'Could not record the request — please try again' });
     }
-    const stands = !current.internalOnly && current.isCallback !== true && webActions.findingKinds(current)
-      .some((row) => row.kind === metadata.kind && row.family === metadata.serviceKey);
+    if (stands === null) return next();
     return stands ? next() : stale();
   } catch (err) { return next(err); }
 }
@@ -1688,6 +1713,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, webTil
             subject: requestSubject,
             description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
             revisionSnapshot,
+            ...webTileWriteOptions(service, req.params.token, metadata),
             onWrite: async (trx) => {
               const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata, trx);
               if (!recorded) throw new Error('event insert failed');

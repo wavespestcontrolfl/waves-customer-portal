@@ -196,4 +196,33 @@ describe('writeOrRefreshCtaRequest', () => {
       await expect(writeOrRefreshCtaRequest(db, { ...ARGS, withRow })).rejects.toThrow('mint failed');
     });
   });
+
+  test('revalidate(trx) runs after the customer lock and before any request read or write; a throw refuses with no row, event or estimate hook', async () => {
+    const { db, ops } = fakeDb();
+    const order = [];
+    const onWrite = jest.fn();
+    const withRow = jest.fn();
+    const refusal = Object.assign(new Error('no longer stands'), { clickEstimateDrift: true });
+    await expect(writeOrRefreshCtaRequest(db, {
+      ...ARGS,
+      revalidate: async (trx) => { order.push(ops.lookups.map((l) => l.table).join(',')); expect(typeof trx).toBe('function'); throw refusal; },
+      onWrite,
+      withRow,
+    })).rejects.toBe(refusal);
+    expect(order).toEqual(['customers']); // only the customer lock had run
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
+    expect(ops.lookups.some((l) => l.table === 'service_requests')).toBe(false);
+    expect(onWrite).not.toHaveBeenCalled();
+    expect(withRow).not.toHaveBeenCalled();
+  });
+
+  test('a revalidate that passes lets the write go on as before', async () => {
+    const { db, ops } = fakeDb();
+    const revalidate = jest.fn(async () => {});
+    const outcome = await writeOrRefreshCtaRequest(db, { ...ARGS, revalidate });
+    expect(revalidate).toHaveBeenCalledTimes(1);
+    expect(outcome.request).toBeTruthy();
+    expect(ops.inserts).toHaveLength(1);
+  });
 });

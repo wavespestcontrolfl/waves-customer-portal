@@ -59,6 +59,8 @@ const CTA_REQUEST_SOURCES = ['service_report', 'portal_home'];
 //                                        the stored shown-price lock now
 //                                        reflects what the customer just saw.
 //   { request }                        — first open request.
+// revalidate(trx) (optional) runs inside the transaction after the customer lock and before any request read or write;
+// a throw rolls back and refuses the tap.
 // onWrite(trx) runs INSIDE the transaction after a row write (never on the
 // dedupe no-op) — the report path records its analytics event there so the
 // event can never claim a request that has no actionable record.
@@ -73,10 +75,13 @@ const CTA_REQUEST_SOURCES = ['service_report', 'portal_home'];
 // rolls back the whole outcome, row write included.
 async function writeOrRefreshCtaRequest(db, {
   customerId, requestedService, source, subject, description, revisionSnapshot,
-  onWrite = null, withRow = null,
+  onWrite = null, withRow = null, revalidate = null,
 }) {
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    // revalidate(trx) runs right after the lock and before any read or write of the request: it throws to refuse (the
+    // caller maps its error), so a tap whose basis changed since the preflight creates no request and no estimate.
+    if (revalidate) await revalidate(trx);
     const existing = await trx('service_requests')
       .where({ customer_id: customerId, requested_service: requestedService })
       .whereIn('source', CTA_REQUEST_SOURCES)

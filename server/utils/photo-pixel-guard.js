@@ -29,17 +29,21 @@ async function assertPhotoWithinPixels(raw) {
   if (Number(meta.width) * Number(meta.height) > MAX_PHOTO_PIXELS) throw new PhotoTooLargeError();
 }
 
+// A released slot goes DIRECTLY to the next waiter (active is not decremented while one waits), so a caller that
+// arrives between a release and the waiter's wake-up can never take the slot too and push the count past the cap.
 let active = 0;
 const waiting = [];
 async function withTranscodeSlot(fn) {
-  if (active >= MAX_CONCURRENT_TRANSCODES) await new Promise((resolve) => waiting.push(resolve));
-  active += 1;
+  if (active >= MAX_CONCURRENT_TRANSCODES) {
+    await new Promise((resolve) => waiting.push(resolve)); // resumes already holding the slot
+  } else {
+    active += 1;
+  }
   try {
     return await fn();
   } finally {
-    active -= 1;
     const next = waiting.shift();
-    if (next) next();
+    if (next) next(); else active -= 1;
   }
 }
 
