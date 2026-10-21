@@ -229,7 +229,7 @@ function normalizeSpokenMoney(input) {
   return { text, changes: resolved, ambiguous };
 }
 
-const DOLLARS_AND_NUMBER_AFTER = /^\s*(?:dollars?|bucks?)?\s*and\s+(?:a\s+)?(?:\d|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i;
+const DOLLARS_AND_NUMBER_AFTER = /^\s*(?:dollars?|bucks?)?\s*and\s+(?:a\s+)?(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i;
 function textAfter(text, phrase) {
   const at = String(text).toLowerCase().indexOf(String(phrase).toLowerCase());
   return at < 0 ? '' : String(text).slice(at + String(phrase).length);
