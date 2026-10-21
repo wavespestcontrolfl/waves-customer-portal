@@ -494,6 +494,37 @@ jest.setTimeout(30000);
       expect((await meta(row.id)).missed_call_settled_at).toBeTruthy();
     });
 
+    test('a pass 2 that crashed before dispatch leaves a stale lease: the next sweep still sends the push and raises the alert', async () => {
+      setGates(['missedCallPushCheck']);
+      const row = call(10, { customer_id: randomUUID(), metadata: {
+        missed_call_push_retries: 1, missed_call_push_first_subs: 2, missed_call_notified_at: new Date(now - 30 * 60000).toISOString(),
+      } });
+      await database('call_log').insert(row);
+      // The first pass's bell row exists; without the retry the reclaimed-lease shortcut would settle on it.
+      await database('notifications').insert({
+        id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'Missed call',
+        metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: row.id } },
+      });
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: { subscriptions: 2, sent: 0, expired: 0, failed: 2, skipped: 0, results: [] } });
+      expect(await sweepMissedCalls()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification.mock.calls[0][2].pushOnly).toBe(true);
+      expect((await meta(row.id)).missed_call_settled_at).toBeTruthy();
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a stale lease on a call with a bell and no pending retry still just settles', async () => {
+      const row = call(10, { customer_id: randomUUID(), metadata: { missed_call_notified_at: new Date(now - 30 * 60000).toISOString() } });
+      await database('call_log').insert(row);
+      await database('notifications').insert({
+        id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'Missed call',
+        metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: row.id } },
+      });
+      expect(await sweepMissedCalls()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+      expect((await meta(row.id)).missed_call_settled_at).toBeTruthy();
+    });
+
     test('the retry still stops when the caller got through meanwhile', async () => {
       setGates(['missedCallPushCheck']);
       const customer = randomUUID();

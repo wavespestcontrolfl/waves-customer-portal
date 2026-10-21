@@ -333,6 +333,16 @@ async function raisePushDeadAlert(row) {
   });
 }
 
+// The push-retry state a claim won: whether pass 1 left a retry pending and how
+// many subscriptions it found.
+function pushRetryState(metadata) {
+  const meta = parseMeta(metadata);
+  return {
+    pushRetry: Number(meta.missed_call_push_retries || 0) >= 1,
+    firstPassSubs: Number(meta.missed_call_push_first_subs || 0),
+  };
+}
+
 async function holdForPushRetry({ row, stats, fenced, pushRetry, firstPassSubs }) {
   if (pushRetry) {
     if (pushReachedNoPhone(stats, firstPassSubs)) await raisePushDeadAlert(row).catch((err) => logger.warn(`[missed-call-bell] push alert failed: ${err.message}`));
@@ -396,7 +406,13 @@ async function ringMissedCallIfUnanswered(callSid) {
     // push-only delivery leaves no row; a re-send is coalesced by the
     // per-call push tag (browser replaces same-tag notifications), whereas
     // settling before dispatch would make the crash a permanent loss.
-    if (reclaimed) {
+    // A push-only retry (GATE_MISSED_CALL_PUSH_CHECK, pass 2): the bell row from
+    // pass 1 stands. Keyed on the stored counter, not the gate, so a gate flipped
+    // off between the passes can never write a second bell.
+    const { pushRetry, firstPassSubs } = pushRetryState(claimed.metadata);
+    // A pending push retry skips the shortcut: its bell row is expected, and a
+    // pass 2 that crashed before dispatch must still send the push.
+    if (reclaimed && !pushRetry) {
       const prior = await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' })
         .whereRaw("metadata->>'triggerKey' = 'customer_missed_call'")
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
@@ -418,12 +434,6 @@ async function ringMissedCallIfUnanswered(callSid) {
     // The post-check below retires the bell for good, so it needs proof of an
     // answered callback, not a callback that may still be ringing.
     const stillMissedFinal = stillMissedWith(calledBackSql({ retire: true }));
-    // A push-only retry (GATE_MISSED_CALL_PUSH_CHECK, pass 2): the bell row from
-    // pass 1 stands. Keyed on the stored counter, not the gate, so a gate flipped
-    // off between the passes can never write a second bell.
-    const claimedMeta = parseMeta(claimed.metadata);
-    const pushRetry = Number(claimedMeta.missed_call_push_retries || 0) >= 1;
-    const firstPassSubs = Number(claimedMeta.missed_call_push_first_subs || 0);
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
