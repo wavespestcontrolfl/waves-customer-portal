@@ -425,7 +425,9 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // GATE_IB_TARGET_RULES_V2 (Codex #6369 r14): a request whose context carries more than
 // one customer row (same-name candidates) keeps a card on every write, including the
 // on-screen same-name pick. A separate flag from untrustedRead, so it is never written
-// to the thread's marker and does not taint later requests on the thread.
+// to the thread's marker and does not taint later requests on the thread. Every card-free
+// path (customer edits, create_customer and the other exempt tools) asks executesWithoutCard
+// or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
   if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) taint.sameNameCandidates = true;
 }

@@ -447,14 +447,35 @@ const MAX_CONTACT_LITERALS = 5;
 // normalized clause with each comma turned into COMMA_TOKEN, so the comma syntax survives
 // normalization.
 const COMMA_TOKEN = 'qqcomma';
-function cityIsTyped(customer, marked) {
+// The text right after this customer's typed name, or null when the name is not typed.
+// `marked` is the normalized clause with commas turned into COMMA_TOKEN.
+function nameTail(customer, marked) {
   const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
   const hay = ` ${marked} `;
   const phrase = [`${first} ${last}`.trim(), first, last].find(name => name && hay.includes(` ${name} `));
+  return phrase ? hay.slice(hay.indexOf(` ${phrase} `) + phrase.length + 2) : null;
+}
+
+function cityIsTyped(customer, marked) {
+  const tail = nameTail(customer, marked);
   const city = normalizeName(customer.city);
-  if (!phrase || !city) return false;
-  const tail = hay.slice(hay.indexOf(` ${phrase} `) + phrase.length + 2);
-  return ['in', 'of', COMMA_TOKEN].some(lead => tail.startsWith(`${lead} ${city} `));
+  return Boolean(tail && city) && ['in', 'of', COMMA_TOKEN].some(lead => tail.startsWith(`${lead} ${city} `));
+}
+
+// Was a qualifier typed after a name: "in <place>", "of <place>" or ", <place>"? A
+// determiner or a command word after it ("in the morning", ", update ...") is not one.
+// Presence is tracked apart from resolution: a qualifier that resolved to nobody ("in
+// Tampa") is still a qualifier (Codex #6369 r15).
+const NON_PLACE_WORDS = new Set(['the', 'a', 'an', 'my', 'our', 'this', 'that', 'his', 'her', 'their', 'to', 'and', 'please']);
+function qualifierAfterName(customer, marked) {
+  const [lead, next] = String(nameTail(customer, marked) ?? '').split(' ');
+  return ['in', 'of', COMMA_TOKEN].includes(lead) && Boolean(next) && !NON_PLACE_WORDS.has(next) && !COMMAND_WORD_RE.test(next);
+}
+
+function qualifierTyped(prompt, named) {
+  const clause = targetClause(prompt);
+  const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
+  return [...clause.matchAll(CONTACT_LITERAL_RE)].length > 0 || named.some(customer => qualifierAfterName(customer, marked));
 }
 
 // The distinct phones and emails a clause types, as lookup literals. Collection stops
@@ -671,8 +692,15 @@ const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause
 // several same-name customers only when the message typed nothing that names a customer.
 // A typed city, phone or email (one customer or several) is explicit evidence: it beats
 // the page, so there is no on-screen pick and the same-name note handles the choice
-// (Codex #6369 r13, pre-push audit).
-const sameNamePick = (scope, r) => (scope && r.typedIds.length === 0 && !r.typedIds.identityConflict ? r.page.customer || null : null);
+// (Codex #6369 r13, pre-push audit). A qualifier typed but resolved to nobody ("in Tampa")
+// is still typed: no on-screen pick either (Codex #6369 r15).
+function sameNamePick(scope, r) {
+  const viewed = r.page.customer;
+  if (!scope || !viewed || r.typedIds.identityConflict) return null;
+  // A typed qualifier that resolved to exactly the viewed customer confirms the page.
+  if (r.typedIds.length === 1) return r.typedIds[0] === viewed.customer_id ? viewed : null;
+  return r.typedIds.length === 0 && !qualifierTyped(r.prompt, r.named) ? viewed : null;
+}
 
 // Candidates, whom this message names (GATE_IB_TARGET_RULES_V2) and the first
 // selection. The typed ids ride on the context so an owner-direct edit can tell a

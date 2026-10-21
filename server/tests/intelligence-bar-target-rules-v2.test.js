@@ -508,6 +508,20 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const viaPhone = await Context.resolve({ prompt: `update Pat Example 941-555-0101 phone`, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
     expect(viaPhone.target).toBeNull();
     expect(viaPhone.typedCustomerIds).toEqual([id(101)]);
+    // A qualifier typed but resolved to nobody is still a qualifier: no on-screen pick (Codex #6369 r15).
+    for (const typedPrompt of ['update Pat Example in Tampa phone', 'update Pat Example of Tampa phone', 'update Pat Example, Tampa phone',
+      'update Pat Example 941-555-9999 phone', 'update Pat Example nobody@example.test phone']) {
+      const none = await Context.resolve({ prompt: typedPrompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+      expect([typedPrompt, none.target, none.ambiguous]).toEqual([typedPrompt, null, true]);
+    }
+    // Words after the name that are not a place do not count as a qualifier.
+    for (const plain of ['update Pat Example in the morning phone', 'update Pat Example, and set the phone', 'update Pat Example and set the phone']) {
+      const picked = await Context.resolve({ prompt: plain, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+      expect([plain, picked.target?.customer_id]).toEqual([plain, id(100)]);
+    }
+    // A qualifier that resolves to exactly the viewed customer confirms the page.
+    const confirmed = await Context.resolve({ prompt: 'update Pat Example in Venice phone', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+    expect(confirmed.target.customer_id).toBe(id(100));
     // Typed evidence that names two customers picks neither, on screen or not.
     customers.push({ ...sameName(1)[0], id: id(300), first_name: 'Alice', last_name: 'Jones', city: 'Venice', phone: '9415550300', hiddenFromName: true });
     const two = await Context.resolve({ prompt: 'update Pat Example 941-555-0101 and 941-555-0300 phone', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
@@ -545,6 +559,12 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(taint.untrustedRead).toBe(false);
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, grounding)).toBe(false);
     expect(OwnerDirect.mayExecuteWithoutCard('update_customer', edit, taint, grounding)).toBe(false);
+    // Exempt tools are carded too: create_customer runs direct in a clean request, never after a same-name context.
+    const create = { first_name: 'Sam', last_name: 'Newcomer', phone: '941-555-0150' };
+    expect(OwnerDirect.executesWithoutCard('create_customer', create, null, OwnerDirect.newRequestTaint([]), grounding)).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('create_customer', create, null, taint, grounding)).toBe(false);
+    expect(OwnerDirect.mayExecuteWithoutCard('create_customer', create, taint, grounding)).toBe(false);
+    expect(OwnerDirect.messageDirectPlan([{ name: 'create_customer', input: create }], () => true, taint, grounding).size).toBe(0);
   });
 
   test('gate on: a single on-screen customer with no candidates keeps direct edits and an unchanged model context', async () => {
