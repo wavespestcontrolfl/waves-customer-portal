@@ -66,6 +66,8 @@ const seedWorld = () => ({
   scheduled_services: [{ id: ID, customer_id: CUSTOMER, scheduled_date: new Date('2026-10-14T00:00:00.000Z'), service_type: 'Pest Control', notes: 'Old visit note', updated_at: new Date(STAMP) }],
   service_product_usage: [{ id: ID, product_id: PRODUCT, service_type: 'General Pest Control', notes: 'Old use note', updated_at: STAMP }],
   products_catalog: [{ id: PRODUCT, name: 'Talstar P' }],
+  time_weekly_summary: [],
+  time_entry_daily_summary: [],
 });
 // What the screen's save does to the world, per catalog row: [table, which row, body key -> column].
 const SAVES = {
@@ -715,11 +717,20 @@ describe('the record snapshot: label, current values, version', () => {
     expect((await propose(inputFor(entry)))._version).toBe(timesheet._version);
   });
 
-  test('a customer with no saved preference row shows "none saved yet" and every flag as not set', async () => {
+  test('a customer with no saved preference row is refused: the screen would seed the default texts first', async () => {
     world.notification_prefs = [];
+    const result = await propose(inputFor(CUSTOMER_ENTRY));
+    expect(result).toMatchObject({ code: 'capability_unimplemented' });
+    expect(result.error).toMatch(/no text preferences saved yet/);
+    expect(result.error).toMatch(/default texts and emails/);
+    expect(result.error).toMatch(/customer page first/);
+    expect(callsOf()).toHaveLength(0);
+    // …also when the row disappears between the card and Confirm.
+    world = seedWorld();
     const preview = await propose(inputFor(CUSTOMER_ENTRY));
-    expect(preview.record_label).toBe('Pat Tester: text and report preferences (none saved yet)');
-    expect(preview.changes.every(change => change.before === null)).toBe(true);
+    world.notification_prefs = [];
+    expect(await propose({ ...inputFor(CUSTOMER_ENTRY), confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'capability_unimplemented' });
+    expect(callsOf()).toHaveLength(0);
   });
 
   test('a value changed on the screen between the card and Confirm is a new card, and nothing is sent', async () => {
@@ -729,7 +740,6 @@ describe('the record snapshot: label, current values, version', () => {
       ['PUT /admin/sms-templates/:id', () => { world.sms_templates[0].updated_at = '2026-10-20T01:00:00.000Z'; }],
       ['PUT /admin/timetracking/entries/:id', () => { world.time_entries[0].clock_out = '2026-10-12T21:00:00.000Z'; }],
       ['PUT /admin/customers/:id/notification-prefs', () => { world.notification_prefs[0].appointment_notify_primary = false; }],
-      ['PUT /admin/customers/:id/notification-prefs', () => { world.notification_prefs = []; }],
       ['PATCH /admin/dispatch/:serviceId/note', () => { world.scheduled_services[0].notes = 'Tech added a note'; }],
       ['PUT /admin/inventory/service-usage/:id', () => { world.service_product_usage[0].notes = 'Changed'; }],
       ['PUT /admin/email-templates/fixtures/:id', () => { world.email_template_fixtures[0].payload = { first_name: 'Other' }; }],
@@ -744,6 +754,58 @@ describe('the record snapshot: label, current values, version', () => {
       expect(await propose({ ...inputFor(entry), confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'preview_changed', preview_changed: true });
     }
     expect(callsOf()).toHaveLength(0);
+  });
+
+  describe('a timesheet edit says what it also does', () => {
+    const { staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+    const timesheet = () => catalog.entries.find(e => e.endpoint === '/admin/timetracking/entries/:id');
+    const WEEK = staffWeekStartForWorkDate('2026-10-12');
+    const signedWeek = (extra = {}) => ({ technician_id: TECH, week_start: WEEK, status: 'open', tech_signed_at: new Date('2026-10-18T22:00:00.000Z'), ...extra });
+    const notesOnly = () => inputFor(timesheet(), { body: { notes: 'Only a note', edit_reason: 'Typo' } });
+
+    test('any edit, a notes-only one included, resets the entry to pending approval and says so', async () => {
+      const preview = await propose(notesOnly());
+      expect(preview.also[0]).toBe('This marks the entry as edited and resets it to pending approval (it is now completed, approval pending).');
+      expect(preview.also).toContain(`Adam Tech has not signed the week of ${WEEK}, so no signature is cleared (week status not summarized yet).`);
+      expect(cardLines(preview).map(line => line.text)).toEqual(expect.arrayContaining(preview.also));
+      expect(displayParams(preview).also).toContain('resets it to pending approval');
+    });
+
+    test('a signed week shows who must sign again, and the signed state is pinned', async () => {
+      world.time_weekly_summary = [signedWeek()];
+      const preview = await propose(notesOnly());
+      expect(preview.also).toContain(`This clears Adam Tech's signed week of ${WEEK} (signed Oct 18, 2026): they must sign again.`);
+      const contract = Contract.buildContract({ toolName: PROPOSE, params: notesOnly(), displayParams: displayParams(preview), preview, summary: 'x' });
+      expect(contract.effects.map(effect => effect.label).join('\n')).toContain('they must sign again');
+      // Unsigned when the card was made, signed before Confirm: a new card.
+      world.time_weekly_summary = [];
+      const earlier = await propose(notesOnly());
+      expect(earlier._version).not.toBe(preview._version);
+      world.time_weekly_summary = [signedWeek()];
+      expect(await propose({ ...notesOnly(), confirmed: true, _approved_edit_pin: earlier._version })).toMatchObject({ code: 'preview_changed' });
+      expect(callsOf()).toHaveLength(0);
+    });
+
+    test('an approved week or day is named: the screen refuses until it is unlocked', async () => {
+      world.time_weekly_summary = [signedWeek({ status: 'approved' })];
+      expect((await propose(notesOnly())).also.join(' ')).toContain(`The week of ${WEEK} is approved (signed Oct 18, 2026): the timesheet screen refuses this edit until the week is unlocked.`);
+      world.time_weekly_summary = [];
+      world.time_entry_daily_summary = [{ technician_id: TECH, work_date: '2026-10-12', status: 'approved' }];
+      expect((await propose(notesOnly())).also.join(' ')).toContain('The day 2026-10-12 is approved: the timesheet screen refuses this edit until the day is reopened.');
+    });
+
+    test('moving the entry into another week names both weeks', async () => {
+      const otherWeek = staffWeekStartForWorkDate('2026-10-21');
+      world.time_weekly_summary = [signedWeek(), { technician_id: TECH, week_start: otherWeek, status: 'open', tech_signed_at: new Date('2026-10-25T22:00:00.000Z') }];
+      const preview = await propose(inputFor(timesheet(), { body: { clock_in: '2026-10-21T08:00:00-04:00', clock_out: '2026-10-21T16:00:00-04:00', edit_reason: 'Wrong day' } }));
+      const text = preview.also.join('\n');
+      expect(text).toContain(`signed week of ${WEEK}`);
+      expect(text).toContain(`signed week of ${otherWeek}`);
+    });
+
+    test('other rows list nothing extra', async () => {
+      expect((await propose(inputFor(ENTRY))).also).toEqual([]);
+    });
   });
 
   test('a record deleted after the card was shown gets no edit', async () => {

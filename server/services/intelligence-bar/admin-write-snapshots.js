@@ -34,6 +34,34 @@ async function customerOf(id) {
   return id ? db('customers').where({ id }).first('first_name', 'last_name', 'company_name', 'deleted_at') : null;
 }
 
+// What confirming a timesheet edit also does (time-tracking.js adminEditEntry + recomputeEntryMutationSummaries):
+// ANY edit, a notes-only one included, marks the entry edited and pending approval, and clears the
+// technician's signature on every affected week that is not approved. The card says so, with the state
+// it is in now; the lines are pinned, so a week signed or approved after the card was shown is a new card.
+async function timesheetEffects(row, techName, body) {
+  const { staffWorkDate, staffWeekStartForWorkDate } = require('../../utils/staff-time-work-date');
+  const dates = [staffWorkDate(row.clock_in)];
+  if (body.clock_in) dates.push(staffWorkDate(new Date(body.clock_in)));
+  const lines = [`This marks the entry as edited and resets it to pending approval (it is now ${text(row.status)}, approval ${text(row.approval_status)}).`];
+  for (const weekStart of [...new Set(dates.map(staffWeekStartForWorkDate))].sort()) {
+    const weekly = await db('time_weekly_summary').where({ technician_id: row.technician_id, week_start: weekStart }).first('status', 'tech_signed_at');
+    const signed = weekly?.tech_signed_at ? new Date(weekly.tech_signed_at).toLocaleDateString('en-US', { timeZone: ET, month: 'short', day: 'numeric', year: 'numeric' }) : null;
+    if (weekly?.status === 'approved') {
+      lines.push(`The week of ${weekStart} is approved (${signed ? `signed ${signed}` : 'not signed'}): the timesheet screen refuses this edit until the week is unlocked.`);
+    } else if (signed) {
+      lines.push(`This clears ${techName}'s signed week of ${weekStart} (signed ${signed}): they must sign again.`);
+    } else {
+      lines.push(`${techName} has not signed the week of ${weekStart}, so no signature is cleared (week status ${text(weekly?.status) || 'not summarized yet'}).`);
+    }
+    const dayDates = dates.filter(d => staffWeekStartForWorkDate(d) === weekStart);
+    for (const workDate of [...new Set(dayDates)].sort()) {
+      const daily = await db('time_entry_daily_summary').where({ technician_id: row.technician_id, work_date: workDate }).first('status');
+      if (daily?.status === 'approved') lines.push(`The day ${workDate} is approved: the timesheet screen refuses this edit until the day is reopened.`);
+    }
+  }
+  return lines;
+}
+
 // A field map: body key -> column. A snapshot's `current` holds each mapped
 // column's value for the body keys the edit carries.
 const SNAPSHOTS = {
@@ -90,14 +118,16 @@ const SNAPSHOTS = {
   },
   'PUT /admin/timetracking/entries/:id': {
     fields: { clock_in: 'clock_in', clock_out: 'clock_out', entry_type: 'entry_type', notes: 'notes', edit_reason: 'edit_reason' },
-    async load(p) {
+    async load(p, body = {}) {
       const row = await db('time_entries').where({ id: p.id }).first();
       if (!row) return null;
       const tech = await db('technicians').where({ id: row.technician_id }).first('name');
+      const techName = text(tech?.name) || 'The technician';
       const day = new Date(row.clock_in).toLocaleDateString('en-US', { timeZone: ET, weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
       return {
         row,
-        label: `${text(tech?.name) || 'A technician'}: ${text(row.entry_type)} entry on ${day}, ${etTime(row.clock_in)} to ${etTime(row.clock_out)} ET (${text(row.status)}, ${text(row.approval_status)})`,
+        label: `${techName}: ${text(row.entry_type)} entry on ${day}, ${etTime(row.clock_in)} to ${etTime(row.clock_out)} ET (${text(row.status)}, ${text(row.approval_status)})`,
+        effects: await timesheetEffects(row, techName, body),
       };
     },
   },
@@ -109,9 +139,17 @@ const SNAPSHOTS = {
     async load(p) {
       const customer = await customerOf(p.id);
       if (!customer || customer.deleted_at) return null;
-      // A customer with no saved row has none yet: the handler creates the defaults, and every flag reads as not set.
-      const row = (await db('notification_prefs').where({ customer_id: p.id }).first()) || { __missing: true };
-      return { row, label: `${fullName(customer)}: text and report preferences${row.__missing ? ' (none saved yet)' : ''}` };
+      const row = await db('notification_prefs').where({ customer_id: p.id }).first();
+      // With no saved row the screen's save first seeds the defaults (confirmations, reminders, en-route and
+      // completed texts, SMS and email, payment confirmations) and then applies the patch: a much bigger change
+      // than the card could show. Refused; the preferences are set on the customer page first.
+      if (!row) {
+        return { blocked: {
+          error: `${fullName(customer)} has no text preferences saved yet. Setting the first one would also switch on the default texts and emails, which this card cannot show. Set their preferences on the customer page first. Nothing was proposed.`,
+          code: 'capability_unimplemented',
+        } };
+      }
+      return { row, label: `${fullName(customer)}: text and report preferences` };
     },
   },
   'PATCH /admin/dispatch/:serviceId/note': {
@@ -136,20 +174,21 @@ const SNAPSHOTS = {
 
 // { label, current: { bodyKey: value }, version, state } for the record, or null
 // when it does not exist. Throws when the database cannot be read.
-async function loadSnapshot(key, pathParams, bodyKeys) {
+async function loadSnapshot(key, pathParams, bodyKeys, body = {}) {
   const spec = SNAPSHOTS[key];
   if (!spec) return { unsupported: true };
-  const found = await spec.load(pathParams);
+  const found = await spec.load(pathParams, body);
   if (!found) return null;
+  if (found.blocked) return { blocked: found.blocked };
   const current = {};
   for (const bodyKey of bodyKeys) {
-    const value = found.row.__missing ? null : plain(found.row[spec.fields[bodyKey]]);
+    const value = plain(found.row[spec.fields[bodyKey]]);
     current[bodyKey] = (spec.jsonFields || []).includes(bodyKey) ? json(value) : value;
     if (current[bodyKey] === undefined) current[bodyKey] = null;
   }
   const stamp = found.row.updated_at;
   return {
-    label: found.label, current, state: found.state || {},
+    label: found.label, current, state: found.state || {}, effects: found.effects || [],
     version: stamp ? new Date(stamp).toISOString() : null,
   };
 }

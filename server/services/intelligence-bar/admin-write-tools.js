@@ -241,13 +241,14 @@ const showValue = (value) => {
 // field, its version and its state, from the snapshot queries
 // (admin-write-snapshots.js). Fail closed: a record that cannot be read, or does
 // not exist, or is in a state the row does not allow, gets no card.
-async function recordSnapshot(row, pathParams, bodyKeys) {
+async function recordSnapshot(row, pathParams, body) {
   let snapshot;
   try {
-    snapshot = await Snapshots.loadSnapshot(`${row.method} ${row.endpoint}`, pathParams, bodyKeys);
+    snapshot = await Snapshots.loadSnapshot(`${row.method} ${row.endpoint}`, pathParams, Object.keys(body), body);
   } catch {
     return { refusal: refusal('Could not read that record just now, so nothing was proposed. Try again in a moment.', 'record_lookup_failed') };
   }
+  if (snapshot?.blocked) return { refusal: refusal(snapshot.blocked.error, snapshot.blocked.code) };
   if (snapshot?.unsupported) return { refusal: refusal('That edit has no record snapshot, so it cannot be carded.', 'edit_not_on_list', { hint: 'find_admin_edits' }) };
   if (!snapshot) return { refusal: refusal('That record was not found.', 'record_unavailable') };
   for (const [field, wanted] of Object.entries(row.requireState || {})) {
@@ -276,7 +277,7 @@ async function buildPlan(input) {
   const pathParams = Object.fromEntries(readRules.patternParams(row.endpoint).map(name => [name, String(input.params[name])]));
   const bound = await bindCustomer(row, input, pathParams);
   if (bound.refusal) return bound;
-  const record = await recordSnapshot(row, pathParams, Object.keys(body));
+  const record = await recordSnapshot(row, pathParams, body);
   if (record.refusal) return record;
   const { snapshot } = record;
   const addressFields = Object.keys(body).filter(writeRules.bodyKeyLooksLikeAddress);
@@ -287,11 +288,11 @@ async function buildPlan(input) {
   const changes = Object.keys(body).sort().map(field => ({ field, before: shown[field], after: body[field] }));
   const version = digestOf({
     m: row.method, e: row.endpoint, p: pathParams, b: body, c: bound.customerId, d: row.digest,
-    l: snapshot.label, cur: snapshot.current, v: snapshot.version,
+    l: snapshot.label, cur: snapshot.current, v: snapshot.version, fx: snapshot.effects,
   });
   return {
     row, path: built.path, paramIndexes: built.paramIndexes, body, pathParams, customerId: bound.customerId,
-    changes, addressFields, version, label: shownLabel, recordVersion: snapshot.version,
+    changes, addressFields, version, label: shownLabel, recordVersion: snapshot.version, effects: snapshot.effects,
   };
 }
 
@@ -305,6 +306,7 @@ function previewOf(plan) {
     endpoint: row.endpoint,
     record: plan.pathParams,
     record_label: plan.label,
+    also: plan.effects,
     ...(plan.customerId ? { customer_id: plan.customerId } : {}),
     changes: plan.changes,
     address_change: plan.addressFields.length > 0,
@@ -332,6 +334,8 @@ function cardLines(preview) {
   }
   lines.push({ kind: 'operational', text: `Edit: ${preview.edit}` });
   lines.push({ kind: 'operational', text: `Record: ${preview.record_label}` });
+  // What the save also does (a timesheet edit resets approval and clears a signed week): listed before the fields.
+  for (const line of preview.also || []) lines.push({ kind: 'operational', text: line });
   for (const change of preview.changes || []) {
     const after = fullText(change.after);
     lines.push({ kind: 'operational', text: `${humanField(change.field)}: ${showValue(change.before)} → ${showValue(change.after)}` });
@@ -346,6 +350,7 @@ function cardLines(preview) {
 function displayParams(preview) {
   if (!preview || preview.preview !== true) return null;
   const shown = { edit: preview.edit, record: preview.record_label };
+  if ((preview.also || []).length) shown.also = preview.also.join(' ');
   if (preview.address_change) shown.address_change = `YES: ${(preview.address_fields || []).join(', ')}`;
   for (const change of preview.changes || []) {
     shown[change.field] = `${showValue(change.before)} → ${showValue(change.after)}`;
@@ -378,11 +383,11 @@ async function verifySaved(plan) {
   });
   let after;
   try {
-    after = await Snapshots.loadSnapshot(`${plan.row.method} ${plan.row.endpoint}`, plan.pathParams, Object.keys(plan.body));
+    after = await Snapshots.loadSnapshot(`${plan.row.method} ${plan.row.endpoint}`, plan.pathParams, Object.keys(plan.body), plan.body);
   } catch {
     return unverified('could not be read, so the fields');
   }
-  if (!after || after.unsupported) return unverified('the record was not found, so the fields');
+  if (!after || after.unsupported || after.blocked) return unverified('the record was not found, so the fields');
   const wrong = Object.keys(plan.body).filter(field => !Snapshots.sameValue(plan.body[field], after.current[field], plan.row.body[field]));
   return wrong.length ? unverified(wrong.join(', ')) : null;
 }
