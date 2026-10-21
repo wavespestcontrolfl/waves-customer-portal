@@ -227,3 +227,14 @@ describe('informational read reasons are not capability declines (Codex #6371 r3
     for (const reason of reasons) expect(BAR_DECLINE_RE.test(reason)).toBe(false);
   });
 });
+
+describe('proposal-time frozen check (Codex #6371 r4)', () => {
+  test('an unreadable frozen verdict at proposal is an uncoded fault, not frozen_visit_move_unsupported', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
+    const at = src.indexOf("verdict.frozen && verdict.reason === 'unreadable'");
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, src.indexOf('}', src.indexOf('return', at)) + 1);
+    expect(block).not.toContain('code:');
+    expect(at).toBeLessThan(src.indexOf("code: 'frozen_visit_move_unsupported'", at - 2000));
+  });
+});

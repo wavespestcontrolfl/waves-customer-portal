@@ -1670,6 +1670,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop, and the bar can\'t move one of them alone from here yet. Nothing was proposed.', code: 'grouped_visit_move_unsupported' } };
         }
         const verdict = await VisitGroups.frozenVisitVerdict(db, pin.visit_id);
+        // An unreadable check is an outage, not a policy refusal: no code, so
+        // Tool Health counts it as a fault and no gap is filed (Codex #6371 r4).
+        if (verdict.frozen && verdict.reason === 'unreadable') {
+          return { failed: true, modelResult: { error: 'The visit\'s status could not be read just now, so nothing was proposed. Try again in a moment.' } };
+        }
         if (verdict.frozen) {
           return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — the bar can\'t move it from here. Nothing was proposed.', code: 'frozen_visit_move_unsupported' } };
         }
