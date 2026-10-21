@@ -45,6 +45,12 @@ const PREFIXED_RES = [
   /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
 ];
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi;
+// HTTP Basic credentials ("Authorization: Basic dXNlcjpwYXNz", or bare "Basic <base64>").
+const BASIC_RE = /\bBasic\s+[A-Za-z0-9+\/]{8,}={0,2}/g;
+// An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
+// STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
+// upper-case name, '=', no spaces (Codex #6375 r2).
+const ENV_SECRET_RE = /\b([A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)/g;
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;
 // user:password@ in a link of ANY scheme (postgresql://, redis://, ftp://,
@@ -86,7 +92,8 @@ function scrubNoteText(input) {
     if (clean !== url) removed += 1;
     return clean;
   });
-  text = text.replace(JWT_RE, swap).replace(BEARER_RE, swap);
+  text = text.replace(JWT_RE, swap).replace(BEARER_RE, swap).replace(BASIC_RE, swap);
+  text = text.replace(ENV_SECRET_RE, (match, name) => { removed += 1; return `${name}=${REMOVED}`; });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);
   if (noPans !== text) removed += 1;

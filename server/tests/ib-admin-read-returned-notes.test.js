@@ -199,3 +199,20 @@ describe('any-scheme link passwords (Codex #6375 security P2)', () => {
     expect(scrubNote('mailto:pat@example.test at 10:30, gate 1234').text).toBe('mailto:pat@example.test at 10:30, gate 1234');
   });
 });
+
+describe('Basic credentials and env-style secrets (Codex #6375 r2)', () => {
+  const { scrubNote } = require('../utils/note-secret-scrubber');
+  test.each([
+    ['Authorization: Basic dXNlcjpwYXNzd29yZA==', 'dXNlcjpwYXNzd29yZA'],
+    ['use Basic YWRtaW46aHVudGVyMjI= for the portal', 'YWRtaW46aHVudGVyMjI'],
+    ['DB_PASSWORD=hunter22', 'hunter22'],
+    ['STRIPE_SECRET_KEY="abc def"', 'abc def'],
+    ['API_TOKEN=xyz123', 'xyz123'],
+  ])('%s is removed', (note, secret) => {
+    expect(scrubNote(note).text).not.toContain(secret);
+  });
+  test('ordinary words and prose stay', () => {
+    const note = 'Basic service plan, gate code 1234; password is hunter2 (prose stays, owner ruling)';
+    expect(scrubNote(note).text).toBe(note);
+  });
+});
