@@ -242,6 +242,14 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     expect(aws.text).toBe('Authorization: [removed]');
     expect(aws.text).not.toMatch(/Signature|AKIDEXAMPLE/);
   });
+  test('a short credential after any Authorization scheme goes too (Codex #6375 r9)', () => {
+    expect(scrubNote('Authorization: Token abc').text).toBe('Authorization: [removed]');
+  });
+  test('quoted credential keys in serialized notes lose their values (Codex #6375 r9)', () => {
+    const json = scrubNote('{"password":"hunter22","api_key":"abc123xyz","gate":"open"}');
+    expect(json.text).toBe('{"password":"[removed]","api_key":"[removed]","gate":"open"}');
+    expect(scrubNote("{'db.password': 'hunter22'}").text).toBe("{'db.password': '[removed]'}");
+  });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
@@ -298,6 +306,13 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
     expect(body.length).toBeLessThanOrEqual(NOTE_CAP + marker);
     expect(result.data.notes[CUT]).toBe(true);
     expect(Object.keys(result.data.notes).length).toBeLessThan(300);
+  });
+
+  test('escaped characters count at their JSON length (Codex #6375 r9)', async () => {
+    const result = await read(ENTRY, { id: 1, notes: { a: '"'.repeat(990) } });
+    const marker = JSON.stringify({ [CUT]: true }).length;
+    expect(JSON.stringify(result.data.notes).length).toBeLessThanOrEqual(NOTE_CAP + marker + JSON.stringify(CUT).length);
+    expect(result.data.notes.a.endsWith(CUT)).toBe(true);
   });
 
   test('an array of scalars is budgeted and closed with one cut marker (r7)', async () => {

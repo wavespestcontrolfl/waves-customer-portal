@@ -367,7 +367,21 @@ function returnNumber(item, state) {
 // (Codex #6375 r4, r7).
 const noteFits = (state, cost) => state.noteBudget === undefined || cost <= state.noteBudget;
 const chargeNote = (state, cost) => { if (state.noteBudget !== undefined) state.noteBudget -= cost; };
-const serialLength = value => (typeof value === 'string' ? value.length + 2 : String(value).length);
+// A string is charged as JSON writes it: quotes, backslashes and control
+// characters expand when escaped (Codex #6375 r9).
+const serialLength = value => (typeof value === 'string' ? JSON.stringify(value).length : String(value).length);
+// The longest start of `text` whose escaped form fits in `room` characters.
+function cutToSerial(text, room) {
+  let used = 0;
+  let end = 0;
+  for (const ch of text) {
+    const cost = JSON.stringify(ch).length - 2;
+    if (used + cost > room) break;
+    used += cost;
+    end += ch.length;
+  }
+  return text.slice(0, end);
+}
 // What an entry needs at least: its own text for a scalar, brackets for a container
 // and the quotes for a string (the string is then cut to what is left).
 const leastLeafCost = entry => {
@@ -381,8 +395,8 @@ function returnNoteString(item, state) {
   state.noteSecrets += removed;
   if (state.noteBudget === undefined) return text;
   const room = Math.max(state.noteBudget - 2, 0);
-  const kept = text.length > room ? `${text.slice(0, room)}${CUT}` : text;
-  chargeNote(state, kept.length + 2);
+  const kept = serialLength(text) - 2 > room ? `${cutToSerial(text, room)}${CUT}` : text;
+  chargeNote(state, serialLength(kept));
   return kept;
 }
 

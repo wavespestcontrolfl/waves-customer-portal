@@ -82,8 +82,11 @@ const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOK
 // The header's whole value goes, to the end of the line: a parameterized scheme
 // (Digest username=..., nonce=..., response=...; AWS4-HMAC-SHA256 ... Signature=...)
 // carries secrets after its first token (Codex #6375 r8).
-const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+([^\n]{4,})/gi;
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
+// Any length: the header itself says the rest is credential material (Codex #6375 r9).
+const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+([^\n]+)/gi;
+// The key may sit in paired quotes, as in serialized JSON or YAML:
+// {"password":"hunter22"} (Codex #6375 r9).
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
 const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
 function isAssignmentSecretKey(key) {
   const words = nameWords(key);
@@ -139,10 +142,11 @@ function scrubNoteText(input) {
     .replace(BASIC_RE, (match, header, scheme, token) => (looksLikeBasicCredential(header, token) ? `${header || ''}${swap()}` : match));
   text = text.replace(ENV_SECRET_RE, (match, name) => { removed += 1; return `${name}=${REMOVED}`; });
   text = text.replace(AUTH_HEADER_RE, (match, head, scheme, value) => (isAlreadyRemoved(scheme) || isAlreadyRemoved(value) ? match : `${head}${swap()}`));
-  text = text.replace(KEY_ASSIGN_RE, (match, key, sep, value) => {
+  text = text.replace(KEY_ASSIGN_RE, (match, quote, key, sep, value) => {
     if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) return match;
     removed += 1;
-    return `${key}${sep}${REMOVED}`;
+    const valueQuote = /^["']/.test(value) ? value[0] : '';
+    return `${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
   });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);
