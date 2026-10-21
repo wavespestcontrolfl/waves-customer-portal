@@ -29,7 +29,7 @@ export default function DidYouMean({ className = '', style }) {
         padding: '6px 14px',
         // 14px: the portal's minimum readable text.
         fontSize: 14,
-        fontWeight: 600,
+        fontWeight: 500, // V2 weights are 400 and 500 only
         color: '#71717A',
         background: '#FAFAFA',
         borderTop: '1px solid #E4E4E7',
