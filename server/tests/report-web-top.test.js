@@ -42,6 +42,17 @@ describe('buildWebTop', () => {
     expect('trendNote' in buildWebTop(data)).toBe(false);
   });
 
+  test('lawn: the action is the aftercare watering line the page recommends, not the banner line', () => {
+    const data = lawn();
+    data.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
+    expect(buildWebTop(data).action).toBe('Water in about \u00bd inch within 24 hours.');
+    data.reportV2.aftercare = { watering: 'No special watering is needed.', neutral: true };
+    expect(buildWebTop(data).action).toBe('Water in today\u2019s treatment by Sat 9 AM.');
+    data.reportV2.aftercare = { watering: '', neutral: false };
+    expect(buildWebTop(data).action).toBe('Water in today\u2019s treatment by Sat 9 AM.');
+    expect('action' in buildWebTop({ ...data, applicationMade: false })).toBe(false);
+  });
+
   test('lawn: no watering banner and nothing needed says so; otherwise no action', () => {
     const data = lawn();
     data.reportV2.banner = { state: 'none', lines: ['No watering change from today’s treatment.'] };

@@ -52,15 +52,23 @@ function lawnScore(data) {
   return out;
 }
 
-/** The one action. Lawn: the watering line the report prints. Other lines: the report's own next step. */
+// A lawn watering line: aftercare.watering (what "What we recommend" prints), else the banner's first line.
+function lawnWatering(v2) {
+  const aftercare = v2?.aftercare?.neutral === true ? null : sentence(v2?.aftercare?.watering, 240);
+  if (aftercare) return aftercare;
+  const banner = v2?.banner;
+  if (!banner || !WATER_STATES.includes(banner.state)) return null;
+  return sentence((Array.isArray(banner.lines) ? banner.lines : []).find((line) => sentence(line)));
+}
+
+/**
+ * The one action. Lawn: the watering line the page already recommends, so it is worded one way (a neutral "no special
+ * watering" line is not an action). Other lines: the report's own next step.
+ */
 function actionLine(data) {
   if (data.serviceLine === 'lawn') {
-    const banner = data.reportV2?.banner;
-    if (treated(data) && banner && WATER_STATES.includes(banner.state)) {
-      const first = (Array.isArray(banner.lines) ? banner.lines : []).find((line) => sentence(line));
-      if (first) return sentence(first);
-    }
-    return data.reportV2?.snapshot?.noActionNeeded === true ? NO_ACTION : null;
+    const water = treated(data) ? lawnWatering(data.reportV2) : null;
+    return water || (data.reportV2?.snapshot?.noActionNeeded === true ? NO_ACTION : null);
   }
   const step = sentence(data.typedReport?.todaysResult?.nextStep);
   if (!step) return null;
