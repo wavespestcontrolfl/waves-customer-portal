@@ -405,7 +405,8 @@ async function withLastVisit(candidates) {
   if (!candidates.length) return candidates;
   let dates = new Map();
   try {
-    const rows = await db('service_records').whereIn('customer_id', candidates.map(c => c.customer_id)).groupBy('customer_id')
+    // A visit is a completed service record (an office-handoff 'incomplete' row is not; Codex #6369 r2).
+    const rows = await db('service_records').whereIn('customer_id', candidates.map(c => c.customer_id)).where('status', 'completed').groupBy('customer_id')
       .select('customer_id', db.raw('MAX(service_date) AS last_visit'));
     dates = new Map(rows.map(row => [String(row.customer_id), row.last_visit]));
   } catch {
@@ -456,7 +457,7 @@ async function typedCustomerIds(prompt, namedResult) {
     const rows = await db('customers').whereNull('deleted_at').where(function () {
       if (literal.phone) this.whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [literal.phone]);
       else this.whereRaw("lower(coalesce(email, '')) = ?", [literal.email]);
-    }).limit(2).select('id', 'phone', 'email');
+    }).limit(2).select('id', 'phone', 'email', 'first_name', 'last_name');
     return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
   };
   // Work budget (Codex #6369 security P2): a message that types more than
@@ -464,16 +465,21 @@ async function typedCustomerIds(prompt, namedResult) {
   // keeps its card), and runs no lookup at all.
   const contactLiterals = [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))];
   if (contactLiterals.length > MAX_CONTACT_LITERALS) return [...ids];
+  const contactOwners = new Map();
   for (const literal of contactLiterals) {
     const found = await owners(literal);
-    if (found.length === 1) contactIds.add(String(found[0].id));
+    if (found.length === 1) { contactIds.add(String(found[0].id)); contactOwners.set(String(found[0].id), found[0]); }
   }
   // Name and contact evidence must agree. A name that matched customers and a
   // phone or email that belongs to someone else is unresolved: it names nobody,
   // so the edit keeps its card (a phone beside a name may only pick among the
   // customers that name matched).
   const nameMatched = new Set((namedResult.matches || []).map(customer => String(customer.id)));
-  if (nameMatched.size && [...contactIds].some(id => !nameMatched.has(id))) return [];
+  // The name list is capped (26 rows): past the cap, a contact owner agrees
+  // with the name when the typed name names that owner (Codex #6369 r2).
+  const agreesWithName = (id) => nameMatched.has(id)
+    || (namedResult.complete === false && namesTargetCustomer(normalizeName(withoutContacts(targetClause(prompt))), contactOwners.get(id) || {}));
+  if (nameMatched.size && [...contactIds].some(id => !agreesWithName(id))) return [];
   for (const id of contactIds) ids.add(id);
   for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];

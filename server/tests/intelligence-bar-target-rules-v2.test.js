@@ -254,6 +254,18 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect((await ask('update Pat Example 941-555-9999 notes')).typedCustomerIds).toEqual([]);
   });
 
+  test('gate on: past the 25-row cap, a phone that belongs to the named person still names them (Codex #6369 r2)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(30);
+    const beyond = customers[29];
+    const digits = beyond.phone.replace(/\D/g, '');
+    const pretty = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+    expect((await ask(`update Pat Example ${pretty} notes`)).typedCustomerIds).toEqual([beyond.id]);
+    // A phone of someone with another name is still a conflict.
+    customers.push({ ...sameName(1)[0], id: id(900), first_name: 'Lee', last_name: 'Other', phone: '9415559000', email: 'lee@example.test' });
+    expect((await ask('update Pat Example 941-555-9000 notes')).typedCustomerIds).toEqual([]);
+  });
+
   test('gate on: a capped name list names nobody, even when one listed row matches the typed city', async () => {
     process.env[ON] = 'true';
     // 30 same-name customers: the lookup stops at 26 and never sees the rest, so a lone city match proves nothing.
@@ -371,14 +383,16 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
   const reschedule = n => ({ type: 'tool_use', name: 'reschedule_appointment', input: { appointment_id: id(600 + n), new_date: '2026-11-03' } });
   const pin = customer_id => ({ pinned_appointment: { id: id(600), customer_id, visit_id: null } });
 
-  test('gate on: six reschedule calls where five name an unknown customer still run the named one direct', () => {
+  test('gate on: a message with six reschedule calls is refused as a set before any commits; unnamed ones still card (Codex #6369 r2)', () => {
     process.env[ON] = 'true';
     const grounding = OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [NAMED], page: { ids: {} } });
     const calls = [1, 2, 3, 4, 5, 6].map(reschedule);
-    // The plan cannot see the previews, so it counts none of them.
+    // More than five such calls in one message: the set goes to the bulk card, decided before the previews.
     const committed = new Map();
     const capped = OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan(calls, () => true, null, grounding));
-    expect(capped.size).toBe(0);
+    expect([...capped]).toEqual(['reschedule_appointment']);
+    // Five or fewer are left to the per-preview count.
+    expect(OwnerDirect.cappedTools(new Map(), OwnerDirect.messageDirectPlan(calls.slice(0, 5), () => true, null, grounding)).size).toBe(0);
     // Each call is judged on its own preview, in order, as it commits.
     const verdicts = [UNNAMED, UNNAMED, UNNAMED, UNNAMED, UNNAMED, NAMED].map((customer_id) => {
       const direct = OwnerDirect.executesWithoutCard('reschedule_appointment', calls[0].input, pin(customer_id), null, grounding);
@@ -387,7 +401,8 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
       OwnerDirect.recordDirectCommit(committed, 'reschedule_appointment');
       return 'direct';
     });
-    expect(verdicts).toEqual(['card', 'card', 'card', 'card', 'card', 'direct']);
+    expect(verdicts).toEqual(['card', 'card', 'card', 'card', 'card', 'refused']);
+    expect(committed.size).toBe(0); // nothing half-applied
   });
 
   test('gate on: after 5 direct reschedules the 6th is refused; other tools and gate off is unchanged', () => {
@@ -414,5 +429,12 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
     expect(limits(full)).toEqual({ old: false, v2: true, anyThree: false });
     expect(full).toMatch(/Up to 5 edits with the same tool/);
     expect(full).toMatch(/for more than 5 records use the bulk tool/);
+  });
+});
+
+describe('round 2 fixes (#6369): last visit and capped-name contacts', () => {
+  test('last visit reads completed service records only', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/task-context.js'), 'utf8');
+    expect(src).toMatch(/db\('service_records'\)[^;]*\.where\('status', 'completed'\)/);
   });
 });

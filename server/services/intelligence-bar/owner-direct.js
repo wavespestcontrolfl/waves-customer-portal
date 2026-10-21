@@ -390,10 +390,18 @@ const PREVIEW_CUSTOMER_TOOLS = new Set(['reschedule_appointment', 'assign_techni
 
 function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
+  const previewCalls = new Map();
   for (const toolUse of toolUses || []) {
-    if (ibTargetRulesV2Live() && PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) continue;
+    if (ibTargetRulesV2Live() && PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) {
+      if (isValid(toolUse)) previewCalls.set(toolUse.name, (previewCalls.get(toolUse.name) || 0) + 1);
+      continue;
+    }
     if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint, grounding) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
+  // A message with more than the limit of these calls is refused as a set
+  // (one bulk card), decided before any of them commits (Codex #6369 r2):
+  // the prompt promises "more than 5 edits" never half-applies.
+  for (const [toolName, n] of previewCalls) if (n > DIRECT_EDITS_V2) plan.set(toolName, n);
   return plan;
 }
 
