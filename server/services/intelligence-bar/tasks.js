@@ -9,7 +9,11 @@ const PendingActions = require('./pending-actions');
 const { UUID_RE } = require('./task-context');
 const REQUEST_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const STATES = new Set(['running', 'responded', 'awaiting_approval', 'needs_information', 'failed', 'outcome_unknown', 'canceled']);
-const leaseExpiry = () => new Date(Date.now() + 120000);
+// One lease for every round: it outlasts the longest model call (the OpenAI
+// backup's 150 s timeout) plus margin, so a still-running round is never
+// resumable mid-call, on either provider (Codex #6373 r5).
+const LEASE_MS = 180 * 1000;
+const leaseExpiry = () => new Date(Date.now() + LEASE_MS);
 // Open for the operator: the receipt-derived states that still need attention.
 const OPEN_STATES = new Set(['running', 'awaiting_approval', 'needs_information', 'outcome_unknown', 'partially_completed', 'ready_to_continue']);
 const ATTACHMENTS_LOST = 'Attached images are not kept with a saved request, so it cannot continue without them. Reattach them in a new request.';
@@ -61,14 +65,12 @@ async function checkpoint(id, actorId, { messages, target, state = 'running', re
 
 // Which provider's reply history this task holds. Written when a request
 // switches to the OpenAI backup (ib-openai-backup.js); a task never mixes providers.
-// The switch also renews the lease to cover a full backup call (up to 150 s plus
-// margin), so the task is not resumable while that call still runs (Codex r5).
-const BACKUP_LEASE_MS = 180 * 1000;
+// The switch also renews the lease (a full backup call fits in it).
 async function markModelProvider(id, actorId, runnerToken, provider) {
   await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken })
     .update({
       request: db.raw('request || ?::jsonb', [JSON.stringify({ model_provider: provider })]),
-      lease_expires_at: new Date(Date.now() + BACKUP_LEASE_MS),
+      lease_expires_at: leaseExpiry(),
       updated_at: db.fn.now(),
     });
 }
