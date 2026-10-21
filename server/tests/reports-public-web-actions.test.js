@@ -829,6 +829,12 @@ describe('the finding tile tap rechecks its gates', () => {
       noWrites();
     });
 
+    test('a technician hid the finding (structured_notes finding decision) inside the transaction window: 409, no writes', async () => {
+      state.onCustomerLock = () => { state.rec = { ...state.rec, structured_notes: { treeShrubTechFindings: [{ key: 'pest_activity', hidden: true }] } }; };
+      await attempt(409);
+      noWrites();
+    });
+
     test('the actions gate turns off inside the transaction: 409, no writes', async () => {
       state.onCustomerLock = () => { gates.reportWebActionsLive.mockReturnValue(false); };
       await attempt(409);

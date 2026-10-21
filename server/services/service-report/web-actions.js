@@ -166,7 +166,9 @@ async function tileEvidence(service, line, knex, { lock = false } = {}) {
   return {
     callback: row.is_callback === true,
     internalOnly: Boolean(delivery) && delivery !== 'auto_send',
-    stamp: stampOf([row.id, row.report_template_version, row.service_line, row.service_type, row.is_callback === true, delivery, line, assessmentStamp]),
+    // The whole structured_notes is stamped: the technician's finding decisions (treeShrubTechFindings and the like)
+    // live there and change which insights the report shows. A rare unrelated note edit only costs a "refresh" 409.
+    stamp: stampOf([row.id, row.report_template_version, row.service_line, row.service_type, row.is_callback === true, delivery, stampOf(row.structured_notes ?? null), line, assessmentStamp]),
   };
 }
 
