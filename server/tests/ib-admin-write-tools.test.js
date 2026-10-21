@@ -815,6 +815,22 @@ describe('email blocks are shown and sent in the screen\'s canonical form', () =
     expect(JSON.parse(callsOf()[0][1].body)).toEqual({ blocks: canonical });
   });
 
+  test('blocks whose normalizer leaves a field undefined are compared as the database keeps them (an image block)', async () => {
+    const input = inputFor(VERSION_ENTRY, { body: { blocks: [{ type: 'image' }] } });
+    mockNormalizeBlocks.mockImplementationOnce(() => [{ type: 'image', src: 'https://example.com/a.png', alt: undefined, width: undefined }]);
+    const preview = await propose(input);
+    expect(preview.changes[0].after).toEqual([{ type: 'image', src: 'https://example.com/a.png' }]);
+    // The save stores the JSON form (undefined fields gone); the read-back must still agree.
+    mockNormalizeBlocks.mockImplementation(() => [{ type: 'image', src: 'https://example.com/a.png', alt: undefined, width: undefined }]);
+    try {
+      const done = await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
+      expect(done).toMatchObject({ success: true });
+      expect(JSON.parse(callsOf()[0][1].body)).toEqual({ blocks: [{ type: 'image', src: 'https://example.com/a.png' }] });
+    } finally {
+      mockNormalizeBlocks.mockImplementation(blocks => (blocks || []).map(block => ({ type: String(block?.type || 'paragraph').trim(), content: String(block?.content || '') })));
+    }
+  });
+
   test('blocks the screen cannot read get no card', async () => {
     mockNormalizeBlocks.mockImplementationOnce(() => { throw new Error('bad block'); });
     expect(await propose(inputFor(VERSION_ENTRY, { body: { blocks: rough } }))).toMatchObject({ code: 'invalid_input' });

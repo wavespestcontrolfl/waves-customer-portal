@@ -154,9 +154,11 @@ async function loadSnapshot(key, pathParams, bodyKeys) {
   };
 }
 
+// The body in the form the request carries and the database keeps: through JSON, so a field the
+// screen's normalizer leaves undefined is gone from the card, the pin, the request and the read-back alike.
 function normalizeBody(key, body) {
   const spec = SNAPSHOTS[key];
-  return spec?.normalize ? spec.normalize(body) : body;
+  return spec?.normalize ? JSON.parse(JSON.stringify(spec.normalize(body))) : body;
 }
 
 function hasSnapshot(key) {
@@ -177,7 +179,7 @@ function sameValue(expected, actual) {
     return new Date(expected).getTime() === new Date(actual).getTime();
   }
   if (typeof expected === 'string' || expected === null) return text(expected).trim() === text(actual).trim();
-  if (typeof expected === 'object') return stable(expected) === stable(typeof actual === 'string' ? json(actual) : actual);
+  if (typeof expected === 'object') return stable(JSON.parse(JSON.stringify(expected))) === stable(JSON.parse(JSON.stringify(typeof actual === 'string' ? json(actual) : actual)));
   return expected === actual;
 }
 
