@@ -23,7 +23,8 @@ jest.mock('../config/twilio-numbers', () => ({
   gbpTracking: { parrish: { number: '+19413840224', label: 'GBP — Parrish' } },
 }));
 jest.mock('../services/notification-triggers', () => ({
-  triggerNotification: jest.fn(async () => ({ bellWritten: true })),
+  // Like the real trigger, reports the bell result through onBell before the push.
+  triggerNotification: jest.fn(async (key, payload, opts) => { opts?.onBell?.(true); return { bellWritten: true }; }),
 }));
 jest.mock('../services/notification-service', () => ({ supersedeMissedCallAdmin: jest.fn(async () => {}) }));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => {}) }));
@@ -81,13 +82,15 @@ jest.setTimeout(30000);
     await database('call_log').insert([call(`${block}0101`, 60 * 24 * 3), call(`${block}0202`, 60 * 24)]);
   }
   const stored = (row) => database('call_log').where({ id: row.id }).first();
+  // The next trigger call reports `stats`, and whether it wrote the bell row, as the real one does.
+  const reports = (stats, written = stats.bellWritten) => triggerNotification.mockImplementationOnce(async (key, payload, opts) => { opts?.onBell?.(written); return stats; });
 
   test('gate on: the third number of a block on a GBP line keeps its bell row, sends no push, and settles', async () => {
     await earlierWave();
     const row = call('+19415550303', 10);
     await database('call_log').insert(row);
     // What the real trigger reports when beforePush stops the push after the bell row is written.
-    triggerNotification.mockResolvedValueOnce({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
+    reports({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
     expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     const { beforePush } = triggerNotification.mock.calls[0][2];
@@ -99,6 +102,40 @@ jest.setTimeout(30000);
     // Gate D (push check) reads a skipped push as deliberate: no retry, no daily alert.
     expect(metadata.missed_call_push_retries).toBeUndefined();
     expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('quiet only after a bell row exists: no row written this pass (every admin has the bell off) lets the push go (Codex #6392 r3)', async () => {
+    await earlierWave();
+    const row = call('+19415550303', 10);
+    await database('call_log').insert(row);
+    reports({ bellWritten: false, push: { sent: 1, subscriptions: 1 } }, false);
+    await ringMissedCallIfUnanswered(row.twilio_call_sid);
+    const { beforePush } = triggerNotification.mock.calls[0][2];
+    // The ordinary supersession check decides, as for any call: still missed, so the push goes.
+    expect(await beforePush({ dispatching: false })).toBe(true);
+    expect((await stored(row)).metadata.missed_call_spam_wave).toBe('block_quiet');
+  });
+
+  test('a quiet stamp that fails or updates no row fails open: the push goes (Codex #6392 r3)', async () => {
+    await earlierWave();
+    const row = call('+19415550303', 10);
+    await database('call_log').insert(row);
+    // The stamp UPDATE is the only write whose SQL is `metadata || $1::jsonb`: make it match 0 rows.
+    const original = mockConn;
+    mockConn = Object.assign((...args) => {
+      const qb = original(...args);
+      const update = qb.update.bind(qb);
+      qb.update = (value, ...rest) => (String(value?.metadata?.sql || '').startsWith('metadata || ') ? Promise.resolve(0) : update(value, ...rest));
+      return qb;
+    }, { raw: (...a) => original.raw(...a), transaction: (...a) => original.transaction(...a) });
+    try {
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      const { beforePush } = triggerNotification.mock.calls[0][2];
+      expect(await beforePush({ dispatching: false })).toBe(true);
+    } finally {
+      mockConn = original;
+    }
+    expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
   });
 
   test('a block wave and a burst together, both gates on, are stamped block_quiet', async () => {
@@ -282,7 +319,7 @@ jest.setTimeout(30000);
       const row = burstRow();
       await database('call_log').insert(row);
       // What the real trigger reports when beforePush stops the push after the bell row is written.
-      triggerNotification.mockResolvedValueOnce({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
+      reports({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
       expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
       expect(triggerNotification).toHaveBeenCalledTimes(1);
       const { beforePush } = triggerNotification.mock.calls[0][2];
@@ -301,7 +338,7 @@ jest.setTimeout(30000);
       await twoMembers();
       const row = burstRow();
       await database('call_log').insert(row);
-      triggerNotification.mockResolvedValueOnce({ bellWritten: true, push: null });
+      reports({ bellWritten: true, push: null });
       expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
       const { metadata } = await stored(row);
       expect(metadata.missed_call_settled_at).toEqual(expect.any(String));

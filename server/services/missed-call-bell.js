@@ -410,14 +410,17 @@ async function quietRobodialerPush(row, fenced) {
   if (flags.burst && !burst) stamps.missed_call_spam_burst_shadow = true;
   if (block || burst) stamps.missed_call_spam_wave = block ? 'block_quiet' : 'burst_quiet';
   if (!Object.keys(stamps).length) return false;
-  // The quiet push matters more than its stamp: a failed write still quiets it.
-  await fenced().update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => {});
-  return Boolean(block || burst);
+  // Quiet only when the marker is durable: the re-push recognises a quiet call by
+  // it. A failed or empty stamp write fails open (the push goes as usual).
+  const stamped = await fenced().update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => 0);
+  return Boolean(block || burst) && stamped === 1;
 }
 
 // A quiet call writes its bell row but never pushes; every other call keeps the
-// supersession check. `false` stops the push.
-const pushGuard = (quiet, stillMissed) => (quiet ? () => false : stillMissed);
+// supersession check. The push is stopped only once THIS pass wrote the bell row
+// (`bellWritten`, from the trigger's onBell, which fires before the push): with no
+// durable row the push is the only channel, so it goes (fail open). `false` stops the push.
+const pushGuard = (quiet, stillMissed, bellWritten) => (quiet ? async (arg) => (bellWritten() ? false : stillMissed(arg)) : stillMissed);
 
 // Shadow for gates A and B while they are off: stamp
 // metadata.missed_call_gap_shadow on a call the gate WOULD have rung, once, so
@@ -613,6 +616,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     const stillMissedFinal = stillMissedWith(calledBackSql({ retire: true }));
     const deferredOnly = deferredOnlyCheck(stillMissed, stillMissedFinal);
     let stats = null;
+    let rowWritten = false; // set by the trigger before the push
     try {
       stats = await triggerNotification('customer_missed_call', {
         customerId: row.customer_id || null,
@@ -628,7 +632,8 @@ async function ringMissedCallIfUnanswered(callSid) {
         // Re-read right before the push (same supersession pattern as the
         // SMS bell): a recording that landed while the badge was computing
         // must not produce a contradictory missed-call push (hook P1).
-        beforePush: pushGuard(quiet, stillMissed),
+        beforePush: pushGuard(quiet, stillMissed, () => rowWritten),
+        onBell: (written) => { rowWritten = Boolean(written); },
         // And right before the bell row is written: a redial answered while
         // preferences loaded must not leave a missed-call bell.
         shouldContinue: stillMissed,
