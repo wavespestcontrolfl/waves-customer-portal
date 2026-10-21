@@ -273,21 +273,29 @@ describe('callBackup', () => {
     expect(mockLedgerCall).toHaveBeenCalledWith('openai', Adapter.backupModel(), expect.any(Function), { laneId: 'ib_admin_backup' });
   });
 
-  test('an incomplete answer or a refusal is filed as a failed ledger row, a clean answer is not', async () => {
+  test('an incomplete answer, a refusal or a rejected reply flips the billed ledger row; a clean answer does not', async () => {
     const reply = body => { global.fetch = jest.fn(async () => ({ ok: true, status: 200, json: async () => body })); return Adapter.callBackup(args); };
     await reply({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'fine' }] }] });
     expect(mockLedgerRejected).not.toHaveBeenCalled();
-    const cut = await reply({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] });
+    const cutBody = { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] };
+    const cut = await reply(cutBody);
     expect(cut.stop_reason).toBe('max_tokens');
-    expect(mockLedgerRejected).toHaveBeenLastCalledWith(cut, 'openai_incomplete');
-    // Cut off for any other reason: the round fails, so no partial text is shown as final (Codex r5).
-    await expect(reply({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial' }] }] }))
-      .rejects.toMatchObject({ code: 'openai_incomplete' });
-    const refused = await reply({ status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] });
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(cutBody, 'openai_incomplete');
+    // Cut off for any other reason: the round fails, so no partial text is shown as final (Codex r5);
+    // the raw billed response keeps its ledger row, flipped to the parser's code (Codex r6).
+    const filteredBody = { status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial' }] }] };
+    await expect(reply(filteredBody)).rejects.toMatchObject({ code: 'openai_incomplete' });
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(filteredBody, 'openai_incomplete');
+    const badArgs = { status: 'completed', output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{"a":', status: 'completed' }] };
+    await expect(reply(badArgs)).rejects.toMatchObject({ code: 'function_arguments_invalid' });
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(badArgs, 'function_arguments_invalid');
+    const refusedBody = { status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] };
+    const refused = await reply(refusedBody);
     expect(refused.stop_reason).toBe('refusal');
-    expect(mockLedgerRejected).toHaveBeenLastCalledWith(refused, 'openai_refusal');
-    expect(mockLedgerRejected).toHaveBeenCalledTimes(2);
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(refusedBody, 'openai_refusal');
+    expect(mockLedgerRejected).toHaveBeenCalledTimes(4);
   });
+
 
   test('an HTTP error rejects with its status (the ledger files it as openai_<status>) and no body text', async () => {
     global.fetch = jest.fn(async () => ({ ok: false, status: 429, json: async () => ({ error: { message: 'customer text here' } }) }));

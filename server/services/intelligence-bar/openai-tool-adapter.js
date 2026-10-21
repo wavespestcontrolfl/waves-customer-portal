@@ -375,8 +375,18 @@ async function callBackup({ system, tools, messages, finalRound = false, tech = 
   }
   const model = backupModel();
   const body = requestBody({ model, system, tools, messages, finalRound, tech });
-  const reply = await ledgerCall('openai', model, async () => fromOpenAIResponse(await postResponses(body)), { laneId: 'ib_admin_backup' });
-  if (failures.has(reply)) ledgerCallRejected(reply, failures.get(reply));
+  // The raw billed response is ledgered first (usage, served model, provider
+  // id); a reply the parser then rejects flips that row to its own code instead
+  // of a costless generic error (Codex #6373 r6).
+  const data = await ledgerCall('openai', model, () => postResponses(body), { laneId: 'ib_admin_backup' });
+  let reply;
+  try {
+    reply = fromOpenAIResponse(data);
+  } catch (err) {
+    ledgerCallRejected(data, err.code || 'openai_unusable');
+    throw err;
+  }
+  if (failures.has(reply)) ledgerCallRejected(data, failures.get(reply));
   return reply;
 }
 
