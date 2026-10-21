@@ -94,3 +94,34 @@ test('the same invoice whose pay-page session was added since the card is refuse
   await expect(InvoiceService.voidInvoice('inv-1', { expected: EXPECTED })).rejects.toThrow(/changed while voiding/);
   expect(mockRetrievePi).not.toHaveBeenCalled();
 });
+
+test('an edit between the first read and the PaymentIntent cancel is caught by a re-read before Stripe cancels anything', async () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1' };
+  mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
+  db
+    .mockReturnValueOnce(chain({ first: withPi })) // first read: matches the card
+    .mockReturnValueOnce(chain({ first: undefined })) // payments guard
+    .mockReturnValueOnce(chain({ first: row({ stripe_payment_intent_id: 'pi_test_1', updated_at: new Date('2099-01-03T00:00:00Z') }) })); // re-read: edited
+  await expect(InvoiceService.voidInvoice('inv-1', { expected })).rejects.toThrow(/changed while voiding/);
+  expect(mockRetrievePi).toHaveBeenCalledTimes(1);
+  expect(mockCancelPi).not.toHaveBeenCalled();
+  expect(db.transaction).not.toHaveBeenCalled();
+});
+
+test('without `expected` the PaymentIntent cancel makes no extra invoice read (the page path)', async () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
+  mockCancelPi.mockResolvedValue({});
+  const update = chain({ returning: [row({ status: 'void' })] });
+  jest.doMock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
+  db
+    .mockReturnValueOnce(chain({ first: withPi }))
+    .mockReturnValueOnce(chain({ first: undefined })) // payments guard
+    .mockReturnValueOnce(update) // straight to the void UPDATE: no re-read between
+    .mockReturnValueOnce(chain({ first: undefined }))
+    .mockReturnValueOnce(chain());
+  await InvoiceService.voidInvoice('inv-1').catch(() => null);
+  expect(mockCancelPi).toHaveBeenCalledTimes(1);
+  expect(update.update).toHaveBeenCalledTimes(1);
+});

@@ -701,6 +701,14 @@ function assertVoidExpected(row, expected) {
     || (row.stripe_payment_intent_id || null) !== (expected.paymentIntentId || null);
   if (changed) throw new Error("Invoice status changed while voiding — re-check and retry");
 }
+// The bar's pin, read again right before the one external effect (cancelling the pay-page PaymentIntent), so the
+// window between the first read and that cancel is a single query, not the Stripe round trip. No-op without `expected`.
+async function recheckVoidExpected(id, expected) {
+  if (!expected) return;
+  const row = await db("invoices").where({ id }).first();
+  if (!row) throw new Error("Invoice not found");
+  assertVoidExpected(row, expected);
+}
 function applyVoidExpected(q, expected) {
   if (!expected) return q;
   if (expected.updatedAt) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
@@ -10991,6 +10999,7 @@ const InvoiceService = {
         throw new Error(`A payment is already in flight (${voidPi.status}); wait for it to settle or refund it before voiding`);
       }
       if (voidPi.status !== "canceled") {
+        await recheckVoidExpected(id, expected);
         try {
           await StripeService.cancelPaymentIntent(triagedVoidPiId, { cancellation_reason: "abandoned" });
         } catch (e) {
