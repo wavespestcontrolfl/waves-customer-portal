@@ -46,7 +46,18 @@ const PREFIXED_RES = [
 ];
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi;
 // HTTP Basic credentials ("Authorization: Basic dXNlcjpwYXNz", or bare "Basic <base64>").
-const BASIC_RE = /\bBasic\s+[A-Za-z0-9+\/]{8,}={0,2}/g;
+// The scheme is case-insensitive in HTTP ("basic dXNl..."). Capital "Basic" is
+// always removed, as before; another casing only when the token decodes to
+// "user:password", so prose like "basic perimeter" stays (Codex #6375 r3).
+const BASIC_RE = /\b(basic)\s+([A-Za-z0-9+\/]{8,}={0,2})/gi;
+function looksLikeBasicCredential(scheme, token) {
+  if (scheme === 'Basic') return true;
+  try {
+    return /^[\x20-\x7e]+:[\x20-\x7e]*$/.test(Buffer.from(token, 'base64').toString('latin1'));
+  } catch {
+    return false;
+  }
+}
 // An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
 // upper-case name, '=', no spaces (Codex #6375 r2).
@@ -92,7 +103,8 @@ function scrubNoteText(input) {
     if (clean !== url) removed += 1;
     return clean;
   });
-  text = text.replace(JWT_RE, swap).replace(BEARER_RE, swap).replace(BASIC_RE, swap);
+  text = text.replace(JWT_RE, swap).replace(BEARER_RE, swap)
+    .replace(BASIC_RE, (match, scheme, token) => (looksLikeBasicCredential(scheme, token) ? swap() : match));
   text = text.replace(ENV_SECRET_RE, (match, name) => { removed += 1; return `${name}=${REMOVED}`; });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);
@@ -104,9 +116,11 @@ function scrubNoteText(input) {
 }
 
 // A scrubbed note, cut to NOTE_CAP characters with "[cut]" at the end.
-function scrubNote(input) {
+// `truncated` says a caller already cut the input (the original was longer),
+// so the marker still shows that content was dropped (Codex #6375 r3).
+function scrubNote(input, { truncated = false } = {}) {
   const { text, removed } = scrubNoteText(input);
-  const cut = String(input).length > SCAN_LIMIT || text.length > NOTE_CAP;
+  const cut = truncated || String(input).length > SCAN_LIMIT || text.length > NOTE_CAP;
   return { text: cut ? `${text.slice(0, NOTE_CAP)}${CUT}` : text, removed };
 }
 

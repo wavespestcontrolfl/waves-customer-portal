@@ -347,7 +347,7 @@ function scrubFreeText(text, state) {
 // removed.
 function returnNote(item, state, depth = 0) {
   if (typeof item === 'string') {
-    const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state));
+    const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state), { truncated: item.length > SCAN_LIMIT });
     state.noteSecrets += removed;
     return text;
   }
@@ -355,8 +355,13 @@ function returnNote(item, state, depth = 0) {
   if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
   if (Array.isArray(item)) return item.map(entry => returnNote(entry, state, depth + 1));
   const out = {};
-  for (const [key, entry] of Object.entries(item)) {
-    if (entry !== null && entry !== undefined && isCredentialField(key, entry)) {
+  let hiddenKeys = 0;
+  for (const [rawKey, entry] of Object.entries(item)) {
+    // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
+    const scrubbedKey = scrubNote(rawKey).text;
+    const key = scrubbedKey === rawKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
+    if (key !== rawKey) state.noteSecrets += 1;
+    if (entry !== null && entry !== undefined && isCredentialField(rawKey, entry)) {
       state.noteSecrets += 1;
       out[key] = REDACTED_FIELD;
     } else out[key] = returnNote(entry, state, depth + 1);

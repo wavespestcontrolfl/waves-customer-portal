@@ -219,3 +219,43 @@ describe('Basic credentials and env-style secrets (Codex #6375 r2)', () => {
     expect(scrubNote(note).text).toBe(note);
   });
 });
+
+describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
+  const { scrubNote, SCAN_LIMIT } = require('../utils/note-secret-scrubber');
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  let saved;
+  beforeEach(() => { saved = gates.map(g => process.env[g]); gates.forEach(g => { process.env[g] = 'true'; }); });
+  afterEach(() => gates.forEach((g, i) => { if (saved[i] === undefined) delete process.env[g]; else process.env[g] = saved[i]; }));
+
+  test('a secret-shaped key in a structured note is replaced; its value is still returned scrubbed', async () => {
+    const key = 'sk-proj-abcdefghij0123456789ABCD';
+    const result = await read(ENTRY, { id: 1, notes: { [key]: 'old integration', 'gate code': '1234' } });
+    expect(JSON.stringify(result)).not.toContain(key);
+    expect(result.data.notes['gate code']).toBe('1234');
+    expect(Object.values(result.data.notes)).toContain('old integration');
+  });
+
+  test('a note longer than the scan limit keeps the cut marker even after link redaction shrinks it', async () => {
+    const longUrl = `https://example-private.test/doc?token=${'a'.repeat(SCAN_LIMIT + 1000)}`;
+    const result = await read(ENTRY, { id: 1, notes: `${longUrl} then the real instructions` });
+    expect(result.data.notes.endsWith('[cut]')).toBe(true);
+  });
+
+  test('a lower-case "basic" scheme is removed when the token decodes to user:password', () => {
+    for (const note of ['Authorization: basic dXNlcjpwYXNzd29yZA==', 'AUTHORIZATION: BASIC YWRtaW46aHVudGVyMjI=']) {
+      const { text, removed } = scrubNote(note);
+      expect(removed).toBeGreaterThan(0);
+      expect(text).not.toMatch(/dXNlcjpwYXNz|YWRtaW46aHVudGVy/);
+    }
+  });
+
+  test('prose after "basic" stays (no user:password inside)', () => {
+    const note = 'basic perimeter treatment, basic quarterly service';
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test('a caller-truncated note still carries the cut marker', () => {
+    expect(scrubNote('short', { truncated: true }).text).toBe('short[cut]');
+    expect(SCAN_LIMIT).toBeGreaterThan(1000);
+  });
+});
