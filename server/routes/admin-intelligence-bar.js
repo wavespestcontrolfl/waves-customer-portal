@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibModelFailureNoticeLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
@@ -90,6 +90,7 @@ const { isToolFailure, recordToolOutcome, executionOutcome } = require('../servi
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
+const MultiCard = require('../services/intelligence-bar/multi-card');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
@@ -1230,7 +1231,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, reproposal = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, reproposal = null, siblingCardIds = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -2133,7 +2134,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // marker predates it and is counted conservatively (Codex r4).
   if (ownerDirectVerdict) params._ib_owner_direct = directVerdict?.direct === true;
 
-  const card = { req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, sourcePin: reproposal?.sourcePin };
+  const card = { req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, sourcePin: reproposal?.sourcePin, siblingCardIds };
   return reproposal ? prepareProposalCard(card) : storeProposalCard(card);
 }
 
@@ -2155,7 +2156,7 @@ async function prepareProposalCard(card) {
 // note (a picker card); `sourcePin` names the card a derived card came from (a
 // server pin, so a retried request finds it); `trx` and `approvedParams`
 // store a prepared card inside the caller's transaction.
-async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, sourcePin = null, trx = null, approvedParams = null }) {
+async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, sourcePin = null, trx = null, approvedParams = null, siblingCardIds = null }) {
   Object.assign(params, sourcePin);
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
@@ -2181,6 +2182,7 @@ async function storeProposalCard({ req, toolName, params, preview, context, task
     requestStartedAt,
     trx,
     approvedParams,
+    siblingCardIds,
     ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolName, params, preview),
       ...(task.inherited ? { inheritedTask: true } : {}) } : {}),
   });
@@ -3598,6 +3600,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
 - Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
     }
+    if (platformEnabled && context !== 'tech' && ibMultiCardLive()) systemPrompt += MultiCard.PROMPT;
     // Last, so every shared prefix above stays cacheable across logins. With
     // the platform off nothing commits directly, so the owner block must
     // stay card-aware (Codex r2 P1 on #5563).
@@ -3690,6 +3693,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
+    // GATE_IB_MULTI_CARD: the request's open cards (tool + record keys), so a later independent write may mint its own card.
+    const multiCardOn = platformEnabled && ibMultiCardLive();
+    const openCards = [];
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
     // the full collector (its own discover_capabilities searches). The tech
@@ -3860,8 +3866,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // confirmation id goes to the client only.
           // A card closes the frontier under the platform only (set below);
           // an uncertain owner-direct commit closes it on either path.
-          if (writeFrontierBlocked) {
-            result = { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
+          const multiCardRefusal = !writeFrontierBlocked && multiCardOn && openCards.length ? MultiCard.admit(toolUse, openCards) : null;
+          if (writeFrontierBlocked || multiCardRefusal) {
+            result = multiCardRefusal || { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
             failed = true;
             errorMessage = result.error;
           } else if (ibWritesDisabled()) {
@@ -3878,6 +3885,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               task: activeTask,
               taskContext,
               requestStartedAt,
+              ...(multiCardOn ? { siblingCardIds: pendingProposals.map(p => p.id) } : {}),
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches
@@ -3968,7 +3976,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
         // Only a card that exists blocks further writes; a proposal refused at
         // preflight left nothing to reconcile, so a corrected call may follow.
-        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
+        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) {
+          // GATE_IB_MULTI_CARD: an open edit on a named record leaves the frontier open for independent cards.
+          const openCard = multiCardOn ? MultiCard.record(toolUse.name, toolUse.input) : null;
+          if (openCard) openCards.push(openCard);
+          else writeFrontierBlocked = true;
+        }
         // Codex r3 P1 on #5275: a github-ops refusal (no failed checks / label
         // already present) embeds the PR title in `error`, and this sink is
         // NOT the redacted intelligence_bar_queries telemetry (finding above)
