@@ -631,12 +631,31 @@ describe('the finding tile tap rechecks its gates', () => {
     expect(buildReportCrossSell).not.toHaveBeenCalled();
   });
 
-  test('both gates live: the tap goes on to the normal path (here it stops at the record lookup, not at a 409)', async () => {
+  test('a callback visit refuses the tile tap (409) unconditionally, whatever GATE_RESERVICE_REPORT_COPY says', async () => {
+    const prev = process.env.GATE_RESERVICE_REPORT_COPY;
+    delete process.env.GATE_RESERVICE_REPORT_COPY;
+    try {
+      const callbackRecord = { id: 'service-1', customer_id: 'customer-1', report_template_version: 'service_report_v1', structured_notes: null, is_callback: true };
+      db.mockImplementation((table) => {
+        if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(callbackRecord) });
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await tap(baseUrl, TILE_META);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/no longer available/);
+      });
+      expect(buildReportCrossSell).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_RESERVICE_REPORT_COPY; else process.env.GATE_RESERVICE_REPORT_COPY = prev;
+    }
+  });
+
+  test('both gates live: the tap goes on to the normal path (the offer is recomputed server-side)', async () => {
     await withServer(async (baseUrl) => {
-      const res = await tap(baseUrl, TILE_META);
-      expect(res.status).not.toBe(409);
+      await tap(baseUrl, TILE_META); // its own fingerprint check may still answer 409 downstream; what matters is it got past the tile gate
     });
-    expect(db).toHaveBeenCalled();
+    expect(buildReportCrossSell).toHaveBeenCalled();
   });
 
   test('the old report card\'s tap (no tile source) is not affected by the tile gates', async () => {
@@ -656,5 +675,33 @@ describe('the finding tile tap rechecks its gates', () => {
     expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, {})).toBe(false);
     expect(webActions.webTileTapAllowed({}, {})).toBe(true);
     expect(webActions.webTileTapAllowed(null, {})).toBe(true);
+  });
+});
+
+describe('POST /reports/:token/photo-check palm subject', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setGates();
+    photoId.runCustomerPhotoId.mockResolvedValue({ status: 200, body: { result: { summary: 'ok' }, next_step: { kind: 'request' } } });
+    homeCheck = jest.spyOn(webActions, 'visitIsAtPrimaryHome').mockResolvedValue(true);
+  });
+  afterEach(() => homeCheck.mockRestore());
+
+  test('a palm report runs the plant handler with the palm subject; other lines pass none', async () => {
+    mockDb({ service_line: 'palm', service_type: 'Palm Tree Injections' });
+    await withServer(async (baseUrl) => { await post(baseUrl, { photos: [JPEG(2000)] }); });
+    expect(photoId.runCustomerPhotoId).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'tree_shrub', subject: 'palm' }));
+    mockDb({ service_line: 'tree_shrub' });
+    await withServer(async (baseUrl) => { await post(baseUrl, { photos: [JPEG(2000)] }); });
+    expect(photoId.runCustomerPhotoId).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'tree_shrub', subject: null }));
+    mockDb({ service_line: 'lawn' });
+    await withServer(async (baseUrl) => { await post(baseUrl, { photos: [JPEG(2000)] }); });
+    expect(photoId.runCustomerPhotoId).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'lawn', subject: null }));
+  });
+
+  test('photoSubjectForLine', () => {
+    expect(webActions.photoSubjectForLine('palm')).toBe('palm');
+    expect(webActions.photoSubjectForLine('tree_shrub')).toBeNull();
+    expect(webActions.photoSubjectForLine(undefined)).toBeNull();
   });
 });

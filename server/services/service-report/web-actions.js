@@ -75,6 +75,12 @@ async function buildFindingTile(data, { buildCrossSell }) {
   };
 }
 
+// The plant handler's subject for the report's service line: a palm report is read as palm (the handler
+// scopes the engine to palm), everything else keeps its own handler's default.
+function photoSubjectForLine(serviceLine) {
+  return serviceLine === 'palm' ? 'palm' : null;
+}
+
 // True only when the visit is PROVABLY at the customer's primary home, by the shared
 // visit-scope chain (visit-property-scope.js): the visit's own address stamp (unit
 // included), else its property link, else its creating estimate, compared with the
@@ -212,6 +218,7 @@ module.exports = {
   buildFindingTile,
   findingKinds,
   photoTypeForLine,
+  photoSubjectForLine,
   visitIsAtPrimaryHome,
   photoAnswer,
   STRUCTURED_FINDING_TABLE,

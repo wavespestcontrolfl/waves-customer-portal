@@ -1377,14 +1377,23 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
 
 // POST /api/reports/:token/events — token-scoped report interaction events.
 // The web report tile's tap is a cross_sell_requested event that names the tile; while either of the tile's
-// gates is dark the tap answers the same 409 as a stale offer, before any recompute or write.
-function webTileTapGate(req, res, next) {
-  const metadata = req.body?.metadata;
-  const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata);
-  if (named && !require('../services/service-report/web-actions').webTileTapAllowed(metadata, require('../config/feature-gates'))) {
-    return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
-  }
-  return next();
+// gates is dark, or the visit is a callback, the tap answers the same 409 as a stale offer, before any recompute or write.
+async function webTileTapGate(req, res, next) {
+  try {
+    const metadata = req.body?.metadata;
+    const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      && metadata.source === require('../services/service-report/web-actions').WEB_TILE_SOURCE;
+    if (!named) return next();
+    const stale = () => res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+    if (!require('../services/service-report/web-actions').webTileTapAllowed(metadata, require('../config/feature-gates'))) return stale();
+    // A complaint-driven (callback) visit never carries the tile, whatever GATE_RESERVICE_REPORT_COPY says, so a tap
+    // from a page that somehow showed one is refused here too.
+    if (FULL_TOKEN_RE.test(req.params.token || '')) {
+      const record = await db('service_records').where({ report_view_token: req.params.token }).first('is_callback');
+      if (record?.is_callback === true) return stale();
+    }
+    return next();
+  } catch (err) { return next(err); }
 }
 
 router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, webTileTapGate, async (req, res, next) => {
@@ -2199,9 +2208,11 @@ router.post('/:token/photo-check', resolveWebPhotoCustomer, validateWebPhotoBody
     res.setHeader('Cache-Control', 'no-store');
     const service = req.reportPhotoService;
     const webActions = require('../services/service-report/web-actions');
-    const type = webActions.photoTypeForLine(service.service_line || detectServiceLine(service.service_type));
+    const line = service.service_line || detectServiceLine(service.service_type);
+    const type = webActions.photoTypeForLine(line);
     const reply = await require('./photo-id').runCustomerPhotoId({
       type,
+      subject: webActions.photoSubjectForLine(line),
       customerId: service.customer_id,
       dataUrls: req.reportPhotoDataUrls,
       // Coverage is offered only for a visit PROVABLY at the home (unit-aware, linked

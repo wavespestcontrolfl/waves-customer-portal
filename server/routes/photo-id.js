@@ -1537,7 +1537,7 @@ router.get('/:type/:id', async (req, res, next) => {
 // prepares the photos exactly as POST /:type does (data URL split, HEIC/odd JPEG
 // transcode) and calls the typed handler with a response shim that captures the
 // reply. The handlers' own 503 copy and next_step kinds are unchanged.
-async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = false }) {
+async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = false, subject = null }) {
   const handler = TYPE_HANDLERS[type];
   if (!handler || !customerId) return { status: 400, body: { error: 'Unknown assessment type' } };
   const rawPhotoInputs = (Array.isArray(dataUrls) ? dataUrls : []).map(splitDataUrl).filter(Boolean);
@@ -1560,7 +1560,7 @@ async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = fa
     json(body) { captured.body = body; return res; },
   };
   const req = {
-    customer: { id: customerId }, customerId, _photoInputs: photoInputs, body: {}, _ephemeral: true,
+    customer: { id: customerId }, customerId, _photoInputs: photoInputs, body: subject === 'palm' ? { subject: 'palm' } : {}, _ephemeral: true,
   };
   await handler(req, res, {
     note: null,

@@ -212,9 +212,6 @@ app.use('/ingest', require('./routes/posthog-ingest'));
 // middleware — CORS preflights, the global /api limiter, body-parser errors —
 // so every response on those token routes carries them.
 app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
-// A dark web-report photo check (GATE_REPORT_WEB_ACTIONS) answers the generic 404 here, ahead of the global /api
-// limiter, so a dark route can never read as a 429 (the router mounts the same guard first as well).
-app.use('/api/reports', reportsPublicRoutes.reportPhotoCheckPreGuard);
 
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
@@ -225,6 +222,12 @@ app.use((req, res, next) => {
     && require('./config/feature-gates').isEnabled('websiteQuoteBooking')) return websiteEstimateHelmet(req, res, next);
   return strictHelmet(req, res, next);
 });
+
+// A dark web-report photo check (GATE_REPORT_WEB_ACTIONS) answers the generic 404 here: after helmet (so the 404
+// carries the helmet headers) and the privacy headers above, but ahead of the global cors(), the /api limiter
+// and every body parser, so a dark route can never read as a 429, a 204 preflight or a parser error. The router
+// mounts the same guard first as well.
+app.use('/api/reports', reportsPublicRoutes.reportPhotoCheckPreGuard);
 
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()

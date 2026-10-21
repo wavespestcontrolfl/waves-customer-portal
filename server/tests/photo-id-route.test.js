@@ -2603,4 +2603,16 @@ describe('runCustomerPhotoId (report-token entry)', () => {
     const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
     expect(reply.status).toBe(200);
   });
+
+  test('a palm report is read with the palm subject (plant engine scoped to palm); without it, tree_shrub', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2.mockResolvedValue({ ok: true, v2: { kind: 'workup', answer: { level: 'symptom', headline: 'Yellowing fronds' }, tier: 'needs_more_evidence', possibilities: [] }, internal: { ladder: 'gemini_only' } });
+    await runCustomerPhotoId({ type: 'tree_shrub', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL], subject: 'palm' });
+    expect(mockIdentifyPlantV2).toHaveBeenLastCalledWith(expect.objectContaining({ subject: 'palm', mode: 'workup', ladder: 'gemini_only' }));
+    await runCustomerPhotoId({ type: 'tree_shrub', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(mockIdentifyPlantV2).toHaveBeenLastCalledWith(expect.objectContaining({ subject: 'tree_shrub' }));
+    // a subject other than palm is never passed through
+    await runCustomerPhotoId({ type: 'tree_shrub', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL], subject: 'cactus' });
+    expect(mockIdentifyPlantV2).toHaveBeenLastCalledWith(expect.objectContaining({ subject: 'tree_shrub' }));
+  });
 });

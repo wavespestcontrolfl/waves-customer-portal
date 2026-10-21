@@ -31,6 +31,7 @@ jest.mock('../routes/photo-id', () => ({
 
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const db = require('../models/db');
 const gates = require('../config/feature-gates');
 
@@ -121,8 +122,9 @@ describe('photo-check pre-guard ahead of a real global /api limiter', () => {
 
   async function withApp(fn) {
     const app = express();
-    // Same order as server/index.js: privacy headers, the pre-guard, THEN cors(), the global limiter, the JSON parser.
+    // Same order as server/index.js: privacy headers, helmet, the pre-guard, THEN cors(), the global limiter, the JSON parser.
     app.use('/api/reports', router.reportsAskPrivacyHeaders);
+    app.use(helmet());
     app.use('/api/reports', router.reportPhotoCheckPreGuard);
     app.use(cors({ origin: 'https://portal.example', credentials: true }));
     app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 1, standardHeaders: true, legacyHeaders: false, message: { error: 'global limit' } }));
@@ -178,6 +180,21 @@ describe('photo-check pre-guard ahead of a real global /api limiter', () => {
     });
   });
 
+  test('a dark 404 carries the helmet headers and the privacy headers (POST and OPTIONS)', async () => {
+    await withApp(async (base) => {
+      const post404 = await call(base, `${TOKEN}/photo-check`);
+      const options404 = await fetch(`${base}/api/reports/${TOKEN}/photo-check`, { method: 'OPTIONS' });
+      for (const res of [post404, options404]) {
+        expect(res.status).toBe(404);
+        expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+        expect(res.headers.get('strict-transport-security')).toBeTruthy();
+        expect(res.headers.get('content-security-policy')).toBeTruthy();
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      }
+    });
+  });
+
   test('live: a malformed token is the same generic 404 before the limiter and the database', async () => {
     gates.reportSimpleWebLive.mockReturnValue(true);
     gates.reportWebActionsLive.mockReturnValue(true);
@@ -205,6 +222,9 @@ describe('photo-check pre-guard ahead of a real global /api limiter', () => {
   test('server/index.js mounts the guard ahead of the global /api limiter', () => {
     const index = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     const guard = index.indexOf("app.use('/api/reports', reportsPublicRoutes.reportPhotoCheckPreGuard)");
+    // after helmet, so a dark 404 carries the helmet headers
+    expect(guard).toBeGreaterThan(index.indexOf('return strictHelmet(req, res, next);'));
+    expect(guard).toBeGreaterThan(index.indexOf("app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders)"));
     const limiterMount = index.indexOf("app.use('/api/', limiter)");
     expect(guard).toBeGreaterThan(-1);
     expect(limiterMount).toBeGreaterThan(guard);
