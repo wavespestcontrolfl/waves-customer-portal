@@ -178,7 +178,7 @@ async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = und
       .whereRaw("COALESCE(metadata->>'repushed_at', '') = ''")
       // A quiet robodialer call never re-pushes; leaving it out here also keeps it from
       // filling the oldest-first batch ahead of real bells. callStillMissed checks again.
-      .whereRaw("NOT EXISTS (SELECT 1 FROM call_log quiet WHERE quiet.id::text = notifications.metadata->'payload'->>'callLogId' AND quiet.metadata->>'missed_call_spam_wave' = ANY(?))", [QUIET_SPAM_WAVE])
+      .whereRaw("NOT EXISTS (SELECT 1 FROM call_log quiet WHERE quiet.id::text = notifications.metadata->'payload'->>'callLogId' AND COALESCE(quiet.source, '') <> ? AND quiet.metadata->>'missed_call_spam_wave' = ANY(?))", [require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE, QUIET_SPAM_WAVE])
       .where('created_at', '<=', new Date(nowMs - REPUSH_AFTER_MS))
       .where('created_at', '>', new Date(nowMs - WINDOW_MS))
       .orderBy('created_at', 'asc')
