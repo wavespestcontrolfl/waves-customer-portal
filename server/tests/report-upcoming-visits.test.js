@@ -1358,4 +1358,25 @@ describe('webPeopleNext (GATE_REPORT_WEB_PEOPLE): the simple web view builds in 
     const none = await buildReportV1Data(BASE_SERVICE, 'token-reads-none', makeKnex(fixtures()), { mode: 'pdf' });
     expect(none).not.toHaveProperty('webPeopleReadsOk');
   });
+
+  describe('webPeopleCoverage: the recorded coverage evidence, whatever the coverage display says', () => {
+    const withLocations = (locations) => ({ ...BASE_SERVICE, service_data: JSON.stringify({ serviceLocations: locations }) });
+    const build = (service, opts = {}) => buildReportV1Data(service, 'token-coverage', makeKnex(fixtures()), { mode: 'pdf', webPeopleNext: true, ...opts });
+
+    test('display off by config ({ enabled: false }): the page shows no items, the evidence still lists the skipped area', async () => {
+      const data = await build(withLocations([{ id: 'a', name: 'Front', status: 'completed' }, { id: 'b', name: 'Back fence', status: 'skipped' }]), { serviceCoverageConfig: { enabled: false } });
+      expect(data.serviceCoverage).toEqual({ enabled: false });
+      expect(data.webPeopleCoverage.map((i) => i.status)).toContain('skipped');
+    });
+
+    test('display off and nothing skipped: clean evidence', async () => {
+      const clean = await build(withLocations([{ id: 'a', name: 'Front', status: 'completed' }]), { serviceCoverageConfig: { enabled: false } });
+      expect(clean.webPeopleCoverage.every((i) => i.needsFollowUp === false && i.status === 'completed')).toBe(true);
+    });
+
+    test('no opt-in: no evidence key', async () => {
+      const data = await buildReportV1Data(withLocations([]), 'token-coverage-none', makeKnex(fixtures()), { mode: 'pdf' });
+      expect(data).not.toHaveProperty('webPeopleCoverage');
+    });
+  });
 });

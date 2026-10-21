@@ -5664,7 +5664,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const hideDefaultLawnCoverage = serviceLine === 'lawn'
     && featureGates.lawnCoverageHideDefaultZonesLive()
     && frozenCoverageDefaultsOnly(structured);
-  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
+  const coverageInput = {
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
@@ -5678,7 +5678,18 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     serviceAreas: areaLabels,
     serviceLocations,
     zones: publicZones,
-  }, serviceCoverageConfig || {});
+  };
+  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage(coverageInput, serviceCoverageConfig || {});
+  // GATE_REPORT_WEB_PEOPLE: the clean-visit check reads the recorded coverage evidence, not the display. The display can be
+  // switched off (config, hidden lawn defaults) and then shows no items; this runs the same normalizer with the display forced on.
+  // null = the evidence could not be read, and the review link fails closed.
+  let webPeopleCoverage = null;
+  if (opts.webPeopleNext === true) {
+    try {
+      const raw = normalizeServiceCoverage(coverageInput, { enabled: true, showOnCustomerReports: true });
+      webPeopleCoverage = (Array.isArray(raw.items) ? raw.items : []).map((item) => ({ status: item.status, needsFollowUp: item.needsFollowUp === true }));
+    } catch { /* evidence stays null */ }
+  }
 
   // WaveGuard membership tier for THIS visit (null for non-members). Prefer the tier
   // frozen at completion (service_records.service_tier — admin-dispatch snapshots the
@@ -7622,7 +7633,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
     // GATE_REPORT_WEB_PEOPLE: the visits for webPeople.nextVisit. The route deletes this key after it reads it.
     // webPeopleReadsOk: false when the findings or zones read failed, so the review card fails closed. The route deletes both keys.
-    ...(webPeopleNext ? { webPeopleReadsOk: !findingsReadFailed && !coverageReadFailed } : {}),
+    ...(webPeopleNext ? { webPeopleReadsOk: !findingsReadFailed && !coverageReadFailed, webPeopleCoverage } : {}),
     ...(webPeopleNext ? { webPeopleNext: (Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : []).map(({ serviceType, scheduledDate, windowStart }) => ({ serviceType, scheduledDate, windowStart })) } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —

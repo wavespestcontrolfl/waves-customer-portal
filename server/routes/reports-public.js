@@ -2751,7 +2751,9 @@ router.get('/:token/data', async (req, res, next) => {
       const webPeopleVisits = v1Data.webPeopleNext;
       const webPeopleReadsOk = v1Data.webPeopleReadsOk === true;
       delete v1Data.webPeopleNext;
+      const webPeopleCoverage = v1Data.webPeopleCoverage;
       delete v1Data.webPeopleReadsOk;
+      delete v1Data.webPeopleCoverage;
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports
@@ -2796,7 +2798,7 @@ router.get('/:token/data', async (req, res, next) => {
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
       // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the people cards. The key is absent when the gate is off or nothing shows.
       if (webPeopleLive(simpleWeb, reportGates)) {
-        const webPeople = await buildWebPeople({ data: v1Data, service, knex: db, nextVisits: webPeopleVisits, readsOk: webPeopleReadsOk })
+        const webPeople = await buildWebPeople({ data: v1Data, service, knex: db, nextVisits: webPeopleVisits, readsOk: webPeopleReadsOk, coverageEvidence: webPeopleCoverage })
           .catch((err) => { logger.warn(`[reports-public] webPeople skipped: ${err.message}`); return null; });
         if (webPeople) v1Data.webPeople = webPeople;
       }

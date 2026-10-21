@@ -48,25 +48,26 @@ function lawnScoreOf(data) {
 }
 
 // A pest visit with nothing to follow up: treated, not a re-service, no high finding, no area that needed attention
-// and no follow-up planned.
-function isCleanPestVisit(data) {
+// and no follow-up planned. coverageEvidence is the recorded coverage items ({ status, needsFollowUp }) from the build,
+// read whether or not the report displays coverage; without it (not an array) the visit is not proven clean.
+function isCleanPestVisit(data, coverageEvidence) {
   // treatmentPerformed null means unknown (the product load failed): not clean.
   if (data?.serviceLine !== 'pest' || data.isCallback === true || data.treatmentPerformed !== true) return false;
+  if (!Array.isArray(coverageEvidence)) return false;
   const findings = Array.isArray(data.findings) ? data.findings : [];
   if (findings.some((f) => ['critical', 'high'].includes(String(f?.severity || '').toLowerCase()))) return false;
-  const items = Array.isArray(data.serviceCoverage?.items) ? data.serviceCoverage.items : [];
   const needsAction = ['inaccessible', 'skipped', 'not_serviced', 'needs_attention', 'needs_follow_up'];
   // A completed or treated item can still carry a recorded follow-up (service-coverage.js needsFollowUp).
-  if (items.some((item) => item?.needsFollowUp === true || needsAction.includes(String(item?.status || '').toLowerCase()))) return false;
+  if (coverageEvidence.some((item) => item?.needsFollowUp === true || needsAction.includes(String(item?.status || '').toLowerCase()))) return false;
   return !data.followUp && !data.reportV2?.followUp;
 }
 
-function goodVisit(data) {
+function goodVisit(data, coverageEvidence) {
   if (data?.serviceLine === 'lawn') {
     const score = lawnScoreOf(data);
     return score != null && score >= REVIEW_MIN_LAWN_SCORE;
   }
-  return isCleanPestVisit(data);
+  return isCleanPestVisit(data, coverageEvidence);
 }
 
 // True when the customer complained, rated low or sounded unhappy on a call in the last QUIET_DAYS. A failed read
@@ -86,12 +87,12 @@ async function hadNegativeContact(knex, customerId, now) {
 
 // The same eligibility the old report's review card used (customer has not already left a review, the server-resolved
 // office), tightened to a good visit and a quiet month.
-async function reviewLinkFor(data, service, knex, now, readsOk) {
+async function reviewLinkFor(data, service, knex, now, { readsOk, coverageEvidence }) {
   // The clean-visit check reads findings and coverage; when either read failed the visit is not proven clean.
   if (readsOk !== true) return null;
   if (data.hasLeftGoogleReview || data.reviewRequestEligible === false) return null;
   const url = data.reviewLocation?.reviewUrl;
-  if (!url || !service.customer_id || !goodVisit(data)) return null;
+  if (!url || !service.customer_id || !goodVisit(data, coverageEvidence)) return null;
   try {
     if (await hadNegativeContact(knex, service.customer_id, now)) return null;
   } catch {
@@ -166,14 +167,15 @@ function nextVisitFor(visits) {
  * @param {object} args.data      the simple web payload, built in 'pdf' mode
  * @param {object} args.service   the joined service record row
  * @param {Array}  args.nextVisits upcoming visits from the build (webPeopleNext)
+ * @param {Array}  args.coverageEvidence recorded coverage items from the build (webPeopleCoverage); missing = no review link
  * @param {boolean} args.readsOk  the build's findings and zones reads succeeded (webPeopleReadsOk); false = no review link
  * @returns {Promise<object|null>} the webPeople payload, or null when there is nothing to show
  */
-async function buildWebPeople({ data, service, knex, nextVisits, readsOk = false, now = new Date() }) {
+async function buildWebPeople({ data, service, knex, nextVisits, readsOk = false, coverageEvidence, now = new Date() }) {
   if (!data || !service) return null;
   const [tech, review] = await Promise.all([
     techFor(data, service, knex),
-    reviewLinkFor(data, service, knex, now, readsOk),
+    reviewLinkFor(data, service, knex, now, { readsOk, coverageEvidence }),
   ]);
   const nextVisit = nextVisitFor(nextVisits);
   const out = {

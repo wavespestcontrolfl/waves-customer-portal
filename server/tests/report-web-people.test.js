@@ -77,9 +77,9 @@ describe('webPeople review link', () => {
   });
 
   test('a failed findings or zones read (readsOk not true) shows no link, whatever the payload says', async () => {
-    const data = { ...lawnData(null), serviceLine: 'pest', treatmentPerformed: true, findings: [], serviceCoverage: { items: [] } };
+    const data = { ...lawnData(null), serviceLine: 'pest', treatmentPerformed: true, findings: [] };
     for (const readsOk of [false, undefined]) {
-      const out = await buildWebPeople({ data, service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], readsOk, now: NOW });
+      const out = await buildWebPeople({ data, service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], readsOk, coverageEvidence: [], now: NOW });
       expect(out.review).toBeUndefined();
     }
     const lawn = await buildWebPeople({ data: lawnData(92), service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], readsOk: false, now: NOW });
@@ -93,31 +93,50 @@ describe('webPeople review link', () => {
 });
 
 describe('clean pest visit', () => {
-  const clean = () => ({ serviceLine: 'pest', treatmentPerformed: true, findings: [{ severity: 'low' }], serviceCoverage: { items: [{ status: 'completed' }] } });
+  const clean = () => ({ serviceLine: 'pest', treatmentPerformed: true, findings: [{ severity: 'low' }] });
+  const CLEAN_EVIDENCE = [{ status: 'completed', needsFollowUp: false }];
 
   test('treated, no high finding, nothing to follow up', () => {
-    expect(isCleanPestVisit(clean())).toBe(true);
+    expect(isCleanPestVisit(clean(), CLEAN_EVIDENCE)).toBe(true);
+    expect(isCleanPestVisit(clean(), [])).toBe(true);
   });
 
   test.each([
-    ['a re-service', { isCallback: true }],
-    ['no treatment', { treatmentPerformed: false }],
-    ['an unknown treatment verdict (null)', { treatmentPerformed: null }],
-    ['no treatment verdict at all', { treatmentPerformed: undefined }],
-    ['a high finding', { findings: [{ severity: 'high' }] }],
-    ['an area that needed attention', { serviceCoverage: { items: [{ status: 'needs_attention' }] } }],
-    ['a planned follow-up', { followUp: { reason: 'x' } }],
-    ['a completed item with a recorded follow-up', { serviceCoverage: { items: [{ status: 'completed', needsFollowUp: true }] } }],
-    ['a treated item with a recorded follow-up', { serviceCoverage: { items: [{ status: 'treated', needsFollowUp: true }] } }],
-    ['another line', { serviceLine: 'mosquito' }],
-  ])('%s is not clean', (_label, patch) => {
-    expect(isCleanPestVisit({ ...clean(), ...patch })).toBe(false);
+    ['a re-service', { isCallback: true }, CLEAN_EVIDENCE],
+    ['no treatment', { treatmentPerformed: false }, CLEAN_EVIDENCE],
+    ['an unknown treatment verdict (null)', { treatmentPerformed: null }, CLEAN_EVIDENCE],
+    ['no treatment verdict at all', { treatmentPerformed: undefined }, CLEAN_EVIDENCE],
+    ['a high finding', { findings: [{ severity: 'high' }] }, CLEAN_EVIDENCE],
+    ['an area that needed attention', {}, [{ status: 'needs_attention' }]],
+    ['a skipped area', {}, [{ status: 'completed' }, { status: 'skipped' }]],
+    ['a planned follow-up', { followUp: { reason: 'x' } }, CLEAN_EVIDENCE],
+    ['a completed item with a recorded follow-up', {}, [{ status: 'completed', needsFollowUp: true }]],
+    ['a treated item with a recorded follow-up', {}, [{ status: 'treated', needsFollowUp: true }]],
+    ['another line', { serviceLine: 'mosquito' }, CLEAN_EVIDENCE],
+    ['coverage evidence that is missing (null)', {}, null],
+    ['coverage evidence that is missing (undefined)', {}, undefined],
+  ])('%s is not clean', (_label, patch, evidence) => {
+    expect(isCleanPestVisit({ ...clean(), ...patch }, evidence)).toBe(false);
   });
 
+  const pestData = (extra = {}) => ({ ...lawnData(null), serviceLine: 'pest', treatmentPerformed: true, lawnAssessment: undefined, findings: [], ...extra });
+  const review = async (data, coverageEvidence) => (await buildWebPeople({ data, service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], readsOk: true, coverageEvidence, now: NOW })).review;
+
   test('a clean pest visit gets the link', async () => {
-    const data = { ...lawnData(null), serviceLine: 'pest', treatmentPerformed: true, lawnAssessment: undefined, findings: [], serviceCoverage: { items: [] } };
-    const out = await buildWebPeople({ data, service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], readsOk: true, now: NOW });
-    expect(out.review.url).toBe('https://g.page/r/example/review');
+    expect((await review(pestData(), []))?.url).toBe('https://g.page/r/example/review');
+  });
+
+  test('coverage display off ({ enabled: false }) and a skipped area in the evidence: no link', async () => {
+    expect(await review(pestData({ serviceCoverage: { enabled: false } }), [{ status: 'skipped' }])).toBeUndefined();
+  });
+
+  test('coverage display off and clean evidence: link', async () => {
+    expect((await review(pestData({ serviceCoverage: { enabled: false } }), [{ status: 'completed', needsFollowUp: false }]))?.url).toBe('https://g.page/r/example/review');
+  });
+
+  test('coverage display off and no evidence: no link', async () => {
+    expect(await review(pestData({ serviceCoverage: { enabled: false } }), undefined)).toBeUndefined();
+    expect(await review(pestData({ serviceCoverage: { enabled: false } }), null)).toBeUndefined();
   });
 });
 

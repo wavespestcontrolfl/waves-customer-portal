@@ -92,6 +92,7 @@ function mockDb(overrides = {}) {
 }
 
 const PEOPLE = { tech: { firstName: 'Alex', photoUrl: null, fdacsId: null, visitsAtHome: null } };
+const COVERAGE = [{ status: 'completed', needsFollowUp: false }];
 const VISITS = [{ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null }];
 
 async function getData(baseUrl, query = '') {
@@ -106,7 +107,7 @@ describe('GET /reports/:token/data people cards (GATE_REPORT_WEB_PEOPLE)', () =>
     gates.reportWebPeopleLive.mockReturnValue(false);
     buildReportV1Data.mockImplementation(async (_s, _t, _db, opts) => ({
       pdfUrl: `/api/reports/${VALID_TOKEN}`,
-      ...(opts.webPeopleNext ? { webPeopleNext: VISITS, webPeopleReadsOk: true } : {}),
+      ...(opts.webPeopleNext ? { webPeopleNext: VISITS, webPeopleReadsOk: true, webPeopleCoverage: COVERAGE } : {}),
     }));
     buildWebPeople.mockResolvedValue(PEOPLE);
   });
@@ -131,9 +132,11 @@ describe('GET /reports/:token/data people cards (GATE_REPORT_WEB_PEOPLE)', () =>
       expect(body.webPeople).toEqual(PEOPLE);
       expect('webPeopleNext' in body).toBe(false);
       expect('webPeopleReadsOk' in body).toBe(false);
+      expect('webPeopleCoverage' in body).toBe(false);
       expect(buildReportV1Data.mock.calls[0][3].webPeopleNext).toBe(true);
       expect(buildWebPeople.mock.calls[0][0].nextVisits).toEqual(VISITS);
       expect(buildWebPeople.mock.calls[0][0].readsOk).toBe(true);
+      expect(buildWebPeople.mock.calls[0][0].coverageEvidence).toEqual(COVERAGE);
     });
   });
 
