@@ -671,9 +671,10 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
       db('scheduled_services').distinct('customer_id').whereIn('customer_id', candidateIds)
         .whereBetween('scheduled_date', [etDateString(now), etDateString(addETDays(now, 1))])
         .whereIn('status', NAME_MATCH_LIVE_VISIT_STATUSES),
-      // Only texts that really went out: canceled rows and unresolved send
-      // reservations are hidden by the shared helper (Codex #6367 r4).
-      excludeUnresolvedSendReservations(db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since)),
+      // Only real contact: an inbound text, or one Waves sent that went out
+      // (scheduled, failed, canceled and held rows do not count; Codex #6367 r4).
+      excludeUnresolvedSendReservations(db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since)
+        .where(function () { this.where('direction', 'inbound').orWhereIn('status', ['sent', 'delivered', 'read']); })),
       db('call_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since),
     ]);
     for (const row of visits) context.visitTodayIds.add(row.customer_id);

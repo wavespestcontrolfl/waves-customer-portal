@@ -616,6 +616,9 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
       await executeTool('query_customers', { search: 'richard dump' });
       const sms = db.__queries.find((q) => q.sql.includes('from "sms_log"'));
       expect(sms.sql).toMatch(/NOT \(/);
+      expect(sms.sql).toMatch(/"direction" = \$\d+/);
+      expect(sms.bindings).toEqual(expect.arrayContaining(['inbound', 'sent', 'delivered']));
+      expect(sms.bindings).not.toContain('scheduled');
     });
 
     test('a scoped task never uses the cache', async () => {
