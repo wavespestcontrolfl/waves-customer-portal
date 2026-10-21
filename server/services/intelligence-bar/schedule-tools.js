@@ -1163,21 +1163,26 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
       const verdict = await frozenVisitVerdict(db, s.visit_id);
       if (verdict.frozen) {
-        skippedGrouped.push({ id: s.id, status: `${s.status} (frozen grouped visit)` });
+        skippedGrouped.push({ id: s.id, status: `${s.status} (${verdict.reason === 'unreadable' ? 'group state unverifiable' : 'frozen grouped visit'})`, ...(verdict.reason === 'unreadable' ? { unreadable: true } : {}) });
         continue;
       }
       movable.push(s);
     } catch (err) {
       logger.warn(`[intelligence-bar:schedule] group-state preview check failed for ${s.id}: ${err.message}`);
-      skippedGrouped.push({ id: s.id, status: `${s.status} (group state unverifiable)` });
+      skippedGrouped.push({ id: s.id, status: `${s.status} (group state unverifiable)`, unreadable: true });
     }
   }
   if (!movable.length) {
     let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
     let errorCode = null;
     if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
-      error = 'Every selected stop is part of a grouped (or frozen) visit, which moves as a whole, and the bar can\'t move grouped visits from here yet';
-      errorCode = 'grouped_visit_move_unsupported';
+      // A stop whose group state could not be READ is an outage: no refusal
+      // code, so it counts as a fault and files no gap (Codex #6371 r4 audit).
+      const unreadable = skippedGrouped.some(g => g.unreadable);
+      error = unreadable
+        ? 'The grouped-visit state of a selected stop could not be read just now, so nothing was proposed. Try again in a moment.'
+        : 'Every selected stop is part of a grouped (or frozen) visit, which moves as a whole, and the bar can\'t move grouped visits from here yet';
+      errorCode = unreadable ? null : 'grouped_visit_move_unsupported';
     } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet';
       errorCode = 'collective_move_unsupported';
@@ -1441,6 +1446,7 @@ async function moveStopsToDay(input, actionContext = {}) {
     }
   } catch (err) {
     if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message, code: 'package_visit_two_linked' };
+    if (err && err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED' && err.reason === 'unreadable') throw err; // an outage stays a fault
     if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
       return {
         error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',

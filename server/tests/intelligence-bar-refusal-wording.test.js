@@ -238,3 +238,11 @@ describe('proposal-time frozen check (Codex #6371 r4)', () => {
     expect(at).toBeLessThan(src.indexOf("code: 'frozen_visit_move_unsupported'", at - 2000));
   });
 });
+
+describe('batch move unreadable checks stay faults (Codex #6371 r4 audit)', () => {
+  test('the batch preview and commit keep unreadable group checks uncoded', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/schedule-tools.js'), 'utf8');
+    expect(src).toContain("errorCode = unreadable ? null : 'grouped_visit_move_unsupported'");
+    expect(src).toContain("err.reason === 'unreadable') throw err");
+  });
+});
