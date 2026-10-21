@@ -10467,7 +10467,8 @@ router.get('/list', async (req, res, next) => {
     // with a matching appointment under the same filters (and a technician's own assignments)
     // are considered, so the scope never widens.
     // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
-    const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive();
+    // Opt-in per caller (`suggest=1`): the schedule list view's bulk actions never see suggestions.
+    const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive() && req.query.suggest === '1';
     let approximateServices = [];
     // All exact rows on this page, so no exact match also comes back as a suggestion (Codex r3).
     if (customerSearchFuzzy && page === 1 && exactServices.length >= total && shouldSearchSoundAlike(search, total, exactServices)) {

@@ -2896,7 +2896,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (val.length >= 2) {
       setCustomerLoading(true);
       try {
-        const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8`);
+        const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`);
         setCustomerResults(r.customers || []);
       } catch { setCustomerResults([]); }
       finally { setCustomerLoading(false); }

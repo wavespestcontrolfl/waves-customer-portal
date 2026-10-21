@@ -2486,10 +2486,12 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
 // the end of `customers` carry `approximate: true`. `unsearched()` is the directory query with
 // its filters and the technician's assigned-visit scope but no text search, so the survivors are
 // read back through the same limits. Gate off: the rows come back untouched and `extra` is empty.
-async function appendApproximateCustomers({ page, search, totalCount, exactRows, mappedRows, unsearched, withListColumns }) {
+// Opt-in per caller (`suggest=1`): only a screen that marks the rows as suggestions asks for them;
+// every other consumer (bulk actions, plain pickers) gets today's exact rows (Codex pre-push).
+async function appendApproximateCustomers({ page, search, totalCount, exactRows, mappedRows, unsearched, withListColumns, suggest = false }) {
   // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
   const enabled = require('../config/feature-gates').customerSearchFuzzyLive();
-  if (!enabled || !search) return { rows: mappedRows, extra: {} };
+  if (!enabled || !search || !suggest) return { rows: mappedRows, extra: {} };
   let approximate = [];
   // Every exact match must be on this page, so none can come back as a suggestion here and
   // as an exact row on a later page (Codex r3; a small page limit would split them).
@@ -2637,6 +2639,7 @@ router.get('/', async (req, res, next) => {
         { ...filters, search: undefined, searchHomes: false }, healthColumns,
       )),
       withListColumns,
+      suggest: req.query.suggest === '1',
     });
     const listRows = fuzzy.rows;
     res.json({

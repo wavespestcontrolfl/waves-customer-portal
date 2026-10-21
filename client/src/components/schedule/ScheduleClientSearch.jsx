@@ -122,7 +122,7 @@ export default function ScheduleClientSearch({ onSelect, className }) {
     setLoading(true);
     const t = setTimeout(() => {
       adminFetch(
-        `/admin/schedule/list?search=${encodeURIComponent(q)}&from=${etDateString()}&limit=50`,
+        `/admin/schedule/list?search=${encodeURIComponent(q)}&from=${etDateString()}&limit=50&suggest=1`,
       )
         .then((d) => {
           if (cancelled) return;

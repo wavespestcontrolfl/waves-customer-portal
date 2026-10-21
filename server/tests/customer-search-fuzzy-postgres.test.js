@@ -106,7 +106,7 @@ jest.setTimeout(120000);
 
   describe('gate off', () => {
     test('a sound-alike search finds nothing, exactly as today, with no new keys', async () => {
-      const { status, body } = await get('/admin/customers?search=Orlan%20damp');
+      const { status, body } = await get('/admin/customers?search=Orlan%20damp&suggest=1');
       expect(status).toBe(200);
       expect(body.customers).toEqual([]);
       expect(body.total).toBe(0);
@@ -114,13 +114,13 @@ jest.setTimeout(120000);
     });
 
     test('a schedule list sound-alike search finds nothing and adds no keys', async () => {
-      const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+      const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}&suggest=1`);
       expect(body.services).toEqual([]);
       expect(body).not.toHaveProperty('approximateCount');
     });
 
     test('exact rows carry no approximate flag', async () => {
-      const { body } = await get('/admin/customers?search=Stompf');
+      const { body } = await get('/admin/customers?search=Stompf&suggest=1');
       expect(names(body.customers)).toEqual(['Orlan Stompf']);
       expect(body.customers[0]).not.toHaveProperty('approximate');
     });
@@ -130,7 +130,7 @@ jest.setTimeout(120000);
     beforeEach(() => { process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true'; });
 
     test('a misspelled search returns approximate rows after nothing, best first', async () => {
-      const { body } = await get('/admin/customers?search=Orlan%20damp');
+      const { body } = await get('/admin/customers?search=Orlan%20damp&suggest=1');
       expect(names(body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf', 'Orlan Stimpf']));
       expect(body.customers.every((row) => row.approximate === true)).toBe(true);
       expect(body.customers.every((row) => Array.isArray(row.matchReasons))).toBe(true);
@@ -144,10 +144,10 @@ jest.setTimeout(120000);
     test('approximate rows follow the exact rows; the exact rows, total and paging are unchanged', async () => {
       const off = await (async () => {
         delete process.env.GATE_CUSTOMER_SEARCH_FUZZY;
-        return get('/admin/customers?search=Stompf');
+        return get('/admin/customers?search=Stompf&suggest=1');
       })();
       process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true';
-      const on = await get('/admin/customers?search=Stompf');
+      const on = await get('/admin/customers?search=Stompf&suggest=1');
       expect(names(off.body.customers)).toEqual(['Orlan Stompf']);
       const exactOn = on.body.customers.filter((row) => !row.approximate);
       expect(exactOn).toEqual(off.body.customers);
@@ -162,29 +162,38 @@ jest.setTimeout(120000);
 
     test('a page that cuts the exact matches short adds no suggestions (Codex r3)', async () => {
       process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true';
-      const { body } = await get('/admin/customers?search=Orlan&limit=1');
+      const { body } = await get('/admin/customers?search=Orlan&limit=1&suggest=1');
       expect(body.total).toBeGreaterThan(1);
       expect(body.customers).toHaveLength(1);
       expect(body.customers.every((row) => !row.approximate)).toBe(true);
       expect(body.approximateCount).toBe(0);
     });
 
+    test('a caller that does not ask (suggest=1) gets exact rows only; the schedule list view bulk actions never see suggestions', async () => {
+      process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true';
+      const customers = await get('/admin/customers?search=Orlan%20damp');
+      expect(customers.body.customers.every((row) => !row.approximate)).toBe(true);
+      expect(customers.body.approximateCount).toBeUndefined();
+      const list = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+      expect(JSON.stringify(list.body)).not.toMatch(/"approximate":true/);
+    });
+
     test('three or more exact rows: no sound-alike pass', async () => {
-      const { body } = await get('/admin/customers?search=Quillon');
+      const { body } = await get('/admin/customers?search=Quillon&suggest=1');
       expect(body.total).toBe(4);
       expect(body.customers.every((row) => !row.approximate)).toBe(true);
       expect(body.approximateCount).toBe(0);
     });
 
     test('never on page 2', async () => {
-      const { body } = await get('/admin/customers?search=Orlan%20damp&page=2');
+      const { body } = await get('/admin/customers?search=Orlan%20damp&page=2&suggest=1');
       expect(body.customers).toEqual([]);
       expect(body.approximateCount).toBe(0);
     });
 
     test('a phone, email or address search never runs the sound-alike pass', async () => {
       for (const search of ['941-555-9999', 'orlan@example.test', '12 Orlan Stompf St']) {
-        const { body } = await get(`/admin/customers?search=${encodeURIComponent(search)}`);
+        const { body } = await get(`/admin/customers?search=${encodeURIComponent(search)}&suggest=1`);
         expect(body.customers).toEqual([]);
         expect(body.approximateCount).toBe(0);
       }
@@ -192,27 +201,27 @@ jest.setTimeout(120000);
 
     test('a text-only address search never runs the name pass', async () => {
       // "Brantmoorton" is a city on file; "Brantmoor" is also a customer's last name.
-      const city = await get('/admin/customers?search=Brantmoorton');
+      const city = await get('/admin/customers?search=Brantmoorton&suggest=1');
       expect(names(city.body.customers)).toEqual(['Dara Wexley']);
       expect(city.body.approximateCount).toBe(0);
       // A street word: the search is an address.
-      const street = await get('/admin/customers?search=Quillow%20Street');
+      const street = await get('/admin/customers?search=Quillow%20Street&suggest=1');
       expect(names(street.body.customers)).toEqual(['Pell Marwick']);
       expect(street.body.approximateCount).toBe(0);
-      const none = await get('/admin/customers?search=Wexford%20Street');
+      const none = await get('/admin/customers?search=Wexford%20Street&suggest=1');
       expect(none.body.customers).toEqual([]);
     });
 
     test('warm cache: a customer renamed since the index was built is not suggested for the old name', async () => {
-      const before = await get('/admin/customers?search=Orlan%20damp');
+      const before = await get('/admin/customers?search=Orlan%20damp&suggest=1');
       expect(names(before.body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf']));
       // No cache reset: the cached index still says "Orlan Stompf".
       await db('customers').where({ id: ids.stompf }).update({ first_name: 'Mavis', last_name: 'Quarles' });
       try {
-        const after = await get('/admin/customers?search=Orlan%20damp');
+        const after = await get('/admin/customers?search=Orlan%20damp&suggest=1');
         expect(names(after.body.customers)).not.toContain('Mavis Quarles');
         expect(names(after.body.customers)).toContain('Orlan Stimpf');
-        const sched = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+        const sched = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}&suggest=1`);
         expect(sched.body.services.map((row) => row.customerName)).not.toContain('Mavis Quarles');
       } finally {
         await db('customers').where({ id: ids.stompf }).update({ first_name: 'Orlan', last_name: 'Stompf' });
@@ -220,21 +229,21 @@ jest.setTimeout(120000);
     });
 
     test('the directory filters still apply to approximate rows', async () => {
-      const { body } = await get('/admin/customers?search=Orlan%20damp&tier=Gold');
+      const { body } = await get('/admin/customers?search=Orlan%20damp&tier=Gold&suggest=1');
       expect(names(body.customers)).toEqual(['Orlan Stompf']);
     });
 
     test('a technician only gets approximate customers with their own current visit', async () => {
-      const tech = await get('/admin/customers?search=Orlan%20damp', { 'x-test-role': 'technician', 'x-test-tech': techId });
+      const tech = await get('/admin/customers?search=Orlan%20damp&suggest=1', { 'x-test-role': 'technician', 'x-test-tech': techId });
       expect(names(tech.body.customers)).toEqual(['Orlan Stimpf']);
       expect(tech.body.customers[0].approximate).toBe(true);
       expect(tech.body.total).toBe(0);
-      const admin = await get('/admin/customers?search=Orlan%20damp');
+      const admin = await get('/admin/customers?search=Orlan%20damp&suggest=1');
       expect(names(admin.body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf', 'Orlan Stimpf']));
     });
 
     test('a technician with no visits gets nothing', async () => {
-      const tech = await get('/admin/customers?search=Orlan%20damp', { 'x-test-role': 'technician', 'x-test-tech': randomUUID() });
+      const tech = await get('/admin/customers?search=Orlan%20damp&suggest=1', { 'x-test-role': 'technician', 'x-test-tech': randomUUID() });
       expect(tech.body.customers).toEqual([]);
       expect(tech.body.approximateCount).toBe(0);
     });
@@ -244,7 +253,7 @@ jest.setTimeout(120000);
     beforeEach(() => { process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true'; });
 
     test('upcoming appointments of sound-alike customers follow the exact rows; total stays exact', async () => {
-      const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+      const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}&suggest=1`);
       expect(body.total).toBe(0);
       expect(body.services.length).toBe(2);
       expect(body.services.every((row) => row.approximate === true)).toBe(true);
@@ -254,9 +263,9 @@ jest.setTimeout(120000);
 
     test('exact rows come first and are unchanged', async () => {
       delete process.env.GATE_CUSTOMER_SEARCH_FUZZY;
-      const off = await get(`/admin/schedule/list?search=Stompf&from=${futureDate(0)}`);
+      const off = await get(`/admin/schedule/list?search=Stompf&from=${futureDate(0)}&suggest=1`);
       process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true';
-      const on = await get(`/admin/schedule/list?search=Stompf&from=${futureDate(0)}`);
+      const on = await get(`/admin/schedule/list?search=Stompf&from=${futureDate(0)}&suggest=1`);
       expect(off.body.services.map((row) => row.customerName)).toEqual(['Orlan Stompf']);
       expect(on.body.services.slice(0, off.body.services.length)).toEqual(off.body.services);
       expect(on.body.services.slice(off.body.services.length).map((row) => row.customerName)).toEqual(['Orlan Stimpf']);
@@ -264,7 +273,7 @@ jest.setTimeout(120000);
     });
 
     test('the row cap keeps the best-ranked customer first: a lower-ranked customer\'s many visits cannot hide it', async () => {
-      const first = (await get('/admin/customers?search=Orlan%20damp')).body.customers.map((row) => row.id);
+      const first = (await get('/admin/customers?search=Orlan%20damp&suggest=1')).body.customers.map((row) => row.id);
       expect(first.length).toBe(2);
       const [best, second] = first;
       // 30 early visits for the second-ranked customer; the best match has one, later.
@@ -273,7 +282,7 @@ jest.setTimeout(120000);
       })));
       await db('scheduled_services').where({ customer_id: best }).update({ scheduled_date: futureDate(90) });
       try {
-        const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+        const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}&suggest=1`);
         expect(body.services.length).toBe(25);
         expect(body.services[0].customerId).toBe(best);
         expect(body.services.filter((row) => row.customerId === second).length).toBe(24);
@@ -283,7 +292,7 @@ jest.setTimeout(120000);
     });
 
     test('a technician only gets their own assigned appointments', async () => {
-      const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`, { 'x-test-role': 'technician', 'x-test-tech': techId });
+      const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}&suggest=1`, { 'x-test-role': 'technician', 'x-test-tech': techId });
       expect(body.services.map((row) => row.customerName)).toEqual(['Orlan Stimpf']);
       expect(body.services[0].approximate).toBe(true);
     });
@@ -310,7 +319,7 @@ jest.setTimeout(120000);
     beforeEach(() => { process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true'; });
 
     test('filters apply before the candidate budget is used up: 501 matching names, a filter allowing only the last', async () => {
-      const { body } = await get('/admin/customers?search=Zara%20Quilfern&tier=Platinum');
+      const { body } = await get('/admin/customers?search=Zara%20Quilfern&tier=Platinum&suggest=1');
       expect(body.customers.map((row) => row.id)).toEqual([lastId]);
       expect(body.customers[0].approximate).toBe(true);
     });
@@ -331,7 +340,7 @@ jest.setTimeout(120000);
       const total = await liveCount();
       expect(total).toBeGreaterThan(20000);
       resetNameIndexCache();
-      await get('/admin/customers?search=Orlan%20damp');
+      await get('/admin/customers?search=Orlan%20damp&suggest=1');
       expect(await cachedEntries()).toBe(total);
       await warmLikeTheBar(); // already cached: the Bar reads the picker's index
       expect(await cachedEntries()).toBe(total);
@@ -342,7 +351,7 @@ jest.setTimeout(120000);
       resetNameIndexCache();
       await warmLikeTheBar();
       expect(await cachedEntries()).toBe(total);
-      const { body } = await get('/admin/customers?search=Orlan%20damp');
+      const { body } = await get('/admin/customers?search=Orlan%20damp&suggest=1');
       expect(names(body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf']));
       expect(await cachedEntries()).toBe(total);
     });
@@ -374,7 +383,7 @@ jest.setTimeout(120000);
       const search = encodeURIComponent('Orlan damp');
       const time = async () => {
         const started = process.hrtime.bigint();
-        await get(`/admin/customers?search=${search}`);
+        await get(`/admin/customers?search=${search}&suggest=1`);
         return Number(process.hrtime.bigint() - started) / 1e6;
       };
       // Warm the route (plans, pools) and the name index.

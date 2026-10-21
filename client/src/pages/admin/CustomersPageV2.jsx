@@ -2158,6 +2158,8 @@ export default function CustomersPageV2() {
     // page 2, etc. Server caps at 500; any customer base above that
     // will still paginate (Prev/Next controls stay wired below).
     params.set("limit", "500");
+    // Ask for "Did you mean" rows: this page marks them (server gate decides).
+    params.set("suggest", "1");
     adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
