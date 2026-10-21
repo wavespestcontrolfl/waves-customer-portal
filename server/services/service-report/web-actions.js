@@ -116,7 +116,8 @@ async function visitIsAtPrimaryHome(row, knex) {
 // the same 409 a stale offer gets. Taps that do not name the tile are the old card's and are unaffected.
 function webTileTapAllowed(metadata, gates) {
   if (!metadata || metadata.source !== WEB_TILE_SOURCE) return true;
-  return webActionsLive(gates) === true && gates.isEnabled('reportClickToEstimate') === true;
+  // Every gate attachWebActions needs to show the tile: the tile gates, the cross-sell card the offer comes from, and click-to-estimate.
+  return webActionsLive(gates) === true && gates.isEnabled('reportCrossSell') === true && gates.isEnabled('reportClickToEstimate') === true;
 }
 
 // ── Atomic revision check for the tile's tap ───────────────────────────────────────────────────────────────────
@@ -153,11 +154,12 @@ async function tileEvidence(service, line, knex, { lock = false } = {}) {
   const table = ASSESSMENT_TABLE_BY_LINE[line];
   if (!table) return null;
   const locked = (query) => (lock ? query.forUpdate() : query);
-  const row = await locked(knex('service_records').where({ id: service.id }))
-    .first('id', 'is_callback', 'structured_notes', 'report_template_version', 'service_line', 'service_type');
+  // The whole row is read (and locked) so the canonical assessment is resolved from what is in the database NOW, never
+  // from the preflight's copy: a relinked scheduled service or customer changes which assessment the visit shows.
+  const row = await locked(knex('service_records').where({ id: service.id })).first();
   if (!row) return null;
   const delivery = typedDeliveryOf(row.structured_notes);
-  const assessment = await loadCanonicalAssessment(service, line, knex);
+  const assessment = await loadCanonicalAssessment(row, line, knex);
   let assessmentStamp = 'none';
   if (assessment) {
     const full = await locked(knex(table).where({ id: assessment.id })).first();
@@ -166,9 +168,17 @@ async function tileEvidence(service, line, knex, { lock = false } = {}) {
   return {
     callback: row.is_callback === true,
     internalOnly: Boolean(delivery) && delivery !== 'auto_send',
-    // The whole structured_notes is stamped: the technician's finding decisions (treeShrubTechFindings and the like)
-    // live there and change which insights the report shows. A rare unrelated note edit only costs a "refresh" 409.
-    stamp: stampOf([row.id, row.report_template_version, row.service_line, row.service_type, row.is_callback === true, delivery, stampOf(row.structured_notes ?? null), line, assessmentStamp]),
+    // The linkage the canonical assessment is resolved through rides the stamp (customer, scheduled service, service id,
+    // property, service date), so a relink between the preflight and the write changes it. The whole structured_notes is
+    // stamped too: the technician's finding decisions (treeShrubTechFindings and the like) live there and change which
+    // insights the report shows. A rare unrelated note edit only costs a "refresh" 409.
+    stamp: stampOf([
+      row.id, row.report_template_version, row.service_line, row.service_type, row.is_callback === true, delivery,
+      stampOf(row.structured_notes ?? null),
+      row.customer_id ?? null, row.scheduled_service_id ?? null, row.service_id ?? null, row.property_id ?? null,
+      row.service_date ? new Date(row.service_date).toISOString() : null,
+      line, assessmentStamp,
+    ]),
   };
 }
 

@@ -661,6 +661,23 @@ describe('the finding tile tap rechecks its gates', () => {
     expect(buildReportCrossSell).not.toHaveBeenCalled();
   });
 
+  test('a malformed token gets the handler\'s generic 404 whatever the gates say (never a gate-derived 409)', async () => {
+    const send = (baseUrl, token) => fetch(`${baseUrl}/reports/${token}/events`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eventName: 'cross_sell_requested', channel: 'public_report', metadata: TILE_META }),
+    });
+    for (const flags of [{ actions: false }, { click: false }, { crossSell: false }, {}]) {
+      setGates({ crossSell: true, ...flags });
+      await withServer(async (baseUrl) => {
+        for (const token of ['short', 'XYZ'.repeat(11), `${VALID_TOKEN.toUpperCase()}`]) {
+          const res = await send(baseUrl, token);
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toBe('Report not found');
+        }
+      });
+    }
+    expect(buildReportCrossSell).not.toHaveBeenCalled();
+  });
+
   test('a callback visit refuses the tile tap (409) unconditionally, whatever GATE_RESERVICE_REPORT_COPY says', async () => {
     const prev = process.env.GATE_RESERVICE_REPORT_COPY;
     delete process.env.GATE_RESERVICE_REPORT_COPY;
@@ -727,7 +744,7 @@ describe('the finding tile tap rechecks its gates', () => {
     beforeEach(() => {
       jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
       state = {
-        rec: { id: 'service-1', customer_id: 'customer-1', report_template_version: 'service_report_v1', structured_notes: null, is_callback: false, service_line: 'lawn', service_type: 'Lawn Care', first_name: 'Pat', last_name: 'Tester' },
+        rec: { id: 'service-1', customer_id: 'customer-1', scheduled_service_id: 'ss1', service_date: '2026-10-20', report_template_version: 'service_report_v1', structured_notes: null, is_callback: false, service_line: 'lawn', service_type: 'Lawn Care', first_name: 'Pat', last_name: 'Tester' },
         canonical: 'a1',
         assessments: { a1: { id: 'a1', turf_density: 80, updated_at: '2026-10-20T10:00:00Z' }, a2: { id: 'a2', turf_density: 70, updated_at: '2026-10-21T10:00:00Z' } },
         onCustomerLock: () => {},
@@ -817,6 +834,20 @@ describe('the finding tile tap rechecks its gates', () => {
       noWrites();
     });
 
+    test('the visit was relinked to another scheduled service between the preflight and the write: 409, no writes', async () => {
+      state.onCustomerLock = () => { state.rec = { ...state.rec, scheduled_service_id: 'ss2' }; };
+      await attempt(409);
+      noWrites();
+    });
+
+    test('the cross-sell gate turns off inside the transaction: 409, no writes', async () => {
+      state.onCustomerLock = () => {
+        gates.isEnabled.mockImplementation((name) => name !== 'reportCrossSell' && ({ reportClickToEstimate: true, customerPhotoId: true }[name] === true));
+      };
+      await attempt(409);
+      noWrites();
+    });
+
     test('the visit became a callback inside the transaction: 409, no writes', async () => {
       state.onCustomerLock = () => { state.rec = { ...state.rec, is_callback: true }; };
       await attempt(409);
@@ -873,6 +904,8 @@ describe('the finding tile tap rechecks its gates', () => {
     const gatesOn = { reportSimpleWebLive: () => true, reportWebActionsLive: () => true, isEnabled: () => true };
     expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, gatesOn)).toBe(true);
     expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, { ...gatesOn, isEnabled: () => false })).toBe(false);
+    expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, { ...gatesOn, isEnabled: (name) => name !== 'reportCrossSell' })).toBe(false);
+    expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, { ...gatesOn, isEnabled: (name) => name !== 'reportClickToEstimate' })).toBe(false);
     expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, { ...gatesOn, reportWebActionsLive: () => false })).toBe(false);
     expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, {})).toBe(false);
     expect(webActions.webTileTapAllowed({}, {})).toBe(true);

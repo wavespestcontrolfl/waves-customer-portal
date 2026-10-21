@@ -11,7 +11,7 @@ const { loadLinkedTreeShrubAssessment } = require('../services/tree-shrub-assess
 const { tileEvidence, tileEvidenceUnchanged } = require('../services/service-report/web-actions');
 
 const SERVICE = { id: 's1', customer_id: 'c1' };
-const RECORD = { id: 's1', is_callback: false, structured_notes: null, report_template_version: 'service_report_v1', service_line: 'lawn', service_type: 'Lawn Care' };
+const RECORD = { id: 's1', customer_id: 'c1', scheduled_service_id: 'ss1', service_id: null, property_id: null, service_date: '2026-10-20', is_callback: false, structured_notes: null, report_template_version: 'service_report_v1', service_line: 'lawn', service_type: 'Lawn Care' };
 
 function fakeKnex({ record = RECORD, rows = {} } = {}) {
   const calls = [];
@@ -35,7 +35,7 @@ describe('tileEvidence', () => {
     const evidence = await tileEvidence(SERVICE, 'lawn', knex, { lock: true });
     expect(evidence).toEqual({ callback: false, internalOnly: false, stamp: expect.stringMatching(/^[a-f0-9]{32}$/) });
     expect(calls).toEqual(['lock:service_records', 'read:service_records', 'lock:lawn_assessments', 'read:lawn_assessments']);
-    expect(loadLinkedLawnAssessment).toHaveBeenCalledWith(SERVICE, knex, { failClosed: true });
+    expect(loadLinkedLawnAssessment).toHaveBeenCalledWith(RECORD, knex, { failClosed: true }); // the locked row, not the caller's copy
     // without lock:true nothing is locked
     const unlocked = fakeKnex({ rows: { lawn_assessments: { id: 'a1', score: 80 } } });
     await tileEvidence(SERVICE, 'lawn', unlocked.knex);
@@ -47,7 +47,7 @@ describe('tileEvidence', () => {
     const { knex, calls } = fakeKnex({ rows: { tree_shrub_assessments: { id: 't1', overall_score: 70 } } });
     expect(await tileEvidence(SERVICE, 'tree_shrub', knex, { lock: true })).toBeTruthy();
     expect(calls).toContain('lock:tree_shrub_assessments');
-    expect(loadLinkedTreeShrubAssessment).toHaveBeenCalledWith(SERVICE, knex, { strict: true });
+    expect(loadLinkedTreeShrubAssessment).toHaveBeenCalledWith(RECORD, knex, { strict: true });
   });
 
   test('any column of the assessment row moves the stamp (rows are hashed whole, no updated_at needed); an identical row does not', async () => {
@@ -57,6 +57,26 @@ describe('tileEvidence', () => {
     expect(await stampFor({ id: 'a1', weed_coverage: 10 })).toBe(base);
     expect(await stampFor({ id: 'a1', weed_coverage: 40 })).not.toBe(base);
     expect(await stampFor({ id: 'a1', weed_coverage: 10, updated_at: 'x' })).not.toBe(base);
+  });
+
+  test('the canonical assessment is resolved from the LOCKED row, never from the preflight copy', async () => {
+    loadLinkedLawnAssessment.mockResolvedValue(null);
+    const stale = { id: 's1', customer_id: 'c1', scheduled_service_id: 'ss-OLD' };
+    await tileEvidence(stale, 'lawn', fakeKnex({ record: { ...RECORD, scheduled_service_id: 'ss-NEW' } }).knex);
+    expect(loadLinkedLawnAssessment.mock.calls[0][0]).toMatchObject({ scheduled_service_id: 'ss-NEW' });
+  });
+
+  test.each([
+    ['scheduled service relinked', { scheduled_service_id: 'ss2' }],
+    ['customer relinked', { customer_id: 'c2' }],
+    ['service id relinked', { service_id: 'x9' }],
+    ['property relinked', { property_id: 'p9' }],
+    ['service date moved', { service_date: '2026-10-21' }],
+  ])('linkage change (%s) moves the stamp', async (_name, change) => {
+    loadLinkedLawnAssessment.mockResolvedValue(null);
+    const base = await tileEvidence(SERVICE, 'lawn', fakeKnex().knex);
+    const moved = await tileEvidence(SERVICE, 'lawn', fakeKnex({ record: { ...RECORD, ...change } }).knex);
+    expect(moved.stamp).not.toBe(base.stamp);
   });
 
   test('a different canonical assessment, or none, changes the stamp', async () => {

@@ -32,9 +32,14 @@ describe('assertPhotoWithinPixels', () => {
 
   test('the ceiling is on the pixel count, not on one side', async () => {
     await expect(assertPhotoWithinPixels(await tinyJpegClaiming(8000, 7000))).rejects.toBeInstanceOf(PhotoTooLargeError); // 56 MP
-    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(8000, 6000))).resolves.toBeUndefined(); // 48 MP phone sensor
-    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(30000, 1000))).resolves.toBeUndefined(); // 30 MP panorama
-    expect(MAX_PHOTO_PIXELS).toBe(50_000_000);
+    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(8000, 6000))).rejects.toBeInstanceOf(PhotoTooLargeError); // 48 MP sensor mode
+    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(6000, 4500))).rejects.toBeInstanceOf(PhotoTooLargeError); // 27 MP
+    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(6000, 4000))).resolves.toBeUndefined(); // 24 MP camera default
+    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(4032, 3024))).resolves.toBeUndefined(); // 12 MP phone
+    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(24000, 1000))).resolves.toBeUndefined(); // 24 MP panorama
+    await expect(assertPhotoWithinPixels(await tinyJpegClaiming(26000, 1000))).rejects.toBeInstanceOf(PhotoTooLargeError); // 26 MP
+    expect(MAX_PHOTO_PIXELS).toBe(25_000_000);
+    expect(MAX_CONCURRENT_TRANSCODES).toBe(1);
   });
 
   test('an ordinary photo passes, and bytes sharp cannot read are left to the caller', async () => {
@@ -89,7 +94,7 @@ describe('withTranscodeSlot hands a released slot straight to the next waiter', 
       return i;
     }));
     await tick();
-    expect(started).toEqual([0, 1]); // only the first two run; the rest wait
+    expect(started).toEqual(Array.from({ length: MAX_CONCURRENT_TRANSCODES }, (_, i) => i)); // only the first caller(s) run; the rest wait
     // release in an interleaved order while new callers keep arriving between a release and the waiter's wake-up
     const late = [];
     for (const i of [1, 0, 3, 2, 5, 4]) {
@@ -113,7 +118,7 @@ describe('withTranscodeSlot hands a released slot straight to the next waiter', 
   });
 
   test('a waiter holding a handed-off slot that throws still frees it for the next', async () => {
-    const hold = [deferred(), deferred()];
+    const hold = [deferred()];
     const holders = hold.map((d) => withTranscodeSlot(() => d.promise));
     const failing = withTranscodeSlot(async () => { throw new Error('boom'); });
     const after = withTranscodeSlot(async () => 'after');
@@ -121,7 +126,6 @@ describe('withTranscodeSlot hands a released slot straight to the next waiter', 
     hold[0].resolve();
     await expect(failing).rejects.toThrow('boom');
     await expect(after).resolves.toBe('after');
-    hold[1].resolve();
     await Promise.all(holders);
   });
 });

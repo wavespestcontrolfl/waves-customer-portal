@@ -2599,7 +2599,7 @@ describe('runCustomerPhotoId (report-token entry)', () => {
   });
 
   test('an ordinary phone photo passes the pixel check', async () => {
-    mockSharpMetadata.mockResolvedValue({ width: 8000, height: 6000 });
+    mockSharpMetadata.mockResolvedValue({ width: 6000, height: 4000 });
     const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
     expect(reply.status).toBe(200);
   });

@@ -1,12 +1,14 @@
 // Bounds for customer-submitted photos before Sharp decodes them. A few kilobytes of HEIC or JPEG
 // header can claim a billion pixels; decoding that takes gigabytes of memory. So the size is read from
 // the header (sharp metadata does not decode) and refused over the pixel ceiling, the decoder is told
-// the same ceiling (limitInputPixels), and only a couple of transcodes run at once.
+// the same ceiling (limitInputPixels), and only one photo is checked or transcoded at a time.
 const sharp = require('sharp');
 
-// 12 MP phones, 48 MP phone sensors and 50 MP cameras pass; anything larger is refused.
-const MAX_PHOTO_PIXELS = 50_000_000;
-const MAX_CONCURRENT_TRANSCODES = 2;
+// The report page shrinks every photo before sending it, and a phone camera's default output (12 to 24 MP) fits; anything
+// larger is refused. One decode at a time machine-wide (the portal photo ID shares this semaphore), so the aggregate
+// decode memory is one image of at most 25 MP.
+const MAX_PHOTO_PIXELS = 25_000_000;
+const MAX_CONCURRENT_TRANSCODES = 1;
 
 class PhotoTooLargeError extends Error {
   constructor() {

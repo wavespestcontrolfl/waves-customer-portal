@@ -1490,11 +1490,12 @@ async function webTileTapGate(req, res, next) {
     const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
       && metadata.source === webActions.WEB_TILE_SOURCE;
     if (!named) return next();
+    // A malformed token gets the handler's generic 404 whatever the gates say: nothing gate-derived is ever answered for it.
+    if (!FULL_TOKEN_RE.test(req.params.token || '')) return next();
     const stale = () => res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
     if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))) return stale();
     // A complaint-driven (callback) visit never carries the tile, whatever GATE_RESERVICE_REPORT_COPY says, so a tap
     // from a page that somehow showed one is refused here too.
-    if (!FULL_TOKEN_RE.test(req.params.token || '')) return next();
     const record = await db('service_records').where({ report_view_token: req.params.token }).first('is_callback');
     if (record?.is_callback === true) return stale();
     // The tap must still match the CURRENT report: re-derive the tile's structured decision (the same table /data uses)
