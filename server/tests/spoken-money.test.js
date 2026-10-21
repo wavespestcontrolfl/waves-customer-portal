@@ -43,6 +43,15 @@ const REWRITES = [
   ['a thousand dollars', '$1,000'],
   ['fifty dollars', '$50'],
   ['twenty bucks', '$20'],
+  // partial phrases are left as heard, never half-rewritten
+  ['charge twenty five hundred dollars', SAME],
+  ['charge one hundred twenty five fifty', SAME],
+  ['charge one hundred and twenty five fifty a month', SAME],
+  ['price two thousand five hundred twenty', 'price $2,520'],
+  // cents are not dollars
+  ['charge one hundred fifty five cents', SAME],
+  ['charge 61 33 cents', SAME],
+  ['price thirty five cents', SAME],
   ['a hundred and five', SAME], // no money cue
   ['two hundred feet of fence for the price', SAME], // unit
   ['charge for three hundred square feet', SAME],
