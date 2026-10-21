@@ -415,12 +415,22 @@ function directEditPossibleBase(toolName, input = {}) {
 // The two decisions the route asks, each checking the per-request flag first
 // (UNTRUSTED READS above): after a general read returned data, never direct.
 function executesWithoutCard(toolName, input = {}, preview = null, taint = null, grounding = null) {
-  return taint?.untrustedRead ? false : directEditAllowed(toolName, input, preview, grounding);
+  return cardsEveryWrite(taint) ? false : directEditAllowed(toolName, input, preview, grounding);
 }
 
 function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = null) {
-  return taint?.untrustedRead ? false : directEditPossible(toolName, input, grounding);
+  return cardsEveryWrite(taint) ? false : directEditPossible(toolName, input, grounding);
 }
+
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r14): a request whose context carries more than
+// one customer row (same-name candidates) keeps a card on every write, including the
+// on-screen same-name pick. A separate flag from untrustedRead, so it is never written
+// to the thread's marker and does not taint later requests on the thread.
+function noteSameNameContext(taint, taskContext) {
+  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) taint.sameNameCandidates = true;
+}
+
+const cardsEveryWrite = taint => Boolean(taint?.untrustedRead || taint?.sameNameCandidates);
 
 // Direct commits already made for this task, by tool (proposePendingWrite
 // stamps `_ib_owner_direct` on them). A failed read counts
@@ -616,4 +626,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { TRUSTED_READS, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, noteSameNameContext, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

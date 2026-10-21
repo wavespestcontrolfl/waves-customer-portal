@@ -1309,7 +1309,7 @@ function sameNameNote(context) {
   const typed = new Set((context.typedCustomerIds || []).map(String));
   const picked = rows.filter(row => typed.has(String(row.customer_id)));
   if (picked.length === 1) {
-    return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${picked[0].city ? `, ${picked[0].city}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
+    return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${safeChoiceCity(picked[0].city) ? `, ${safeChoiceCity(picked[0].city)}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
   }
   // offer_choices needs two buttons at least. With fewer than two usable labels, a
   // button list cannot name the customer: ask for a phone number or email.
@@ -1336,4 +1336,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

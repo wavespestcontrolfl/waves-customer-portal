@@ -89,6 +89,7 @@ const { isToolFailure, recordToolOutcome, executionOutcome } = require('../servi
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
+const ModelContext = require('../services/intelligence-bar/model-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
@@ -3614,7 +3615,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const messages = [
       ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
       { role: 'user', content: buildUserMessageContent(`Current Eastern date: ${etDateString()}\n\n${prompt}`,
-        images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
+        images, taskContext ? { ...pageData, validated_task_context: ModelContext.modelContext(taskContext) } : pageData) },
     ];
 
     let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...ToolSearch.stripServerSearchBlocks(req.ibResumedTask.checkpoint)] : messages;
@@ -3622,7 +3623,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // stripped on load and the request runs on the ordinary list (tool-search.js).
     const searchQueries = new Map();
     if (req.ibResumedTask) {
-      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext: ModelContext.modelContext(taskContext) })}` });
     }
     // Once the general admin read returned data, nothing after it runs without
     // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
@@ -3630,6 +3631,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
       fullAccess: actionScope.fullAccess, conversationHistory,
     });
+    OwnerDirect.noteSameNameContext(requestTaint, taskContext);
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
