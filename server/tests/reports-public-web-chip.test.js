@@ -22,6 +22,7 @@ jest.mock('../config/feature-gates', () => ({
   reportWebLiveChipLive: jest.fn(() => false),
 }));
 jest.mock('../services/service-report/lawn-live-chip', () => ({
+  ...jest.requireActual('../services/service-report/lawn-live-chip'),
   resolveLiveChip: jest.fn(),
 }));
 jest.mock('../services/lawn-assessment-history', () => ({
@@ -191,6 +192,8 @@ describe('GET /reports/:token/data live chip (GATE_REPORT_WEB_LIVE_CHIP)', () =>
       expect(body.liveChip).toEqual({ state: 'no_rain', text: 'No rain since your treatment.' });
       expect(JSON.stringify(body)).not.toMatch(/27\.1|-82\.4|latitude|longitude/);
       expect(resolveLiveChip.mock.calls[0][0]).toMatchObject({ completedAt: '2026-10-20T14:00:00Z' });
+      // the build and the chip share one weather read: the out-param carries the view's shared series
+      expect(typeof resolveLiveChip.mock.calls[0][0].series.read).toBe('function');
       expect('programPromise' in body).toBe(false);
     });
   });

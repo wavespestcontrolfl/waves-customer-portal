@@ -92,6 +92,36 @@ function seriesReader(forecast) {
 }
 
 /**
+ * One weather read per /data view. The water-in banner's coverage check (GATE_LAWN_WATER_IN_RAIN, read while the report
+ * is built) and the chip (read afterwards) both need rain since the completion; the banner's window stops at its
+ * deadline, the chip's at now. This holds ONE completion-to-now series: whichever reader asks first fetches it (from the
+ * earliest `from` it is given), the other answers from it. `now` is fixed here so both read the same closed hours.
+ * A failed read is remembered as a miss, never retried within the view.
+ */
+function createSharedSeries(fetchForecast, now = new Date()) {
+  let pending = null;
+  return {
+    now,
+    read({ latitude, longitude, from }) {
+      if (!pending) {
+        pending = Promise.resolve(fetchForecast({
+          latitude, longitude, from: new Date(toMs(from)), to: now, timeoutMs: FETCH_TIMEOUT_MS, now, exactTotal: true,
+        })).catch(() => null);
+      }
+      return pending;
+    },
+  };
+}
+
+/** A fetchForecast for resolveRainCoverage that answers the banner's window from the shared series. */
+function sharedCoverageReader(series, { latitude, longitude, from }) {
+  return async ({ from: askedFrom, to }) => {
+    const forecast = await series.read({ latitude, longitude, from });
+    return forecast && forecast.status === 'ok' ? seriesReader(forecast)({ from: askedFrom, to }) : forecast;
+  };
+}
+
+/**
  * Did rain do the water-in? True when the banner already says so (GATE_LAWN_WATER_IN_RAIN replay), or rain measured since
  * the visit reaches the amount the products ask for (the same reader the banner uses, on the TOTAL, so a long run of
  * trace hours counts). It reads the series the chip already holds: no second weather read.
@@ -113,21 +143,26 @@ async function rainWateredIn({ instruction, products, forecast, nowMs, latitude,
  * @param {number|string} input.latitude
  * @param {number|string} input.longitude
  * @param {Date} [input.now]
- * @param {Function} input.fetchForecast    application-conditions.fetchPropertyForecast
+ * @param {Function} input.fetchForecast    application-conditions.fetchPropertyForecast (unused when `series` is given)
+ * @param {object} [input.series]           createSharedSeries(...): the view's one completion-to-now weather read
  * @returns {Promise<{state: string, text: string}|null>}
  */
 async function resolveLiveChip({
-  completedAt, instruction, products, latitude, longitude, now, fetchForecast,
+  completedAt, instruction, products, latitude, longitude, now: nowIn, fetchForecast, series,
 } = {}) {
   try {
     const fromMs = toMs(completedAt);
+    // With a shared series the view's one clock is the series' own, so both readers judge the same closed hours.
+    const now = series ? series.now : nowIn;
     const nowMs = now instanceof Date ? now.getTime() : Date.now();
-    if (typeof fetchForecast !== 'function' || !Number.isFinite(fromMs)) return null;
+    if ((!series && typeof fetchForecast !== 'function') || !Number.isFinite(fromMs)) return null;
     if (nowMs <= fromMs || nowMs - fromMs > COPY.visitWindowDays * DAY_MS) return null;
 
-    const forecast = await fetchForecast({
-      latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs), exactTotal: true,
-    });
+    const forecast = series
+      ? await series.read({ latitude, longitude, from: fromMs })
+      : await fetchForecast({
+        latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs), exactTotal: true,
+      });
     if (!forecast || forecast.status !== 'ok') return null;
     const { last, dry } = rainSince(forecast, fromMs, nowMs);
 
@@ -146,4 +181,4 @@ async function resolveLiveChip({
   }
 }
 
-module.exports = { resolveLiveChip, RAIN_HOUR_INCHES };
+module.exports = { resolveLiveChip, createSharedSeries, sharedCoverageReader, RAIN_HOUR_INCHES };

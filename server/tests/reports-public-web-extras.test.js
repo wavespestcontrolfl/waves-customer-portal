@@ -22,6 +22,7 @@ jest.mock('../config/feature-gates', () => ({
   reportWebLiveChipLive: jest.fn(() => false),
 }));
 jest.mock('../services/service-report/lawn-live-chip', () => ({
+  ...jest.requireActual('../services/service-report/lawn-live-chip'),
   resolveLiveChip: jest.fn(),
 }));
 jest.mock('../services/lawn-assessment-history', () => ({

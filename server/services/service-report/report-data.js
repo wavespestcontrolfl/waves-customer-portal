@@ -3963,16 +3963,23 @@ function applyAfterHoldOverlay(waterContext, instruction) {
 // completion that reaches the water-in amount turns it into "water_in_by_rain" (the rain did the watering in); before
 // that a generic spray-and-rotor figure pair reads as an amount first. Only a REPLAY of a frozen instruction is touched
 // (the completion build, its freeze and its text never see this), and any miss in the rain read leaves it as frozen.
-async function waterInRainInstruction(instruction, { products, service, now = new Date() }) {
+async function waterInRainInstruction(instruction, { products, service, now = new Date(), sharedSeries = null, completionTime = null }) {
   if (!lawnWaterInRain.appliesTo(instruction)) return instruction;
   try {
+    const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
+    const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
+    // GATE_REPORT_WEB_LIVE_CHIP: while the chip is live this view makes ONE weather read, shared with the chip (the
+    // chip's series starts at the earlier of the two completion times, so it holds both windows).
+    const from = new Date(Math.min(Date.parse(instruction.completedAt), Date.parse(completionTime) || Infinity));
     const coverage = await lawnWaterInRain.resolveRainCoverage({
       instruction,
       products,
-      now,
-      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
-      fetchForecast: require('./application-conditions').fetchPropertyForecast,
+      now: sharedSeries ? sharedSeries.now : now,
+      latitude,
+      longitude,
+      fetchForecast: sharedSeries
+        ? require('./lawn-live-chip').sharedCoverageReader(sharedSeries, { latitude, longitude, from })
+        : require('./application-conditions').fetchPropertyForecast,
     });
     return lawnWaterInRain.applyWaterInRain(instruction, coverage);
   // read-failure-exempt: the rain read is an optional improvement of a frozen banner; a miss leaves the banner as frozen.
@@ -5793,7 +5800,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
         // freeze and the completion text never see it). A replay only.
         if (wateringInstruction && !opts.wateringInstructionOut && opts.lawnWaterInRain === true && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
-          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service });
+          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service, sharedSeries: opts.liveChipOut?.series || null, completionTime });
         }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
@@ -7761,6 +7768,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 
 module.exports = {
   buildReportV1Data,
+  waterInRainInstruction,
   resolveRecordedProtocolVersion,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,

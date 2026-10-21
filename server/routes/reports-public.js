@@ -2646,7 +2646,10 @@ router.get('/:token/data', async (req, res, next) => {
         && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
       const buildMode = simpleWeb ? 'pdf' : mode;
       const programLive = webExtraLive(simpleWeb, reportGates, 'reportWebProgramLive');
-      const liveChipOut = webExtraLive(simpleWeb, reportGates, 'reportWebLiveChipLive') ? {} : undefined;
+      // The out-param also carries the view's one shared weather read (the banner's water-in coverage and the chip use it).
+      const liveChipOut = webExtraLive(simpleWeb, reportGates, 'reportWebLiveChipLive')
+        ? { series: require('../services/service-report/lawn-live-chip').createSharedSeries(require('../services/service-report/application-conditions').fetchPropertyForecast) }
+        : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
