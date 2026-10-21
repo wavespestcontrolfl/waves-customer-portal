@@ -367,9 +367,12 @@ describe('confirm', () => {
     });
     // The receipt guard it hands over allows exactly the destinations the card showed.
     const { receiptGuard } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
-    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test' })).toBe(true);
+    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test', optedOut: false })).toBe(true);
+    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test', optedOut: true })).toBe(false);
+    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test', optedOut: null })).toBe(false);
+    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test' })).toBe(false);
     expect(await receiptGuard.check({ channel: 'sms', to: '+19415550142' })).toBe(true);
-    expect(await receiptGuard.check({ channel: 'email', to: 'other@example.test' })).toBe(false);
+    expect(await receiptGuard.check({ channel: 'email', to: 'other@example.test', optedOut: false })).toBe(false);
     expect(await receiptGuard.check({ channel: 'app', to: null })).toBe(false);
   });
 

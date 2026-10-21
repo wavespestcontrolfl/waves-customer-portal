@@ -287,7 +287,7 @@ function planEffects({ invoice, dueCents, method, reference, note, sendReceipt, 
     effects.push({ kind: 'operational', text: 'This invoice came from a completed visit: the customer may be enrolled in the review-request follow-up under the standing review rules (no review text goes out from this step itself).' });
   }
   effects.push(sendReceipt
-    ? { kind: 'comms', text: `A receipt is sent now: ${[reach.via !== 'sms' && reach.email && `email to ${maskEmail(reach.email)}`, reach.via !== 'email' && reach.phone && `text to ${maskPhone(reach.phone)}`].filter(Boolean).join(' and ')}. A leg is skipped if the customer's receipt settings or an opt-out say so, or if the address or phone changed since this card.` }
+    ? { kind: 'comms', text: `A receipt is sent now: ${[reach.via !== 'sms' && reach.email && `email to ${maskEmail(reach.email)}`, reach.via !== 'email' && reach.phone && `text to ${maskPhone(reach.phone)}`].filter(Boolean).join(' and ')}. A leg is skipped if the customer opted out of receipts or their receipt settings say so, or if the address or phone changed since this card.` }
     : { kind: 'comms', text: 'Nothing is sent to the customer: no receipt, text or email.' });
   return effects;
 }

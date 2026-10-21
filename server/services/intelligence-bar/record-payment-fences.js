@@ -22,7 +22,8 @@
  *
  *   receiptGuard { check, relabel }  the provider-boundary check for the inline receipt (beforeProviderHandoff on the receipt email
  *       and text). It allows a send only to the email / phone the card showed (digests, receipt-destination-digest.js); the App leg
- *       is never approved. `relabel` words a refused leg "receipt not sent: contact changed".
+ *       is never approved. The email also needs the customer's receipt opt-out to read false (the manual email ignores it on its own).
+ *       `relabel` words a refused leg: contact changed, the customer opted out of receipts, or the settings could not be read.
  */
 const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
 
@@ -35,6 +36,8 @@ const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown �
 const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 const CONTACT_CHANGED = 'receipt not sent: contact changed';
+const OPTED_OUT = 'receipt not sent: the customer opted out of receipts';
+const SETTINGS_UNREADABLE = 'receipt not sent: the customer\'s receipt settings could not be read';
 
 const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, drift: true });
 
@@ -72,19 +75,27 @@ function settlementFenceFor(pin) {
 }
 
 // approved: { email, phone } digests the card showed (null = no such leg).
+// The email: the manual receipt email deliberately ignores the customer's receipt opt-out and hands it to this check as facts.optedOut
+// (true, false, or null when the settings could not be read), so the card binds it: a send needs optedOut === false (null fails
+// closed). The text needs no such check here: sendReceipt's own messaging pipeline honors the same opt-out (purpose payment_receipt,
+// PURPOSE_OPTED_OUT -> "receipt_texts_opted_out") before this boundary check runs, and reports it as the leg's own reason.
 function receiptGuardFor(approved) {
-  const refused = new Set();
+  const refused = new Map();
+  const refuse = (channel, reason) => { refused.set(channel, reason); return false; };
   const check = async (facts) => {
     const channel = facts?.channel;
-    const allowed = (channel === 'email' && Boolean(approved.email) && emailDigest(facts.to) === approved.email)
-      || (channel === 'sms' && Boolean(approved.phone) && phoneDigest(facts.to) === approved.phone);
-    if (!allowed) refused.add(channel);
-    return allowed;
+    if (channel === 'email') {
+      if (!approved.email || emailDigest(facts.to) !== approved.email) return refuse(channel, CONTACT_CHANGED);
+      if (facts.optedOut === true) return refuse(channel, OPTED_OUT);
+      return facts.optedOut === false ? true : refuse(channel, SETTINGS_UNREADABLE);
+    }
+    if (channel === 'sms' && approved.phone && phoneDigest(facts.to) === approved.phone) return true;
+    return refuse(channel, CONTACT_CHANGED);
   };
-  // A leg the check refused reads as the contact change it was, not as a provider failure.
+  // A leg the check refused reads as the reason it was, not as a provider failure.
   const relabel = ({ emailResult, smsResult }) => ({
-    emailResult: refused.has('email') && emailResult && !emailResult.ok ? { ok: false, error: CONTACT_CHANGED } : emailResult,
-    smsResult: refused.has('sms') && smsResult && !smsResult.ok ? { ok: false, error: CONTACT_CHANGED } : smsResult,
+    emailResult: refused.has('email') && emailResult && !emailResult.ok ? { ok: false, error: refused.get('email') } : emailResult,
+    smsResult: refused.has('sms') && smsResult && !smsResult.ok ? { ok: false, error: refused.get('sms') } : smsResult,
   });
   return { check, relabel };
 }

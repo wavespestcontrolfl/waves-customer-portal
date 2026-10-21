@@ -685,8 +685,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
   describe('receiptGuard: the receipt sends hand the senders a provider-boundary check', () => {
     const guard = () => receiptGuardFor({ email: emailDigest('pat@example.test'), phone: phoneDigest('(941) 555-0100') });
     // Senders that call the check with the destination they are about to use, as the real ones do.
-    function senders({ emailTo, smsTo }) {
-      sendReceiptEmail.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'email', to: emailTo, amount: '117.00' })) === true ? { ok: true } : { ok: false, error: 'Receipt email handoff aborted by the caller' }));
+    function senders({ emailTo, smsTo, optedOut = false }) {
+      sendReceiptEmail.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'email', to: emailTo, amount: '117.00', optedOut })) === true ? { ok: true } : { ok: false, error: 'Receipt email handoff aborted by the caller' }));
       InvoiceService.sendReceipt.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'sms', to: smsTo, amount: '117.00' })) === true ? { sent: true } : { sent: false, reason: 'receipt handoff aborted by the caller' }));
     }
     afterEach(() => {
@@ -713,10 +713,38 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(half.receipt).toEqual({ email: { ok: true }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
     });
 
+    test.each([
+      ['opted out', true, 'receipt not sent: the customer opted out of receipts'],
+      ['unreadable settings (null fails closed)', null, 'receipt not sent: the customer\'s receipt settings could not be read'],
+    ])('the email to an approved address still needs the receipt opt-out to read false: %s skips it with its own reason; the text is unaffected', async (_name, optedOut, error) => {
+      settle();
+      senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut });
+      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+      expect(out.receipt).toEqual({ email: { ok: false, error }, sms: { ok: true } });
+    });
+
+    test('a clear opt-out (false) sends the email; a changed address wins over the opt-out wording', async () => {
+      settle();
+      senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut: false });
+      expect((await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() })).receipt.email).toEqual({ ok: true });
+      settle();
+      senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550100', optedOut: true });
+      expect((await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() })).receipt.email).toEqual({ ok: false, error: 'receipt not sent: contact changed' });
+    });
+
+    test('the text leg: an opt-out is the messaging pipeline\'s own PURPOSE_OPTED_OUT answer (receipt_texts_opted_out), reported as the leg\'s reason, not relabelled', async () => {
+      settle();
+      senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
+      InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'receipt_texts_opted_out' });
+      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+      expect(out.receipt.sms).toEqual({ ok: false, error: 'receipt_texts_opted_out' });
+    });
+
     test('an App leg, or a destination the card did not show, is never approved', async () => {
       const check = async (facts, approved) => receiptGuardFor(approved).check(facts);
       const approved = { email: emailDigest('pat@example.test'), phone: phoneDigest('9415550100') };
       expect(await check({ channel: 'push', to: null }, approved)).toBe(false);
+      expect(await check({ channel: 'email', to: 'pat@example.test', optedOut: false }, approved)).toBe(true);
       expect(await check({ channel: 'app', to: null }, approved)).toBe(false);
       expect(await check({ channel: 'email', to: 'pat@example.test' }, { email: null, phone: null })).toBe(false);
       expect(await check({ channel: 'sms', to: '9415550100' }, { email: null, phone: null })).toBe(false);
