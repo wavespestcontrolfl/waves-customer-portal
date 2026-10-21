@@ -140,6 +140,9 @@ describe('cancelServiceFromBar hands the card\'s approvals to the handler', () =
     const { json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR, approvedMoney });
     const call = mockRunFollowThrough.mock.calls[0][0];
     expect(call.pinnedEffects).toEqual({ 'svc-bar-1': approvedMoney });
+    // The shared status writer's UNPINNED invoice void / credit reversal stands down, so nothing runs on live state
+    // before the pinned follow-through (and approved effects are not double-counted as skipped).
+    expect(mockTransitionJobStatus.mock.calls[0][0].moneySeam).toBe('caller');
     expect(call.waiveFee).toBe(false);
     expect(json.moneySkipped).toEqual([{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }]);
   });

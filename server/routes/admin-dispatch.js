@@ -3147,6 +3147,9 @@ async function serviceStatusHandler(req, res, next) {
           // fire-and-forget claim could race and steal the marker from the
           // operator-requested text.
           notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+          // Set only by cancelServiceFromBar: the pinned follow-through below does the invoice void and credit
+          // reversal on the card's effects, so the shared writer's unpinned money seam stands down.
+          ...(req.ibApprovedMoney ? { moneySeam: 'caller' } : {}),
           // This route runs the OFFICE version of the activation itself
           // (below) — the shared writer must not fire its lazy one too.
           legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,

@@ -332,6 +332,9 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
   cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false, holdCompletionOutcome = 'performed',
+  // 'caller': the caller runs the invoice void and inspection-credit reversal itself, on the effects it was shown
+  // (the Intelligence Bar cancel card's pinned follow-through), so this writer's unpinned seam stands down.
+  moneySeam,
   // A caller transitioning a BATCH of rows passes one Set and refreshes the
   // affected routes once after its loop (dispatch-assignment.js
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
@@ -1009,9 +1012,11 @@ async function transitionJobStatus({
       // idempotent, so routes that also run it (cancel/no-show branches)
       // double-run safely. Post-commit by placement, best-effort by
       // contract.
-      void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
-        logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
-      });
+      if (moneySeam !== 'caller') {
+        void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
+          logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
+        });
+      }
       // Visit-group seam (visit-group-scope.md §2): a cancelled/skipped
       // child leaves its group; the last remaining row dissolves it.
       // Guarded HERE — the one shared status writer — so no transition

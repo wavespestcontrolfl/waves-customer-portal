@@ -61,6 +61,19 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     expect(log.updates).toHaveLength(1);
   });
 
+  test('an approved cascade texts no child (call-booked or package), whatever the child\'s kind', async () => {
+    const call = { id: 'child-1', status: 'pending', source_action: 'ai_call_pipeline_followup', scheduled_date: '2026-11-02', service_type: 'pest_control', technician_id: 'tech-9' };
+    await run({ children: [call], locked: { 'child-1': { ...call } }, approvedChildren: [{ ...APPROVED, status: 'pending' }] });
+    expect(transitionJobStatus.mock.calls[0][0].notifyCustomer).toBe(false);
+  });
+
+  test('without approvedChildren a call-booked child keeps its own notice behavior (unchanged)', async () => {
+    const call = { id: 'child-1', status: 'pending', source_action: 'ai_call_pipeline_followup' };
+    const { conn } = fakeConn({ children: [call], locked: {} });
+    await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
+    expect(Object.keys(transitionJobStatus.mock.calls[0][0])).not.toContain('notifyCustomer');
+  });
+
   test('a linked visit that is NOT on the card is left alone and reported', async () => {
     const { cancelled, report } = await run({ approvedChildren: [] });
     expect(cancelled).toBe(0);

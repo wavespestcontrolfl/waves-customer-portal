@@ -950,7 +950,9 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           // A package visit 2 arms reminders, so its own cancel could text the
           // customer; the parent's cancellation owns that choice (an operator
           // may have chosen no text), so the child never sends its own.
-          ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION ? { notifyCustomer: false } : {}),
+          // An approved cascade (the Intelligence Bar cancel card, which promises no text for a linked visit) texts
+          // no child either, call-booked or package.
+          ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION || approved ? { notifyCustomer: false } : {}),
           trx,
         });
         await trx('scheduled_services')
