@@ -28,6 +28,7 @@ const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
 const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../../utils/redact-request-url');
+const { NOTE_CAP } = require('../../utils/note-secret-scrubber');
 const { newState, redactSecrets, redactString, withholdNotes } = require('../../utils/signed-link-redaction');
 const catalog = require('./admin-read-catalog.json');
 
@@ -90,6 +91,13 @@ const BLOCKED_ROUTES = Object.freeze([...catalog.blockedRoutes]);
 
 function adminReadLive() {
   return require('../../config/feature-gates').ibGeneralReadLive() === true;
+}
+
+// GATE_IB_READ_NOTES (needs the general read): free-text notes come back scrubbed
+// instead of withheld. Read at call time. The caller has already checked the
+// owner login, so a non-owner login never reaches it.
+function readNotesLive() {
+  return require('../../config/feature-gates').ibReadNotesLive() === true;
 }
 
 function refusal(error, code, extra = {}) {
@@ -313,10 +321,16 @@ async function shapeResponse(response, entry, authorization) {
 // fields), then cut to the cap.
 const NOTES_WITHHELD_NOTE = 'Free-text notes are not read through this tool, because people paste passwords and links into them. Tell the operator the note exists and its length; they can read it on the record.';
 
+const NOTES_RETURNED_NOTE = `Free-text notes are returned as written, with secrets of fixed formats (keys, tokens, card numbers and the like) removed, and each is cut at ${NOTE_CAP} characters. A password or code written as plain words is not removed; do not repeat one back unless the operator asks.`;
+
 function answerFrom(parsed, status, entry) {
   const state = newState();
-  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read.
-  const clean = redactSecrets(withholdNotes(parsed, entry.freeText || {}, state), state);
+  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read,
+  // unless GATE_IB_READ_NOTES is on: then it is returned through the fixed-format scrubber only.
+  const returning = readNotesLive();
+  const clean = returning
+    ? redactSecrets(parsed, state, 0, { freeText: entry.freeText || {} })
+    : redactSecrets(withholdNotes(parsed, entry.freeText || {}, state), state);
   const fitted = fitToCap(clean);
   const removed = [
     state.links ? `${state.links} signed file link(s)` : null,
@@ -326,6 +340,7 @@ function answerFrom(parsed, status, entry) {
   const notes = [
     UNTRUSTED_NOTE,
     state.notes ? NOTES_WITHHELD_NOTE : null,
+    state.notesReturned ? NOTES_RETURNED_NOTE : null,
     removed.length ? `Removed ${removed.join(', ')} (shown as "[signed link removed]", "[private link removed]" or "[removed]"); the bar never holds a credential or a link that carries one.` : null,
     fitted.truncated
       ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). Narrow with "query" filters (a date range, status, id or limit) to see the rest.${paginationHint(clean)}`
@@ -337,6 +352,7 @@ function answerFrom(parsed, status, entry) {
     ...(state.links + state.privateLinks ? { signed_links_removed: state.links + state.privateLinks } : {}),
     ...(state.fields ? { credential_fields_removed: state.fields } : {}),
     ...(state.notes ? { notes_withheld: state.notes } : {}),
+    ...(state.notesReturned ? { notes_returned: state.notesReturned } : {}),
     note: notes.length ? notes.join(' ') : null,
   };
 }

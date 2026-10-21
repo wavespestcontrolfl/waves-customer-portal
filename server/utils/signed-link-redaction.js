@@ -37,6 +37,7 @@
  */
 const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
+const { scrubNote } = require('./note-secret-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -265,7 +266,7 @@ function redactString(text, state) {
 }
 
 function newState() {
-  return { links: 0, privateLinks: 0, fields: 0, notes: 0 };
+  return { links: 0, privateLinks: 0, fields: 0, notes: 0, notesReturned: 0, noteSecrets: 0 };
 }
 
 // OPERATOR NOTES. A free-text field typed by staff or customers about a record
@@ -337,18 +338,48 @@ function scrubFreeText(text, state) {
   return clean;
 }
 
+// RETURNED NOTES (GATE_IB_READ_NOTES, owner ruling 2026-10-13). A value the
+// withholding rule above would hide comes back instead: every string in it goes
+// through the ONE fixed-format scrubber (note-secret-scrubber.js) and is cut at
+// 1,000 characters. No other rule runs on it, so gate codes and lockbox
+// instructions come back as written. A credential-named key inside it is still
+// removed.
+function returnNote(item, state, depth = 0) {
+  if (typeof item === 'string') {
+    const { text, removed } = scrubNote(item);
+    state.noteSecrets += removed;
+    return text;
+  }
+  if (!item || typeof item !== 'object') return item;
+  if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
+  if (Array.isArray(item)) return item.map(entry => returnNote(entry, state, depth + 1));
+  const out = {};
+  for (const [key, entry] of Object.entries(item)) {
+    if (entry !== null && entry !== undefined && isCredentialField(key, entry)) {
+      state.noteSecrets += 1;
+      out[key] = REDACTED_FIELD;
+    } else out[key] = returnNote(entry, state, depth + 1);
+  }
+  return out;
+}
+
 // A copy of `value` with credentials removed. `state` counts what was removed.
-function redactSecrets(value, state, depth = 0) {
+// `notes` ({ freeText }) turns on RETURNED NOTES: a value that would be
+// withheld is returned scrubbed instead. Without it nothing changes.
+function redactSecrets(value, state, depth = 0, notes = null) {
   if (typeof value === 'string') return scrubFreeText(redactString(value, state), state);
   if (!value || typeof value !== 'object') return value;
   if (depth > MAX_DEPTH) { state.fields += 1; return '[too deeply nested]'; }
-  if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1));
+  if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1, notes));
   const out = {};
   for (const [key, item] of Object.entries(value)) {
     if (item !== null && item !== undefined && isCredentialField(key, item)) {
       state.fields += 1;
       out[key] = REDACTED_FIELD;
-    } else out[key] = redactSecrets(item, state, depth + 1);
+    } else if (notes && shouldWithhold(key, item, notes.freeText)) {
+      state.notesReturned += 1;
+      out[key] = returnNote(item, state);
+    } else out[key] = redactSecrets(item, state, depth + 1, notes);
   }
   return out;
 }
