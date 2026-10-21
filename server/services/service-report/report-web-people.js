@@ -10,8 +10,7 @@
  *   tech       first name, photo and FDACS applicator number from the staff record the report already uses, plus how
  *              many visits that technician has done at this home.
  *   treatedMap true when the technician traced a treatment map for this visit (lawn, pest and the other lines).
- *   nextVisit  the next visit at this property and its self-serve reschedule link. The link is the one the
- *              "Your plan" card uses (reschedule-link.js, with the public reschedule page's own eligibility verdict).
+ *   nextVisit  the next visit at this property (date and window only, never a reschedule link).
  *   review     the Google review link, only for a good visit and a quiet customer (see reviewLinkFor).
  */
 
@@ -152,9 +151,8 @@ function nextVisitFor(visits) {
   return {
     serviceType: next.serviceType || null,
     scheduledDate: next.scheduledDate,
+    // No reschedule link: it is a bearer credential. "Move it" goes to the signed-in portal schedule.
     windowStart: next.windowStart || null,
-    // The existing self-serve reschedule page decides whether the visit can still move; null hides the button.
-    rescheduleUrl: typeof next.rescheduleUrl === 'string' && next.rescheduleUrl ? next.rescheduleUrl : null,
   };
 }
 

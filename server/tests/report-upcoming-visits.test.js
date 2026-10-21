@@ -1307,27 +1307,21 @@ describe('webPeopleNext (GATE_REPORT_WEB_PEOPLE): the simple web view builds in 
     ],
   });
 
-  test('pdf mode with the opt-in: visits and reschedule links, though both report gates are off, and no upcomingVisitsCard key', async () => {
-    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
-    const data = await buildReportV1Data(BASE_SERVICE, 'token-web-people', makeKnex(fixtures()), { mode: 'pdf', webPeopleNext: true });
-    expect(data.webPeopleNext).toEqual([{
-      serviceType: 'Lawn Care Treatment', scheduledDate: todayPlus(5), windowStart: '08:00:00', rescheduleUrl: 'https://short.test/l/scheduled-lawn',
-    }]);
-    expect(data).not.toHaveProperty('upcomingVisitsCard');
-    expect(buildRescheduleLink).toHaveBeenCalledWith('scheduled-lawn', { customerId: 'customer-1', reuseExisting: true });
+  test('pdf mode with the opt-in: the visits, never a reschedule link, whatever the reschedule gate says', async () => {
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_REPORT_PLAN_RESCHEDULE = gate; else delete process.env.GATE_REPORT_PLAN_RESCHEDULE;
+      buildRescheduleLink.mockClear();
+      const data = await buildReportV1Data(BASE_SERVICE, 'token-web-people', makeKnex(fixtures()), { mode: 'pdf', webPeopleNext: true });
+      expect(data.webPeopleNext).toEqual([{ serviceType: 'Lawn Care Treatment', scheduledDate: todayPlus(5), windowStart: '08:00:00' }]);
+      expect(JSON.stringify(data)).not.toMatch(/reschedule|short\.test/i);
+      expect(data).not.toHaveProperty('upcomingVisitsCard');
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+    }
   });
 
   test('pdf mode without the opt-in: no key and nothing minted', async () => {
     const data = await buildReportV1Data(BASE_SERVICE, 'token-no-opt-in', makeKnex(fixtures()), { mode: 'pdf' });
     expect(data).not.toHaveProperty('webPeopleNext');
     expect(buildRescheduleLink).not.toHaveBeenCalled();
-  });
-
-  test('a visit the public reschedule page would refuse (in progress) gets no link', async () => {
-    const f = fixtures();
-    f.scheduled_services[1] = { ...f.scheduled_services[1], status: 'en_route' };
-    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
-    const data = await buildReportV1Data(BASE_SERVICE, 'token-web-people-busy', makeKnex(f), { mode: 'pdf', webPeopleNext: true });
-    expect(data.webPeopleNext[0].rescheduleUrl).toBeNull();
   });
 });

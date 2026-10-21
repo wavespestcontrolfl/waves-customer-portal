@@ -86,25 +86,19 @@ describe('web report people cards', () => {
     expect(screen.getByAltText('Technician-traced treatment map')).toBeInTheDocument();
   });
 
-  it('next visit: Works confirms on the page and writes nothing; Move it opens the reschedule link', async () => {
-    const { fetchMock } = renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00', rescheduleUrl: 'https://portal.example/r/abc' } }));
+  it('next visit: Works confirms on the page and writes nothing; Move it opens the signed-in portal schedule, never a token link', async () => {
+    const { container, fetchMock } = renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00' } }));
     await screen.findByText(/This report is provided for your records/);
     expect(screen.getByText('Your next visit')).toBeInTheDocument();
     expect(screen.getByText(/Lawn Care · Wed, Nov 18 · 9:00 AM/)).toBeInTheDocument();
     expect(screen.getByText('Does this time work for you?')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Move it' })).toHaveAttribute('href', 'https://portal.example/r/abc');
+    expect(screen.getByRole('link', { name: 'Move it' })).toHaveAttribute('href', '/?tab=schedule');
+    expect(container.innerHTML).not.toMatch(/\/reschedule/);
     const callsBefore = fetchMock.mock.calls.length;
     fireEvent.click(screen.getByRole('button', { name: 'Works' }));
     expect(screen.getByText('Great. We will see you then.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Works' })).toBeNull();
     expect(fetchMock.mock.calls.length).toBe(callsBefore);
-  });
-
-  it('next visit with no reschedule link: no Move it, the phone line instead', async () => {
-    renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null, rescheduleUrl: null } }));
-    await screen.findByText(/This report is provided for your records/);
-    expect(screen.queryByRole('link', { name: 'Move it' })).toBeNull();
-    expect(screen.getByText(/Need a change\? Call/)).toBeInTheDocument();
   });
 
   it('review card: names the technician and the customer, links to Google, and records the click', async () => {
@@ -120,7 +114,7 @@ describe('web report people cards', () => {
   });
 
   it('no review in webPeople: no review card', async () => {
-    renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null, rescheduleUrl: null } }));
+    renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null } }));
     await screen.findByText(/This report is provided for your records/);
     expect(screen.queryByText(/How did .* do today/)).toBeNull();
   });

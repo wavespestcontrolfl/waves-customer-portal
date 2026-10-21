@@ -92,7 +92,7 @@ function mockDb(overrides = {}) {
 }
 
 const PEOPLE = { tech: { firstName: 'Alex', photoUrl: null, fdacsId: null, visitsAtHome: null } };
-const VISITS = [{ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null, rescheduleUrl: 'https://portal.example/r/abc' }];
+const VISITS = [{ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null }];
 
 async function getData(baseUrl, query = '') {
   const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data${query}`);

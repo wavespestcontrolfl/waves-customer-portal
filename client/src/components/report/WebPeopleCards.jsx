@@ -1,9 +1,7 @@
 // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the people cards of the simple web service report.
 // The server sends `data.webPeople` only while the gate is live; every sentence below is fixed copy, with a name or a
-// date filled in. Nothing here writes: "Works" only confirms on the page, "Move it" opens the customer's existing
-// self-serve reschedule page, and the review card links to Google.
+// date filled in. Nothing here writes: "Works" only confirms on the page, "Move it" opens the signed-in portal schedule, and the review card links to Google.
 import { useState } from 'react';
-import { WAVES_SUPPORT_PHONE_DISPLAY } from '../../constants/business';
 import TracedTreatmentZoneMap from './TracedTreatmentZoneMap';
 import {
   formatNextAppointmentLabel, trackReportEvent, tracedVariantFallback,
@@ -113,9 +111,8 @@ function NextVisit({ visit, glass }) {
           <p style={{ margin: '8px 0 12px', color: MUTED }}>Does this time work for you?</p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
             <button type="button" style={buttonStyle(true)} onClick={() => setWorks(true)}>Works</button>
-            {visit.rescheduleUrl
-              ? <a href={visit.rescheduleUrl} style={buttonStyle(false)}>Move it</a>
-              : <span style={{ color: MUTED, fontSize: 15, alignSelf: 'center' }}>Need a change? Call {WAVES_SUPPORT_PHONE_DISPLAY}.</span>}
+            {/* The signed-in portal schedule, never a token link: a forwarded report must not carry the visit's reschedule capability. */}
+            <a href="/?tab=schedule" style={buttonStyle(false)}>Move it</a>
           </div>
         </>
       )}

@@ -6726,7 +6726,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // the general report limiter, repeatedly.
   let upcomingVisitsCard = null;
   // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the simple web view is built in 'pdf' mode, so the card above never ran
-  // for it. opts.webPeopleNext asks for the same property-scoped visits and reschedule links in that build; the route
+  // for it. opts.webPeopleNext asks for the same property-scoped visits (never a reschedule link) in that build; the route
   // moves them into webPeople.nextVisit. The gate itself is read by the route, which is the only caller that sets it.
   const webPeopleNext = opts.webPeopleNext === true;
   if (webPeopleNext || (opts.mode === 'live' && opts.upcomingVisitsCard === true
@@ -6967,7 +6967,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // short-link row each time. null when no link applies (too close
           // to the visit, dispatch-owned pending, grouped visit, ...) and on
           // ANY failure: the report never breaks.
-          const planReschedule = reportPlanRescheduleLive() || webPeopleNext;
+          // The web-people build never carries a reschedule link: it is a bearer credential and that card links to the signed-in portal.
+          const planReschedule = reportPlanRescheduleLive() && !webPeopleNext;
           const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
           const visits = await Promise.all(matched.map(async (row) => {
             let rescheduleUrl = null;
@@ -7588,7 +7589,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // opts.upcomingVisitsCard check the work above already gated on.
     ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
     // GATE_REPORT_WEB_PEOPLE: the visits for webPeople.nextVisit. The route deletes this key after it reads it.
-    ...(webPeopleNext ? { webPeopleNext: Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : [] } : {}),
+    ...(webPeopleNext ? { webPeopleNext: (Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : []).map(({ serviceType, scheduledDate, windowStart }) => ({ serviceType, scheduledDate, windowStart })) } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same

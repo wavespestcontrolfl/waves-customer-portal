@@ -182,15 +182,14 @@ describe('webPeople tech, map and next visit', () => {
     expect((await buildWebPeople({ data: lawnData(70), service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], now: NOW })).treatedMap).toBeUndefined();
   });
 
-  test('next visit: the first visit with its reschedule link; no link means no button', async () => {
+  test('next visit: the first visit, date and window only; a reschedule link or token in the input never reaches the payload', async () => {
     const visits = [
-      { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00', rescheduleUrl: 'https://portal.example/r/abc' },
-      { serviceType: 'Pest Control', scheduledDate: '2026-12-01', windowStart: null, rescheduleUrl: null },
+      { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00', rescheduleUrl: 'https://portal.example/reschedule/abc', reschedule_token: 'tok' },
+      { serviceType: 'Pest Control', scheduledDate: '2026-12-01', windowStart: null },
     ];
     const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex: fakeKnex(QUIET), nextVisits: visits, now: NOW });
-    expect(out.nextVisit).toEqual({ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00', rescheduleUrl: 'https://portal.example/r/abc' });
-    const noLink = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [{ ...visits[0], rescheduleUrl: undefined }], now: NOW });
-    expect(noLink.nextVisit.rescheduleUrl).toBeNull();
+    expect(out.nextVisit).toEqual({ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00' });
+    expect(JSON.stringify(out)).not.toMatch(/reschedule|tok/i);
   });
 
   test('nothing to show returns null', async () => {
