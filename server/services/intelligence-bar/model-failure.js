@@ -233,20 +233,25 @@ async function ringFailureBell({ code, gap, lane }) {
  * Everything the route needs after a model call failed. Never throws.
  * Returns { answer, taskState, code } (taskState null without a saved task).
  */
+// Ring on the pool (no held transaction), then re-check under the lane lock on
+// ONE connection: a recovery whose answer began after this failure, and that
+// ran before the bell existed, is caught here and the bell is closed at once.
+// Holding a transaction while other writes wait for pool connections could
+// exhaust the pool under a burst of failures (pre-push audit).
 async function ringUnlessRecovered({ code, gap, lane, failedAt }) {
+  await stampLastFailure(lane, new Date(failedAt));
+  await ringFailureBell({ code, gap, lane });
   try {
     const db = require('../../models/db');
-    await db.transaction(async (trx) => {
+    return await db.transaction(async (trx) => {
       await lockLane(trx, lane);
-      await stampLastFailure(lane, new Date(failedAt));
-      if (await recoveredAt(trx, lane) > failedAt) return;
-      await ringFailureBell({ code, gap, lane });
+      const recovered = await recoveredAt(trx, lane);
+      if (!(recovered > failedAt)) return 0;
+      return closeOpenBells(trx, lane, recovered);
     });
   } catch (err) {
-    // The lock or the marker read failed: ring anyway (a missed outage is worse).
-    logger.warn(`[intelligence-bar] model failure lane lock unavailable (code=${err?.code || err?.name || 'error'})`);
-    await stampLastFailure(lane, new Date(failedAt));
-    await ringFailureBell({ code, gap, lane });
+    logger.warn(`[intelligence-bar] model failure recovery re-check failed (code=${err?.code || err?.name || 'error'})`);
+    return 0;
   }
 }
 
@@ -281,6 +286,23 @@ function laneState(lane) {
   if (!lanes.has(key)) lanes.set(key, { mayBeOpen: true, lastCheckAt: 0 });
   return lanes.get(key);
 }
+// Close the lane's open bells whose last failure came before `answeredSince`,
+// under row locks, inside the caller's transaction.
+async function closeOpenBells(trx, lane, answeredSince) {
+  const NotificationService = require('../notification-service');
+  const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
+    // Only a bell whose last failure came before this answer's attempt began.
+    .modify((q) => { if (answeredSince) q.whereRaw("COALESCE((metadata->>'lastFailureAt')::timestamptz, created_at) < ?", [new Date(answeredSince)]); })
+    .forUpdate()
+    .select('id');
+  if (!rows.length) return 0;
+  return NotificationService.markAdminDone(rows.map((r) => r.id), {
+    by: 'ib-model-recovered',
+    resolution: 'The AI model answered again.',
+  }, trx);
+}
+
 async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin', answeredSince = null } = {}) {
   const state = laneState(lane);
   if (!state.mayBeOpen && now - state.lastCheckAt < RECOVERY_CHECK_MS) return 0;
@@ -288,23 +310,12 @@ async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin', an
   state.lastCheckAt = now;
   try {
     const db = require('../../models/db');
-    const NotificationService = require('../notification-service');
     // Select and close under the same row locks, so a failure stamp cannot land
     // between them (stampLastFailure waits for the lock, then finds the row done).
     return await db.transaction(async (trx) => {
       await lockLane(trx, lane);
       await noteRecovery(trx, lane, answeredSince);
-      const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-        .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
-        // Only a bell whose last failure came before this answer's attempt began.
-        .modify((q) => { if (answeredSince) q.whereRaw("COALESCE((metadata->>'lastFailureAt')::timestamptz, created_at) < ?", [new Date(answeredSince)]); })
-        .forUpdate()
-        .select('id');
-      if (!rows.length) return 0;
-      return NotificationService.markAdminDone(rows.map((r) => r.id), {
-        by: 'ib-model-recovered',
-        resolution: 'The AI model answered again.',
-      }, trx);
+      return closeOpenBells(trx, lane, answeredSince);
     });
   } catch (err) {
     state.mayBeOpen = true;

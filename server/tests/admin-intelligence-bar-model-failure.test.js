@@ -583,28 +583,31 @@ describe('round 4 Codex fixes (#6368)', () => {
       db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
     }
   });
-  test('a first failure that finds a newer recovery does not ring; an older one rings', async () => {
+  test('a first failure overtaken by a newer recovery closes its bell at once; an older recovery leaves it open', async () => {
     const db = require('../models/db');
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     const compose = require('../services/admin-alert-compose');
-    const mockRaiseAdminAlert = jest.spyOn(compose, 'raiseAdminAlert').mockImplementation(async () => ({ id: 1 }));
+    const raise = jest.spyOn(compose, 'raiseAdminAlert').mockImplementation(async () => ({ id: 1 }));
     const failedAt = Date.parse('2026-10-21T01:00:00Z');
     const run = async (recovered) => {
-      const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), update: jest.fn(async () => 0) };
+      const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), update: jest.fn(async () => 0), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select: jest.fn(async () => [{ id: 31 }]) };
       const trx = laneTrx(chain, { recovered });
       db.mockImplementation(() => chain);
       db.transaction = async (fn) => fn(trx);
-      mockRaiseAdminAlert.mockClear();
-      await ModelFailure.ringUnlessRecovered({ code: 'anthropic_400', gap: null, lane: 'admin', failedAt });
-      return mockRaiseAdminAlert.mock.calls.length;
+      raise.mockClear();
+      mockMarkAdminDone.mockClear();
+      mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
+      const closed = await ModelFailure.ringUnlessRecovered({ code: 'anthropic_400', gap: null, lane: 'admin', failedAt });
+      return { rang: raise.mock.calls.length, closed, lock: trx.raw.mock.calls.length };
     };
     try {
-      expect(await run('2026-10-21T01:00:05Z')).toBe(0);
-      expect(await run('2026-10-21T00:59:00Z')).toBe(1);
-      expect(await run(null)).toBe(1);
+      expect(await run('2026-10-21T01:00:05Z')).toEqual({ rang: 1, closed: 1, lock: 1 });
+      expect(await run('2026-10-21T00:59:00Z')).toEqual({ rang: 1, closed: 0, lock: 1 });
+      expect(await run(null)).toEqual({ rang: 1, closed: 0, lock: 1 });
     } finally {
-      mockRaiseAdminAlert.mockRestore();
+      raise.mockRestore();
       db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
     }
   });
+
 });
