@@ -11,10 +11,13 @@
  * renotify true so the phone buzzes again instead of silently replacing the
  * first banner, and writes NO new bell row.
  *
- * At-most-once: the sweep first stamps notifications.metadata.repushed_at in
- * one atomic UPDATE that re-checks the row is still unread and open. Only the
- * writer that stamped it sends. A crash after the stamp loses the re-push
- * rather than repeating it; that is the deliberate trade.
+ * At-most-once: notifications.metadata.repushed_at is stamped in one atomic
+ * UPDATE that re-checks the row is still unread and open. The stamp runs in
+ * the push service's beforeDispatch hook, i.e. after the subscription lookup
+ * and immediately before the first provider handoff, so a failed lookup never
+ * consumes the one re-push. Only the writer that stamped it sends. A crash
+ * after the stamp loses the re-push rather than repeating it; that is the
+ * deliberate trade.
  *
  * Off (gate unset) the sweep returns before any query.
  */
@@ -69,19 +72,45 @@ async function repushRecipients(triggers, trigger) {
   return recipients.length ? { recipients, pref } : null;
 }
 
-// One bell: stamp, then push. True when a device accepted it.
-async function repushOne(row, now, { triggers, trigger, to, PushService }) {
-  // Atomic at-most-once claim, re-checking that nobody opened or closed the
-  // bell since the candidate read.
-  const stamped = await db('notifications')
-    .where({ id: row.id })
-    .whereRaw(OPEN_UNREAD)
-    .whereRaw("COALESCE(metadata->>'repushed_at', '') = ''")
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('repushed_at', ?::text)", [now.toISOString()]) });
-  if (!stamped) return false;
+// Office hours, re-read at every boundary (sweep start, each bell's claim, each
+// device): open per the loaded window AND the closed-day list read STRICTLY, so
+// an unreadable blackout lookup counts as closed (find-time's rule).
+async function canRepushNow(hours, clock) {
+  const at = clock();
+  if (!officeOpenAt(hours, at)) return false;
+  try {
+    const { etDateString } = require('../utils/datetime-et');
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const day = etDateString(at);
+    const closed = await getBlackoutDates(day, day, db, { strict: true });
+    return !closed.has(day);
+  } catch (err) {
+    logger.warn(`[missed-call-repush] closed-day lookup failed; treating as closed: ${err.message}`);
+    return false;
+  }
+}
+
+// One bell: push, stamping repushed_at inside beforeDispatch. True when a
+// device accepted it.
+async function repushOne(row, { triggers, trigger, to, PushService, hours, clock }) {
   const payload = row.metadata?.payload || {};
   const stillOpen = async () => Boolean(await db('notifications').where({ id: row.id })
     .whereRaw(OPEN_UNREAD).first('id'));
+  let claimed = false;
+  // Runs after the subscription lookup, right before the first handoff. The
+  // atomic stamp re-checks that nobody opened, closed or re-pushed the bell.
+  const claim = async () => {
+    if (!(await canRepushNow(hours, clock))) return false;
+    const stamped = await db('notifications')
+      .where({ id: row.id })
+      .whereRaw(OPEN_UNREAD)
+      .whereRaw("COALESCE(metadata->>'repushed_at', '') = ''")
+      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('repushed_at', ?::text)", [clock().toISOString()]) });
+    claimed = stamped > 0;
+    return claimed;
+  };
+  // Before every device: still open, and still office hours.
+  const beforeHandoff = async () => officeOpenAt(hours, clock()) && (await stillOpen());
   let stats = null;
   try {
     stats = await PushService.sendToAdminUsers(
@@ -99,11 +128,12 @@ async function repushOne(row, now, { triggers, trigger, to, PushService }) {
           renotify: true,
         };
       },
-      { beforeDispatch: stillOpen, beforeHandoff: stillOpen },
+      { beforeDispatch: claim, beforeHandoff },
     );
   } catch (err) {
     logger.warn(`[missed-call-repush] push failed for notification ${row.id}: ${err.message}`);
   }
+  if (!claimed) return false;
   const sent = Number(stats?.sent || 0);
   await db('notifications').where({ id: row.id })
     .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('repush_sent', ?::int)", [sent]) })
@@ -111,16 +141,16 @@ async function repushOne(row, now, { triggers, trigger, to, PushService }) {
   return sent > 0;
 }
 
-async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = undefined } = {}) {
+async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = undefined, clock = () => new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('missedCallRepush')) return 0;
   try {
     const nowMs = now.getTime();
     const officeHours = hours !== undefined ? hours : await require('./voice-agent/relay-context').loadOfficeHours();
-    if (!officeOpenAt(officeHours, now)) return 0;
+    if (!(await canRepushNow(officeHours, clock))) return 0;
     // Retire bells whose caller already got through first, so a resolved call
-    // never buzzes again; the sibling sweep runs concurrently (pre-push audit).
-    await require('./missed-call-bell').retireCalledBackMissedCalls().catch(() => {});
+    // never buzzes again. If the retire fails, this tick sends nothing.
+    await require('./missed-call-bell').retireCalledBackMissedCalls();
 
     const candidates = await db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
@@ -139,10 +169,11 @@ async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = und
     const to = await repushRecipients(triggers, trigger);
     if (!to) return 0;
 
-    const ctx = { triggers, trigger, to, PushService: require('./push-notifications') };
+    const ctx = { triggers, trigger, to, PushService: require('./push-notifications'), hours: officeHours, clock };
     let repushed = 0;
     for (const row of candidates) {
-      if (await repushOne(row, now, ctx)) repushed += 1;
+      if (!officeOpenAt(officeHours, clock())) break;
+      if (await repushOne(row, ctx)) repushed += 1;
     }
     return repushed;
   } catch (err) {

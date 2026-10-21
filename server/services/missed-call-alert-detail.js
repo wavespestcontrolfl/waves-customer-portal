@@ -18,6 +18,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { callDurationSeconds } = require('../utils/call-timeline');
 
 // Live visits only (the repo's LIVE_VISIT_STATUSES): a skipped or other
 // terminal row must never show as the next visit (pre-push audit).
@@ -82,8 +83,9 @@ async function detailPayload(row, now = new Date()) {
   const out = {};
   const line = shortLineLabel(parseMeta(row?.metadata).location);
   if (line) out.line = line;
-  const seconds = row?.duration_seconds == null ? NaN : Number(row.duration_seconds);
-  if (Number.isFinite(seconds) && seconds >= 0) out.durationSeconds = Math.round(seconds);
+  // Only positive seconds: a stored 0 means "not reported yet", not a 0-second call.
+  const seconds = callDurationSeconds(row);
+  if (seconds > 0) out.durationSeconds = Math.round(seconds);
   const next = await nextVisitDate(row?.customer_id, now);
   if (next) out.nextVisitDate = next;
   return out;
@@ -91,7 +93,7 @@ async function detailPayload(row, now = new Date()) {
 
 /** True when the payload carries any of the gate-on fields. */
 function hasDetail(p) {
-  return Boolean(p) && (p.line != null || p.durationSeconds != null || p.nextVisitDate != null);
+  return Boolean(p) && (p.line != null || Number(p.durationSeconds) > 0 || p.nextVisitDate != null);
 }
 
 /**
@@ -102,8 +104,7 @@ function formatMissedCallBody(p = {}) {
   const phone = p.phone || 'unknown number';
   if (!hasDetail(p)) return `${phone} called and did not leave a voicemail.`;
   const where = p.line ? ` ${p.line}` : '';
-  const secs = Number.isFinite(Number(p.durationSeconds)) && p.durationSeconds != null
-    ? `, ${Math.round(Number(p.durationSeconds))} sec` : '';
+  const secs = Number(p.durationSeconds) > 0 ? `, ${Math.round(Number(p.durationSeconds))} sec` : '';
   const day = visitDayLabel(p.nextVisitDate);
   return `${phone} called${where}${secs}, no voicemail.${day ? ` Next visit ${day}.` : ''}`;
 }

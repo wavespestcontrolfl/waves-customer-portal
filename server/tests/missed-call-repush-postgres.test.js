@@ -34,12 +34,14 @@ jest.mock('../services/push-notifications', () => ({
 const { isEnabled } = require('../config/feature-gates');
 const PushService = require('../services/push-notifications');
 const { sweepMissedCallRepush } = require('../services/missed-call-repush');
+const missedCallBell = require('../services/missed-call-bell');
+const blackoutDates = require('../services/scheduling/blackout-dates');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call re-push on PostgreSQL', () => {
   let database;
   const schema = `missed_call_repush_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['notifications', 'notification_preferences', 'technicians'];
+  const tables = ['notifications', 'notification_preferences', 'technicians', 'call_log', 'schedule_blackout_dates', 'system_settings'];
   // Tue 2026-10-20 11:00 ET (EDT) is inside Mon-Sat 8:00-18:00.
   const NOW = new Date('2026-10-20T15:00:00Z');
   const HOURS = { startMin: 8 * 60, endMin: 18 * 60 };
@@ -53,6 +55,7 @@ jest.setTimeout(30000);
     mockConn = database;
   });
   beforeEach(async () => {
+    jest.restoreAllMocks();
     jest.clearAllMocks();
     isEnabled.mockImplementation(() => true);
     adminId = randomUUID();
@@ -83,7 +86,11 @@ jest.setTimeout(30000);
     return { ...row, callLogId };
   }
   const stored = (row) => database('notifications').where({ id: row.id }).first();
-  const run = (opts = {}) => sweepMissedCallRepush({ now: NOW, hours: HOURS, ...opts });
+  // `now` also drives the sweep's clock, so every recheck sees the same instant.
+  const run = (opts = {}) => {
+    const at = opts.now || NOW;
+    return sweepMissedCallRepush({ hours: HOURS, clock: () => at, ...opts, now: at });
+  };
 
   test('the called-back retire runs before any re-push is chosen (pre-push audit)', async () => {
     const { retireCalledBackMissedCalls } = require('../services/missed-call-bell');
@@ -175,7 +182,8 @@ jest.setTimeout(30000);
       return (await opts.beforeDispatch()) ? { sent: 1 } : { sent: 0, superseded: true };
     });
     expect(await run()).toBe(0);
-    expect((await stored(row)).metadata.repush_sent).toBe(0);
+    // Never stamped: the claim refused an opened bell.
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
   });
 
   test('only missed-call bells and only the admin recipients with push on', async () => {
@@ -194,6 +202,63 @@ jest.setTimeout(30000);
   test('a bell older than 48 hours is the office\'s to close by hand', async () => {
     await bell(49 * 60);
     expect(await run()).toBe(0);
+  });
+
+  test('a failed subscription lookup does not consume the one re-push', async () => {
+    const row = await bell(45);
+    // The push service fails (or finds no devices) before it reaches beforeDispatch.
+    PushService.sendToAdminUsers.mockRejectedValueOnce(new Error('subscription lookup outage'));
+    expect(await run()).toBe(0);
+    PushService.sendToAdminUsers.mockImplementationOnce(async () => ({ sent: 0, subscriptions: 0 }));
+    expect(await run()).toBe(0);
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
+    // The next tick still sends it, once.
+    expect(await run()).toBe(1);
+    expect((await stored(row)).metadata.repushed_at).toBeTruthy();
+  });
+
+  test('office hours are rechecked at the handoff, not only at sweep start', async () => {
+    const row = await bell(45);
+    let at = NOW;
+    const evening = new Date('2026-10-20T22:30:00Z'); // 18:30 ET
+    // The office closes while the push service prepares: nothing is stamped or sent.
+    PushService.sendToAdminUsers.mockImplementationOnce(async (ids, build, opts) => {
+      at = evening;
+      return (await opts.beforeDispatch()) ? { sent: 1 } : { sent: 0, superseded: true };
+    });
+    expect(await sweepMissedCallRepush({ now: NOW, hours: HOURS, clock: () => at })).toBe(0);
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
+    // It closes after the stamp but before a device: that device is skipped.
+    at = NOW;
+    PushService.sendToAdminUsers.mockImplementationOnce(async (ids, build, opts) => {
+      expect(await opts.beforeDispatch()).toBe(true);
+      at = evening;
+      return (await opts.beforeHandoff()) ? { sent: 1 } : { sent: 0, superseded: true };
+    });
+    expect(await sweepMissedCallRepush({ now: NOW, hours: HOURS, clock: () => at })).toBe(0);
+    expect((await stored(row)).metadata.repushed_at).toBeTruthy();
+    expect((await stored(row)).metadata.repush_sent).toBe(0);
+  });
+
+  test('a closed day in the blackout list holds it back; an unreadable list counts as closed', async () => {
+    const row = await bell(45);
+    await database('schedule_blackout_dates').insert({ date: '2026-10-20' });
+    expect(await run()).toBe(0);
+    await database('schedule_blackout_dates').del();
+    jest.spyOn(blackoutDates, 'getBlackoutDates').mockRejectedValue(new Error('blackout read failed'));
+    expect(await run()).toBe(0);
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    blackoutDates.getBlackoutDates.mockRestore();
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
+    expect(await run()).toBe(1);
+  });
+
+  test('if retiring called-back bells fails, the tick sends nothing', async () => {
+    const row = await bell(45);
+    jest.spyOn(missedCallBell, 'retireCalledBackMissedCalls').mockRejectedValue(new Error('retire failed'));
+    expect(await run()).toBe(0);
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
   });
 
   test('gate off does nothing: no query, no push, no stamp', async () => {

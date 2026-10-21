@@ -49,7 +49,9 @@ describe('copy', () => {
   test('a missing piece is left out, not printed as blank', () => {
     expect(formatMissedCallBody({ phone: '(941) 555-0100', durationSeconds: 7 })).toBe('(941) 555-0100 called, 7 sec, no voicemail.');
     expect(formatMissedCallBody({ phone: '(941) 555-0100', line: 'Venice (Pest)' })).toBe('(941) 555-0100 called Venice (Pest), no voicemail.');
-    expect(formatMissedCallBody({ phone: '(941) 555-0100', durationSeconds: 0 })).toBe('(941) 555-0100 called, 0 sec, no voicemail.');
+    // A stored 0 is "not reported", never a 0-second call.
+    expect(formatMissedCallBody({ phone: '(941) 555-0100', durationSeconds: 0 })).toBe(ORIGINAL('(941) 555-0100'));
+    expect(formatMissedCallBody({ phone: '(941) 555-0100', line: 'Venice (Pest)', durationSeconds: 0 })).toBe('(941) 555-0100 called Venice (Pest), no voicemail.');
   });
 
   test('the longest line label still keeps the body inside 110 characters', () => {
@@ -108,6 +110,14 @@ describe('payload', () => {
     expect(await nextVisitDate('cust-1')).toBeNull();
     visitQuery(undefined);
     expect(await detailPayload(row)).toEqual({ line: 'Parrish (Pest)', durationSeconds: 12 });
+  });
+
+  test('a stored 0 or unknown duration is left out; a recording length fills in', async () => {
+    isEnabled.mockImplementation((g) => g === 'missedCallAlertDetail');
+    expect(await detailPayload({ customer_id: null, duration_seconds: 0, metadata: {} })).toEqual({});
+    expect(await detailPayload({ customer_id: null, duration_seconds: null, metadata: {} })).toEqual({});
+    expect(await detailPayload({ customer_id: null, duration_seconds: 0, recording_duration_seconds: 9, metadata: {} }))
+      .toEqual({ durationSeconds: 9 });
   });
 
   test('metadata may arrive as a JSON string', async () => {
