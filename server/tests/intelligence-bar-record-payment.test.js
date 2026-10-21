@@ -363,7 +363,7 @@ describe('confirm', () => {
       invoiceId: INV,
       body: { method: 'check', reference: '1042', note: 'n', sendReceipt: true, via: 'both' },
       actor: { technicianId: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' },
-      approvedPayment: { expectedAmountCents: 11700, settlementFence: expect.any(Function), receiptGuard: { check: expect.any(Function), relabel: expect.any(Function) } },
+      approvedPayment: { expectedAmountCents: 11700, settlementFence: expect.any(Function), receiptGuard: { check: expect.any(Function), relabel: expect.any(Function), terminal: expect.any(Function) } },
     });
     // The receipt guard it hands over allows exactly the destinations the card showed.
     const { receiptGuard } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;

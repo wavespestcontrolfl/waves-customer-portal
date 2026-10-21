@@ -542,7 +542,7 @@ async function recordManualPayment(id, {
           await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
         }
       } finally {
-        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult });
+        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult, terminal: receiptGuard?.terminal() });
       }
       if (receiptGuard) ({ emailResult, smsResult } = receiptGuard.relabel({ emailResult, smsResult }));
     }

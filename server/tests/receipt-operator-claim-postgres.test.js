@@ -525,6 +525,58 @@ postgres('operator receipt claim on PostgreSQL', () => {
     });
   });
 
+  describe('terminal — a caller\'s provider-boundary check refused a leg (the Intelligence Bar record_payment card)', () => {
+    const contactChanged = { status: 'failed', lastError: 'contact_changed_since_card' };
+
+    test.each(['queued', 'retry_scheduled'])('a %s job the operator claimed is finished as the caller said, not handed back to the drain', async (status) => {
+      const invoiceId = await seedJob({ status });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: contactChanged })).toBe('finalized');
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed', locked_by: null, locked_at: null, last_error: 'contact_changed_since_card' });
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
+    });
+
+    test('an opt-out finishes the job the way the queue closes one: completed with receipt_opted_out', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: { status: 'completed', lastError: null, emailResult: { ok: false, error: 'receipt_opted_out' } } });
+      const row = await job(invoiceId);
+      expect(row).toMatchObject({ status: 'completed', locked_by: null, email_result: { ok: false, error: 'receipt_opted_out' } });
+      expect(row.completed_at).not.toBeNull();
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+    });
+
+    test('a job another path enqueued during the claim is finished too', async () => {
+      const taken = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(taken);
+      await enqueueReceiptDelivery({ invoiceId: taken, source: 'ib_closeout_repair' });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: contactChanged });
+      expect(await job(taken)).toMatchObject({ status: 'failed', source: 'ib_closeout_repair', last_error: 'contact_changed_since_card' });
+    });
+
+    test('a row the claim created itself is removed as always: the card\'s refusal leaves no job behind', async () => {
+      const invoiceId = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: contactChanged })).toBe('removed');
+      expect(await job(invoiceId)).toBeUndefined();
+    });
+
+    test('a delivered email still completes the job — terminal only applies to an undelivered one', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: true, emailResult: { ok: true }, terminal: contactChanged });
+      expect(await job(invoiceId)).toMatchObject({ status: 'completed', email_result: { ok: true } });
+    });
+
+    test('no terminal: the job goes back as it was (the Invoices page path)', async () => {
+      const invoiceId = await seedJob({ status: 'retry_scheduled' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('returned_to_queue');
+      expect(await job(invoiceId)).toMatchObject({ status: 'retry_scheduled' });
+    });
+  });
+
   describe('holdForReconciliation — an unknown provider outcome never goes back to the drain', () => {
     test('a queued job the operator claimed is parked as failed, not re-queued; the drain and a new claim leave it alone', async () => {
       const invoiceId = await seedJob({ status: 'retry_scheduled' });

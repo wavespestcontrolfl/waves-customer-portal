@@ -759,6 +759,41 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(out.receipt.sms).toEqual({ ok: false, error: 'receipt_texts_opted_out' });
     });
 
+    describe('a refused leg finishes the invoice\'s queued receipt job instead of handing it back to the drain (Codex r5)', () => {
+      const releaseArgs = () => ReceiptDeliveryQueue.releaseOperatorReceiptClaim.mock.calls.at(-1)[1];
+
+      test('a changed contact: the claim is released with a terminal "failed / contact_changed_since_card" for the job', async () => {
+        settle();
+        senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550100' });
+        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+        expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'contact_changed_since_card' });
+      });
+
+      test('an opted-out customer: the job is finished the way the queue closes an opt-out (completed, receipt_opted_out)', async () => {
+        settle();
+        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut: true });
+        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+        expect(releaseArgs().terminal).toEqual({ status: 'completed', lastError: null, emailResult: { ok: false, error: 'receipt_opted_out' } });
+      });
+
+      test('unreadable settings fail closed as a failed job for a person', async () => {
+        settle();
+        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut: null });
+        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+        expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'receipt_settings_unreadable_since_card' });
+      });
+
+      test('nothing refused: no terminal; the page path (no guard) passes none either', async () => {
+        settle();
+        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
+        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+        expect(releaseArgs().terminal).toBeNull();
+        settle();
+        await recordManualPayment('inv-1', { method: 'check' });
+        expect(releaseArgs().terminal).toBeUndefined();
+      });
+    });
+
     test('an App leg, or a destination the card did not show, is never approved', async () => {
       const check = async (facts, approved) => receiptGuardFor(approved).check(facts);
       const approved = { email: emailDigest('pat@example.test'), phone: phoneDigest('9415550100') };
