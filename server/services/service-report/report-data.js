@@ -4594,6 +4594,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // paths already refuse to cache on image-resolution failures.
   imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
   imageResolutionFailures += Number(lawnAssessment?.photoFindingsUnresolved) || 0;
+  // GATE_REPORT_WEB_SLIDER: last visit's photo beside today's, same shot, same property. The route asks only for
+  // a live simple-web view while the gate is live. A failed read means no slider, never a failed report.
+  const lawnSlider = opts.lawnSlider === true && serviceLine === 'lawn' && lawnAssessment?.assessmentId
+    ? await require('./lawn-slider').buildLawnSlider({ assessmentId: lawnAssessment.assessmentId, knex, photoUrl: lawnPhotoUrl }).catch(() => null)
+    : null;
   // A failed service_products read leaves this build's product list empty, not
   // known-empty. The "From your technician" paragraph is frozen once and never
   // rewritten, so it must not be written from such a build whatever the copy-v6
@@ -7322,6 +7327,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     reportV2,
     token,
     serviceRecordId: service.id,
+    ...(lawnSlider ? { lawnSlider } : {}),
     serviceType: service.service_type,
     serviceDisplayName: linkedServiceName,
     serviceLine,
