@@ -5,7 +5,7 @@
  * web service report. Built on every /data request, so it is never frozen, never in the PDF and never in a stored
  * record. One fixed sentence from measured rain at the home since the visit completed, or nothing:
  *
- *   rain in the last RECENT hours   "Rain fell N hours ago. Wait until the lawn is dry."
+ *   rain in the last RECENT hours   "Rain fell about N hours ago. Wait until the lawn is dry."
  *   rain covered the water-in       "Rain since your visit has watered the treatment in."
  *   a full dry read since the visit "No rain since your treatment."
  *   anything else (unknown, older than the window, no coordinates, no whole hour yet)  null: the chip is hidden
@@ -33,28 +33,31 @@ const toMs = (value) => {
 };
 
 function rainLine(hoursAgo) {
-  if (hoursAgo < 1) return COPY.rainWithinHour;
   return hoursAgo === 1 ? COPY.rainHoursAgoOne : COPY.rainHoursAgo.replace('{n}', String(hoursAgo));
 }
 
 /**
  * What the forecast's past-hour rows say about the time since the visit. Hour rows are stamped at the END of their hour:
- * row S holds the rain of S-1h..S. The window runs from the hour that CONTAINS the completion (its stamp is the first
- * hour boundary after it, so 10:15 reads the 11:00 row) through the last CLOSED hour (the stamp at or before now; the
- * hour in progress is unknown). Returns the last rainy row in that window (or null) and `dry`: true only when every row
- * of the window is present with a reading and none is rainy, so a gap or a partly read window never reads as dry.
- * A window with no closed hour yet is never dry.
+ * row S holds the rain of the bucket S-1h..S. The window runs from the bucket that CONTAINS the completion (10:15 reads
+ * the 11:00 row) through the last CLOSED bucket (the stamp at or before now; the hour in progress is unknown).
+ *
+ * The completion bucket is PARTLY before the visit, so a reading in it cannot say when the rain fell: it never supports
+ * a "rain fell" claim (only buckets that start at or after the completion do), and rain in it blocks the dry state.
+ * Returns `last`, the latest rainy bucket that starts at or after the completion ({ start }), or null, and `dry`: true
+ * only when every bucket of the window, the completion bucket included, is read and none is rainy. A window with no
+ * closed bucket yet is never dry.
  */
 function rainSince(forecast, fromMs, nowMs) {
   const firstStamp = Math.floor(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS;
   const lastStamp = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
   const byStamp = new Map((Array.isArray(forecast && forecast.hourly) ? forecast.hourly : []).map((r) => [toMs(r.at), r.precipitation_in]));
-  const readings = [];
-  for (let stamp = firstStamp; stamp <= lastStamp; stamp += HOUR_MS) readings.push({ ms: stamp, inches: byStamp.get(stamp) });
-  const rainy = readings.filter((r) => typeof r.inches === 'number' && r.inches >= RAIN_HOUR_INCHES);
+  const buckets = [];
+  for (let stamp = firstStamp; stamp <= lastStamp; stamp += HOUR_MS) buckets.push({ start: stamp - HOUR_MS, inches: byStamp.get(stamp) });
+  const rainy = (b) => typeof b.inches === 'number' && b.inches >= RAIN_HOUR_INCHES;
+  const after = buckets.filter((b) => b.start >= fromMs && rainy(b));
   return {
-    last: rainy.length ? rainy[rainy.length - 1] : null,
-    dry: readings.length > 0 && readings.every((r) => typeof r.inches === 'number' && r.inches < RAIN_HOUR_INCHES),
+    last: after.length ? after[after.length - 1] : null,
+    dry: buckets.length > 0 && buckets.every((b) => typeof b.inches === 'number' && !rainy(b)),
   };
 }
 
@@ -95,7 +98,8 @@ async function resolveLiveChip({
     if (!forecast || forecast.status !== 'ok') return null;
     const { last, dry } = rainSince(forecast, fromMs, nowMs);
 
-    const hoursAgo = last ? Math.floor((nowMs - last.ms) / HOUR_MS) : null;
+    // Elapsed time is told from the bucket's START (the rain fell somewhere inside the hour), so it reads "about".
+    const hoursAgo = last ? Math.floor((nowMs - last.start) / HOUR_MS) : null;
     if (hoursAgo !== null && hoursAgo <= COPY.recentHours) return { state: 'recent_rain', text: rainLine(hoursAgo) };
 
     if (await rainWateredIn({ instruction, products, last, nowMs, latitude, longitude, fetchForecast })) {

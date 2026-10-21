@@ -25,11 +25,11 @@ const run = (forecast, extra = {}) => resolveLiveChip({
 });
 
 describe('live lawn status chip', () => {
-  test('rain in the last hours: "Rain fell N hours ago. Wait until the lawn is dry."', async () => {
-    // the 17:00Z stamp = rain 16:00-17:00Z; now 18:30Z -> 1 hour ago
-    expect(await run(forecastWith({ '2026-10-21T17:00:00.000Z': 0.2 }))).toEqual({ state: 'recent_rain', text: 'Rain fell 1 hour ago. Wait until the lawn is dry.' });
-    expect((await run(forecastWith({ '2026-10-21T16:00:00.000Z': 0.2 }))).text).toBe('Rain fell 2 hours ago. Wait until the lawn is dry.');
-    expect((await run(forecastWith({ '2026-10-21T18:00:00.000Z': 0.05 }))).text).toBe('Rain fell within the last hour. Wait until the lawn is dry.');
+  test('rain in the last hours: "Rain fell about N hours ago. Wait until the lawn is dry." (told from the hour\'s start)', async () => {
+    // the 17:00Z stamp = rain 16:00-17:00Z; now 18:30Z -> that hour started 2.5 hours ago
+    expect(await run(forecastWith({ '2026-10-21T17:00:00.000Z': 0.2 }))).toEqual({ state: 'recent_rain', text: 'Rain fell about 2 hours ago. Wait until the lawn is dry.' });
+    expect((await run(forecastWith({ '2026-10-21T16:00:00.000Z': 0.2 }))).text).toBe('Rain fell about 3 hours ago. Wait until the lawn is dry.');
+    expect((await run(forecastWith({ '2026-10-21T18:00:00.000Z': 0.05 }))).text).toBe('Rain fell about 1 hour ago. Wait until the lawn is dry.');
   });
 
   test('rain older than the recent window and no water-in coverage: hidden', async () => {
@@ -48,12 +48,25 @@ describe('live lawn status chip', () => {
     // now 11:20: the completion hour is the only closed hour; dry = no rain, rainy = hidden
     const early = new Date('2026-10-21T11:20:00Z');
     expect(await run(forecastWith({}, { now: early }), { now: early })).toEqual({ state: 'no_rain', text: COPY.noRain });
-    expect(await run(forecastWith({ '2026-10-21T11:00:00.000Z': 0.1 }, { now: early }), { now: early })).toEqual({ state: 'recent_rain', text: 'Rain fell within the last hour. Wait until the lawn is dry.' });
+    expect(await run(forecastWith({ '2026-10-21T11:00:00.000Z': 0.1 }, { now: early }), { now: early })).toBeNull();
     // a completion exactly on the hour does not need the row before it (10:00 stamp = 09:00-10:00, before the visit)
     const onHour = { completedAt: '2026-10-21T10:00:00Z' };
     const rows = forecastWith({}, { from: '2026-10-21T10:00:00Z' });
     expect(rows.hourly[0].at).toBe('2026-10-21T11:00:00.000Z');
     expect(await run(rows, onHour)).toEqual({ state: 'no_rain', text: COPY.noRain });
+  });
+
+  test('rain in the partial completion hour is never a positive claim; an hour that starts at the completion is', async () => {
+    // completed 10:55, rain at 10:05 sits in the 11:00 row (10:00-11:00): it may be before the visit
+    const late = { completedAt: '2026-10-21T10:55:00Z', now: new Date('2026-10-21T11:10:00Z') };
+    expect(await run(forecastWith({ '2026-10-21T11:00:00.000Z': 0.3 }, { from: late.completedAt, now: late.now }), late)).toBeNull();
+    // later hours still speak: rain in the 12:00 row (11:00-12:00) starts after the completion
+    const next = { completedAt: '2026-10-21T10:55:00Z', now: new Date('2026-10-21T12:10:00Z') };
+    const rows = forecastWith({ '2026-10-21T11:00:00.000Z': 0.3, '2026-10-21T12:00:00.000Z': 0.2 }, { from: next.completedAt, now: next.now });
+    expect((await run(rows, next)).text).toBe('Rain fell about 1 hour ago. Wait until the lawn is dry.');
+    // completed exactly on the hour: the 11:00 row (10:00-11:00) starts AT the completion, so it counts
+    const exact = { completedAt: '2026-10-21T10:00:00Z', now: new Date('2026-10-21T11:10:00Z') };
+    expect((await run(forecastWith({ '2026-10-21T11:00:00.000Z': 0.3 }, { from: exact.completedAt, now: exact.now }), exact)).text).toBe('Rain fell about 1 hour ago. Wait until the lawn is dry.');
   });
 
   test('a missing hour is unknown, never dry', async () => {
