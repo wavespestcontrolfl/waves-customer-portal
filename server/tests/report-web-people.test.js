@@ -83,7 +83,7 @@ describe('webPeople review link', () => {
 });
 
 describe('clean pest visit', () => {
-  const clean = () => ({ serviceLine: 'pest', findings: [{ severity: 'low' }], serviceCoverage: { items: [{ status: 'completed' }] } });
+  const clean = () => ({ serviceLine: 'pest', treatmentPerformed: true, findings: [{ severity: 'low' }], serviceCoverage: { items: [{ status: 'completed' }] } });
 
   test('treated, no high finding, nothing to follow up', () => {
     expect(isCleanPestVisit(clean())).toBe(true);
@@ -92,6 +92,8 @@ describe('clean pest visit', () => {
   test.each([
     ['a re-service', { isCallback: true }],
     ['no treatment', { treatmentPerformed: false }],
+    ['an unknown treatment verdict (null)', { treatmentPerformed: null }],
+    ['no treatment verdict at all', { treatmentPerformed: undefined }],
     ['a high finding', { findings: [{ severity: 'high' }] }],
     ['an area that needed attention', { serviceCoverage: { items: [{ status: 'needs_attention' }] } }],
     ['a planned follow-up', { followUp: { reason: 'x' } }],
@@ -101,19 +103,21 @@ describe('clean pest visit', () => {
   });
 
   test('a clean pest visit gets the link', async () => {
-    const data = { ...lawnData(null), serviceLine: 'pest', lawnAssessment: undefined, findings: [], serviceCoverage: { items: [] } };
+    const data = { ...lawnData(null), serviceLine: 'pest', treatmentPerformed: true, lawnAssessment: undefined, findings: [], serviceCoverage: { items: [] } };
     const out = await buildWebPeople({ data, service: SERVICE, knex: fakeKnex(QUIET), nextVisits: [], now: NOW });
     expect(out.review.url).toBe('https://g.page/r/example/review');
   });
 });
 
 describe('webPeople tech, map and next visit', () => {
-  const performed = (id, visit) => ({ id, scheduled_service_id: id, visit_id: visit || null, structured_notes: { visitOutcome: 'completed' } });
+  const HOME = { service_address_line1: '100 Palm Ave', service_address_city: 'Parrish', service_address_zip: '34219' };
+  const ELSEWHERE = { service_address_line1: '9 Oak Ct', service_address_city: 'Sarasota', service_address_zip: '34236' };
+  const performed = (id, visit, stamp = HOME) => ({ id, scheduled_service_id: id, visit_id: visit || null, structured_notes: { visitOutcome: 'completed' }, ...stamp });
 
   test('tech strip: first name, photo, FDACS id and the visit count from two or more stops', async () => {
     const knex = fakeKnex({
       ...QUIET,
-      scheduled_services: { property_id: 'prop-1' },
+      scheduled_services: HOME,
       service_records: [performed('a'), performed('b', 'v1'), performed('c', 'v1'), performed('d')],
     });
     const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], now: NOW });
@@ -122,9 +126,39 @@ describe('webPeople tech, map and next visit', () => {
 
   test('one visit is not worth a count; a typed shadow record never counts', async () => {
     const shadow = { id: 'z', scheduled_service_id: 'z', structured_notes: { typedReportDelivery: 'shadow', visitOutcome: 'completed' } };
-    const knex = fakeKnex({ ...QUIET, scheduled_services: { property_id: null }, service_records: [performed('a'), shadow] });
+    const knex = fakeKnex({ ...QUIET, scheduled_services: HOME, service_records: [performed('a'), shadow] });
     const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], now: NOW });
     expect(out.tech.visitsAtHome).toBeNull();
+  });
+
+  test('only visits at the same premises count: another home of the same customer is left out', async () => {
+    const knex = fakeKnex({
+      ...QUIET,
+      scheduled_services: HOME,
+      service_records: [performed('a'), performed('b'), performed('c', null, ELSEWHERE)],
+    });
+    const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], now: NOW });
+    expect(out.tech.visitsAtHome).toBe(2);
+  });
+
+  test('a booking that carries no premises evidence (no stamp, property or estimate): no count, though other records exist', async () => {
+    const knex = fakeKnex({
+      ...QUIET,
+      scheduled_services: { property_id: null },
+      service_records: [performed('a'), performed('b'), performed('c')],
+    });
+    const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], now: NOW });
+    expect(out.tech.visitsAtHome).toBeNull();
+  });
+
+  test('a record with no premises evidence is never counted as this home', async () => {
+    const knex = fakeKnex({
+      ...QUIET,
+      scheduled_services: HOME,
+      service_records: [performed('a'), performed('b'), performed('c', null, {})],
+    });
+    const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], now: NOW });
+    expect(out.tech.visitsAtHome).toBe(2);
   });
 
   test('a failed count read still shows the strip', async () => {

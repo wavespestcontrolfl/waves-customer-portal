@@ -17,6 +17,7 @@
 
 const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
 const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
+const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
 
 const REVIEW_MIN_LAWN_SCORE = 85;
 const QUIET_DAYS = 30;
@@ -49,7 +50,8 @@ function lawnScoreOf(data) {
 // A pest visit with nothing to follow up: treated, not a re-service, no high finding, no area that needed attention
 // and no follow-up planned.
 function isCleanPestVisit(data) {
-  if (data?.serviceLine !== 'pest' || data.isCallback === true || data.treatmentPerformed === false) return false;
+  // treatmentPerformed null means unknown (the product load failed): not clean.
+  if (data?.serviceLine !== 'pest' || data.isCallback === true || data.treatmentPerformed !== true) return false;
   const findings = Array.isArray(data.findings) ? data.findings : [];
   if (findings.some((f) => ['critical', 'high'].includes(String(f?.severity || '').toLowerCase()))) return false;
   const items = Array.isArray(data.serviceCoverage?.items) ? data.serviceCoverage.items : [];
@@ -95,26 +97,34 @@ async function reviewLinkFor(data, service, knex, now) {
   return { url, locationId: data.reviewLocation.id || null };
 }
 
+const SCOPE_COLUMNS = ['service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id', 'source_estimate_id'];
+
 // How many visits this technician has done at this home, counted as the plan card counts a visit: performed,
-// customer-visible, one stop once however many services it held.
+// customer-visible, one stop once however many services it held. "This home" is proven the way the upcoming-visits
+// card proves it (visit-property-scope.js): a record counts only when its booking resolves to the same premises as
+// this visit's booking. When this visit's premises cannot be proven, the count is 0 and the strip omits it.
 async function visitsAtHome(knex, service) {
-  if (!service.technician_id || !service.customer_id) return 0;
-  const booking = service.scheduled_service_id
-    ? await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('property_id')
-    : null;
+  if (!service.technician_id || !service.customer_id || !service.scheduled_service_id) return 0;
+  const booking = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first(...SCOPE_COLUMNS);
+  const caches = { propertyById: new Map(), estimateById: new Map() };
+  const here = booking ? await resolveVisitPropertyScope(booking, knex, caches) : null;
+  if (!here?.key) return 0;
   const rows = await knex('service_records as sr')
     .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('sr.customer_id', service.customer_id)
     .where('sr.technician_id', service.technician_id)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<=', service.service_date)
-    .modify((qb) => { if (booking?.property_id) qb.where('ss.property_id', booking.property_id); })
-    .select('sr.id', 'sr.scheduled_service_id', 'sr.structured_notes', 'ss.visit_id')
+    .select('sr.id', 'sr.scheduled_service_id', 'sr.structured_notes', 'ss.visit_id', ...SCOPE_COLUMNS.map((c) => `ss.${c}`))
     .limit(500);
-  const stops = new Set(rows
-    .filter((row) => !serviceRecordSuppressesCustomerArtifacts(row)
-      && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
-    .map((row) => (row.visit_id ? `visit:${row.visit_id}` : `booking:${row.scheduled_service_id || row.id}`)));
+  const stops = new Set();
+  for (const row of rows) {
+    if (serviceRecordSuppressesCustomerArtifacts(row)
+      || !isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome)) continue;
+    const there = await resolveVisitPropertyScope(row, knex, caches);
+    if (!sameResolvedProperty(there.key, here.key)) continue;
+    stops.add(row.visit_id ? `visit:${row.visit_id}` : `booking:${row.scheduled_service_id || row.id}`);
+  }
   return stops.size;
 }
 
