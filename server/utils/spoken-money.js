@@ -222,7 +222,17 @@ function normalizeSpokenMoney(input) {
     ambiguous.push({ heard, candidates: [fmtDollarsCents(Number(heard.slice(0, 2)), Number(heard.slice(2))), fmtDollars(value)] });
   }
 
-  return { text, changes, ambiguous };
+  // "one hundred dollars and fifty five" (no "cents"): the whole-dollar reading
+  // would drop the cents, so no amount is suggested for it (pre-push audit r3).
+  const resolved = changes.filter((change) => change.kind === 'dollars-and-cents'
+    || !DOLLARS_AND_NUMBER_AFTER.test(textAfter(original, change.from)));
+  return { text, changes: resolved, ambiguous };
+}
+
+const DOLLARS_AND_NUMBER_AFTER = /^\s*(?:dollars?|bucks?)?\s*and\s+(?:a\s+)?(?:\d|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i;
+function textAfter(text, phrase) {
+  const at = String(text).toLowerCase().indexOf(String(phrase).toLowerCase());
+  return at < 0 ? '' : String(text).slice(at + String(phrase).length);
 }
 
 /** What the client may send as dictation_money: up to three { heard, suggested? } with short strings. */
