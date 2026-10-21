@@ -92,6 +92,14 @@ function withoutUnreplayableRounds(messages) {
  * still use. A request not on the search path keeps its tools. The history loses
  * the server search blocks; client tool_use / tool_result pairs stay.
  */
+function withoutThinking(messages) {
+  return messages.map((message) => {
+    if (!Array.isArray(message.content)) return message;
+    const content = message.content.filter(block => block?.type !== 'thinking' && block?.type !== 'redacted_thinking');
+    return content.length === message.content.length ? message : { ...message, content };
+  }).filter(message => !Array.isArray(message.content) || message.content.length);
+}
+
 function backupRequestState({ tools, messages, context, actionScope }) {
   let nextTools = tools;
   if (usesToolSearch(tools)) {
@@ -100,7 +108,10 @@ function backupRequestState({ tools, messages, context, actionScope }) {
     const ordinary = ActionRegistry.initialTools(context, { ...actionScope, toolSearch: false }).map(apiToolDefinition);
     nextTools = [...new Map([...ordinary, ...loaded].map(tool => [tool.name, tool])).values()];
   }
-  return { tools: nextTools, messages: withoutUnreplayableRounds(ToolSearch.stripServerSearchBlocks(messages)), toolSearch: false };
+  // Thinking blocks are Claude-only and never reach OpenAI; dropping them first
+  // lets the server-search blocks go too, so the saved checkpoint stays
+  // resumable (a history with both is refused on resume) (Codex r8).
+  return { tools: nextTools, messages: withoutUnreplayableRounds(ToolSearch.stripServerSearchBlocks(withoutThinking(messages))), toolSearch: false };
 }
 
 // The same prompt, with the two sentences that name the Anthropic tool search

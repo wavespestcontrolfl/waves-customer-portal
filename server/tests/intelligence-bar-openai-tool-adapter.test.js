@@ -158,7 +158,10 @@ describe('fromOpenAIResponse', () => {
 
   test('stop reasons: end_turn for text, max_tokens when cut off, refusal for a refusal; bad arguments become {}', () => {
     expect(Adapter.fromOpenAIResponse({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }] }).stop_reason).toBe('end_turn');
-    expect(Adapter.fromOpenAIResponse({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }).stop_reason).toBe('max_tokens');
+    expect(Adapter.fromOpenAIResponse({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'part' }] }] }).stop_reason).toBe('max_tokens');
+    // No visible text and no tool call: the round fails, it never closes the task as answered (Codex r8).
+    expect(() => Adapter.fromOpenAIResponse({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [{ type: 'reasoning', id: 'rs_1' }] })).toThrow(expect.objectContaining({ code: 'openai_empty' }));
+    expect(() => Adapter.fromOpenAIResponse({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '   ' }] }] })).toThrow(expect.objectContaining({ code: 'openai_empty' }));
     expect(Adapter.fromOpenAIResponse({ output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] }).stop_reason).toBe('refusal');
     // Unparseable or non-object arguments fail the round: no tool runs on an empty input (Codex r3).
     for (const bad of ['{"a":', '[1,2]', '"text"', 'null', '7']) {
@@ -167,7 +170,7 @@ describe('fromOpenAIResponse', () => {
     }
     expect(Adapter.fromOpenAIResponse({ output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '' }] }).content[0].input).toEqual({});
     expect(Adapter.fromOpenAIResponse({ output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{}' }] }).content[0].input).toEqual({});
-    expect(Adapter.fromOpenAIResponse({}).content).toEqual([]);
+    expect(() => Adapter.fromOpenAIResponse({})).toThrow(expect.objectContaining({ code: 'openai_empty' }));
   });
 });
 
@@ -277,7 +280,7 @@ describe('callBackup', () => {
     const reply = body => { global.fetch = jest.fn(async () => ({ ok: true, status: 200, json: async () => body })); return Adapter.callBackup(args); };
     await reply({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'fine' }] }] });
     expect(mockLedgerRejected).not.toHaveBeenCalled();
-    const cutBody = { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] };
+    const cutBody = { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'part' }] }] };
     const cut = await reply(cutBody);
     expect(cut.stop_reason).toBe('max_tokens');
     expect(mockLedgerRejected).toHaveBeenLastCalledWith(cutBody, 'openai_incomplete');

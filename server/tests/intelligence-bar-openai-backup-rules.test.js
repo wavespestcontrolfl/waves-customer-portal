@@ -181,3 +181,18 @@ describe('resume of a backup task after a tool round', () => {
     expect(JSON.stringify(live.messages)).toMatch(/_openai/);
   });
 });
+
+describe('mixed thinking + tool search history (Codex r8)', () => {
+  test('the backup drops thinking and the server-search blocks, so the checkpoint stays resumable', () => {
+    const ToolSearch = require('../services/intelligence-bar/tool-search');
+    const messages = [
+      { role: 'user', content: 'move my 2pm' },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'x', signature: 's' }, { type: 'server_tool_use', id: 'srv_1', name: 'tool_search_tool_regex', input: { query: 'move' } }, { type: 'tool_search_tool_result', tool_use_id: 'srv_1', content: { type: 'tool_search_tool_search_result', tool_references: [] } }, { type: 'text', text: 'Looking.' }] },
+    ];
+    expect(ToolSearch.hasSearchAndThinking(messages)).toBe(true);
+    const state = Backup.backupRequestState({ tools: [], messages, context: 'customers', actionScope: { role: 'admin', context: 'customers', fullAccess: false } });
+    expect(ToolSearch.hasSearchAndThinking(state.messages)).toBe(false);
+    expect(JSON.stringify(state.messages)).not.toMatch(/thinking|server_tool_use|tool_search_tool_result/);
+    expect(JSON.stringify(state.messages)).toContain('Looking.');
+  });
+});

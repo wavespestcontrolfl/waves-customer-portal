@@ -295,6 +295,13 @@ function fromOpenAIResponse(data) {
     throw err;
   }
   const raw = (Array.isArray(data?.output) ? data.output : []).flatMap(item => outputBlocks(item, data));
+  // No tool call and no visible text (the budget went to reasoning, or a blank
+  // answer): the round fails instead of closing the task as answered (Codex r8).
+  if (!raw.some(block => block.type === 'tool_use' || (block.type === 'text' && String(block.text || '').trim()))) {
+    const err = new Error('OpenAI backup returned no usable answer');
+    err.code = 'openai_empty';
+    throw err;
+  }
   const stop_reason = stopReasonOf(data, raw);
   const content = raw.map(({ refusal, ...block }) => block);
   const replay = replayableRound(data?.output);
