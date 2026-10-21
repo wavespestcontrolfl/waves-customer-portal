@@ -1,5 +1,7 @@
 'use strict';
 
+const db = require('../models/db');
+
 // Contact session (GATE_CONTACT_LOGIN) response projections: what an
 // on-location contact's OWN session may read off the account holder's row,
 // applied by the routes CONTACT_SESSION_ROUTES admits (middleware/auth.js).
@@ -69,14 +71,36 @@ function withholdReportArtifacts(service) {
 // property (codex #6363 r16 P1): the contact token carries no property
 // claim and the app shows a contact one house, so the visits and reports
 // stamped to the holder's OTHER saved properties are not theirs to list or
-// open. The saved-property resolver with no claim resolves the primary; its
-// predicate applies only to a profile with 2+ properties or a retired one,
-// so a single home is byte-identical. null for a holder session: the routes
-// keep their own opt-in scoping.
+// open. The scope is built here from the customer_properties rows, NOT
+// through the holder's saved-property resolver (codex r16 security P1):
+// that resolver reads as unscoped while GATE_APP_PROPERTY_SCOPE — the
+// holder app's picker rollout — is off, and the contact's boundary cannot
+// depend on it. Same shape as resolveSessionScope so the shared predicates
+// (applyPropertyPredicate, scopeRecordsToProperty) apply as they stand: the
+// primary's stamped visits plus the unstamped ones; a profile whose rows
+// were all retired has no house to show a contact anything under; one that
+// never had a row keeps its one address's customer-wide reads. null for a
+// holder session: the routes keep their own opt-in scoping.
 async function contactRecordScope(req) {
   if (!req.contactSession) return null;
-  return require('./account-properties').resolveSessionScope(req);
+  const customerId = req.customerId;
+  const rows = await db('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
+    .select('id', 'is_primary');
+  if (!rows.length) {
+    const everHadRow = !!(await db('customer_properties').where({ customer_id: customerId }).first('id'));
+    return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };
+  }
+  const property = rows.find((r) => r.is_primary === true) || rows[0];
+  return { customerId, enabled: true, multi: rows.length > 1, scoped: true, closed: false, property };
 }
+
+// What a contact's payloads say about the property scope: the contact app
+// has no picker and /auth/me reports the scope off, so every scoped read
+// echoes the same — never the resolved primary's id, which the holder
+// client would compare against a selection the contact never made.
+const CONTACT_PROPERTY_SCOPE_ECHO = Object.freeze({ enabled: false, propertyId: null, closed: false });
 
 // That scope on a service_records query that LEFT JOINs scheduled_services
 // (the detail, the documents list, the report PDF) — the same rule the
@@ -154,6 +178,7 @@ function contactVisit(visit) {
 function contactSchedulePayload(payload) {
   return {
     ...payload,
+    propertyScope: CONTACT_PROPERTY_SCOPE_ECHO,
     hasCancellableWork: false,
     reservice: null,
     overlayHandoff: false,
@@ -163,13 +188,14 @@ function contactSchedulePayload(payload) {
 
 // The GET /api/schedule/next payload for a contact.
 function contactNextPayload(payload) {
-  return { ...payload, next: contactVisit(payload.next) };
+  return { ...payload, propertyScope: CONTACT_PROPERTY_SCOPE_ECHO, next: contactVisit(payload.next) };
 }
 
 module.exports = {
   contactSessionReportsWithheld,
   contactRecordScope,
   scopeContactRecords,
+  CONTACT_PROPERTY_SCOPE_ECHO,
   withholdReportArtifacts,
   contactSafeReportLinks,
   contactSafeReportCustomer,

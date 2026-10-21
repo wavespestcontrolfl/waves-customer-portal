@@ -574,7 +574,7 @@ router.get('/me', authenticate, async (req, res, next) => {
       cancelledAt: null,
       actor: actorPayload(contact),
       notificationPrefs: null,
-      propertyScope: { enabled: false, propertyId: null, closed: false },
+      propertyScope: require('../services/contact-session-projection').CONTACT_PROPERTY_SCOPE_ECHO,
     });
   }
   const [prefs, annualPrepay, creditLedger] = await Promise.all([

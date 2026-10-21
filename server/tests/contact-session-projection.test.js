@@ -28,7 +28,7 @@ jest.mock('../services/account-properties', () => ({
   resolveSessionScope: jest.fn(async () => null),
   resolvedScopePayload: () => ({ enabled: false }),
   isSecondarySelection: () => false,
-  applyPropertyPredicate: (q) => q,
+  applyPropertyPredicate: jest.fn((q) => q),
 }));
 const mockSession = {};
 jest.mock('../middleware/auth', () => ({
@@ -43,11 +43,17 @@ jest.mock('../middleware/auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const { listPortalServiceHistory, scopeRecordsToProperty } = require('../services/portal-service-history');
-const { resolveSessionScope } = require('../services/account-properties');
+const { resolveSessionScope, applyPropertyPredicate } = require('../services/account-properties');
 const projection = require('../services/contact-session-projection');
 
-// A multi-property profile's resolved PRIMARY scope (GATE_APP_PROPERTY_SCOPE on).
+// A multi-property profile's saved-property rows, and the PRIMARY scope a
+// contact's reads resolve from them — whatever GATE_APP_PROPERTY_SCOPE says.
+const PROPERTY_ROWS = [{ id: 'prop-1', is_primary: true }, { id: 'prop-2', is_primary: false }];
 const PRIMARY_SCOPE = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: true } };
+// Table-aware db: the saved-property rows, else the given rows by table, else nothing.
+function wireTables(byTable, properties = PROPERTY_ROWS) {
+  db.mockImplementation((table) => chain(table === 'customer_properties' ? properties : (byTable[table] || [])));
+}
 
 const OCCUPANT = { slot: 'service_contact', name: 'Sam', phone: '+19415550202', contactRole: '', phoneKey: '9415550202' };
 const TENANT = { ...OCCUPANT, contactRole: 'tenant' };
@@ -107,10 +113,22 @@ describe('pure projections', () => {
     expect(JSON.stringify(projection.withholdReportArtifacts(row))).not.toMatch(/tok|71/);
   });
 
-  test('contactRecordScope / scopeContactRecords: a contact\'s record reads carry the resolved (primary) saved-property scope; a holder\'s carry none (codex r16)', async () => {
-    resolveSessionScope.mockResolvedValueOnce(PRIMARY_SCOPE);
-    expect(await projection.contactRecordScope({ customer: { id: 'c' }, contactSession: OCCUPANT })).toEqual(PRIMARY_SCOPE);
-    expect(await projection.contactRecordScope({ customer: { id: 'c' } })).toBeNull();
+  test('contactRecordScope / scopeContactRecords: a contact\'s record reads carry the PRIMARY saved-property scope built from the rows — never the holder\'s gate-dependent resolver; a holder\'s carry none (codex r16 P1 + security P1)', async () => {
+    const req = { customerId: 'cust-1', customer: { id: 'cust-1' }, contactSession: OCCUPANT };
+    wireTables({});
+    expect(await projection.contactRecordScope(req)).toEqual(PRIMARY_SCOPE);
+    expect(resolveSessionScope).not.toHaveBeenCalled();
+    // One primary row: still scoped (a visit stamped to a retired house stays out).
+    wireTables({}, [PROPERTY_ROWS[0]]);
+    expect(await projection.contactRecordScope(req)).toMatchObject({ enabled: true, multi: false, scoped: true, property: PROPERTY_ROWS[0] });
+    // No active row: a profile that never had one keeps its customer-wide reads; one whose rows were all retired is closed.
+    wireTables({}, []);
+    expect(await projection.contactRecordScope(req)).toMatchObject({ enabled: true, scoped: false, closed: false, property: null });
+    const retired = chain([]);
+    retired.first = jest.fn(async () => ({ id: 'retired' }));
+    db.mockImplementation((table) => (table === 'customer_properties' ? retired : chain([])));
+    expect(await projection.contactRecordScope(req)).toMatchObject({ enabled: true, scoped: true, closed: true, property: null });
+    expect(await projection.contactRecordScope({ customerId: 'cust-1', customer: { id: 'cust-1' } })).toBeNull();
     const q = { marker: true };
     expect(projection.scopeContactRecords(q, PRIMARY_SCOPE)).toBe(q);
     expect(scopeRecordsToProperty).toHaveBeenCalledWith(q, PRIMARY_SCOPE);
@@ -160,7 +178,8 @@ describe('pure projections', () => {
       rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null,
     });
     for (const key of projection._test.PLAN_SIGNAL_KEYS) expect(key in out.upcoming[0]).toBe(false);
-    expect(projection.contactNextPayload({ next: null })).toEqual({ next: null });
+    expect(projection.contactNextPayload({ next: null })).toEqual({ next: null, propertyScope: { enabled: false, propertyId: null, closed: false } });
+    expect(out.propertyScope).toEqual({ enabled: false, propertyId: null, closed: false });
     expect(projection.contactNextPayload({ next: { id: 'n', isRecurring: true, isCallback: true, rescheduleUrl: '/reschedule/t', calendarUrl: 'c', calendarExpiresAt: 'e' } }).next)
       .toEqual({ id: 'n', rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null });
   });
@@ -194,21 +213,23 @@ describe('GET /schedule and /schedule/next for a contact session', () => {
   };
   const customerRow = { id: 'cust-1', active: true, waveguard_tier: 'gold', monthly_rate: '120', reservice_token: 'rt-1' };
 
-  test('the holder keeps the reschedule link, the re-service card and the overlay handoff', async () => {
-    let calls = 0;
-    db.mockImplementation(() => { calls += 1; return calls === 1 ? chain([row]) : chain([customerRow]); });
+  const scheduleTables = { scheduled_services: [row], customers: [customerRow] };
+
+  test('the holder keeps the reschedule link, the re-service card and the overlay handoff — and reads through the saved-property resolver, never the contact scope', async () => {
+    wireTables(scheduleTables);
     await withServer(async (get) => {
       const { body } = await get('/schedule');
       expect(body.upcoming[0].rescheduleUrl).toBe('/reschedule/tok-1');
       expect(body.reservice).toEqual({ url: '/reservice/rt-1', lanes: ['pest'] });
       expect(body.overlayHandoff).toBe(true);
+      expect(resolveSessionScope).toHaveBeenCalled();
+      expect(applyPropertyPredicate).not.toHaveBeenCalledWith(expect.anything(), PRIMARY_SCOPE);
     });
   });
 
-  test('a contact gets the same visits with no bearer, no re-service card, no handoff — and the token never rides the JSON', async () => {
+  test('a contact gets the same visits with no bearer, no re-service card, no handoff — scoped to the PRIMARY property whatever the holder gate says, echoing the scope off (codex r16 security P1)', async () => {
     mockSession.contact = OCCUPANT;
-    let calls = 0;
-    db.mockImplementation(() => { calls += 1; return calls === 1 ? chain([row]) : chain([customerRow]); });
+    wireTables(scheduleTables);
     await withServer(async (get) => {
       const { status, body } = await get('/schedule');
       expect(status).toBe(200);
@@ -219,21 +240,26 @@ describe('GET /schedule and /schedule/next for a contact session', () => {
       expect(body.hasCancellableWork).toBe(false);
       for (const key of ['isRecurring', 'isCallback', 'waveguardQualifying', 'serviceFamily']) expect(body.upcoming[0]).not.toHaveProperty(key);
       expect(JSON.stringify(body)).not.toMatch(/tok-1|rt-1/);
+      // The visit query carried the primary-property predicate, built without the holder's resolver.
+      expect(resolveSessionScope).not.toHaveBeenCalled();
+      expect(applyPropertyPredicate).toHaveBeenCalledWith(expect.anything(), PRIMARY_SCOPE);
+      expect(body.propertyScope).toEqual({ enabled: false, propertyId: null, closed: false });
     });
-    db.mockImplementation(() => chain([row]));
+    applyPropertyPredicate.mockClear();
     await withServer(async (get) => {
       const { body } = await get('/schedule/next');
       expect(body.next).toMatchObject({ id: 'svc-1', rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null });
       expect(body.next).not.toHaveProperty('isRecurring');
       expect(body.next).not.toHaveProperty('isCallback');
       expect(JSON.stringify(body)).not.toContain('tok-1');
+      expect(applyPropertyPredicate).toHaveBeenCalledWith(expect.anything(), PRIMARY_SCOPE);
+      expect(body.propertyScope).toEqual({ enabled: false, propertyId: null, closed: false });
     });
   });
 
   test('a contact asking for allProperties=1 gets the ordinary contact projection, never the coverage payload (codex r14)', async () => {
     mockSession.contact = OCCUPANT;
-    let calls = 0;
-    db.mockImplementation(() => { calls += 1; return calls === 1 ? chain([row]) : chain([customerRow]); });
+    wireTables(scheduleTables);
     await withServer(async (get) => {
       const { status, body } = await get('/schedule?allProperties=1');
       expect(status).toBe(200);
@@ -242,7 +268,6 @@ describe('GET /schedule and /schedule/next for a contact session', () => {
       expect(body.reservice).toBeNull();
       expect(JSON.stringify(body)).not.toMatch(/tok-1|rt-1/);
     });
-    db.mockImplementation(() => chain([row]));
     await withServer(async (get) => {
       const { body } = await get('/schedule/next?allProperties=1');
       expect(body.next).toMatchObject({ id: 'svc-1', rescheduleUrl: null });
@@ -265,11 +290,10 @@ describe('GET /services for a contact session', () => {
   };
 
   function wireDetail() {
-    db.mockImplementation((table) => {
-      if (table === 'service_records') return chain([record]);
-      if (table === 'service_products') return chain([{ id: 'p1', product_name: 'Alpine' }]);
-      if (table === 'service_photos') return chain([{ id: 'ph1', photo_type: 'after', caption: '', s3_key: 'k' }]);
-      return chain([]);
+    wireTables({
+      service_records: [record],
+      service_products: [{ id: 'p1', product_name: 'Alpine' }],
+      service_photos: [{ id: 'ph1', photo_type: 'after', caption: '', s3_key: 'k' }],
     });
   }
 
@@ -292,7 +316,6 @@ describe('GET /services for a contact session', () => {
 
   test('a contact\'s list, detail, documents-style record reads and stats are scoped to the primary property; the holder\'s list stays customer-wide unless asked (codex r16 P1)', async () => {
     mockSession.contact = OCCUPANT;
-    resolveSessionScope.mockResolvedValue(PRIMARY_SCOPE);
     listPortalServiceHistory.mockResolvedValue({ services: listed, total: 1 });
     wireDetail();
     await withServer(async (get) => {

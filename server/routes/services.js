@@ -50,9 +50,10 @@ router.get('/', async (req, res, next) => {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { limit, offset, type, propertyScoped } = value;
-    // A contact's list is always scoped to the primary property (codex
-    // #6363 r16 P1); the holder's stays customer-wide unless asked.
-    const scope = propertyScoped || req.contactSession ? await resolveSessionScope(req) : null;
+    // A contact's list is always scoped to the primary property, whatever
+    // the holder's property gate says (codex #6363 r16 P1 + security P1);
+    // the holder's stays customer-wide unless asked.
+    const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped ? await resolveSessionScope(req) : null);
 
     const { services: listed, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
     // A contact the rule withholds from gets no artifact; an allowed contact
@@ -184,8 +185,9 @@ router.get('/stats/summary', async (req, res, next) => {
       });
     }
     // Per lawn like the cap below: the selected property's when the session is scoped to one. A contact's reads are scoped
-    // to the primary property (codex #6363 r16 P1), so its counts and readings never carry the holder's other homes.
-    const scope = await resolveSessionScope(req);
+    // to the primary property whatever the holder's gate says (codex #6363 r16 P1 + security P1), so its counts and
+    // readings never carry the holder's other homes.
+    const scope = req.contactSession ? await contactRecordScope(req) : await resolveSessionScope(req);
     const records = () => {
       const q = db('service_records').where({ 'service_records.customer_id': req.customerId });
       return req.contactSession
