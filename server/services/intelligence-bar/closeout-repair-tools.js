@@ -113,8 +113,6 @@ const STEP_EFFECTS = {
 // ordinary Bill replay (current price, current tax) would not honour.
 const BILLABLE_INVOICE_REASONS = new Set(['expected_invoice_not_minted']);
 
-const NOT_A_GAP_FIX = /could not be read|switched off|turned off|is off\b|disabled/i;
-
 function parseNotes(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -511,7 +509,7 @@ function manualItems(facts, steps, skipped) {
   for (const [name, f] of Object.entries(facts)) {
     if (!f || planned.has(name)) continue;
     if (f.state === 'unknown') {
-      manual.push({ fact: name, state: f.state, reason: f.reason, fix: 'Lookup outage — status is unverified, not missing; re-check before acting.' });
+      manual.push({ fact: name, state: f.state, reason: f.reason, fix: 'Lookup outage — status is unverified, not missing; re-check before acting.', blockedNow: true });
       continue;
     }
     if (!['pending', 'failed'].includes(f.state) || skippedFacts.has(name)) continue;
@@ -519,7 +517,10 @@ function manualItems(facts, steps, skipped) {
     if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
     manual.push({ fact: name, state: f.state, reason: f.reason, fix: MANUAL_REMEDY[name] });
   }
-  for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `The bar can\'t repair this from here: ${s.why}.` });
+  // A skipped step is one the bar CAN run, blocked right now (a lookup that
+  // failed, a switch that is off, no contact on file): `blockedNow` keeps it out
+  // of the capability-gap text (Codex #6371 r8-r10).
+  for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `The bar can\'t repair this from here: ${s.why}.`, blockedNow: true });
   return manual;
 }
 
@@ -814,10 +815,9 @@ async function repairCloseout(input, actionContext = {}) {
       // The manual fixes ride the top-level text too: the gap collector reads
       // only `error`, so a capability decline that lives only under manual[]
       // ("the bar can't bill this visit from here") would never reach the gap list.
-      // A lookup that failed ("... could not be read") is a transient fault and a
-      // step whose delivery is switched off is a disabled feature, not a missing
-      // capability: both stay under manual[] only, out of the gap text (Codex r8, r9).
-      const manualFixes = [...new Set(plan.manual.map((m) => m.fix).filter((fix) => fix && !NOT_A_GAP_FIX.test(fix)))];
+      // Only the open items no tool here supports reach the gap text: a step the
+      // bar can run but that is blocked right now (blockedNow) stays under manual[].
+      const manualFixes = [...new Set(plan.manual.filter((m) => !m.blockedNow).map((m) => m.fix).filter(Boolean))];
       return {
         error: status.summary?.closedOut
           ? 'This visit is fully closed out — nothing to repair.'

@@ -325,12 +325,10 @@ describe('successful results and switched-off steps stay out of the gap list (Co
     expect(line).toBeTruthy();
     expect(BAR_DECLINE_RE.test(line)).toBe(false);
   });
-  test('closeout manual fixes that are switched off or unreadable are not promoted', () => {
+  test('closeout: a skipped step (blocked right now) is never promoted into the gap text', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/closeout-repair-tools.js'), 'utf8');
-    const re = new RegExp(src.match(/const NOT_A_GAP_FIX = \/(.+)\/i;/)[1], 'i');
-    expect(re.test("The bar can't repair this from here: report email delivery is switched off")).toBe(true);
-    expect(re.test("The bar can't repair this from here: the customer's contact settings could not be read")).toBe(true);
-    expect(re.test("The bar can't bill this visit from here")).toBe(false);
+    expect(src).not.toMatch(/NOT_A_GAP_FIX/);
+    expect(src).toMatch(/plan\.manual\.filter\(\(m\) => !m\.blockedNow\)/);
   });
 });
 
