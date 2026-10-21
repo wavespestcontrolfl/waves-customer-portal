@@ -41,6 +41,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'accept_estimate',
   // convert_lead previews name the lead and the customer, a masked phone, the email and both addresses.
   'convert_lead',
+  // void_invoice previews name the customer and the invoice.
+  'void_invoice',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

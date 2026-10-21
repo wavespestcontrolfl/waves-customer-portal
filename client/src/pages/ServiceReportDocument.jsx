@@ -9,7 +9,7 @@ import {
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
-import { isTroubleSpotPhoto, rateWithBasis, techTextBeyondSummary } from './serviceReportCleanup';
+import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -1349,7 +1349,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
                   : [insight.whatWeSaw, insight.whyItMatters, insight.wavesAction]).filter(Boolean).join(' ')}
               </Bullet>
             ))}
-            {defenseBlock?.summary && <Bullet>{defenseBlock.summary}</Bullet>}
+            {defenseBlock?.summary && !(reportCleanup && sameSentence(defenseBlock.summary, v2StatusLine?.detail)) && <Bullet>{defenseBlock.summary}</Bullet>}
             {defenseItems.map((item) => (
               <Bullet key={item.key || item.label}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
@@ -1361,7 +1361,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
                 {termiteStatusLine.detail ? ` — ${termiteStatusLine.detail}` : ''}
               </Bullet>
             )}
-            {termiteDefenseBlock?.summary && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
+            {termiteDefenseBlock?.summary && !(reportCleanup && sameSentence(termiteDefenseBlock.summary, termiteStatusLine?.detail)) && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
             {termiteDefenseItems.map((item) => (
               <Bullet key={`termite-${item.key || item.label}`}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
@@ -1802,7 +1802,8 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
                 {data.reportV2?.photoSummary || data.typedReport?.photoSummary}
               </p>
             )}
-            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+            {/* GATE_REPORT_CLEANUP_1020: each card sizes to its own photo; a taller neighbor no longer stretches it. */}
+            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10, ...(reportCleanup ? { alignItems: 'start' } : {}) }}>
               {photos.map((photo) => (
                 <figure key={photo.id || photo.url} className="doc-keep" style={{ margin: 0 }}>
                   {/* fixed-height contain thumbnails: a portrait field photo

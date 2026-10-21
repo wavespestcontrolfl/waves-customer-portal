@@ -248,6 +248,205 @@ const SHAPES = {
     query: { customerId: UUID },
     body: { nextVisit: { id: UUID, date: '2026-10-20', serviceType: 'Pest Control' } },
     kept: { 'nextVisit.date': '2026-10-20', 'nextVisit.serviceType': 'Pest Control' },
+  },  // ---- Core screens and leads. Free text stays withheld exactly as on every other row: a note-like key name by the
+  // default, and the keys a name would not catch (leadSourceDetail, preview, service_interest, extracted_data ...) by a
+  // reviewed "note" declaration. Projected (omit) keys never reach the model. ----
+  // admin-customers.js:2483 (handler), 1249 mapCustomerListRow: an explicit field list per customer, plus counts and filter lists.
+  '/admin/customers': {
+    body: {
+      customers: [{
+        id: UUID, firstName: 'Sample', lastName: 'Person', accountId: UUID, profileLabel: 'Home', isPrimaryProfile: true, email: 'sample@example.test',
+        phone: '+15555550103', city: 'Sampletown', address: '2 Example Way, Sampletown, FL 34200', tier: 'Gold', monthlyRate: 89, pipelineStage: 'active_customer',
+        leadSource: 'google', leadSourceDetail: PASSWORD_NOTE, balanceOwed: 0, tags: ['vip'], cardsOnFile: 1, propertyCount: 1,
+      }],
+      total: 1, page: 1, limit: 100, totalPages: 1, pipelineCounts: { active_customer: 1 }, filters: { tags: ['vip'], sources: ['google'], areas: ['Sampletown'] },
+    },
+    dropped: ['customers.0.leadSourceDetail'],
+    kept: { 'customers.0.firstName': 'Sample', 'customers.0.tier': 'Gold', 'customers.0.balanceOwed': 0, total: 1, 'filters.areas': ['Sampletown'] },
+  },
+  // admin-customers.js:2887 -> customer-history.js:321 listCustomerTimeline: { timeline[{ id, type, title, description, date, metadata }], ... }.
+  '/admin/customers/:id/timeline': {
+    params: { id: UUID },
+    body: { timeline: [{ id: 'sms:1', type: 'sms', title: 'SMS received', description: PASSWORD_NOTE, date: '2026-10-01T12:00:00Z', metadata: { direction: 'inbound' } }], missingSources: [], limit: 50, type: 'all', search: '', hasMore: false, nextCursor: null },
+    dropped: ['timeline.0.description'],
+    kept: { 'timeline.0.type': 'sms', 'timeline.0.date': '2026-10-01T12:00:00Z', limit: 50, hasMore: false },
+  },
+  // admin-customers.js:2925 -> customer-history.js:403 listCustomerComms; mapCommsMessage (:358) builds each message.
+  // readScope and composerComms (:519) are omitted by the row.
+  '/admin/customers/:id/comms': {
+    params: { id: UUID },
+    body: {
+      comms: [{ id: UUID, channel: 'sms', direction: 'inbound', body: PASSWORD_NOTE, aiSummary: LINK_NOTE, media: [], deliveryStatus: 'received', createdAt: '2026-10-01T12:00:00Z', contactPhone: '+15555550103' }],
+      composerComms: [{ id: UUID, channel: 'sms', direction: 'inbound', body: 'DUPLICATE-ROW-BODY' }],
+      total: 1, limit: 100, channel: 'all', hasMore: false, nextCursor: null, readScope: { conversationIds: [UUID], readBefore: '2026-10-01T12:00:00Z' },
+    },
+    dropped: ['comms.0.body', 'comms.0.aiSummary'],
+    omitted: ['composerComms', 'readScope'],
+    kept: { 'comms.0.direction': 'inbound', total: 1, channel: 'all' },
+  },
+  // admin-customers.js:3119-3191: { customer (explicit columns), estimates (id, status, token, ...), stats, lastContact }.
+  '/admin/customers/:id/estimates-summary': {
+    params: { id: UUID },
+    body: {
+      customer: { id: UUID, first_name: 'Sample', last_name: 'Person', waveguard_tier: 'Gold', lead_source_detail: PASSWORD_NOTE },
+      estimates: [{ id: UUID, status: 'sent', token: 'TOKEN-PLACEHOLDER-0001', service_interest: LINK_NOTE, decline_reason: PASSWORD_NOTE, monthly_total: '59.00' }],
+      stats: { total: 1, accepted: 0, declined: 0, open: 1, conversionRate: null }, lastContact: { channel: 'sms', direction: 'inbound', at: '2026-10-01T12:00:00Z', preview: LINK_NOTE },
+    },
+    dropped: ['estimates.0.decline_reason', 'estimates.0.service_interest', 'customer.lead_source_detail', 'lastContact.preview'],
+    omitted: ['estimates.0.token'],
+    kept: { 'estimates.0.status': 'sent', 'stats.open': 1, 'customer.waveguard_tier': 'Gold' },
+  },
+  // admin-customers.js:2652-2677: { cards[{ id, method_type, brand, last_four, exp_month, exp_year, bank_name, is_default }] }; no Stripe id is mapped.
+  '/admin/customers/:id/cards': {
+    params: { id: UUID },
+    body: { cards: [{ id: UUID, method_type: 'card', brand: 'visa', last_four: '4242', exp_month: 12, exp_year: 2030, bank_name: null, is_default: true }] },
+    kept: { 'cards.0.brand': 'visa', 'cards.0.last_four': '4242', 'cards.0.is_default': true },
+  },
+  // admin-customers.js:3215-3222: { service: { id, serviceType, scheduledDate, status } | null }.
+  '/admin/customers/:id/latest-scheduled-service': {
+    params: { id: UUID },
+    body: { service: { id: UUID, serviceType: 'Pest Control', scheduledDate: '2026-10-20', status: 'confirmed' } },
+    kept: { 'service.serviceType': 'Pest Control', 'service.status': 'confirmed' },
+  },
+  // admin-customers.js:2742 -> collection-hold-admin.js:17 listCollectionHolds: { holds[{ id, flag, reason, created_by, created_at, stops_charges }] }.
+  '/admin/customers/:id/collection-holds': {
+    params: { id: UUID },
+    body: { holds: [{ id: UUID, flag: 'collection_hold', reason: PASSWORD_NOTE, created_by: 'Office', created_at: '2026-10-01T00:00:00Z', stops_charges: false }] },
+    dropped: ['holds.0.reason'],
+    kept: { 'holds.0.flag': 'collection_hold', 'holds.0.stops_charges': false },
+  },
+  // admin-customers.js:5440-5470: { credit: { amount, estimateId, estimateSlug, payerBilled } | null }.
+  '/admin/customers/:id/deposit-credit': {
+    params: { id: UUID },
+    body: { credit: { amount: 50, estimateId: UUID, estimateSlug: 'sample-estimate', payerBilled: false } },
+    kept: { 'credit.amount': 50, 'credit.payerBilled': false },
+  },
+  // admin-schedule.js:10338 (handler), :10470-10530 map: { services[], total, page, pageSize, totalPages }; explicit fields, no notes column.
+  '/admin/schedule/list': {
+    query: { from: '2026-10-14', to: '2026-10-14' },
+    body: {
+      services: [{ id: UUID, customerId: UUID, customerName: 'Sample Person', scheduledDate: '2026-10-14', serviceType: 'Pest Control', status: 'confirmed', windowStart: '09:00', windowEnd: '11:00', technicianName: 'Tech A', address: '2 Example Way', city: 'Sampletown', prepaidAmount: null, isRecurring: true }],
+      total: 1, page: 1, pageSize: 25, totalPages: 1,
+    },
+    kept: { 'services.0.serviceType': 'Pest Control', 'services.0.technicianName': 'Tech A', total: 1, pageSize: 25 },
+  },
+  // admin-dispatch.js:6548-6660: { techs[{ id, name, avatar_url (presigned S3), role, status, lat, lng, ... }], jobs[{ id, customer_name, address, ... }] }.
+  '/admin/dispatch/board': {
+    body: {
+      techs: [{ id: UUID, name: 'Tech A', avatar_url: 'https://bucket.s3.amazonaws.com/tech.jpg?X-Amz-Signature=PLACEHOLDERSIG0001', role: 'technician', status: 'idle', lat: 27.5, lng: -82.5, today_total: 3, today_completed: 1, out_today: false }],
+      jobs: [{ id: UUID, technician_id: UUID, customer_id: UUID, customer_name: 'Sample P.', address: '2 Example Way, Sampletown, FL 34200', status: 'confirmed', service_type: 'Pest Control', window_start: '09:00', window_end: '11:00' }],
+    },
+    omitted: ['techs.0.avatar_url'],
+    kept: { 'techs.0.name': 'Tech A', 'techs.0.today_total': 3, 'jobs.0.customer_name': 'Sample P.' },
+  },
+  // admin-dispatch.js:6721-6800: one job, explicit fields; notes and internal_notes are free text.
+  '/admin/dispatch/jobs/:id': {
+    params: { id: UUID },
+    body: { id: UUID, customer_id: UUID, customer_first_name: 'Sample', customer_last_name: 'Person', customer_phone: '+15555550103', address: '2 Example Way, Sampletown, FL 34200', status: 'confirmed', service_type: 'Pest Control', scheduled_date: '2026-10-14', window_start: '09:00', window_end: '11:00', notes: PASSWORD_NOTE, internal_notes: LINK_NOTE },
+    dropped: ['notes', 'internal_notes'],
+    kept: { status: 'confirmed', service_type: 'Pest Control', customer_last_name: 'Person' },
+  },
+  // admin-dispatch.js:6817-6900: one technician and today's route.
+  '/admin/dispatch/techs/:id': {
+    params: { id: UUID },
+    body: { id: UUID, name: 'Tech A', role: 'technician', phone: '+15555550104', status: 'idle', current_job_id: null, today: { scheduled_date: '2026-10-14', completed: 1, total: 3, late_count: 0 }, route: [{ job_id: UUID, customer_first_name: 'Sample', customer_last_name: 'Person', address: '2 Example Way', service_type: 'Pest Control', status: 'confirmed' }] },
+    kept: { name: 'Tech A', 'today.total': 3, 'route.0.status': 'confirmed' },
+  },
+  // admin-dispatch.js:6935-7010: { alerts[{ id, type, severity, tech_name, job_id, address, payload, ... }] }; payload is system-written.
+  '/admin/dispatch/alerts': {
+    body: { alerts: [{ id: UUID, type: 'tech_late', severity: 'warning', tech_id: UUID, tech_name: 'Tech A', job_id: UUID, address: '2 Example Way', payload: { minutes_late: 12 }, created_at: '2026-10-14T13:00:00Z', resolved_at: null }] },
+    kept: { 'alerts.0.type': 'tech_late', 'alerts.0.severity': 'warning' },
+  },
+  // admin-estimates.js:3791 (handler), :4000-4130 map: { estimates[{ id, status, customerName, ..., notes, declineReason, dispositionNote, token, agentDraftReview }], truncated }.
+  '/admin/estimates': {
+    body: {
+      estimates: [{
+        id: UUID, status: 'sent', customerName: 'Sample Person', customerId: UUID, monthlyTotal: 59, onetimeTotal: 0, tier: 'Gold', sentAt: '2026-10-01T00:00:00Z', viewCount: 2, source: 'manual',
+        leadSourceDetail: PASSWORD_NOTE, serviceInterest: LINK_NOTE, description: LINK_NOTE, notes: PASSWORD_NOTE, declineReason: LINK_NOTE, dispositionNote: PASSWORD_NOTE, token: 'TOKEN-PLACEHOLDER-0002',
+        estimatorEngine: { lane: 'review', laneReasons: ['new customer'], reviewNotes: LINK_NOTE, marginWarnings: [] },
+        agentDraftReview: { reasoning: PASSWORD_NOTE, assumptions: [LINK_NOTE], uncertainty: [PASSWORD_NOTE], sqftSource: 'measured', unverifiedLineCount: 0 },
+      }],
+      truncated: false,
+    },
+    dropped: [
+      'estimates.0.leadSourceDetail', 'estimates.0.serviceInterest', 'estimates.0.description', 'estimates.0.notes', 'estimates.0.declineReason', 'estimates.0.dispositionNote',
+      'estimates.0.estimatorEngine.laneReasons', 'estimates.0.estimatorEngine.reviewNotes', 'estimates.0.agentDraftReview.reasoning', 'estimates.0.agentDraftReview.assumptions', 'estimates.0.agentDraftReview.uncertainty',
+    ],
+    omitted: ['estimates.0.token'],
+    kept: { 'estimates.0.status': 'sent', 'estimates.0.monthlyTotal': 59, 'estimates.0.estimatorEngine.lane': 'review', truncated: false },
+  },
+  // admin-invoices.js:540 -> invoice.js:10029 list: invoices.* plus customer fields, card_on_file, active_payment_plan.
+  '/admin/invoices': {
+    query: { customer_id: UUID },
+    body: {
+      invoices: [{
+        id: UUID, invoice_number: 'INV-2001', customer_id: UUID, status: 'sent', total: '120.00', notes: PASSWORD_NOTE, title: LINK_NOTE,
+        token: 'TOKEN-PLACEHOLDER-0003', send_claim_token: 'CLAIM-PLACEHOLDER-0001', stripe_payment_intent_id: 'pi_PLACEHOLDER0001', stripe_charge_id: 'ch_PLACEHOLDER0001',
+        receipt_url: 'https://pay.example.test/receipts/PLACEHOLDER', first_name: 'Sample', card_on_file: { brand: 'visa', last_four: '4242' }, review_hold: false,
+      }],
+      total: 1, page: 1,
+    },
+    dropped: ['invoices.0.notes', 'invoices.0.title'],
+    omitted: ['invoices.0.token', 'invoices.0.send_claim_token', 'invoices.0.stripe_payment_intent_id', 'invoices.0.stripe_charge_id', 'invoices.0.receipt_url'],
+    kept: { 'invoices.0.invoice_number': 'INV-2001', 'invoices.0.status': 'sent', 'invoices.0.card_on_file.last_four': '4242', total: 1 },
+  },
+  // admin-invoices.js:874 -> invoice.js:9973 getById: invoices.* + customer + active_payment_plan + annual_prepay(_term).
+  '/admin/invoices/:id': {
+    params: { id: UUID },
+    body: {
+      id: UUID, invoice_number: 'INV-2001', customer_id: UUID, status: 'sent', total: '120.00', notes: PASSWORD_NOTE, title: PASSWORD_NOTE, line_items: [{ description: LINK_NOTE, amount: 120 }],
+      token: 'TOKEN-PLACEHOLDER-0004', send_claim_token: 'CLAIM-PLACEHOLDER-0002', stripe_payment_intent_id: 'pi_PLACEHOLDER0002', stripe_charge_id: 'ch_PLACEHOLDER0002',
+      receipt_url: 'https://pay.example.test/receipts/PLACEHOLDER2', customer: { first_name: 'Sample', last_name: 'Person', card_on_file: { brand: 'visa', last_four: '4242' } }, active_payment_plan: null, suggested_coverage: null,
+    },
+    dropped: ['notes', 'title', 'line_items.0.description'],
+    omitted: ['token', 'send_claim_token', 'stripe_payment_intent_id', 'stripe_charge_id', 'receipt_url'],
+    kept: { invoice_number: 'INV-2001', status: 'sent', 'line_items.0.amount': 120, 'customer.card_on_file.last_four': '4242' },
+  },
+  // admin-invoices.js:429-480 getInvoiceDeliveryRecipients: explicit fields.
+  '/admin/invoices/:id/recipients': {
+    params: { id: UUID },
+    body: { invoiceId: UUID, invoiceNumber: 'INV-2001', customerId: UUID, customerName: 'Sample Person', primaryContact: { name: 'Sample Person', email: 'sample@example.test', phone: '+15555550103', role: 'primary' }, smsRecipient: { name: 'Sample Person', phone: '+15555550103', role: 'primary' }, emailRecipient: { email: 'sample@example.test', name: 'Sample Person', role: 'primary' }, billingPreference: { name: '', email: '' } },
+    kept: { invoiceNumber: 'INV-2001', 'primaryContact.role': 'primary' },
+  },
+  // admin-leads.js:727 (handler): { leads[leads.* + source_name, source_type, source_channel, estimate_status, assigned_name], total, page, limit, consultationLinksEnabled }.
+  '/admin/leads': {
+    query: { status: 'open', limit: 25 },
+    body: {
+      leads: [{
+        id: UUID, first_name: 'Sample', last_name: 'Person', phone: '+15555550105', email: 'lead@example.test', status: 'new', lead_type: 'call',
+        service_interest: PASSWORD_NOTE, transcript_summary: LINK_NOTE, extracted_data: { wants: 'quarterly pest control' }, heard_about_prompt: PASSWORD_NOTE, lead_synopsis: LINK_NOTE, source_name: 'Website', source_channel: 'organic', estimate_status: null, assigned_name: 'Tech A',
+        call_recording_url: 'https://api.example.test/recordings/PLACEHOLDERREC1', anon_id: 'ANON-PLACEHOLDER-1', gclid: 'GCLID-PLACEHOLDER-1',
+      }],
+      total: 1, page: 1, limit: 25, consultationLinksEnabled: false,
+    },
+    dropped: ['leads.0.service_interest', 'leads.0.transcript_summary', 'leads.0.extracted_data', 'leads.0.heard_about_prompt', 'leads.0.lead_synopsis'],
+    omitted: ['leads.0.call_recording_url', 'leads.0.anon_id', 'leads.0.gclid'],
+    kept: { 'leads.0.status': 'new', 'leads.0.source_name': 'Website', total: 1, limit: 25 },
+  },
+  // admin-leads.js:929-1100: { lead (leads.* + source and assigned name), activities[], calls[] }; the raw recording URL stays server-side in calls.
+  '/admin/leads/:id': {
+    params: { id: UUID },
+    body: {
+      lead: { id: UUID, first_name: 'Sample', status: 'contacted', service_interest: PASSWORD_NOTE, transcript_summary: LINK_NOTE, extracted_data: { wants: 'quarterly pest control' }, heard_about_prompt: PASSWORD_NOTE, lead_synopsis: LINK_NOTE, source_name: 'Website', assigned_name: 'Tech A', call_recording_url: 'https://api.example.test/recordings/PLACEHOLDERREC2', anon_id: 'ANON-PLACEHOLDER-2', gclid: 'GCLID-PLACEHOLDER-2' },
+      activities: [{ id: 1, lead_id: UUID, activity_type: 'created', description: PASSWORD_NOTE, performed_by: 'Office', metadata: { from: 'web form' }, created_at: '2026-10-01T00:00:00Z' }],
+      calls: [{ id: UUID, direction: 'inbound', duration_seconds: 120, recording_sid: 'RE00000000000000000000000000000001', has_recording: true, transcription: LINK_NOTE, transcription_status: 'completed', created_at: '2026-10-01T00:00:00Z' }],
+    },
+    dropped: ['lead.service_interest', 'lead.transcript_summary', 'lead.extracted_data', 'lead.heard_about_prompt', 'lead.lead_synopsis', 'activities.0.description', 'activities.0.metadata', 'calls.0.transcription'],
+    omitted: ['lead.call_recording_url', 'lead.anon_id', 'lead.gclid'],
+    kept: { 'lead.status': 'contacted', 'activities.0.activity_type': 'created', 'calls.0.transcription_status': 'completed', 'calls.0.has_recording': true, 'calls.0.duration_seconds': 120 },
+  },
+  // admin-leads.js:168-262: one object of counts, times and totals; no lead row.
+  '/admin/leads/analytics/overview': {
+    query: { start_date: '2026-10-01', end_date: '2026-10-13' },
+    body: { total: 12, won: 3, lost: 2, active: 7, conversionRate: 25, medianResponseTime: 14, avgSpeedToLead: null, openUnansweredCount: 0, costTotal: 300, revenue: 900, cpa: 100, roi: 200, startDate: '2026-10-01T04:00:00Z', endDate: '2026-10-13T03:59:59Z' },
+    kept: { total: 12, won: 3, conversionRate: 25, roi: 200 },
+  },
+  // admin-leads.js:288-301 -> lead-attribution.js:594-607: { sources[{ source (lead_sources row), totalLeads, conversions, ... }] }.
+  '/admin/leads/analytics/by-source': {
+    query: { start_date: '2026-10-01', end_date: '2026-10-13' },
+    body: { sources: [{ source: { id: UUID, name: 'Website', source_type: 'organic', channel: 'organic', is_active: true, notes: PASSWORD_NOTE }, totalLeads: 12, conversions: 3, conversionRate: 25, totalCost: 300, totalRevenue: 900, costPerLead: 25, roi: 200 }] },
+    dropped: ['sources.0.source.notes'],
+    kept: { 'sources.0.source.name': 'Website', 'sources.0.totalLeads': 12, 'sources.0.roi': 200 },
   },
 };
 
@@ -267,6 +466,108 @@ const READER = { fullAccess: true, isAdmin: true, staffAuthorization: AUTH };
 const readOf = (endpoint, shape) => executeAdminReadTool('read_admin_data', {
   endpoint, ...(shape.params ? { params: shape.params } : {}), ...(shape.query ? { query: shape.query } : {}),
 }, READER);
+
+// Keep mode (Codex #6366 rounds 1 to 3): a row that returns a whole table row or a broad object lists the keys it
+// KEEPS. Every key Codex named, and two invented future columns, is added to EVERY object of the fixture; none may
+// reach the answer. Sentinel text, so a leak is found by a plain search of the answer.
+const TRAP_KEYS = [
+  'payment_reference', 'profileLabel', 'tags', 'competitorName', 'title', 'notes', 'description', 'service_interest', 'lead_synopsis',
+  'heard_about_prompt', 'extracted_data', 'metadata', 'future_free_text_column', 'futureOperatorColumn', 'future_operator_column',
+];
+const trapValue = key => `TRAP-${key}`;
+function withTraps(value) {
+  if (Array.isArray(value)) return value.map(withTraps);
+  if (!value || typeof value !== 'object') return value;
+  const out = Object.fromEntries(Object.entries(value).map(([key, item]) => [key, withTraps(item)]));
+  // a map of counts (pipelineCounts) is not a record: it has no columns
+  const values = Object.values(value);
+  if (values.length && values.every(item => typeof item === 'number')) return out;
+  for (const key of TRAP_KEYS) if (!Object.hasOwn(out, key)) out[key] = key === 'tags' ? [trapValue(key)] : key === 'extracted_data' || key === 'metadata' ? { wants: trapValue(key) } : trapValue(key);
+  return out;
+}
+const KEEP_ENTRIES = catalog.entries.filter(entry => entry.keep);
+
+// The rest of the fields each handler returns (read from the handler's own mapping, cited above each fixture), added
+// to the fixture by path so a keep list is tested against a full record. A path that the fixture already holds is left alone.
+const under = (prefix, names) => names.map(name => `${prefix}.${name}`);
+const MORE = {
+  '/admin/customers': under('customers.0', ['matchedHomeAddress', 'contactRole', 'serviceContactName', 'serviceContactPhone', 'serviceContactEmail', 'serviceContact2Name', 'serviceContact2Phone', 'serviceContact2Email',
+    'serviceContact3Name', 'serviceContact3Phone', 'serviceContact3Email', 'memberSince', 'active', 'leadScore', 'companyName', 'propertyType', 'lastContactDate', 'lastContactType', 'nextFollowUp', 'lifetimeRevenue',
+    'totalServices', 'lastServiceDate', 'nextServiceDate', 'serviceTypes', 'serviceCount', 'lastRating', 'overdueInvoiceCount', 'healthScore', 'healthGrade', 'landingPageUrl']),
+  '/admin/customers/:id/comms': under('comms.0', ['conversationId', 'durationSeconds', 'answeredBy', 'isRead', 'messageType', 'recordingSid', 'ourEndpointLabel']),
+  '/admin/customers/:id/estimates-summary': [
+    ...under('customer', ['phone', 'email', 'address_line1', 'city', 'state', 'zip', 'active', 'created_at', 'property_type', 'company_name', 'lead_source']),
+    ...under('estimates.0', ['annual_total', 'onetime_total', 'waveguard_tier', 'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at']), 'stats.acceptedLifetimeMonthly'],
+  '/admin/dispatch/alerts': under('alerts.0', ['customer_first_name', 'customer_last_name', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'resolved_by']),
+  '/admin/dispatch/board': [...under('techs.0', ['current_job_id', 'eta_minutes', 'updated_at', 'location_updated_at']), ...under('jobs.0', ['lat', 'lng', 'scheduled_date'])],
+  '/admin/dispatch/jobs/:id': ['customer_email', 'lat', 'lng', 'tech_id', 'tech_full_name', 'updated_at', 'visit_id'],
+  '/admin/dispatch/techs/:id': ['email', 'active', 'lat', 'lng', 'status_updated_at', 'location_updated_at', ...under('route.0', ['scheduled_date', 'window_start', 'window_end'])],
+  '/admin/estimates': [
+    ...under('estimates.0', ['customerPhone', 'address', 'customerEmail', 'updatedAt', 'createdBy', 'viewedAt', 'acceptedAt', 'scheduledAt', 'expiresAt', 'sendMethod', 'declinedAt', 'lastViewedAt', 'clickCount',
+      'lastClickedAt', 'createdAt', 'leadSource', 'isPriority', 'followUpCount', 'lastFollowUpAt', 'disposition', 'dispositionSource', 'competitorPrice', 'archivedAt', 'showOneTimeOption', 'billByInvoice', 'isCommercialProposal', 'serviceLines', 'automation']),
+    ...under('estimates.0.confirmedAppointment', ['id', 'scheduledDate', 'windowDisplay', 'windowStart', 'serviceType', 'linked']), 'estimates.0.agentDraftReview.createdAt'],
+};
+const INVOICE_MORE = ['service_date', 'due_date', 'subtotal', 'discount_amount', 'tax_rate', 'tax_amount', 'credit_applied', 'sent_at', 'viewed_at', 'paid_at', 'view_count', 'payment_method', 'card_brand', 'card_last_four',
+  'service_type', 'tech_name', 'sms_sent_at', 'sms_reminder_count', 'last_reminder_at', 'receipt_sent_at', 'prepaid_at', 'archived_at', 'payer_id', 'scheduled_service_id', 'created_at', 'updated_at', 'po_number', 'discount_label'];
+const PLAN_MORE = ['id', 'payment_amount', 'payment_frequency', 'next_payment_date', 'total_balance', 'status'];
+MORE['/admin/invoices'] = [
+  ...under('invoices.0', [...INVOICE_MORE, 'last_name', 'phone', 'email', 'waveguard_tier', 'property_type', 'annual_prepay_id', 'annual_prepay_status', 'annual_prepay_plan_label', 'annual_prepay_term_start', 'annual_prepay_term_end', 'annual_prepay_amount']),
+  ...under('invoices.0.active_payment_plan', PLAN_MORE)];
+MORE['/admin/invoices/:id'] = [
+  ...INVOICE_MORE, 'review_hold', ...under('line_items.0', ['quantity', 'unit_price', 'category']), ...under('customer', ['phone', 'email', 'waveguard_tier', 'address_line1', 'city', 'state', 'zip']),
+  ...under('active_payment_plan', PLAN_MORE),
+  ...under('annual_prepay', ['id', 'status', 'monthlyRate', 'planLabel', 'termStart', 'termEnd', 'coverageMonths', 'coverageServiceType', 'coverageVisitCount', 'coverageCadence']),
+  ...under('annual_prepay_term', ['id', 'status', 'monthlyRate', 'planLabel', 'prepayAmount', 'termStart', 'termEnd'])];
+MORE['/admin/invoices/:id/recipients'] = ['payerBilled', 'billingPreference.name', 'billingPreference.email'];
+const LEAD_MORE = ['last_name', 'phone', 'email', 'address', 'city', 'zip', 'lead_type', 'urgency', 'is_residential', 'is_commercial', 'is_qualified', 'lead_source_id', 'source_type', 'estimate_id', 'customer_id', 'assigned_to',
+  'monthly_value', 'initial_service_value', 'waveguard_tier', 'first_contact_at', 'response_time_minutes', 'next_follow_up_at', 'builder_warranty_expires_on', 'created_at', 'updated_at', 'disqualification_reason', 'builder_warranty_provider'];
+MORE['/admin/leads'] = [...under('leads.0', [...LEAD_MORE, 'first_name', 'status']), 'leads.0.estimate_status'];
+MORE['/admin/leads/:id'] = [...under('lead', [...LEAD_MORE, 'id', 'source_channel', 'estimate_id']), ...under('activities.0', ['lead_id']), ...under('calls.0', ['id', 'recording_url'])];
+MORE['/admin/leads/analytics/by-source'] = [
+  ...under('sources.0', ['costPerAcquisition', 'channelSpend', 'avgResponseTime', 'startDate', 'endDate']), ...under('sources.0.source', ['id'])];
+MORE['/admin/leads/analytics/overview'] = ['recentMedianResponseTime', 'speedToLeadSince', 'avgResponseTime'];
+MORE['/admin/schedule/list'] = under('services.0', ['customerId', 'serviceTypeRaw', 'windowEnd', 'estimatedDuration', 'estimatedPrice', 'serviceKey', 'primaryLinePrice', 'prepaidAmount', 'prepaidMethod', 'prepaidAt',
+  'technicianId', 'zone', 'city', 'recurringPattern', 'recurringParentId', 'sourceEstimateId', 'payerId', 'poNumber', 'selfPayOverride', 'serviceAddons']);
+
+function setAt(target, path, value) {
+  const keys = path.split('.');
+  let node = target;
+  keys.slice(0, -1).forEach((key, index) => {
+    if (node[key] === undefined || node[key] === null) node[key] = /^\d+$/.test(keys[index + 1]) ? [] : {};
+    node = node[key];
+  });
+  const last = keys[keys.length - 1];
+  if (node[last] === undefined) node[last] = value;
+}
+// The fixture with every MORE field added. A value is the field's name, so a mix-up shows in the failure.
+function fullBody(endpoint, shape) {
+  const body = JSON.parse(JSON.stringify(shape.body));
+  for (const path of MORE[endpoint] || []) setAt(body, path, `${path.split('.').pop()}-value`);
+  return body;
+}
+const bodyFor = (endpoint, shape) => (KEEP_ENTRIES.some(entry => entry.endpoint === endpoint) ? withTraps(fullBody(endpoint, shape)) : shape.body);
+
+// Every leaf path of a value ("a.0.b"); an empty list or object is a leaf.
+function leafPaths(value, prefix = '') {
+  const counts = value && typeof value === 'object' && !Array.isArray(value) ? Object.values(value) : [];
+  if (counts.length && counts.every(item => typeof item === 'number')) return [prefix];
+  if (Array.isArray(value)) return value.length ? value.flatMap((item, index) => leafPaths(item, prefix ? `${prefix}.${index}` : String(index))) : [prefix];
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value);
+    return keys.length ? keys.flatMap(key => leafPaths(value[key], prefix ? `${prefix}.${key}` : key)) : [prefix];
+  }
+  return [prefix];
+}
+// A matcher written apart from the run-time one: "*" is any one segment; a pattern that ends at a list of plain
+// values keeps the whole list (the rest of the path is list positions).
+function keptBy(pattern, path) {
+  const want = pattern.split('.');
+  const have = path.split('.');
+  if (have.length < want.length) return false;
+  if (!want.every((segment, index) => segment === '*' || segment === have[index])) return false;
+  return have.slice(want.length).every(segment => /^\d+$/.test(segment));
+}
+const keptByAny = (keep, path) => keep.some(pattern => keptBy(pattern, path));
 
 beforeEach(() => {
   process.env.GATE_IB_GENERAL_READ = 'true';
@@ -308,10 +609,12 @@ describe('every catalog endpoint has a verified response fixture', () => {
 
   test.each(catalog.entries.map(entry => [entry.endpoint]))('%s: exactly the expected keys are withheld, the rest come back', async (endpoint) => {
     const shape = SHAPES[endpoint];
-    global.fetch = jest.fn(async () => jsonResponse(shape.body));
+    global.fetch = jest.fn(async () => jsonResponse(bodyFor(endpoint, shape)));
     const result = await readOf(endpoint, shape);
     expect(result.status).toBe(200);
     const text = JSON.stringify(result);
+    // A keep-mode row drops what it does not list: dropped, not withheld (no marker, no key).
+    for (const path of shape.dropped || []) expect({ path, value: getAt(result.data, path) }).toEqual({ path, value: undefined });
     // The withheld set is exact: nothing else in the answer is a withheld marker.
     expect(markerPaths(result.data).sort()).toEqual([...(shape.withheld || [])].sort());
     for (const path of shape.withheld || []) {
@@ -320,6 +623,13 @@ describe('every catalog endpoint has a verified response fixture', () => {
       expect(getAt(result.data, path)).toBe(`[note withheld: ${length} characters]`);
     }
     for (const piece of FAKE_PIECES) expect(text).not.toContain(piece);
+    // A projected (omit) key is gone with its value, and the reader is told it is left out by design.
+    for (const path of shape.omitted || []) {
+      expect(getAt(result.data, path)).toBeUndefined();
+      expect(getAt(shape.body, path)).toBeDefined();
+    }
+    expect(text).not.toMatch(/PLACEHOLDER|DUPLICATE-ROW-BODY|TRAP-/);
+    if (shape.omitted) expect(result.note).toMatch(/Left out of this read by design/);
     for (const [path, value] of Object.entries(shape.kept || {})) expect(getAt(result.data, path)).toEqual(value);
     for (const [path, value] of Object.entries(shape.content || {})) expect(getAt(result.data, path)).toBe(value);
     if (shape.withheld && shape.withheld.length) expect(result.notes_withheld).toBe(shape.withheld.length);
@@ -386,5 +696,83 @@ describe('the default withholds a name-matched key that no row declared', () => 
       expect(FREE_TEXT_WORDS).toContain(word);
     }
     expect(Object.isFrozen(FREE_TEXT_WORDS)).toBe(true);
+  });
+});
+
+describe('keep mode: only the listed fields reach the model, and a new column never does', () => {
+  test('the 21 rows added with the core screens and leads are in keep mode', () => {
+    expect(KEEP_ENTRIES.map(entry => entry.endpoint).sort()).toEqual([
+      '/admin/customers', '/admin/customers/:id/cards', '/admin/customers/:id/collection-holds', '/admin/customers/:id/comms', '/admin/customers/:id/deposit-credit',
+      '/admin/customers/:id/estimates-summary', '/admin/customers/:id/latest-scheduled-service', '/admin/customers/:id/timeline',
+      '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/estimates',
+      '/admin/invoices', '/admin/invoices/:id', '/admin/invoices/:id/recipients', '/admin/leads', '/admin/leads/:id',
+      '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/schedule/list',
+    ]);
+  });
+
+  test.each(KEEP_ENTRIES.map(entry => [entry.endpoint, entry]))('%s: every fixture field is kept or dropped on purpose, and each kept field comes back unchanged', async (endpoint, entry) => {
+    const shape = SHAPES[endpoint];
+    const body = bodyFor(endpoint, shape);
+    global.fetch = jest.fn(async () => jsonResponse(body));
+    const result = await readOf(endpoint, shape);
+    expect(result.status).toBe(200);
+    expect(result.truncated).toBe(false);
+    const text = JSON.stringify(result);
+    // The seven keys Codex named, and the invented future columns, are not in the answer, as a key or as text.
+    expect(text).not.toMatch(/TRAP-/);
+    for (const key of ['payment_reference', 'profileLabel', 'tags', 'competitorName', 'future_free_text_column', 'futureOperatorColumn']) expect(text).not.toContain(`"${key}"`);
+    // Nothing the answer holds is off the list.
+    for (const path of leafPaths(result.data)) expect({ path, listed: path === '' || keptByAny(entry.keep, path) }).toEqual({ path, listed: true });
+    // Every fixture field on the list comes back with its value; every other one is gone.
+    for (const path of leafPaths(body)) {
+      const value = getAt(body, path);
+      if (keptByAny(entry.keep, path)) expect({ path, value: getAt(result.data, path) }).toEqual({ path, value });
+      else expect({ path, value: getAt(result.data, path) }).toEqual({ path, value: undefined });
+    }
+    // The answer says it is a reviewed list.
+    expect(result.note).toMatch(/only a reviewed list of fields/);
+    expect(result).not.toHaveProperty('notes_withheld');
+  });
+
+  test.each(KEEP_ENTRIES.map(entry => [entry.endpoint, entry]))('%s: the fixture exercises every listed field', (endpoint, entry) => {
+    const paths = leafPaths(bodyFor(endpoint, SHAPES[endpoint]));
+    expect({ endpoint, unexercised: entry.keep.filter(pattern => !paths.some(path => keptBy(pattern, path))) }).toEqual({ endpoint, unexercised: [] });
+  });
+
+  test('a column that appears next month is dropped, at every depth, on every kept record', async () => {
+    const endpoint = '/admin/invoices';
+    const shape = SHAPES[endpoint];
+    const body = JSON.parse(JSON.stringify(shape.body));
+    body.invoices[0].brand_new_column = 'TRAP-brand_new_column';
+    body.invoices[0].card_on_file.brand_new_nested = 'TRAP-brand_new_nested';
+    body.brand_new_top = 'TRAP-brand_new_top';
+    global.fetch = jest.fn(async () => jsonResponse(body));
+    const result = await readOf(endpoint, shape);
+    expect(JSON.stringify(result)).not.toMatch(/TRAP-brand_new/);
+    expect(result.data.invoices[0].card_on_file).toEqual({ brand: 'visa', last_four: '4242' });
+  });
+
+  test('a kept key is still scrubbed: a link or a secret inside a kept value does not pass', async () => {
+    const endpoint = '/admin/customers/:id/latest-scheduled-service';
+    const shape = SHAPES[endpoint];
+    global.fetch = jest.fn(async () => jsonResponse({ service: { id: UUID, serviceType: LINK_NOTE, scheduledDate: '2026-10-20', status: 'confirmed' } }));
+    const result = await readOf(endpoint, shape);
+    for (const piece of FAKE_PIECES) expect(JSON.stringify(result)).not.toContain(piece);
+    expect(result.data.service.status).toBe('confirmed');
+  });
+});
+
+describe('keep mode round 3 fixes (Codex #6366 r3)', () => {
+  const { keepPaths } = require('../utils/response-projection');
+  test('an absent allow-listed object stays null instead of disappearing', () => {
+    expect(keepPaths({ service: null }, ['service.id', 'service.status'])).toEqual({ service: null });
+    expect(keepPaths({ service: { id: 1, status: 'pending', notes: 'x' } }, ['service.id', 'service.status'])).toEqual({ service: { id: 1, status: 'pending' } });
+  });
+  test('invoice line categories and the raw page size are not offered', () => {
+    const rows = require('../services/intelligence-bar/admin-read-reviewed.json').reviewed;
+    const detail = rows.find((r) => r.endpoint === '/admin/invoices/:id');
+    const list = rows.find((r) => r.endpoint === '/admin/invoices');
+    expect(detail.keep).not.toContain('line_items.*.category');
+    expect(list.query).not.toContain('limit');
   });
 });

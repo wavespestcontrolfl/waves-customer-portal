@@ -94,6 +94,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // send_invoice (owner ruling 2026-10-07): an existing invoice only,
   // through the Invoices page's own send handler.
   'send_invoice',
+  // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
+  // an invoice with nothing collected only, sends nothing.
+  'void_invoice',
   'update_lead_contact',
   // convert_lead (owner ruling 2026-10-12): the Leads page's Convert to Customer handler, run in
   // process behind a card; links the lead to an existing customer and sends nothing.

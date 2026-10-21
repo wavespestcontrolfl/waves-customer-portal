@@ -355,6 +355,7 @@ const SCOPE_SNAPSHOT = {
     'send_invoice',
     // convert_lead carries lead_id + customer_id (validateRecordTarget binds both to the task customer).
     'convert_lead',
+    'void_invoice',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.
