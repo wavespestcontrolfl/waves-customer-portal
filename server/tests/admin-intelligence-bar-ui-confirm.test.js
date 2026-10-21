@@ -371,7 +371,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
         prompt: 'charge sixty-one thirty-three a month',
         dictation_money: [{ heard: 'sixty-one thirty-three', suggested: '$1,000,000' }],
       });
-      expect(prompt).toContain('The operator dictated "sixty-one thirty-three", which reads as $61.33; use $61.33 and show it on any card.');
+      expect(prompt).toContain('The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using an amount from this dictation, read it back ("I heard $61.33, is that right?") unless a confirmation card shows it.');
       expect(prompt).not.toContain('1,000,000');
     });
 

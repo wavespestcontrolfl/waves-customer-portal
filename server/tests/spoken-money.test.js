@@ -260,13 +260,13 @@ describe('ambiguousAmountNote with clear readings', () => {
   const Q = 'charge sixty-one thirty-three a month and 61 33 later';
   test('states the amount the server computed, with the card instruction', () => {
     expect(ambiguousAmountNote([{ heard: 'sixty-one thirty-three', suggested: '$9.99' }], Q))
-      .toContain('The operator dictated "sixty-one thirty-three", which reads as $61.33; use $61.33 and show it on any card.');
+      .toContain('The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using an amount from this dictation, read it back ("I heard $61.33, is that right?") unless a confirmation card shows it.');
   });
   test('the client amount is never read', () => {
     expect(ambiguousAmountNote([{ heard: 'sixty-one thirty-three', suggested: '$9.99' }], Q)).not.toContain('9.99');
   });
   test('matching ignores case and spacing', () => {
-    expect(ambiguousAmountNote([{ heard: 'Sixty-One  Thirty-Three' }], Q)).toContain('reads as $61.33');
+    expect(ambiguousAmountNote([{ heard: 'Sixty-One  Thirty-Three' }], Q)).toContain('may mean $61.33');
   });
   test('words that are not an amount in this question add nothing', () => {
     expect(ambiguousAmountNote([{ heard: 'sixty-one thirty-three' }], 'gate code sixty-one thirty-three')).toBe('');
@@ -306,6 +306,7 @@ describe('dollars and a number without cents (pre-push audit r3)', () => {
     expect(normalizeSpokenMoney('charge one hundred dollars and fifty five').changes).toEqual([]);
     expect(normalizeSpokenMoney('charge one hundred dollars and 55').changes).toEqual([]);
     expect(normalizeSpokenMoney('charge one hundred dollars fifty five').changes).toEqual([]);
+    expect(normalizeSpokenMoney('charge one hundred dollars, actually one hundred dollars and fifty five').changes).toEqual([]);
     expect(normalizeSpokenMoney('charge one hundred dollars, 55').changes).toEqual([]);
     expect(normalizeSpokenMoney('charge one hundred dollars and fifty five cents').changes).toEqual([expect.objectContaining({ to: '$100.55' })]);
     expect(normalizeSpokenMoney('charge one hundred dollars and the rest later').changes).toEqual([expect.objectContaining({ to: '$100' })]);

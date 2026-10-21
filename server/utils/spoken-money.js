@@ -224,8 +224,12 @@ function normalizeSpokenMoney(input) {
 
   // "one hundred dollars (and) fifty five" with no "cents": the whole-dollar
   // reading would drop the cents, so no amount is suggested for it (pre-push audit r3).
-  const resolved = changes.filter((change) => change.kind === 'dollars-and-cents'
-    || !DOLLARS_AND_NUMBER_AFTER.test(textAfter(original, change.from)));
+  // A phrase heard more than once can carry a correction ("one hundred dollars,
+  // actually one hundred dollars and fifty five"): no suggestion for it.
+  const lower = String(original).toLowerCase();
+  const once = (phrase) => lower.indexOf(phrase.toLowerCase()) === lower.lastIndexOf(phrase.toLowerCase());
+  const resolved = changes.filter((change) => once(change.from) && (change.kind === 'dollars-and-cents'
+    || !DOLLARS_AND_NUMBER_AFTER.test(textAfter(original, change.from))));
   return { text, changes: resolved, ambiguous };
 }
 
@@ -257,7 +261,7 @@ const squash = (v) => String(v).toLowerCase().replace(/\s+/g, ' ').trim();
  * The client only says WHICH heard words are dictated; every amount in the note is recomputed here
  * from the question (the client's `suggested` is never read), and a four-digit entry must really be
  * four digits. At most three lines. Returns '' when there is nothing to say.
- *   - a clear reading: 'The operator dictated "sixty-one thirty-three", which reads as $61.33; use $61.33 ...'
+ *   - a clear reading: 'The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using ... read it back ...'
  *   - an unclear one: ask with offer_choices between $61.33 and $6,133 before using it.
  */
 function ambiguousAmountNote(list, question) {
@@ -273,7 +277,7 @@ function ambiguousAmountNote(list, question) {
       continue;
     }
     const change = parsed.changes.find((c) => squash(c.from) === squash(heard));
-    if (change) lines.push(`The operator dictated "${change.from}", which reads as ${change.to}; use ${change.to} and show it on any card.`);
+    if (change) lines.push(`The operator dictated "${change.from}", which may mean ${change.to}. Before using an amount from this dictation, read it back ("I heard ${change.to}, is that right?") unless a confirmation card shows it.`);
   }
   const unique = [...new Set(lines)].slice(0, 3);
   return unique.length ? `\n\nDICTATED AMOUNTS:\n${unique.join('\n')}` : '';
