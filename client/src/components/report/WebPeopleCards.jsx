@@ -125,7 +125,8 @@ function NextVisit({ visit, glass }) {
 }
 
 function ReviewAsk({ data, review, token, glass }) {
-  const tech = String(data.technician?.name || data.technicianName || '').trim().split(/\s+/)[0] || 'we';
+  // Only the server-validated name: a placeholder label ("Your Waves technician") never becomes "How did Your do".
+  const tech = data.webPeople?.tech?.firstName || 'we';
   const name = String(data.customerFirstName || '').trim();
   return (
     <PeopleCard glass={glass} className="web-people-review">

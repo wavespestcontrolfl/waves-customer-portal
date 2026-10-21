@@ -118,8 +118,15 @@ describe('web report people cards', () => {
     expect(fetchMock.mock.calls.length).toBe(callsBefore);
   });
 
+  it('review card with no validated technician asks about "we", never the placeholder label', async () => {
+    renderReport(payload({ tech: null, review: { url: 'https://g.page/r/example/review', locationId: 'venice' } }, { technician: { name: 'Your Waves technician' }, technicianName: 'Your Waves technician' }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByRole('heading', { name: /^How did we do today/ })).toBeInTheDocument();
+    expect(screen.queryByText(/How did Your/)).toBeNull();
+  });
+
   it('review card: names the technician and the customer, links to Google, and records the click', async () => {
-    const { fetchMock } = renderReport(payload({ review: { url: 'https://g.page/r/example/review', locationId: 'venice' } }));
+    const { fetchMock } = renderReport(payload({ tech: { firstName: 'Alex', photoUrl: null, fdacsId: null, visitsAtHome: null }, review: { url: 'https://g.page/r/example/review', locationId: 'venice' } }));
     await screen.findByText(/This report is provided for your records/);
     expect(screen.getByRole('heading', { name: 'How did Alex do today, Casey?' })).toBeInTheDocument();
     const link = screen.getByRole('link', { name: /Rate today.s visit/ });
