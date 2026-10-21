@@ -127,13 +127,19 @@ function targetGrounding(taskContext) {
   // Conflicting name and contact evidence (Codex #6369): a target resolved from
   // the typed name is not trusted; an operator pick and the page still are.
   const conflict = taskContext?.identityConflict === true;
+  // Direct (no-card) authority from typed evidence needs EXACTLY ONE typed customer
+  // (Codex #6369 r12): a reply that resolves two or more customers (a choice label
+  // whose customer-entered city holds another customer's name) grounds none of them,
+  // and a name-resolved target is dropped with them.
+  const typed = Array.isArray(taskContext?.typedCustomerIds) ? taskContext.typedCustomerIds : [];
+  const distrustLookup = conflict || typed.length > 1;
   const addTarget = (target) => {
-    if (conflict && target?.provenance === 'current_request_lookup') return;
+    if (distrustLookup && target?.provenance === 'current_request_lookup') return;
     if (target?.customer_id) ids.add(String(target.customer_id).toLowerCase());
   };
   for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) addTarget(target);
   addTarget(taskContext?.target);
-  for (const id of Array.isArray(taskContext?.typedCustomerIds) ? taskContext.typedCustomerIds : []) ids.add(String(id).toLowerCase());
+  if (typed.length === 1) ids.add(String(typed[0]).toLowerCase());
   // The customer on screen: the page context's own customer, or the customer
   // record the page showed (pageIds, already validated by the task context).
   const page = taskContext?.page || {};

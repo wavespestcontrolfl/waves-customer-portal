@@ -576,6 +576,18 @@ async function initialFormIds(prompt) {
 // "First L., City", which initialFormIds resolves back. null = no button can name this
 // customer (no city, still too long, or it looks like another same-name customer's):
 // the bar asks for a phone number or email instead.
+// The city on a button comes from customer-entered data, and a tap sends the button text
+// back as the owner's message. Only a plain place name passes: letters, spaces, hyphen
+// and apostrophe, up to 3 words and 30 characters. Anything else ("Update Alice Jones",
+// digits, punctuation) gives the customer no button (Codex #6369 r12).
+const SAFE_CITY_RE = /^\p{L}[\p{L}'-]*(?: \p{L}[\p{L}'-]*){0,2}$/u;
+// A word that reads as a command ("Update", "Assign", "Delete") is never a place name.
+const COMMAND_WORD_RE = new RegExp(`\\b(?:${PERSON_ACTIONS}|assign|add|remove|rate|tier|waive|apply)\\b`, 'i');
+const safeChoiceCity = city => {
+  const text = String(city || '').trim();
+  return text.length <= 30 && SAFE_CITY_RE.test(text) && !COMMAND_WORD_RE.test(text) ? text : null;
+};
+
 async function choiceLabels(customers) {
   const full = customer => `${[customer.first_name, customer.last_name].filter(Boolean).join(' ')}${customer.city ? `, ${customer.city}` : ''}`;
   const short = customer => `${customer.first_name} ${String(customer.last_name || '').trim().charAt(0)}., ${customer.city}`;
@@ -595,7 +607,7 @@ async function choiceLabels(customers) {
     for (const row of found) owners.set(tripleKey([row.first, row.initial, row.city]), row);
   }
   const labels = customers.map((customer) => {
-    if (!customer.city) return null;
+    if (!safeChoiceCity(customer.city)) return null;
     const whole = full(customer);
     if (whole.length <= MAX_LABEL_CHARS) return whole;
     if (!wantsShort(customer)) return null;
