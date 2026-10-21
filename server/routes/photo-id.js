@@ -1515,4 +1515,48 @@ router.get('/:type/:id', async (req, res, next) => {
   }
 });
 
+// GATE_REPORT_WEB_ACTIONS (owner 2026-10-20): the simple web service report's
+// "Seen something since?" button runs THESE handlers for the report's customer,
+// so the customer gets the same read, the same stored row and the same coverage
+// check as the portal photo ID, with no second pipeline. The caller (the report
+// route) owns auth (the report token), the gate and the limiters; this only
+// prepares the photos exactly as POST /:type does (data URL split, HEIC/odd JPEG
+// transcode) and calls the typed handler with a response shim that captures the
+// reply. The handlers' own 503 copy and next_step kinds are unchanged.
+async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = false }) {
+  const handler = TYPE_HANDLERS[type];
+  if (!handler || !customerId) return { status: 400, body: { error: 'Unknown assessment type' } };
+  const rawPhotoInputs = (Array.isArray(dataUrls) ? dataUrls : []).map(splitDataUrl).filter(Boolean);
+  if (!rawPhotoInputs.length || rawPhotoInputs.length !== dataUrls.length) {
+    return { status: 400, body: { error: 'Photos could not be read.' } };
+  }
+  let photoInputs;
+  try {
+    photoInputs = await Promise.all(rawPhotoInputs.map(normalizePhotoInput));
+  } catch (err) {
+    logger.warn(`[photo-id] report photo transcode failed: ${err.message}`);
+    return { status: 400, body: { error: 'One of your photos could not be processed. Try a different photo.' } };
+  }
+  const captured = { status: 500, body: null };
+  const res = {
+    status(code) { captured.status = code; return res; },
+    json(body) { captured.body = body; return res; },
+  };
+  const req = {
+    customer: { id: customerId }, customerId, _photoInputs: photoInputs, body: {},
+  };
+  await handler(req, res, {
+    note: null,
+    location: null,
+    propertyId: null,
+    isSecondary,
+    issueAssociation: { enabled: false, issueId: null, observedOn: null },
+  });
+  return captured;
+}
+
 module.exports = router;
+// The report route shares the portal photo ID's per-customer and daily limiters,
+// so one customer has one photo-check quota whichever page they use.
+module.exports.photoIdLimiters = { perCustomerLimiter, sharedDailyLimiter };
+module.exports.runCustomerPhotoId = runCustomerPhotoId;

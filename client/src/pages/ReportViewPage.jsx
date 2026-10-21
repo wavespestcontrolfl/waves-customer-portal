@@ -6,6 +6,7 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
+import ReportWebActions from '../components/report/ReportWebActions';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
@@ -10509,6 +10510,12 @@ function SimpleWebReport({ data, token }) {
         </div>
       ) : null}
       <ServiceReportDocument data={data} token={token} web glass={glass} />
+      {/* GATE_REPORT_WEB_ACTIONS: finding offer tile + photo button; renders nothing without data.webActions. */}
+      {data.webActions ? (
+        <div className="sr-shell" style={{ maxWidth: 760, margin: '0 auto', padding: '0 16px 24px' }}>
+          <ReportWebActions actions={data.webActions} token={token} apiBase={API_BASE} submitEvent={submitReportEvent} readOnly={data.staffViewer === true} />
+        </div>
+      ) : null}
     </div>
   );
 }

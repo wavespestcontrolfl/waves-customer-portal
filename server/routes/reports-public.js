@@ -141,6 +141,7 @@ router.param('token', async (req, res, next, token) => {
   }
 });
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
+const { attachWebActions, webActionsLive } = require('../services/service-report/web-actions');
 const {
   runAndSwallowErrors: runPestPressureForServiceRecord,
   calculateAndPersistForServiceRecord,
@@ -2021,6 +2022,74 @@ router.post('/:token/ask', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/reports/:token/photo-check — the simple web report's "Seen something
+// since?" button (GATE_REPORT_WEB_ACTIONS, owner 2026-10-20). Auth is the report
+// token, as on /ask. The route runs the EXISTING customer photo ID handlers for
+// the report's customer (routes/photo-id.js runCustomerPhotoId): same read, same
+// stored row, same plan-coverage check, and it SHARES that route's per-customer
+// (10 a day) and daily vision-spend limiters. Body: { photos: [one data URL] },
+// at most 750 KB (the page shrinks the photo first), inside the app's 1 MB JSON
+// parser, so no large-body parser is opened to a token holder. Answers fixed
+// sentences only. Sends nothing to a customer and books nothing: a covered answer
+// points at the signed-in Schedule tab, never the standing re-service token.
+// Write mirrors read: it answers 404 unless the page would show the button (both
+// report gates and the photo ID gate live, a customer on the record, not
+// suppressed). Dark gate = 404 BEFORE the limiters, so a probe never sees a 429.
+const WEB_PHOTO_MAX_BYTES = 750 * 1024;
+async function resolveWebPhotoCustomer(req, res, next) {
+  try {
+    const gates = require('../config/feature-gates');
+    if (!FULL_TOKEN_RE.test(req.params.token || '') || !webActionsLive(gates) || !gates.isEnabled('customerPhotoId')) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const service = await db('service_records as sr')
+      .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+      .where('sr.report_view_token', req.params.token)
+      .select('sr.id', 'sr.customer_id', 'sr.report_template_version', 'sr.structured_notes', 'sr.service_type', 'sr.service_line',
+        db.raw(`${stampedDivergesSql('ss', 'c')} as stamped_address_diverges`))
+      .first();
+    if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service) || !service.customer_id) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    req.reportPhotoService = service;
+    // The shared photo ID limiters key on req.customer.id.
+    req.customer = { id: service.customer_id };
+    return next();
+  } catch (err) { return next(err); }
+}
+// Lazy: photo-id.js pulls in the vision services, which a report read never needs.
+const lazyPhotoIdLimiter = (name) => (req, res, next) => require('./photo-id').photoIdLimiters[name](req, res, next);
+
+router.post('/:token/photo-check', resolveWebPhotoCustomer, lazyPhotoIdLimiter('perCustomerLimiter'), lazyPhotoIdLimiter('sharedDailyLimiter'), async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    const { validateRequestPhotos, decodedBase64Bytes } = require('../utils/request-photo-validation');
+    const photos = req.body?.photos;
+    if (!Array.isArray(photos) || photos.length !== 1) return res.status(400).json({ error: 'Attach one photo.' });
+    const validated = validateRequestPhotos(photos);
+    if (!validated.ok) return res.status(validated.status || 400).json({ error: validated.error });
+    if (decodedBase64Bytes(photos[0].slice(photos[0].indexOf(',') + 1)) > WEB_PHOTO_MAX_BYTES) {
+      return res.status(413).json({ error: `That photo is too large. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.` });
+    }
+    const service = req.reportPhotoService;
+    const webActions = require('../services/service-report/web-actions');
+    const type = webActions.photoTypeForLine(service.service_line || detectServiceLine(service.service_type));
+    const reply = await require('./photo-id').runCustomerPhotoId({
+      type,
+      customerId: service.customer_id,
+      dataUrls: validated.photos,
+      // A visit at another address than the home is never "covered": the re-service
+      // picker books the on-file address (same rule as the portal photo ID).
+      isSecondary: service.stamped_address_diverges === true,
+    });
+    const answer = webActions.photoAnswer(type, reply);
+    return res.status(answer.ok ? 200 : answer.status).json(answer.ok
+      ? { headline: answer.headline, message: answer.message, canRebook: answer.canRebook }
+      : { error: answer.message });
+  } catch (err) { return next(err); }
+});
+
 // GET /api/reports/:token/preview.jpg — token-gated MMS preview image.
 router.get('/:token/preview.jpg', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -2636,6 +2705,9 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
+      // GATE_REPORT_WEB_ACTIONS (owner 2026-10-20): the finding offer tile and the
+      // photo button. Live simple-web views only; absent key = byte-identical payload.
+      await attachWebActions(service, v1Data, { db, gates: reportGates, simpleWeb });
       return res.json(v1Data);
     }
 

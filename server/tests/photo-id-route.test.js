@@ -2517,3 +2517,45 @@ test('preview signing failure retains the photo ID, emits a safe diagnostic and 
   expect(await customerPhotoViews('pest', 'parent')).toEqual([{ id: 'photo-signing-failed', mime_type: undefined, url: null }]);
   expect(require('../services/logger').warn).toHaveBeenCalledWith('[photo-id] preview signing failed for photo photo-signing-failed');
 });
+
+// ── GATE_REPORT_WEB_ACTIONS: the report page's photo button reuses these handlers ──
+describe('runCustomerPhotoId (report-token entry)', () => {
+  const { runCustomerPhotoId } = require('../routes/photo-id');
+
+  test('runs the typed handler for the report customer: same row, same coverage check, URL stays in the reply for the caller to drop', async () => {
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-pest', lanes: ['pest'] });
+    const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(reply.status).toBe(200);
+    expect(reply.body.next_step.kind).toBe('reservice');
+    expect(TABLES.pest_identifications).toHaveLength(1);
+    expect(TABLES.pest_identifications[0]).toEqual(expect.objectContaining({ customer_id: CUSTOMER_ID, mode: 'customer', source: 'portal', property_id: null }));
+    expect(mockStoreFunnelPhotos).toHaveBeenCalledWith(expect.objectContaining({ table: 'pest_identification_photos' }));
+  });
+
+  test('a secondary-property visit reads as "request", never "reservice", even when the plan covers the lane', async () => {
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-pest', lanes: ['pest'] });
+    const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL], isSecondary: true });
+    expect(reply.body.next_step.kind).toBe('request');
+  });
+
+  test('lawn type runs the lawn handler', async () => {
+    const reply = await runCustomerPhotoId({ type: 'lawn', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(reply.status).toBe(200);
+    expect(reply.body.type).toBe('lawn');
+    expect(TABLES.lawn_diagnostics).toHaveLength(1);
+  });
+
+  test('bad input is refused before any vision call', async () => {
+    expect((await runCustomerPhotoId({ type: 'bogus', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] })).status).toBe(400);
+    expect((await runCustomerPhotoId({ type: 'pest', customerId: null, dataUrls: [PHOTO_DATA_URL] })).status).toBe(400);
+    expect((await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: ['not a data url'] })).status).toBe(400);
+    expect(mockIdentifyPest).not.toHaveBeenCalled();
+  });
+
+  test('a vision miss keeps the handler 503 copy with the office phone', async () => {
+    mockIdentifyPest.mockResolvedValue({ ok: false, perPhoto: [] });
+    const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(reply.status).toBe(503);
+    expect(reply.body.error).toContain('(941) 297-5749');
+  });
+});

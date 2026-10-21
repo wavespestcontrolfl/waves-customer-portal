@@ -644,6 +644,7 @@
         "POST /api/reports/:token/ask",
         "POST /api/reports/:token/events",
         "POST /api/reports/:token/pest-pressure/client-rating",
+        "POST /api/reports/:token/photo-check",
         "POST /api/reports/:token/referral-link",
         "POST /api/reports/project/:token/ask"
       ]
