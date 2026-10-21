@@ -518,10 +518,29 @@ async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null
   const exactCount = Number(matched.count);
   if (exactCount === 0) return await withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
   // Name matcher v2: one exact hit can still be the wrong person.
-  if (exactCount === 1 && nameMatchV2Live()) return await withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
+  const nameSearch = nameMatchV2Live() && !looksLikePlaceSearch(search, result.customers);
+  if (exactCount === 1 && nameSearch) return await withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
   // Several exact hits: same rows, ordered by name fit and context.
-  if (exactCount > 1 && nameMatchV2Live()) return await withContextOrder(result, { search, offset, pageCustomerId, keepSort: !!sort_by });
+  if (exactCount > 1 && nameSearch) return await withContextOrder(result, { search, offset, pageCustomerId, keepSort: !!sort_by });
   return result;
+}
+
+// The text is a place, not a misspelled name, when it carries an address word
+// ("Main Street", "Bradenton FL") or an exact row matched it on its address or
+// city. Then the exact rows are the answer and are neither reranked nor given
+// sound-alike alternatives. Mirrors shouldSearchSoundAlike in
+// customer-name-search.js (the admin pickers' sound-alike pass).
+const PLACE_WORDS = new Set([
+  'st', 'street', 'ave', 'avenue', 'av', 'rd', 'road', 'dr', 'drive', 'ln', 'lane', 'blvd', 'boulevard',
+  'ct', 'court', 'cir', 'circle', 'way', 'pl', 'place', 'ter', 'terrace', 'trl', 'trail', 'pkwy', 'parkway',
+  'hwy', 'highway', 'loop', 'cv', 'cove', 'apt', 'unit', 'suite', 'ste', 'fl', 'florida',
+]);
+const placeWords = text => String(text || '').toLowerCase().normalize('NFKC').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+function looksLikePlaceSearch(search, exactRows) {
+  const words = placeWords(search);
+  if (words.some(word => PLACE_WORDS.has(word))) return true;
+  const needle = words.join(' ');
+  return !!needle && (exactRows || []).some(row => placeWords([row.address, row.city].filter(Boolean).join(' ')).join(' ').includes(needle));
 }
 
 // Every non-search filter of query_customers, in one place.
@@ -783,6 +802,7 @@ async function withAlternativeCustomers(result, unsearched, { search, limit, off
 }
 
 const EXACT_ORDER_NOTE = 'Several customers matched the search exactly. They are the same exact matches, ordered by how well the name fits and by context (match.score and match.reasons: on_screen, visit_soon, recent_contact). When the top two scores are close, show them with offer_choices and get a confirmed pick before any write or send.';
+const EXACT_KEPT_ORDER_NOTE = 'Several customers matched the search exactly. They are kept in the requested order; match.score (and match.reasons: on_screen, visit_soon, recent_contact) shows how well each name fits. When two scores are close, show them with offer_choices and get a confirmed pick before any write or send.';
 
 // v2: several exact hits. The set is unchanged; each row that fits the dictated
 // name gets `match`, and without an explicit sort_by the best fits come first.
@@ -799,7 +819,7 @@ async function withContextOrder(result, { search, offset, pageCustomerId, keepSo
     ...ranked.map(entry => withMatch.find(row => row.id === entry.id)),
     ...withMatch.filter(row => !entries.has(row.id)),
   ];
-  return { ...result, customers: order, note: EXACT_ORDER_NOTE };
+  return { ...result, customers: order, note: keepSort ? EXACT_KEPT_ORDER_NOTE : EXACT_ORDER_NOTE };
 }
 
 async function findOverdueCustomers(input) {

@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, nameMatchV2Live } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, nameMatchV2Live } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -89,6 +89,7 @@ const { isToolFailure, recordToolOutcome, executionOutcome } = require('../servi
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
+const MultiCard = require('../services/intelligence-bar/multi-card');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
@@ -932,6 +933,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // void_invoice: the card names the invoice, the customer and the amount; the lines ride the contract.
+  void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -971,6 +976,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
+  void_invoice: '_verified_invoice_void_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -1229,7 +1236,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, reproposal = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, reproposal = null, siblingCardIds = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -2132,7 +2139,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // marker predates it and is counted conservatively (Codex r4).
   if (ownerDirectVerdict) params._ib_owner_direct = directVerdict?.direct === true;
 
-  const card = { req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, sourcePin: reproposal?.sourcePin };
+  const card = { req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, sourcePin: reproposal?.sourcePin, siblingCardIds };
   return reproposal ? prepareProposalCard(card) : storeProposalCard(card);
 }
 
@@ -2154,7 +2161,7 @@ async function prepareProposalCard(card) {
 // note (a picker card); `sourcePin` names the card a derived card came from (a
 // server pin, so a retried request finds it); `trx` and `approvedParams`
 // store a prepared card inside the caller's transaction.
-async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, sourcePin = null, trx = null, approvedParams = null }) {
+async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, sourcePin = null, trx = null, approvedParams = null, siblingCardIds = null }) {
   Object.assign(params, sourcePin);
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
@@ -2180,6 +2187,7 @@ async function storeProposalCard({ req, toolName, params, preview, context, task
     requestStartedAt,
     trx,
     approvedParams,
+    siblingCardIds,
     ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolName, params, preview),
       ...(task.inherited ? { inheritedTask: true } : {}) } : {}),
   });
@@ -3358,7 +3366,7 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). Never create an invoice, change an amount, charge a card, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. Never create an invoice, change an amount, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
@@ -3583,6 +3591,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
 - Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
     }
+    if (platformEnabled && context !== 'tech' && ibMultiCardLive()) systemPrompt += MultiCard.PROMPT;
     // Last, so every shared prefix above stays cacheable across logins. With
     // the platform off nothing commits directly, so the owner block must
     // stay card-aware (Codex r2 P1 on #5563).
@@ -3674,6 +3683,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
+    // GATE_IB_MULTI_CARD: the request's open cards (tool + record keys), so a later independent write may mint its own card.
+    const multiCardOn = platformEnabled && ibMultiCardLive();
+    const openCards = [];
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
     // the full collector (its own discover_capabilities searches). The tech
@@ -3842,8 +3854,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // confirmation id goes to the client only.
           // A card closes the frontier under the platform only (set below);
           // an uncertain owner-direct commit closes it on either path.
-          if (writeFrontierBlocked) {
-            result = { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
+          const multiCardRefusal = !writeFrontierBlocked && multiCardOn && openCards.length ? MultiCard.admit(toolUse, openCards) : null;
+          if (writeFrontierBlocked || multiCardRefusal) {
+            result = multiCardRefusal || { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
             failed = true;
             errorMessage = result.error;
           } else if (ibWritesDisabled()) {
@@ -3860,6 +3873,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               task: activeTask,
               taskContext,
               requestStartedAt,
+              ...(multiCardOn ? { siblingCardIds: pendingProposals.map(p => p.id) } : {}),
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches
@@ -3953,7 +3967,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
         // Only a card that exists blocks further writes; a proposal refused at
         // preflight left nothing to reconcile, so a corrected call may follow.
-        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
+        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) {
+          // GATE_IB_MULTI_CARD: an open edit on a named record leaves the frontier open for independent cards.
+          const openCard = multiCardOn ? MultiCard.record(toolUse.name, toolUse.input) : null;
+          if (openCard) openCards.push(openCard);
+          else writeFrontierBlocked = true;
+        }
         // Codex r3 P1 on #5275: a github-ops refusal (no failed checks / label
         // already present) embeds the PR title in `error`, and this sink is
         // NOT the redacted intelligence_bar_queries telemetry (finding above)
