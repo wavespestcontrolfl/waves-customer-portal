@@ -709,6 +709,17 @@ const {
   CONTACT_PREF_KEY_BY_COLUMN, CONTACT_CHANNEL_KEY_BY_COLUMN, CONTACT_CHANNEL_VALUES,
 } = require('../services/contact-notification-prefs');
 
+// A contact's email on file is per NUMBER, across every slot carrying it
+// (codex #6363 r19 P2): the holder may store the same phone twice with the
+// address on only one slot, and the choices row is keyed by phone — the same
+// rule pruneContactNotificationPrefs applies. The address, '' when none.
+function contactEmailOnFile(customer, phoneKey) {
+  const { getServiceContactSlots, phoneKeyOf } = require('../services/customer-contact');
+  const slot = getServiceContactSlots(customer)
+    .find((s) => s.phone && phoneKeyOf(s.phone) === phoneKey && String(s.email || '').trim());
+  return slot ? String(slot.email).trim() : '';
+}
+
 async function contactPreferencePayload(req) {
   const ContactPrefs = require('../services/contact-notification-prefs');
   const contact = req.contactSession;
@@ -717,16 +728,17 @@ async function contactPreferencePayload(req) {
     ContactPrefs.getContactPrefRow(req.customerId, contact.phone),
     db('recipient_optin').where({ customer_id: req.customerId, phone_key: contact.phoneKey }).first('status').catch(() => null),
   ]);
-  const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable: !!contact.email });
+  const emailOnFile = contactEmailOnFile(req.customer, contact.phoneKey);
+  const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable: !!emailOnFile });
   // The report rule (customer-contact.js slotWithheldFromReports) decides
   // whether this contact ever gets the visit's findings; the card says so
   // instead of offering a report toggle that would never fire.
   const reportsWithheld = await require('../services/contact-session-projection').contactSessionReportsWithheld(req);
   return {
-    contact: { name: contact.name || '', phone: contact.phone, email: contact.email || '', slot: contact.slot },
+    contact: { name: contact.name || '', phone: contact.phone, email: emailOnFile, slot: contact.slot },
     preferences,
     accountOff,
-    emailAvailable: !!contact.email,
+    emailAvailable: !!emailOnFile,
     reportsWithheld,
     contactReportTexts: contactReportTextsOn(),
     consentAttestedAt: own?.consent_attested_at || null,
@@ -803,7 +815,7 @@ router.put('/contact-preferences', async (req, res, next) => {
       const live = await trx('customers').where({ id: req.customerId }).forUpdate().first();
       const liveSlot = require('../services/customer-contact').findServiceContactSlotByPhoneKey(live, contact.phoneKey);
       if (!liveSlot) return 'removed';
-      if (asksEmailOnly && !liveSlot.email) return 'email_unavailable';
+      if (asksEmailOnly && !contactEmailOnFile(live, contact.phoneKey)) return 'email_unavailable';
       // The consent decision reads its inputs under the same lock (codex r4
       // P2): a holder enabling a purpose between an unlocked read and this
       // write must not let a text path open without the attestation.

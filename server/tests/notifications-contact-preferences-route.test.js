@@ -267,6 +267,20 @@ describe('PUT /contact-preferences', () => {
     expect(tables.service_contact_notification_prefs).toEqual([]);
   });
 
+  test('email on file is per NUMBER across every slot carrying it: an address on a duplicate slot makes email available to the payload and the locked save (codex r19)', async () => {
+    // Sam's number stored twice — slot 1 without an address, slot 3 with one.
+    tables.customers[0].service_contact_email = null;
+    tables.customers[0].service_contact3_name = 'Sam Spouse';
+    tables.customers[0].service_contact3_phone = '(941) 555-0202';
+    tables.customers[0].service_contact3_email = 'sam.alt@example.com';
+    const read = await get();
+    expect(read.body.emailAvailable).toBe(true);
+    expect(read.body.contact.email).toBe('sam.alt@example.com');
+    const res = await put({ enRouteChannel: 'email' });
+    expect(res.status).toBe(200);
+    expect(tables.service_contact_notification_prefs[0]).toEqual(expect.objectContaining({ phone_key: '9415550202', en_route_channel: 'email' }));
+  });
+
   test('email-only delivery needs an address on file for this contact', async () => {
     mockSession.current.contactSession = TERRY;
     const res = await put({ enRouteChannel: 'email' });

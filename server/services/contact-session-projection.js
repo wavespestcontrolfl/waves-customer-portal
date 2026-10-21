@@ -84,10 +84,13 @@ function withholdReportArtifacts(service) {
 async function contactRecordScope(req) {
   if (!req.contactSession) return null;
   const customerId = req.customerId;
+  // The same columns the saved-property resolver selects: the tracking
+  // projection (scopedLocationCustomer) reads a non-primary fallback
+  // property's address and geocode off the scope (codex #6363 r19 P2).
   const rows = await db('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
-    .select('id', 'is_primary');
+    .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
   if (!rows.length) {
     const everHadRow = !!(await db('customer_properties').where({ customer_id: customerId }).first('id'));
     return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };
