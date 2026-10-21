@@ -631,7 +631,7 @@
     {
       "router": "server/routes/reports-public.js",
       "mount": "/api/reports",
-      "reason": "Public service-report viewer by unguessable token (report pages, recap video, tokenized ask)",
+      "reason": "Public service-report viewer by unguessable token (report pages, recap video, tokenized ask, the lawn card's same-origin front photo behind GATE_REPORT_WEB_SHARE: resized, metadata removed, same photo the report page already shows)",
       "routes": [
         "GET /api/reports/:token",
         "GET /api/reports/:token/data",
@@ -639,6 +639,7 @@
         "GET /api/reports/:token/preview.jpg",
         "GET /api/reports/:token/recap",
         "GET /api/reports/:token/recap/video",
+        "GET /api/reports/:token/share-photo",
         "GET /api/reports/project/:token/data",
         "GET /api/reports/project/:token/fdacs-pdf",
         "POST /api/reports/:token/ask",

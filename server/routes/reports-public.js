@@ -37,6 +37,7 @@ const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services
 
 const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectApplicatorTechnician, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
+const webShareService = require('../services/service-report/web-share');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -1310,7 +1311,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
     // a token holder must not mint events/notifications for a dark gate).
     // Same copy as an unknown event — the gate state is not probeable.
     if ((eventName === 'cross_sell_requested' || eventName === 'referral_cta_clicked')
-      && !require('../config/feature-gates').isEnabled('reportCrossSell')) {
+      && !require('../config/feature-gates').isEnabled('reportCrossSell')
+      // The lawn card's tap (GATE_REPORT_WEB_SHARE) records the same referral click.
+      && !(eventName === 'referral_cta_clicked' && webShareService.webShareEnabled())) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
@@ -1709,7 +1712,8 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     if (reserviceReportCopyGateOn() && service.is_callback === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
+    // The lawn card (GATE_REPORT_WEB_SHARE) takes the same tap without the cross-sell gate.
+    if (!require('../config/feature-gates').isEnabled('reportCrossSell') && !webShareService.webShareEnabled()) {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Enrollment + share copy live in ONE composer shared with the estimate
@@ -1731,6 +1735,47 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     // phone number in the logs (AGENTS.md PII-in-logs rule).
     logger.warn(`[reports-public] referral-link failed (code=${err?.code || 'none'}, token=${req.params.token.slice(0, 8)}…)`);
     return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+  }
+});
+
+// Token-keyed cap for the lawn card's photo read (an S3 read plus a resize per hit).
+const sharePhotoLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `sharephoto:${req.params.token || 'anon'}`,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+// GET /api/reports/:token/share-photo — the front-yard photo for the shareable lawn card
+// (GATE_REPORT_WEB_SHARE). Same-origin on purpose: the photo bucket sets no CORS headers, so a
+// browser canvas could not export an image that drew a signed S3 URL. Resized, upright, with the
+// file metadata (GPS) removed. Dark gate, unknown token, suppressed or callback report, or no
+// front photo = the same generic 404.
+router.get('/:token/share-photo', sharePhotoLimiter, async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '') || !webShareService.webShareEnabled()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .select('id', 'customer_id', 'scheduled_service_id', 'report_template_version', 'structured_notes', 'is_callback')
+      .first();
+    if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service) || service.is_callback === true) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const photo = await webShareService.findShareFrontPhoto(service);
+    if (!photo) return res.status(404).json({ error: 'Not found' });
+    const bytes = await webShareService.readSharePhoto(photo);
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    return res.send(bytes);
+  } catch (err) {
+    logger.warn(`[reports-public] share-photo failed (code=${err?.code || 'none'})`);
+    return next(err);
   }
 });
 
@@ -2636,6 +2681,8 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
+      // GATE_REPORT_WEB_SHARE (owner 2026-10-20, idea 8): the shareable lawn card offer, live simple-web views only.
+      if (simpleWeb) await webShareService.attachWebShare(v1Data, service, reportGates);
       return res.json(v1Data);
     }
 
