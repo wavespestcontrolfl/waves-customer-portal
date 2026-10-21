@@ -55,6 +55,7 @@ const BY_DESIGN_REFUSAL_CODES = new Set([
 // Coded refusals whose text says the bar cannot do something, but that were
 // never gap rows (a switch that is off, a provider-side limit, a gate flip that
 // is the owner's). Skipped by the text rule below so it adds no new build work.
+const GATE_OFF_CODE_RE = /(?:^|_)(?:not_enabled|gate_off)$/;
 const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
 ]);
@@ -439,7 +440,9 @@ function recordableRefusalCode(result) {
   if (BY_DESIGN_REFUSAL_CODES.has(code)) return null;
   if (RECORDED_REFUSAL_CODES.has(code)) return code;
   const text = [result.error, result.refused].filter((value) => typeof value === 'string').join(' ');
-  if (UNRECORDED_DECLINE_CODES.has(code)) return null;
+  // A feature that is built but switched off is not a missing capability:
+  // every *_not_enabled / *gate_off code stays out of the gap list (Codex #6371 r6).
+  if (UNRECORDED_DECLINE_CODES.has(code) || GATE_OFF_CODE_RE.test(code)) return null;
   // A refusal that sends the operator to another screen, or that says plainly
   // the bar cannot do this from here (the wording every tool refusal uses).
   if (!OTHER_SCREEN_RE.test(text) && !BAR_DECLINE_RE.test(text)) return null;

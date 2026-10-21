@@ -296,3 +296,12 @@ describe('Codex #6371 r5 audit findings', () => {
     expect(recordableRefusalCode({ error: fault.error })).toBeNull();
   });
 });
+
+describe('a switched-off gate is not a gap (Codex #6371 r6)', () => {
+  test.each(['accept_estimate_not_enabled', 'autopay_off_not_enabled', 'cancel_gate_off', 'gate_off', 'void_invoice_not_enabled'])('%s records nothing', (code) => {
+    expect(recordableRefusalCode({ success: false, code, error: "The bar can't accept this estimate from here yet." })).toBeNull();
+  });
+  test('a real capability code with the same wording still records', () => {
+    expect(recordableRefusalCode({ success: false, code: 'cancel_with_effects_unsupported', error: "The bar can't cancel a visit with an invoice from here yet." })).toBe('cancel_with_effects_unsupported');
+  });
+});
