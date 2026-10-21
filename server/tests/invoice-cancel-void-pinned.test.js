@@ -127,3 +127,48 @@ test('a pinned invoice that gained a card PaymentIntent since the card is left a
   expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
   expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
 });
+
+// Opt-in piCache (the Intelligence Bar cancel check under the visit lock): PaymentIntents looked up before the lock
+// are reused, and with piCacheOnly an uncached one throws instead of calling Stripe while the lock is held.
+describe('previewInvoiceVoidForCancelledService piCache', () => {
+  const withPi = () => { mockInvoiceRows = [{ ...INV_A, stripe_payment_intent_id: 'pi_test' }, INV_B]; };
+
+  test('without a cache every call retrieves the PaymentIntent (unchanged)', async () => {
+    withPi();
+    const stripe = require('../services/stripe');
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    expect(stripe.retrievePaymentIntent).toHaveBeenCalledTimes(2);
+  });
+
+  test('a cache fills on the first (pre-lock) call and the cache-only call under the lock makes NO Stripe call', async () => {
+    withPi();
+    const stripe = require('../services/stripe');
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const piCache = new Map();
+    const before = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1', { piCache });
+    expect(stripe.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+    expect(piCache.get('pi_test')).toEqual({ status: 'requires_payment_method' });
+    const inLock = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1', { piCache, piCacheOnly: true });
+    expect(stripe.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+    expect(inLock).toEqual(before);
+  });
+
+  test('a PaymentIntent that appeared after the pre-lock check cannot be verified under the lock: it throws, no Stripe call', async () => {
+    mockInvoiceRows = [INV_A, INV_B];
+    const piCache = new Map();
+    await InvoiceService.previewInvoiceVoidForCancelledService('svc-1', { piCache });
+    withPi();
+    const stripe = require('../services/stripe');
+    await expect(InvoiceService.previewInvoiceVoidForCancelledService('svc-1', { piCache, piCacheOnly: true })).rejects.toThrow(/was not checked before the lock/);
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+  });
+
+  test('a cached in-flight PaymentIntent still excludes the invoice from the void set', async () => {
+    withPi();
+    const piCache = new Map([['pi_test', { status: 'processing' }]]);
+    const set = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1', { piCache, piCacheOnly: true });
+    expect(set.map((i) => i.id)).toEqual(['inv-b']);
+  });
+});

@@ -93,6 +93,11 @@ const {
   cancelWithEffectsRefusal,
 } = require('../services/appointment-cancel-impact');
 
+const TEXT_PREVIEW = {
+  would_send: true, body: 'Hi Synthia, your visit is cancelled.', template_body: null, reason: null,
+  recipients: [{ recipient_key: 'abc123abc123abc1', phone_last4: '0101', role: 'primary', first_name: 'Synthia', body: 'Hi Synthia, your visit is cancelled.' }],
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockLinkedFollowUps = [];
@@ -108,7 +113,7 @@ beforeEach(() => {
   mockUnresolvedAfterVoid.mockResolvedValue(false);
   mockCreditPreview.mockResolvedValue(null);
   mockNoticeVerdict.mockResolvedValue('none');
-  mockTextPreview.mockResolvedValue({ would_send: true, body: 'Hi Synthia, your visit is cancelled.', reason: null });
+  mockTextPreview.mockResolvedValue(TEXT_PREVIEW);
   // Bare by default: no invoice and no inspection-credit offer at all
   // (owner ruling 2026-09-28, "bare visits only"). Both are query-builder
   // shaped (a real `.first('id')` call), matching how
@@ -783,7 +788,7 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect(impact.notify_customer).toBe(true);
     expect(impact.invoices).toHaveLength(1);
     expect(impact.linked_invoices).toEqual([{ id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: 120 }]);
-    expect(impact.customer_text).toEqual({ would_send: true, body: 'Hi Synthia, your visit is cancelled.', reason: null });
+    expect(impact.customer_text).toEqual(TEXT_PREVIEW);
     // The Dispatch handler owns the text, so the shared notice hook is not a second text.
     expect(impact.customer_notice).toBe('none');
     expect(cancelWithEffectsRefusal(impact)).toBeNull();
@@ -874,8 +879,43 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     const impact = await run({ notifyCustomer: false });
     expect(mockTextPreview).not.toHaveBeenCalled();
     expect(impact.notify_customer).toBe(false);
-    expect(impact.customer_text).toEqual({ would_send: false, body: null, reason: 'cancelled_without_text' });
+    expect(impact.customer_text).toEqual({ would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' });
     expect(cancelImpactsMatch(impact, await run({ notifyCustomer: true }))).toBe(false);
+  });
+
+  test('the card\'s recipients and wording are pinned: a different recipient set or text is drift', async () => {
+    noCard();
+    const before = await run();
+    mockTextPreview.mockResolvedValue({ ...TEXT_PREVIEW, body: 'Different wording', recipients: [{ ...TEXT_PREVIEW.recipients[0], body: 'Different wording' }] });
+    expect(cancelImpactsMatch(before, await run())).toBe(false);
+    mockTextPreview.mockResolvedValue({ ...TEXT_PREVIEW, recipients: [...TEXT_PREVIEW.recipients, { recipient_key: 'fff', phone_last4: '0202', role: 'service', first_name: 'Sam', body: 'x' }] });
+    expect(cancelImpactsMatch(before, await run())).toBe(false);
+  });
+
+  test('a re-check passes the approved text object to the preview (same variant), a first look passes none', async () => {
+    noCard();
+    await run();
+    expect(mockTextPreview).toHaveBeenLastCalledWith('svc-synthetic-1');
+    await run({ approvedText: TEXT_PREVIEW });
+    expect(mockTextPreview).toHaveBeenLastCalledWith('svc-synthetic-1', { approved: TEXT_PREVIEW });
+  });
+
+  test('a piCache is handed to the invoice preview only when supplied (the lock-time check makes no Stripe call)', async () => {
+    noCard();
+    await run();
+    expect(mockInvoicePreview).toHaveBeenLastCalledWith('svc-synthetic-1');
+    const piCache = new Map();
+    await run({ piCache, piCacheOnly: true });
+    expect(mockInvoicePreview).toHaveBeenLastCalledWith('svc-synthetic-1', { piCache, piCacheOnly: true });
+  });
+
+  test('lockLinkedFollowUps row-locks the live linked visits on the cancel transaction', async () => {
+    const calls = [];
+    const chain = { where: () => chain, whereRaw: () => chain, orderBy: () => chain, forUpdate: () => { calls.push('forUpdate'); return chain; }, select: async () => [{ id: 'svc-visit-2' }] };
+    const trx = () => chain;
+    const { lockLinkedFollowUps } = require('../services/appointment-cancel-impact');
+    expect(await lockLinkedFollowUps(trx, 'svc-synthetic-1')).toEqual([{ id: 'svc-visit-2' }]);
+    expect(calls).toEqual(['forUpdate']);
   });
 
   test('a changed invoice between card and confirm is drift', async () => {

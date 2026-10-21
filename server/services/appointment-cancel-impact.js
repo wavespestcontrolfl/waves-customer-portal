@@ -154,6 +154,13 @@ async function linkedFollowUpRows(conn, scheduledServiceId) {
     .select('id', 'status', 'scheduled_date', 'service_type');
 }
 
+// Row-locks the visit's live linked follow-ups (FOR UPDATE, on the cancel transaction) so none of them can be moved,
+// confirmed or billed between the check under the parent's lock and the parent's commit.
+async function lockLinkedFollowUps(trx, scheduledServiceId) {
+  const { applyCallFollowUpCancelFilter } = require('./call-booking-catalog');
+  return applyCallFollowUpCancelFilter(trx('scheduled_services'), scheduledServiceId).orderBy('id').forUpdate().select('id');
+}
+
 async function cardRailFingerprint(conn, scheduledServiceId) {
   return crypto.createHash('sha256').update(JSON.stringify(await cardRailRows(conn, scheduledServiceId))).digest('hex');
 }
@@ -481,6 +488,27 @@ async function loadLinkedEffects(scheduledServiceId) {
   };
 }
 
+// The with-effects block of the impact: the linked invoices and visits, the customer text, and the refusal codes that
+// still block once the allowed ones (EFFECTS_ALLOWED_REFUSALS) are set aside.
+async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText }) {
+  const linked = await loadLinkedEffects(scheduledServiceId);
+  const customerText = notifyCustomer === false
+    ? { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' }
+    : await require('./appointment-reminders').previewCancellationText(scheduledServiceId, ...(approvedText ? [{ approved: approvedText }] : []));
+  let blocking = refusals.filter((code) => !EFFECTS_ALLOWED_REFUSALS.has(code));
+  if (linked.followUpBilled) blocking = [...new Set([...blocking, 'linked_followup_billed'])].sort();
+  return {
+    blocking,
+    effects: {
+      with_effects: true,
+      notify_customer: notifyCustomer !== false,
+      customer_text: customerText,
+      linked_invoices: linked.linked_invoices,
+      linked_visits: linked.linked_visits,
+    },
+  };
+}
+
 /**
  * The exact effect set cancelling `scheduledServiceId` would produce right
  * now: the appointment identity, the late-cancel fee decision, the
@@ -491,6 +519,9 @@ async function loadLinkedEffects(scheduledServiceId) {
  */
 async function computeCancelAppointmentImpact(scheduledServiceId, {
   now = new Date(), actorId = null, withEffects = false, notifyCustomer = true,
+  // Opt-in, with effects: the card's pinned customer_text (so a re-check renders the same wording), and a cache of
+  // PaymentIntent lookups so the re-check under the visit lock makes no Stripe call (piCacheOnly throws instead).
+  approvedText = null, piCache = null, piCacheOnly = false,
 } = {}) {
   const loaded = await loadAppointmentFacts(scheduledServiceId);
   if (!loaded) return null;
@@ -505,7 +536,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   const anyLinkedFollowUp = (await linkedFollowUpRows(db, scheduledServiceId)).length > 0;
   const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
-    InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
+    InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId, ...(piCache ? [{ piCache, piCacheOnly }] : [])),
     // Read-only mirror of job-status.js's real cancellation-notice hook
     // (Codex round-1 P1: the bar's card claimed cancellations never contact
     // the customer, but the shared status writer's default notice path can
@@ -580,23 +611,9 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   // GATE_IB_CANCEL_WITH_EFFECTS: the effects block the card shows and the Dispatch replay produces. Computed only
   // with the gate on, so the impact of a gate-off proposal stays byte-identical to before. `notify_customer` is the
   // choice the card shows ("cancel without a text" sets it false) and Confirm sends to the Dispatch handler.
-  let effects = {};
-  let blocking = refusals;
-  if (withEffects) {
-    const linked = await loadLinkedEffects(scheduledServiceId);
-    const customerText = notifyCustomer === false
-      ? { would_send: false, body: null, reason: 'cancelled_without_text' }
-      : await require('./appointment-reminders').previewCancellationText(scheduledServiceId);
-    blocking = refusals.filter((code) => !EFFECTS_ALLOWED_REFUSALS.has(code));
-    if (linked.followUpBilled) blocking = [...new Set([...blocking, 'linked_followup_billed'])].sort();
-    effects = {
-      with_effects: true,
-      notify_customer: notifyCustomer !== false,
-      customer_text: customerText,
-      linked_invoices: linked.linked_invoices,
-      linked_visits: linked.linked_visits,
-    };
-  }
+  const { effects, blocking } = withEffects
+    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText })
+    : { effects: {}, blocking: refusals };
 
   return {
     appointment,
@@ -646,6 +663,7 @@ module.exports = {
   computeCancelAppointmentImpact,
   cancelWithEffectsRefusal,
   linkedFollowUpRows,
+  lockLinkedFollowUps,
   cancelImpactsMatch,
   previewCancelFee,
   feeRailClear,

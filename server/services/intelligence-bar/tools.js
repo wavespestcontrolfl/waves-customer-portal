@@ -4368,10 +4368,13 @@ async function cancelWithEffects(input, actionContext, appt) {
   if (actionContext.isAdmin !== true) {
     return { error: 'Admin access required for this action', code: 'permission_denied' };
   }
-  const { computeCancelAppointmentImpact, cancelImpactsMatch, cancelWithEffectsRefusal } = require('../appointment-cancel-impact');
+  const { computeCancelAppointmentImpact, cancelImpactsMatch, cancelWithEffectsRefusal, lockLinkedFollowUps } = require('../appointment-cancel-impact');
   const changed = { error: 'The cancellation effects (invoices, credit, linked visits, customer text or fee) changed since this card was shown — nothing was changed. Ask again for a fresh preview.', preview_changed: true };
-  const recompute = () => computeCancelAppointmentImpact(appointment_id, {
+  // PaymentIntent lookups made before the lock are reused under it, so the lock-time check makes no Stripe call.
+  const piCache = new Map();
+  const recompute = (extra = {}) => computeCancelAppointmentImpact(appointment_id, {
     actorId: actionContext.technicianId || null, withEffects: true, notifyCustomer: frozen.notify_customer,
+    approvedText: frozen.customer_text, piCache, ...extra,
   });
   let fresh;
   try {
@@ -4384,16 +4387,30 @@ async function cancelWithEffects(input, actionContext, appt) {
   const refusal = cancelWithEffectsRefusal(fresh);
   if (refusal) return refusal;
 
+  // What the card approved goes to the handler: the exact text per recipient (only when a text is carded) and the
+  // linked visits. A text the card could not compose is not sent at all.
+  const text = frozen.customer_text || {};
+  const sendText = frozen.notify_customer === true && text.would_send === true;
   const { cancelServiceFromBar } = require('../../routes/admin-dispatch');
   let replay;
   try {
     replay = await cancelServiceFromBar({
       serviceId: appointment_id,
-      notifyCustomer: frozen.notify_customer,
+      notifyCustomer: sendText,
+      approvedNotice: sendText ? (text.recipients || []).map(({ recipient_key, body }) => ({ recipient_key, body })) : null,
+      linkedChildren: frozen.linked_visits || [],
       notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
       actor: { technicianId: actionContext.technicianId || null },
-      beforeCommit: async () => {
-        const inLock = await recompute();
+      // Under the visit lock: lock the linked visits too, then compare cheap DB fields only (PaymentIntents were
+      // looked up before the lock; one that appeared since cannot be checked here and counts as a change).
+      beforeCommit: async (trx) => {
+        let inLock;
+        try {
+          await lockLinkedFollowUps(trx, appointment_id);
+          inLock = await recompute({ piCacheOnly: true });
+        } catch (err) {
+          throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed', cause: err });
+        }
         if (!cancelImpactsMatch(inLock, frozen) || cancelWithEffectsRefusal(inLock)) {
           throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed' });
         }
@@ -4403,20 +4420,27 @@ async function cancelWithEffects(input, actionContext, appt) {
     logger.error(`[intelligence-bar] Dispatch cancel replay failed for ${appointment_id}: ${err.message}`);
     return { error: 'The Dispatch cancel failed before finishing — check the visit before trying again.' };
   }
-  return cancelReplayResult(replay, { appointment_id, appt, frozen, changed });
+  return cancelReplayResult(replay, { appointment_id, appt, frozen, changed, sendText });
 }
 
 // The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
 // the customer and says honestly whether the cancellation text went out.
-async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed }) {
+async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed, sendText }) {
   if (status >= 400 || json.success !== true) {
     if (json.code === 'preview_changed') return changed;
     return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 ? { preview_changed: true } : {}) };
   }
   const customer = await db('customers').where('id', appt.customer_id).first();
   logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);
-  const textSent = frozen.notify_customer === true && json.notificationSent === true;
-  const textFailed = frozen.notify_customer === true && json.notificationSent === false;
+  const warnings = [];
+  if (sendText && json.notificationSent === false) {
+    warnings.push(`The visit is cancelled, but the customer text did not go out: ${json.notificationError || 'no reason given'}.`);
+  }
+  // A linked visit that changed since the card (or was not on it) is left alone, never cancelled unseen.
+  const skipped = json.linkedVisitsSkipped || [];
+  if (skipped.length) {
+    warnings.push(`${skipped.length} linked visit(s) were NOT cancelled because they changed since the card (${skipped.map((v) => `${v.id}: ${v.reason}`).join('; ')}) — check them.`);
+  }
   return {
     success: true,
     appointment_id,
@@ -4424,8 +4448,9 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
     date: appt.scheduled_date,
     service_type: appt.service_type,
     ran_dispatch_cancel: true,
-    customer_text_sent: textSent,
-    ...(textFailed ? { warning: `The visit is cancelled, but the customer text did not go out: ${json.notificationError || 'no reason given'}.` } : {}),
+    customer_text_sent: sendText && json.notificationSent === true,
+    ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
   };
 }
 

@@ -79,6 +79,19 @@ describe('visit-cancellation-followthrough', () => {
     await expect(runVisitCancellationFollowThrough({ targetIds: [] })).resolves.toEqual({ settled: 0 });
   });
 
+  // Opt-in (the Intelligence Bar cancel card): the approved linked visits ride to the tracker cancel, which runs the
+  // parent-cancel cascade. Every other caller's tracker call is unchanged.
+  it('passes the approved linked visits and the skip report to the tracker cancel only when supplied', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    const tracker = require('../services/track-transitions').cancel;
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], actorId: 'admin-1', reason: 'rain' });
+    expect(tracker).toHaveBeenLastCalledWith('svc-1', { reason: 'rain', actorId: 'admin-1' });
+    const linkedChildren = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+    const linkedChildReport = { skipped: [] };
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], actorId: 'admin-1', reason: 'rain', linkedChildren, linkedChildReport });
+    expect(tracker).toHaveBeenLastCalledWith('svc-1', { reason: 'rain', actorId: 'admin-1', linkedChildren, linkedChildReport });
+  });
+
   it.each(['charge_failed', 'charge_review', 'lane_check_failed'])('a NON-CLEAN hold outcome (%s) raises the unresolved-fee alert', async (reason) => {
     mockHoldCancel.mockResolvedValueOnce({ charged: false, reason });
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');

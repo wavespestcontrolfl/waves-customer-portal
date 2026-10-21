@@ -892,6 +892,18 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // parent-linked flow untouched. Best-effort per child, and callers invoke
 // this after their own parent-cancel commits — a cascade failure must
 // never fail the parent cancel.
+// The re-check an approved linked visit passes under its own row lock before the parent's cancel takes it along.
+async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want) {
+  const changed = (reason) => Object.assign(new Error(`linked follow-up ${childId} changed since the card: ${reason}`), { code: 'LINKED_CHILD_CHANGED', reason });
+  const locked = await applyCallFollowUpCancelFilter(trx('scheduled_services'), parentServiceId)
+    .where('id', childId).forUpdate().first('id', 'status', 'scheduled_date', 'service_type');
+  if (!locked) throw changed('no_longer_linked');
+  if (String(locked.status) !== String(want.status)) throw changed('status_changed');
+  if (callBookingDateOnly(locked.scheduled_date) !== callBookingDateOnly(want.scheduled_date)) throw changed('date_changed');
+  if ((locked.service_type || null) !== (want.service_type || null)) throw changed('service_changed');
+  if (await require('./invoice').anyInvoiceLinkedToVisit(trx, childId).first('id')) throw changed('invoice_added');
+}
+
 // actorId: the staff row cancelling the parent (a technicians.id, or null)
 // — rides into each child's history + the child's tech cancel card, so a
 // technician cancelling their own booking hears nothing about its follow-up
@@ -900,17 +912,33 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // packageOnly: the skipped / no-show cascade (job-status.js) — a package
 // visit 2 is treatment 2 of a visit 1 that never happened, so it goes; a
 // call-booked child keeps its office-owned lifecycle there, as before.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false }) {
+// approvedChildren (opt-in, the Intelligence Bar cancel card): [{ id, status, scheduled_date, service_type }], the
+// linked visits the operator approved. Only those are cancelled, each one only after it is re-read under its OWN row
+// lock and still matches the card (still a live linked follow-up, same status, date and service, no invoice of its
+// own); any other child, and any approved child that changed, is NOT cancelled and is listed in report.skipped
+// ({ id, reason }). Without approvedChildren every caller behaves exactly as before.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false, approvedChildren = null, report = null }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
   const childQuery = applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId);
   if (packageOnly) childQuery.where({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
-  const children = await childQuery.select('id', 'status', 'source_action');
+  const children = await childQuery.select('id', 'status', 'source_action', 'scheduled_date', 'service_type');
+  const approved = Array.isArray(approvedChildren) ? new Map(approvedChildren.map((c) => [String(c.id), c])) : null;
+  const skip = (id, reason) => {
+    logger.warn(`[call-booking] linked follow-up ${id} of ${parentServiceId} NOT cancelled with the parent: ${reason}`);
+    if (report && Array.isArray(report.skipped)) report.skipped.push({ id, reason });
+  };
+  if (approved) {
+    const present = new Set(children.map((c) => String(c.id)));
+    for (const id of approved.keys()) if (!present.has(id)) skip(id, 'no_longer_linked');
+  }
   let cancelled = 0;
   for (const child of children) {
+    if (approved && !approved.has(String(child.id))) { skip(child.id, 'not_on_card'); continue; }
     try {
       await conn.transaction(async (trx) => {
+        if (approved) await assertApprovedChildUnchanged(trx, parentServiceId, child.id, approved.get(String(child.id)));
         await transitionJobStatus({
           jobId: child.id,
           fromStatus: child.status,
@@ -935,6 +963,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
       cancelled += 1;
       logger.info(`[call-booking] cancelled linked follow-up ${child.id} with parent ${parentServiceId}`);
     } catch (childErr) {
+      if (childErr && childErr.code === 'LINKED_CHILD_CHANGED') { skip(child.id, childErr.reason); continue; }
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
     }
   }

@@ -49,6 +49,9 @@ const {
  * @param {Date} [opts.now] Explicit cancellation instant for callers that
  *   already retain it. Otherwise read the latest real cancellation transition;
  *   same-status retries must never evaluate fees against the retry clock.
+ * @param {object[]} [opts.linkedChildren] Opt-in (the Intelligence Bar cancel card): the linked follow-up visits the
+ *   operator approved ({ id, status, scheduled_date, service_type }). The cascade then cancels only those, each
+ *   re-checked under its own lock; the rest are listed in opts.linkedChildReport.skipped.
  * @param {object} [opts.pinnedEffects] Per-target effects a confirmation
  *   card showed, keyed by target id: `{ invoices, fee,
  *   creditReversalOfferIds }` (from appointment-cancel-impact.js). A pinned
@@ -65,6 +68,8 @@ async function runVisitCancellationFollowThrough({
   source = 'cancellation',
   now,
   pinnedEffects = null,
+  linkedChildren = null,
+  linkedChildReport = null,
 } = {}) {
   const ids = targetIds.filter(Boolean);
   const CardHolds = require('./estimate-card-holds');
@@ -145,7 +150,11 @@ async function runVisitCancellationFollowThrough({
     await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome });
 
     try {
-      const result = await trackTransitions.cancel(id, { reason, actorId });
+      const result = await trackTransitions.cancel(id, {
+        reason,
+        actorId,
+        ...(Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : {}),
+      });
       await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result });
     } catch (e) {
       logger.error(`[${source}] cancel track transition failed for ${id}: ${e.message}`);

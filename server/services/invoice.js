@@ -13552,7 +13552,7 @@ const InvoiceService = {
    * the whole effect set as undeterminable. A PaymentIntent that Stripe
    * cannot verify without an error (`!pi`) is skipped, as the sweep does.
    */
-  async previewInvoiceVoidForCancelledService(scheduledServiceId) {
+  async previewInvoiceVoidForCancelledService(scheduledServiceId, { piCache = null, piCacheOnly = false } = {}) {
     const would = [];
     if (!scheduledServiceId) return would;
     const candidates = await db("invoices")
@@ -13578,7 +13578,17 @@ const InvoiceService = {
         .first("id");
       if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
       if (candidate.stripe_payment_intent_id) {
-        const pi = await require("./stripe").retrievePaymentIntent(candidate.stripe_payment_intent_id);
+        // Opt-in piCache (the Intelligence Bar cancel check that runs under the visit lock): a PaymentIntent already
+        // retrieved before the lock is read from the cache, and with piCacheOnly one that is NOT cached throws
+        // instead of calling Stripe while the lock is held.
+        const piId = candidate.stripe_payment_intent_id;
+        let pi;
+        if (piCache && piCache.has(piId)) pi = piCache.get(piId);
+        else if (piCacheOnly) throw new Error(`PaymentIntent ${piId} was not checked before the lock`);
+        else {
+          pi = await require("./stripe").retrievePaymentIntent(piId);
+          if (piCache) piCache.set(piId, pi);
+        }
         if (!pi || PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) continue;
       }
       would.push({

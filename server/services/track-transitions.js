@@ -1516,10 +1516,14 @@ async function markComplete(serviceId, opts = {}) {
 // also runs on the already-cancelled/0-row retry paths — a prior attempt
 // may have cancelled the tracker but died before reaching the cascade,
 // which would otherwise strand the follow-up active forever.
-async function cascadeCallFollowUpCancel(serviceId, actorId = null) {
+async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
-    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId, actorId });
+    await cancelCallFollowUpsForParentCancel({
+      conn: db, parentServiceId: serviceId, actorId,
+      // Opt-in (the Intelligence Bar cancel card): only the approved linked visits, each re-checked under its lock.
+      ...(approval ? { approvedChildren: approval.linkedChildren, report: approval.linkedChildReport } : {}),
+    });
   } catch (err) {
     logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
   }
@@ -1529,7 +1533,8 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null) {
  * Admin-only cancel. Extends token expiry to NOW()+24h so the customer
  * can still see the cancelled state for a day.
  */
-async function cancel(serviceId, { reason, actorId } = {}) {
+async function cancel(serviceId, { reason, actorId, linkedChildren = null, linkedChildReport = null } = {}) {
+  const approval = Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : null;
   let svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.status === 'completed') return { ok: false, reason: 'cannot_cancel_complete' };
@@ -1539,7 +1544,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
     // Continue below when an older writer advanced only track_state; the
     // canonical status transition will repair it and append history.
     if (svc.status === 'cancelled') {
-      await cascadeCallFollowUpCancel(serviceId, actorId);
+      await cascadeCallFollowUpCancel(serviceId, actorId, approval);
       emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
       return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
     }
@@ -1609,7 +1614,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
   }
 
   if (svc.track_state === 'cancelled') {
-    await cascadeCallFollowUpCancel(serviceId, actorId);
+    await cascadeCallFollowUpCancel(serviceId, actorId, approval);
     emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
@@ -1624,7 +1629,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
-  await cascadeCallFollowUpCancel(serviceId, actorId);
+  await cascadeCallFollowUpCancel(serviceId, actorId, approval);
   emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,

@@ -116,6 +116,32 @@ beforeEach(() => {
 
 const ACTOR = { technicianId: 'admin-1' };
 
+describe('cancelServiceFromBar hands the card\'s approvals to the handler', () => {
+  test('the approved text goes to handleCancellation and the approved linked visits to the follow-through, with an empty skip report', async () => {
+    const approvedNotice = [{ recipient_key: 'abc123abc123abc1', body: 'Hi Synthia, your visit is cancelled.' }];
+    const linkedChildren = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+    const { status, json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR, approvedNotice, linkedChildren });
+    expect(status).toBe(200);
+    expect(mockHandleCancellation.mock.calls[0][1].approvedNotice).toBe(approvedNotice);
+    expect(mockRunFollowThrough.mock.calls[0][0].linkedChildren).toBe(linkedChildren);
+    expect(mockRunFollowThrough.mock.calls[0][0].linkedChildReport).toEqual({ skipped: [] });
+    expect(json.linkedVisitsSkipped).toEqual([]);
+  });
+
+  test('a linked visit the cascade skipped comes back in the reply', async () => {
+    mockRunFollowThrough.mockImplementationOnce(async ({ linkedChildReport }) => { linkedChildReport.skipped.push({ id: 'child-1', reason: 'date_changed' }); });
+    const { json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR, linkedChildren: [{ id: 'child-1' }] });
+    expect(json.linkedVisitsSkipped).toEqual([{ id: 'child-1', reason: 'date_changed' }]);
+  });
+
+  test('with no approvals the handler\'s calls carry none of the opt-in keys (a Dispatch cancel is unchanged)', async () => {
+    const { json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR });
+    expect(Object.keys(mockHandleCancellation.mock.calls[0][1])).not.toContain('approvedNotice');
+    expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('linkedChildren');
+    expect(json.linkedVisitsSkipped).toBeUndefined();
+  });
+});
+
 describe('cancelServiceFromBar replays the Dispatch cancel handler with the carded body only', () => {
   test('with a text: this visit only, the text seam told to send, no fee waiver, follow-through on this visit', async () => {
     const { status, json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, notes: 'Cancelled via Intelligence Bar: rain', actor: ACTOR });

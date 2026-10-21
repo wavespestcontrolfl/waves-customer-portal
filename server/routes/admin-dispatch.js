@@ -3062,9 +3062,6 @@ async function serviceStatusHandler(req, res, next) {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
-        // Set only by cancelServiceFromBar (never an HTTP field): the Intelligence Bar cancel card re-checks the
-        // effects it showed while this row lock is held, so nothing it did not show can be cancelled or voided.
-        if (typeof req.ibBeforeCancelCommit === 'function') await req.ibBeforeCancelCommit(trx);
         if (toStatus === 'no_show' && lockedRow) noShowOccurrence = { id: svc.id, ...lockedRow };
         // The same guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
@@ -3087,6 +3084,8 @@ async function serviceStatusHandler(req, res, next) {
             && ['pending', 'confirmed'].includes(String(locked.status));
         }
         const isFieldLifecycleTakeover = takeoverCandidate && fieldConfirmVerified;
+        // Set only by cancelServiceFromBar: the Intelligence Bar cancel card re-checks what it showed, under this lock.
+        if (typeof req.ibBeforeCancelCommit === 'function') await req.ibBeforeCancelCommit(trx);
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
@@ -3334,6 +3333,8 @@ async function serviceStatusHandler(req, res, next) {
         await AppointmentReminders.handleCancellation(svc.id, {
           sendNotification: notifyCustomer !== false,
           ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
+          // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
+          ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
@@ -3346,6 +3347,8 @@ async function serviceStatusHandler(req, res, next) {
         waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
         reason: notes || null,
         source: 'admin-dispatch',
+        // Set only by cancelServiceFromBar: the linked visits the card approved (each re-checked under its lock).
+        ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
       });
       // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
       // inside a 9-application plan adds one back at the end of the series.
@@ -3474,6 +3477,7 @@ async function serviceStatusHandler(req, res, next) {
             notificationError: cancelNoticeOutcome.notificationError || null,
           }
         : {}),
+      ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
     });
   } catch (err) { next(err); }
 }
@@ -3484,7 +3488,9 @@ async function serviceStatusHandler(req, res, next) {
 // promise resolves the reply it would send, { status, json }. The body is the carded one and nothing else: status
 // 'cancelled', scope 'this_only', the operator's reason and notifyCustomer as the card showed it. No waiveCardHoldFee
 // and no coordinates. `beforeCommit(trx)` runs inside the handler's cancel transaction right after it locks the visit.
-function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit }) {
+// `approvedNotice` and `linkedChildren` carry what the card showed: the send uses exactly that text, and the linked
+// visits not on the card (or changed since) are left alone and reported as `linkedVisitsSkipped`.
+function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit, approvedNotice, linkedChildren }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -3497,6 +3503,11 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
       techRole: 'admin',
       technicianId: actor?.technicianId || null,
       ibBeforeCancelCommit: beforeCommit,
+      // The card's approvals: the text per recipient ([{ recipient_key, body }]) and the linked visits
+      // ([{ id, status, scheduled_date, service_type }]). The handler's cascade cancels only those.
+      ibApprovedCancelNotice: approvedNotice || null,
+      ibApprovedLinkedChildren: Array.isArray(linkedChildren) ? linkedChildren : null,
+      ibLinkedChildReport: Array.isArray(linkedChildren) ? { skipped: [] } : null,
     };
     Promise.resolve(serviceStatusHandler(req, res, reject)).catch(reject);
   });

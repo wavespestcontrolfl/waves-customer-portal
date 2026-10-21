@@ -426,9 +426,10 @@ describe('Codex r9 writers (source order)', () => {
 
   test('the call follow-up cancel cascade carries the acting staff row from both callers (child card + history)', () => {
     const track = read('../services/track-transitions.js');
-    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null) {');
-    expect(track).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId, actorId });");
-    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId\)/g)).toHaveLength(3);
+    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {');
+    // approval is the opt-in Intelligence Bar cancel card (approved linked visits); null for every other caller.
+    expect(track).toContain('conn: db, parentServiceId: serviceId, actorId,');
+    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId, approval\)/g)).toHaveLength(3);
     expect(track).not.toContain('cascadeCallFollowUpCancel(serviceId);');
     const offboarding = read('../services/customer-offboarding.js');
     expect(offboarding).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });");

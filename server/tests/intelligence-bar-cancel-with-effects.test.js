@@ -80,6 +80,7 @@ jest.mock('../services/appointment-cancel-impact', () => {
     cardRailFingerprint: actual.cardRailFingerprint,
     cardRailRows: actual.cardRailRows,
     cancelWithEffectsRefusal: actual.cancelWithEffectsRefusal,
+    lockLinkedFollowUps: (...a) => mockLockLinked(...a),
     prepaidCommitmentReason: (...a) => mockPrepaidCommitmentReason(...a),
     linkedFollowUpRows: (...a) => mockLinkedFollowUpRows(...a),
   };
@@ -115,6 +116,7 @@ jest.mock('../services/job-status', () => ({
 }));
 
 
+const mockLockLinked = jest.fn(async () => []);
 const mockCancelFromBar = jest.fn();
 jest.mock('../routes/admin-dispatch', () => ({ cancelServiceFromBar: (...a) => mockCancelFromBar(...a) }));
 
@@ -131,7 +133,10 @@ const FROZEN = {
   technician_notice: 'none',
   with_effects: true,
   notify_customer: true,
-  customer_text: { would_send: true, body: 'Hi Synthia, your visit is cancelled.', reason: null },
+  customer_text: {
+    would_send: true, body: 'Hi Synthia, your visit is cancelled.', template_body: null, reason: null,
+    recipients: [{ recipient_key: 'abc123abc123abc1', phone_last4: '0101', role: 'primary', first_name: 'Synthia', body: 'Hi Synthia, your visit is cancelled.' }],
+  },
   linked_invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89 }],
   linked_visits: [{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }],
   identity_fingerprint: 'fp-1',
@@ -160,10 +165,15 @@ afterEach(() => {
 describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', () => {
   test('a matching card replays the handler once with the carded body: this visit, the reason, the text choice, the operator', async () => {
     const result = await executeTool('cancel_appointment', input(), ADMIN);
-    expect(mockComputeImpact).toHaveBeenCalledWith('svc-synthetic-1', { actorId: 'admin-1', withEffects: true, notifyCustomer: true });
+    expect(mockComputeImpact).toHaveBeenCalledWith('svc-synthetic-1', expect.objectContaining({
+      actorId: 'admin-1', withEffects: true, notifyCustomer: true, approvedText: FROZEN.customer_text, piCache: expect.any(Map),
+    }));
     expect(mockCancelFromBar).toHaveBeenCalledTimes(1);
     expect(mockCancelFromBar.mock.calls[0][0]).toMatchObject({
       serviceId: 'svc-synthetic-1', notifyCustomer: true, notes: 'Cancelled via Intelligence Bar: rain', actor: { technicianId: 'admin-1' },
+      // The exact approved text per recipient and the approved linked visits go to the handler.
+      approvedNotice: [{ recipient_key: 'abc123abc123abc1', body: 'Hi Synthia, your visit is cancelled.' }],
+      linkedChildren: FROZEN.linked_visits,
     });
     expect(result).toMatchObject({ success: true, appointment_id: 'svc-synthetic-1', customer_name: 'Synthia Tester', ran_dispatch_cancel: true, customer_text_sent: true });
     expect(result.warning).toBeUndefined();
@@ -174,12 +184,13 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
   });
 
   test('"cancel without a text" is carried as notifyCustomer false, and nothing is reported sent', async () => {
-    const silent = { ...FROZEN, notify_customer: false, customer_text: { would_send: false, body: null, reason: 'cancelled_without_text' } };
+    const silent = { ...FROZEN, notify_customer: false, customer_text: { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' } };
     mockComputeImpact.mockResolvedValue(silent);
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true } });
     const result = await executeTool('cancel_appointment', input({ _frozen_cancellation_impact: silent }), ADMIN);
-    expect(mockComputeImpact).toHaveBeenCalledWith('svc-synthetic-1', { actorId: 'admin-1', withEffects: true, notifyCustomer: false });
+    expect(mockComputeImpact).toHaveBeenCalledWith('svc-synthetic-1', expect.objectContaining({ withEffects: true, notifyCustomer: false }));
     expect(mockCancelFromBar.mock.calls[0][0].notifyCustomer).toBe(false);
+    expect(mockCancelFromBar.mock.calls[0][0].approvedNotice).toBeNull();
     expect(result.customer_text_sent).toBe(false);
     expect(result.warning).toBeUndefined();
   });
@@ -210,15 +221,51 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.success).toBeUndefined();
   });
 
-  test('the beforeCommit hook passes when nothing moved', async () => {
+  test('the beforeCommit hook locks the linked visits, then re-checks with the cached PaymentIntents only (no Stripe call under the lock)', async () => {
     let hookError = null;
+    const trx = { id: 'trx' };
     mockCancelFromBar.mockImplementation(async ({ beforeCommit }) => {
-      try { await beforeCommit({}); } catch (err) { hookError = err; }
+      try { await beforeCommit(trx); } catch (err) { hookError = err; }
       return { status: 200, json: { success: true, notificationSent: true } };
     });
     await executeTool('cancel_appointment', input(), ADMIN);
     expect(hookError).toBeNull();
+    expect(mockLockLinked).toHaveBeenCalledWith(trx, 'svc-synthetic-1');
     expect(mockComputeImpact).toHaveBeenCalledTimes(2);
+    const [before, inLock] = mockComputeImpact.mock.calls.map((c) => c[1]);
+    expect(before.piCacheOnly).toBeUndefined();
+    expect(inLock.piCacheOnly).toBe(true);
+    expect(inLock.piCache).toBe(before.piCache);
+    expect(inLock.approvedText).toBe(FROZEN.customer_text);
+  });
+
+  test('a lock-time check that cannot be completed (a payment attempt appeared) is a change: preview_changed, never a raw error', async () => {
+    mockCancelFromBar.mockImplementation(async ({ beforeCommit }) => {
+      mockComputeImpact.mockRejectedValue(new Error('PaymentIntent pi_x was not checked before the lock'));
+      try { await beforeCommit({}); } catch (err) { return { status: err.status, json: { error: err.message, code: err.code } }; }
+      return { status: 200, json: { success: true } };
+    });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.preview_changed).toBe(true);
+    expect(result.error).not.toMatch(/PaymentIntent/);
+  });
+
+  test('a text the card could not compose is never sent, even with notify_customer true', async () => {
+    const noText = { ...FROZEN, customer_text: { would_send: false, body: null, template_body: null, recipients: [], reason: 'no_recipient' } };
+    mockComputeImpact.mockResolvedValue(noText);
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true } });
+    const result = await executeTool('cancel_appointment', input({ _frozen_cancellation_impact: noText }), ADMIN);
+    expect(mockCancelFromBar.mock.calls[0][0]).toMatchObject({ notifyCustomer: false, approvedNotice: null });
+    expect(result.customer_text_sent).toBe(false);
+    expect(result.warning).toBeUndefined();
+  });
+
+  test('a linked visit the cascade left alone (it changed after the card) is reported, not hidden', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, linkedVisitsSkipped: [{ id: 'svc-visit-2', reason: 'date_changed' }] } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.linked_visits_skipped).toEqual([{ id: 'svc-visit-2', reason: 'date_changed' }]);
+    expect(result.warning).toMatch(/1 linked visit\(s\) were NOT cancelled because they changed since the card \(svc-visit-2: date_changed\)/);
   });
 
   test.each([

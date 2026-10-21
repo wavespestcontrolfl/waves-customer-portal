@@ -1078,9 +1078,6 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
     if (toolName === 'accept_estimate') contactLabel = 'Customer will be emailed (see the Message lines)';
-    if (cancelTextGoesOut) {
-      contactLabel = `The customer is texted this cancellation notice if they can receive texts: "${String(cancelEffects.customer_text.body)}"`;
-    }
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,
@@ -1127,7 +1124,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (bookingConfirmationLines) bookingConfirmationLines.forEach((line) => push('comms', line));
     // The tier-upgrade email has its own line above; an email change on the
     // same card has its own double-opt-in line too.
-    else if (!tierUpgradeEmail) push('comms', contactLabel);
+    else if (cancelTextGoesOut) {
+      // One line per approved recipient with the exact text: Confirm sends these bodies and no others.
+      for (const r of cancelEffects.customer_text.recipients || []) {
+        push('comms', `Text to the ${r.role || 'primary'} contact ending ${r.phone_last4 || '????'}, if they can receive texts: "${String(r.body)}"`);
+      }
+    } else if (!tierUpgradeEmail) push('comms', contactLabel);
   }
 
   if (cancelEffects && !cancelTextGoesOut) {

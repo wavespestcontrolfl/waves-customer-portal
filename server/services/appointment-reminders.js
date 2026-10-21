@@ -967,10 +967,10 @@ async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars,
   return legacyBody;
 }
 
-async function renderRequiredTemplate(templateKey, vars, context = {}) {
+async function renderRequiredTemplate(templateKey, vars, context = {}, opts = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context, opts);
       if (body) return body;
     }
   } catch (err) {
@@ -1697,6 +1697,74 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   return true;
 }
 
+// Short stable key for one text recipient (a hash of the last ten phone digits): the cancel card pins who gets the
+// approved text without storing the number a second time, and the send finds the approved body by it.
+function noticeRecipientKey(phone) {
+  return require('crypto').createHash('sha256').update(lastTenDigits(phone) || '').digest('hex').slice(0, 16);
+}
+
+// The cancellation text for ONE recipient. handleCancellation sends with it, and the Intelligence Bar cancel card
+// previews with it (`preview`), so the two cannot drift. A send renders the live template (weighted variants
+// included); a card that approved a text passes `approvedNotice` (Map recipient key -> body) and the send uses that
+// exact body, refusing a recipient the card did not approve. A preview passes `templateBody` (the variant the card
+// picked, null = the base row) so a later re-check renders the same wording.
+async function renderCancellationBody({ customer, contact, record, scheduledServiceId, approvedNotice = null, templateBody = null, preview = false }) {
+  if (approvedNotice) {
+    const approved = approvedNotice.get(noticeRecipientKey(contact.phone));
+    if (!approved) throw new Error('The cancellation text was approved for other recipients; this contact was not on the card');
+    return approved;
+  }
+  const apptTime = new Date(record.appointment_time);
+  const vars = {
+    first_name: firstNameFrom(contact.name) || customer?.first_name || 'there',
+    service_type: smsServiceLabelStored(record.service_type),
+    day: formatDay(apptTime),
+    date: formatDate(apptTime),
+  };
+  const context = { workflow: 'appointment_cancelled', entity_type: 'scheduled_service', entity_id: scheduledServiceId };
+  if (!preview) return renderRequiredTemplate('appointment_cancelled', vars, context);
+  try {
+    // A pinned variant body skips getTemplate's active check, so confirm the template itself is live first.
+    if (templateBody != null) await renderRequiredTemplate('appointment_cancelled', vars, context, { audit: false, noVariants: true });
+    return await renderRequiredTemplate('appointment_cancelled', vars, context, templateBody != null ? { audit: false, templateBody } : { audit: false, noVariants: true });
+  } catch {
+    return null;
+  }
+}
+
+// Who an appointment notice goes to, before any send-time hold: the appointment contacts, minus third parties still
+// waiting on their double opt-in, with the account holder as the fallback (never over an explicit opt-out). The ONE
+// resolution safeSendAppointment sends with and the Intelligence Bar cancel card previews.
+async function resolveNoticeContacts(customer, prefs, messageType) {
+  const contacts = getAppointmentContacts(customer, prefs);
+  if (!contacts.length) return { contacts, allowedContacts: [] };
+  // Recipient double opt-in hold (gated): third-party contacts the portal
+  // flow has asked to confirm (pending/declined row) don't get texts until
+  // they reply YES. No row = grandfathered. Shared with the twilio.js
+  // en-route/arrived loops; fail-open on lookup errors.
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  let allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
+  // Hold emptied a NON-empty list: fall back to the primary account holder
+  // (always a legitimate recipient of their own appointment changes; their
+  // own consent is validated at send time) so reschedule/cancel/no-show
+  // notices from DIRECT callers never silently vanish (#2956 codex r7).
+  // …but NEVER over an explicit opt-out (codex #2992 P1): the resolver now
+  // honors a stored `false`, so re-adding the holder here would reinstate
+  // exactly the messages the toggle promises to stop. An unreadable preference
+  // is treated the same way — fail closed rather than guess.
+  const { prefsUnavailable: primaryPrefsUnavailable } = require('./customer-contact');
+  const primaryOptedOut = primaryPrefsUnavailable(prefs) || prefs?.appointment_notify_primary === false;
+  if (!allowedContacts.length && contacts.length && !primaryOptedOut) {
+    const { getPrimaryContact } = require('./customer-contact');
+    const primary = getPrimaryContact(customer);
+    if (primary.phone) {
+      logger.info(`[appt-remind] All recipients held by opt-in for customer ${customer.id} — falling back to primary for ${messageType}`);
+      allowedContacts = [{ ...primary, role: 'primary' }];
+    }
+  }
+  return { contacts, allowedContacts };
+}
+
 async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
   // An UNREADABLE preferences row (a failed notification_prefs read, or a
   // saved property whose toggles could not be read under
@@ -1769,37 +1837,14 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       return false;
     }
   }
-  const contacts = getAppointmentContacts(customer, prefs);
-  if (!contacts.length) {
+  const resolvedNotice = await resolveNoticeContacts(customer, prefs, messageType);
+  if (!resolvedNotice.contacts.length) {
     logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
     return false;
   }
 
   let sentAny = false;
-  // Recipient double opt-in hold (gated): third-party contacts the portal
-  // flow has asked to confirm (pending/declined row) don't get texts until
-  // they reply YES. No row = grandfathered. Shared with the twilio.js
-  // en-route/arrived loops; fail-open on lookup errors.
-  const { filterRecipientsByOptin } = require('./recipient-optin');
-  let allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
-  // Hold emptied a NON-empty list: fall back to the primary account holder
-  // (always a legitimate recipient of their own appointment changes; their
-  // own consent is validated at send time) so reschedule/cancel/no-show
-  // notices from DIRECT callers never silently vanish (#2956 codex r7).
-  // …but NEVER over an explicit opt-out (codex #2992 P1): the resolver now
-  // honors a stored `false`, so re-adding the holder here would reinstate
-  // exactly the messages the toggle promises to stop. An unreadable preference
-  // is treated the same way — fail closed rather than guess.
-  const { prefsUnavailable: primaryPrefsUnavailable } = require('./customer-contact');
-  const primaryOptedOut = primaryPrefsUnavailable(prefs) || prefs?.appointment_notify_primary === false;
-  if (!allowedContacts.length && contacts.length && !primaryOptedOut) {
-    const { getPrimaryContact } = require('./customer-contact');
-    const primary = getPrimaryContact(customer);
-    if (primary.phone) {
-      logger.info(`[appt-remind] All recipients held by opt-in for customer ${customer.id} — falling back to primary for ${messageType}`);
-      allowedContacts = [{ ...primary, role: 'primary' }];
-    }
-  }
+  let allowedContacts = resolvedNotice.allowedContacts;
   // Round 7 P2: under a callback-number hold only the account holder's App
   // leg proceeds (no other contact is texted on this visit while held —
   // the pre-check's standing rule for the SMS path).
@@ -4489,29 +4534,39 @@ const AppointmentReminders = {
   },
 
   /**
-   * Read-only preview of the text handleCancellation (below) sends when its
-   * sendNotification is on: the same reminder row, customer, day/date and
-   * 'appointment_cancelled' template, rendered with no claim, no send and no
-   * audit row (the Intelligence Bar cancel card shows it before Confirm).
-   * `would_send` says a text is composed; whether it reaches the customer still
-   * depends on their contact settings at send time (opt-out, landline, hours).
-   * A weighted template variant can change the exact wording, so the preview
-   * renders the base row. Returns { would_send, body, reason }.
+   * Read-only preview of the text(s) handleCancellation (below) sends when its sendNotification is on: the same
+   * reminder row, customer, appointment-contact resolution (resolveNoticeContacts) and per-recipient rendering
+   * (renderCancellationBody), with no claim, no send and no audit row. The Intelligence Bar cancel card shows it and
+   * pins it; the card's Confirm hands the approved bodies back to handleCancellation (`options.approvedNotice`).
+   * The card picks ONE template variant (`template_body`) so the pinned wording is what gets sent; a re-check
+   * passes the card's `approved` object to re-render with that same variant. Send-time holds (opt-out, landline,
+   * quiet hours) are not previewed. Returns { would_send, body, template_body, recipients, reason }.
    */
-  async previewCancellationText(scheduledServiceId) {
+  async previewCancellationText(scheduledServiceId, { approved = null } = {}) {
+    const none = (reason) => ({ would_send: false, body: null, template_body: null, recipients: [], reason });
     const record = await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).first();
-    if (!record) return { would_send: false, body: null, reason: 'no_reminder_record' };
+    if (!record) return none('no_reminder_record');
     const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-    if (!customer) return { would_send: false, body: null, reason: 'customer_not_found' };
-    const apptTime = new Date(record.appointment_time);
-    const body = await smsTemplatesRouter.getTemplate('appointment_cancelled', {
-      first_name: customer.first_name,
-      service_type: smsServiceLabelStored(record.service_type),
-      day: formatDay(apptTime),
-      date: formatDate(apptTime),
-    }, {}, { audit: false, noVariants: true });
-    if (!body) return { would_send: false, body: null, reason: 'template_unavailable' };
-    return { would_send: true, body, reason: null };
+    if (!customer) return none('customer_not_found');
+    const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
+    if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true) return none('preferences_unavailable');
+    const { allowedContacts } = await resolveNoticeContacts(customer, prefs || {}, 'appointment_cancelled');
+    if (!allowedContacts.length) return none('no_recipient');
+    const variant = approved ? null : await require('./sms-template-variants').selectVariant('appointment_cancelled').catch(() => null);
+    const templateBody = approved ? (approved.template_body ?? null) : (variant?.body ?? null);
+    const recipients = [];
+    for (const contact of allowedContacts) {
+      const body = await renderCancellationBody({ customer, contact, record, scheduledServiceId, templateBody, preview: true });
+      if (!body) return none('template_unavailable');
+      recipients.push({
+        recipient_key: noticeRecipientKey(contact.phone),
+        phone_last4: lastTenDigits(contact.phone).slice(-4),
+        role: contact.role || 'primary',
+        first_name: firstNameFrom(contact.name) || customer.first_name || null,
+        body,
+      });
+    }
+    return { would_send: true, body: recipients[0].body, template_body: templateBody, recipients, reason: null };
   },
 
   /**
@@ -4862,24 +4917,14 @@ const AppointmentReminders = {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
           const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
-          const apptTime = new Date(record.appointment_time);
-          const day = formatDay(apptTime);
-          const date = formatDate(apptTime);
-
-          const serviceLabel = smsServiceLabelStored(record.service_type);
-          const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-            const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-            return renderRequiredTemplate('appointment_cancelled', {
-              first_name: firstName,
-              service_type: serviceLabel,
-              day,
-              date,
-            }, {
-              workflow: 'appointment_cancelled',
-              entity_type: 'scheduled_service',
-              entity_id: scheduledServiceId,
-            });
-          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
+          // The Intelligence Bar cancel card approves the exact text per recipient (renderCancellationBody); a
+          // Dispatch cancel passes none and renders the live template.
+          const approvedNotice = options.approvedNotice
+            ? new Map(options.approvedNotice.map((entry) => [entry.recipient_key, entry.body]))
+            : null;
+          const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => renderCancellationBody({
+            customer, contact, record, scheduledServiceId, approvedNotice,
+          }), 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
             sendOutcome,
             // Lease-ownership recheck AT the provider handoff (codex r6):
             // customer lookup, prefs, rendering, and the line lookup all

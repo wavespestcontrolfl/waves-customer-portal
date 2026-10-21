@@ -515,7 +515,13 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
     technician_notice: 'none',
     with_effects: true,
     notify_customer: true,
-    customer_text: { would_send: true, body: 'Hi Synthia, your visit on Monday is cancelled.', reason: null },
+    customer_text: {
+      would_send: true, body: 'Hi Synthia, your visit on Monday is cancelled.', template_body: null, reason: null,
+      recipients: [
+        { recipient_key: 'abc123abc123abc1', phone_last4: '0101', role: 'primary', first_name: 'Synthia', body: 'Hi Synthia, your visit on Monday is cancelled.' },
+        { recipient_key: 'def456def456def4', phone_last4: '0202', role: 'service', first_name: 'Sam', body: 'Hi Sam, your visit on Monday is cancelled.' },
+      ],
+    },
     linked_invoices: [
       { id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: 120 },
       { id: 'inv-0', invoice_number: 'INV-0999', status: 'void', total: 10 },
@@ -554,6 +560,8 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
     expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
     const stored = mockCreatePendingAction.mock.calls[0][0];
     expect(stored.params.notify_customer).toBe(true);
+    // The approved recipients and wording ride the frozen pin and the contract hash.
+    expect(stored.contract.pinned_cancellation.customer_text.recipients.map((r) => r.recipient_key)).toEqual(['abc123abc123abc1', 'def456def456def4']);
     expect(stored.params._frozen_cancellation_impact).toEqual(EFFECTS_IMPACT);
     expect(stored.contract.pinned_cancellation).toEqual(EFFECTS_IMPACT);
     const l = labels(stored);
@@ -562,7 +570,9 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
     expect(l).toContain('Invoice INV-0999 (void) stays as it is — nothing to void');
     expect(l.some((x) => /\$75\.00 inspection credit this booking earned is taken back/.test(x))).toBe(true);
     expect(l).toContain('Also cancels the linked follow-up visit (pest_control) on 2026-11-02, with no text for it');
-    expect(l).toContain('The customer is texted this cancellation notice if they can receive texts: "Hi Synthia, your visit on Monday is cancelled."');
+    // One line per approved recipient, with the exact text that recipient gets.
+    expect(l).toContain('Text to the primary contact ending 0101, if they can receive texts: "Hi Synthia, your visit on Monday is cancelled."');
+    expect(l).toContain('Text to the service contact ending 0202, if they can receive texts: "Hi Sam, your visit on Monday is cancelled."');
     expect(l).toContain('To cancel without a text, ask for "cancel without a text" and a new card is shown');
     // The old "pinned set only" promise is false for a replay and must not be on this card.
     expect(l.some((x) => /Only the invoices listed above are voided/.test(x))).toBe(false);
@@ -571,7 +581,7 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
   });
 
   test('"cancel without a text" -> notify_customer false: the card says no text, and the choice is pinned', async () => {
-    const silent = { ...EFFECTS_IMPACT, notify_customer: false, customer_text: { would_send: false, body: null, reason: 'cancelled_without_text' } };
+    const silent = { ...EFFECTS_IMPACT, notify_customer: false, customer_text: { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' } };
     mockComputeCancelImpact.mockResolvedValue(silent);
     await propose({ reason: 'rain', notify_customer: false });
     expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID, { actorId: 'admin-1', withEffects: true, notifyCustomer: false });
