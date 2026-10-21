@@ -71,7 +71,7 @@ function looksLikeBasicCredential(header, token) {
 // An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
 // upper-case name, '=', no spaces (Codex #6375 r2).
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)/g;
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/g;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names
@@ -86,9 +86,9 @@ const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOK
 const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+([^\n]+)/gi;
 // The key may sit in paired quotes, as in serialized JSON or YAML:
 // {"password":"hunter22"} (Codex #6375 r9).
-// An unquoted value stops at a field delimiter, so a harmless field before it
+// A quoted value honors backslash escapes (\" inside JSON); an unquoted value stops at a field delimiter, so a harmless field before it
 // ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|[^\s,;}\]"']{4,})/gi;
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s,;}\]"']{4,})/gi;
 const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
 function isAssignmentSecretKey(key) {
   const words = nameWords(key);

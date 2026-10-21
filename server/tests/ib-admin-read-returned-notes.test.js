@@ -253,6 +253,10 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     expect(scrubNote('{"id":1,"password":"hunter22"}').text).toBe('{"id":1,"password":"[removed]"}');
     expect(scrubNote('{"enabled":true,"api_key":"abc123xyz"}').text).toBe('{"enabled":true,"api_key":"[removed]"}');
     expect(scrubNote('retries=3; db.password=hunter22, mode=fast').text).toBe('retries=3; db.password=[removed], mode=fast');
+    // Escaped quotes inside a quoted value do not end it (pre-push audit).
+    const escaped = scrubNote(JSON.stringify({ password: 'abc"hunter22' }));
+    expect(escaped.text).toBe('{"password":"[removed]"}');
+    expect(scrubNote('DB_PASSWORD="abc\\"hunter22" next').text).toBe('DB_PASSWORD=[removed] next');
   });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
