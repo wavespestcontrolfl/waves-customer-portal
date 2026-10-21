@@ -10473,7 +10473,8 @@ router.get('/list', async (req, res, next) => {
     // All exact rows on this page, so no exact match also comes back as a suggestion (Codex r3).
     if (customerSearchFuzzy && page === 1 && exactServices.length >= total && shouldSearchSoundAlike(search, total, exactServices)) {
       const ranked = await findSoundAlikeCustomers(db, search, {
-        scopeQuery: db('customers').whereNull('customers.deleted_at').whereIn(
+        // Projects the id only (every consumer clears and re-selects its own columns).
+        scopeQuery: db('customers').select('customers.id').whereNull('customers.deleted_at').whereIn(
           'customers.id',
           unsearchedQ.clone().clearSelect().clearOrder().select('scheduled_services.customer_id'),
         ),

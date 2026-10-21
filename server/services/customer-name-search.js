@@ -65,7 +65,7 @@ function shouldSearchSoundAlike(search, exactTotal, exactRows = []) {
 // Intelligence Bar's. Required when the cache is cold, not at load time.
 function loadNameCandidates(knex) {
   const { nameCandidates, NAME_INDEX_BOOK_CAP } = require('./intelligence-bar/tools');
-  return nameCandidates(knex('customers').whereNull('customers.deleted_at'), NAME_INDEX_BOOK_CAP);
+  return nameCandidates(knex('customers').select('customers.id').whereNull('customers.deleted_at'), NAME_INDEX_BOOK_CAP);
 }
 
 // Which of the survivors the caller's scoped query allows: one id-only read of
@@ -73,7 +73,7 @@ function loadNameCandidates(knex) {
 // the caller's filters and technician scope and NO text search.
 async function allowedByScope(knex, scopeQuery, survivors) {
   if (!survivors.length) return survivors;
-  const base = scopeQuery || knex('customers').whereNull('customers.deleted_at');
+  const base = scopeQuery || knex('customers').select('customers.id').whereNull('customers.deleted_at');
   const rows = await base.clone().clearSelect().clearOrder()
     .select('customers.id').whereIn('customers.id', survivors.map((entry) => entry.id));
   const allowed = new Set(rows.map((row) => row.id));
@@ -101,7 +101,7 @@ async function allowedSurvivors(knex, scopeQuery, search, index) {
 // returned is the current one.
 async function rescoreCurrentNames(knex, scopeQuery, search, ranked, context) {
   if (!ranked.length) return ranked;
-  const base = scopeQuery || knex('customers').whereNull('customers.deleted_at');
+  const base = scopeQuery || knex('customers').select('customers.id').whereNull('customers.deleted_at');
   const rows = await base.clone().clearSelect().clearOrder()
     .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
     .whereIn('customers.id', ranked.map((entry) => entry.id));
