@@ -139,7 +139,10 @@ function recordingFilter(row, admitted) {
     return qb.whereNotNull('customer_id')
       .whereRaw('recording_sid IS NOT DISTINCT FROM ?::text', [row.recording_sid])
       .whereRaw('recording_url IS NOT DISTINCT FROM ?::text', [row.recording_url])
-      .whereRaw('transcription_status IS NOT DISTINCT FROM ?::text', [row.transcription_status]);
+      .whereRaw('transcription_status IS NOT DISTINCT FROM ?::text', [row.transcription_status])
+      // The text too: a markers-only transcript replaced by real speech on the
+      // same recording and status is a voicemail, not an empty one.
+      .whereRaw('transcription IS NOT DISTINCT FROM ?::text', [row.transcription]);
   };
 }
 // The sweep cannot know a row yet: with gate A on it also lists a customer's
@@ -214,20 +217,29 @@ const CALLED_BACK_SQL = buildCalledBackSql('');
 //    leg picked up. The parent-leg duration_seconds proves nothing: it holds
 //    the 8 s press-1 prompt plus the whole 30 s ring, so a callback that rang
 //    out lasts longer than any sensible "answered" threshold; or
-//  - no customer_leg and the bridged call is still in flight (status stays
-//    'bridged' until the status callback ends it): it may be live now, and the
-//    sweep looks again in 2 minutes. Capped at 15 minutes from the bridge.
+//  - (claim, sweep and push re-read only, never retire) no customer_leg and the
+//    bridged call is still in flight (status stays 'bridged' until the status
+//    callback ends it): it may be live now, and the sweep looks again in 2
+//    minutes. Capped at 15 minutes from the bridge.
 // No literal question mark: knex reads one as a binding.
 const CUSTOMER_LEG_SECONDS_SQL = "CASE WHEN later.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (later.metadata->'customer_leg'->>'duration_seconds')::numeric > 0 ELSE FALSE END";
 const CALLED_BACK_ANSWERED_SQL = buildCalledBackSql(
   " AND ((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
+  + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL)))");
+// The same proof plus a bridged call still in flight. For the claim, the sweep
+// and the re-read before the push ONLY (do not ring during a live callback;
+// the sweep looks again in 2 minutes). Never for retiring a bell: a callback
+// still ringing may go unanswered, and a retired bell does not come back.
+const CALLED_BACK_DEFER_SQL = buildCalledBackSql(
+  " AND ((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
   + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL))"
   + " OR (later.metadata->'customer_leg' IS NULL AND later.status = 'bridged' AND later.bridged_at > now() - interval '15 minutes'))");
 // Read at call time, so the claim, the sweep, the re-read before the push and
-// the retire pass all follow one gate.
-function calledBackSql() {
+// the retire pass all follow one gate. `retire` asks for proof of an answered leg.
+function calledBackSql({ retire = false } = {}) {
   const { isEnabled } = require('../config/feature-gates');
-  return isEnabled('callbackNeedsAnswer') ? CALLED_BACK_ANSWERED_SQL : CALLED_BACK_SQL;
+  if (!isEnabled('callbackNeedsAnswer')) return CALLED_BACK_SQL;
+  return retire ? CALLED_BACK_ANSWERED_SQL : CALLED_BACK_DEFER_SQL;
 }
 
 function parseMeta(meta) {
@@ -392,10 +404,14 @@ async function ringMissedCallIfUnanswered(callSid) {
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
     // False too once a later call got through (calledBackSql).
-    const stillMissed = async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
+    const stillMissedWith = (calledBackClause) => async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
       .modify(recording).whereNull('voicemail_callback_alerted_at')
-      .whereRaw(calledBack)
+      .whereRaw(calledBackClause)
       .first('id'));
+    const stillMissed = stillMissedWith(calledBack);
+    // The post-check below retires the bell for good, so it needs proof of an
+    // answered callback, not a callback that may still be ringing.
+    const stillMissedFinal = stillMissedWith(calledBackSql({ retire: true }));
     // A push-only retry (GATE_MISSED_CALL_PUSH_CHECK, pass 2): the bell row from
     // pass 1 stands. Keyed on the stored counter, not the gate, so a gate flipped
     // off between the passes can never write a second bell.
@@ -427,7 +443,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     // and here makes this call the voicemail lane's — retire the bell just
     // written. The voicemail path runs the same supersede when IT claims, so
     // both orderings converge on one alert per call.
-    if (!(await stillMissed().catch(() => true))) {
+    if (!(await stillMissedFinal().catch(() => true))) {
       const NotificationService = require('./notification-service');
       await NotificationService.supersedeMissedCallAdmin({ callLogId: row.id }).catch(() => {});
     }
@@ -527,7 +543,7 @@ async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
     .whereRaw("notifications.metadata->>'triggerKey' = 'customer_missed_call'")
     .whereNull('notifications.done_at')
     .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS))
-    .whereRaw(`NOT ${calledBackSql()}`)
+    .whereRaw(`NOT ${calledBackSql({ retire: true })}`)
     .distinct('call_log.id')
     .limit(limit);
   if (!rows.length) return 0;

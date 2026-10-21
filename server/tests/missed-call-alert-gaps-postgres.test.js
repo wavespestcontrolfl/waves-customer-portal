@@ -148,6 +148,24 @@ jest.setTimeout(30000);
       expect(verdicts).toEqual({ before: true, after: false });
     });
 
+    test('on: a markers-only transcript replaced by real speech (same recording, same status) loses the push and retires the bell', async () => {
+      setGates(['missedCallEmptyVmCustomer']);
+      const row = emptyVm(10, { transcription_status: 'completed', transcription: '[NO SPEECH]' });
+      await database('call_log').insert(row);
+      const supersede = jest.spyOn(require('../services/notification-service'), 'supersedeMissedCallAdmin').mockResolvedValue(1);
+      const verdicts = {};
+      triggerNotification.mockImplementationOnce(async (_key, _payload, opts) => {
+        verdicts.before = await opts.beforePush({ dispatching: false });
+        await database('call_log').where({ id: row.id }).update({ transcription: 'Hi, this is about the wasp nest by the garage.' });
+        verdicts.shouldContinue = await opts.shouldContinue();
+        verdicts.after = await opts.beforePush({ dispatching: true });
+        return { bellWritten: true };
+      });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      expect(verdicts).toEqual({ before: true, shouldContinue: false, after: false });
+      expect(supersede).toHaveBeenCalledWith({ callLogId: row.id });
+    });
+
     test('on: a customer with an ordinary missed call and an unknown 15 s caller still behave as before', async () => {
       setGates(['missedCallEmptyVmCustomer', 'missedCallUnknownCallers']);
       const customer = call(10, { customer_id: randomUUID(), from_phone: '+19415550108' });
@@ -238,6 +256,49 @@ jest.setTimeout(30000);
         });
       }
     }
+
+    test('on: a callback that starts ringing during delivery defers the push but never retires the bell; an answered one does', async () => {
+      setGates(['callbackNeedsAnswer']);
+      const supersede = jest.spyOn(require('../services/notification-service'), 'supersedeMissedCallAdmin').mockResolvedValue(1);
+      const ringing = call(40, { customer_id: randomUUID() });
+      await database('call_log').insert(ringing);
+      const verdicts = {};
+      triggerNotification.mockImplementationOnce(async (_key, _payload, opts) => {
+        await database('call_log').insert(outbound({ status: 'bridged', duration_seconds: 0 }, 1));
+        verdicts.push = await opts.beforePush({ dispatching: true });
+        return { bellWritten: true };
+      });
+      await ringMissedCallIfUnanswered(ringing.twilio_call_sid);
+      expect(verdicts.push).toBe(false);
+      expect(supersede).not.toHaveBeenCalled();
+
+      supersede.mockClear();
+      const answered = call(40, { customer_id: randomUUID(), from_phone: '+19415550130' });
+      await database('call_log').insert(answered);
+      triggerNotification.mockImplementationOnce(async (_key, _payload, opts) => {
+        await database('call_log').insert(outbound({ to_phone: '+19415550130', metadata: { customer_leg: { status: 'completed', duration_seconds: 60 } } }));
+        verdicts.answered = await opts.beforePush({ dispatching: true });
+        return { bellWritten: true };
+      });
+      await ringMissedCallIfUnanswered(answered.twilio_call_sid);
+      expect(verdicts.answered).toBe(false);
+      expect(supersede).toHaveBeenCalledWith({ callLogId: answered.id });
+    });
+
+    test('retire: a bridged callback still in flight does not retire an open bell with the gate on, and neither does one that then rang out', async () => {
+      const missed = call(30, { customer_id: randomUUID() });
+      const bell = { id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'Missed call',
+        metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: missed.id } }, created_at: new Date(now - 5 * 60000) };
+      await database('call_log').insert([missed, outbound({ status: 'bridged', duration_seconds: 0 }, 2)]);
+      await database('notifications').insert(bell);
+      setGates(['callbackNeedsAnswer']);
+      expect(await retireCalledBackMissedCalls()).toBe(0);
+      await database('call_log').where({ direction: 'outbound' }).update({ status: 'completed', duration_seconds: 40 });
+      expect(await retireCalledBackMissedCalls()).toBe(0);
+      expect((await database('notifications').where({ id: bell.id }).first()).done_at).toBeNull();
+      // The claim still waits for the live callback.
+      expect(await sweepMissedCalls()).toBe(1);
+    });
 
     test('an answered inbound redial still counts with the gate on', async () => {
       setGates(['callbackNeedsAnswer']);
