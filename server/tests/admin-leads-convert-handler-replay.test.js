@@ -30,11 +30,13 @@ function seed() {
     leads: { id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null },
     customers: { id: CUST },
   };
+  db.raw = jest.fn((sql) => ({ raw: sql }));
   db.mockImplementation((table) => {
-    const q = {};
-    q.where = jest.fn(() => q);
-    q.whereNull = jest.fn(() => q);
-    q.first = jest.fn(async () => tables[table]);
+    const q = { table, conds: [] };
+    q.where = jest.fn((...a) => { q.conds.push(['where', ...a]); return q; });
+    q.whereNull = jest.fn((k) => { q.conds.push(['whereNull', k]); return q; });
+    q.select = jest.fn(() => q);
+    q.first = jest.fn(async () => (table === 'customers' && q.conds.some((c) => c[0] === 'whereNull' && c[1] === 'deleted_at') && tables.customers?.deleted_at ? undefined : tables[table]));
     for (const write of ['insert', 'update', 'del']) q[write] = jest.fn(() => { throw new Error(`unexpected ${write} on ${table}`); });
     return q;
   });
@@ -127,6 +129,7 @@ test('a convert sends no text and writes nothing itself (the only write is the o
 function claimOf(row) {
   const conds = [];
   const calls = [];
+  const existsSubs = [];
   const builder = (list, mode) => new Proxy({}, {
     get(_t, prop) {
       if (prop === 'where') return (a, b) => {
@@ -138,6 +141,12 @@ function claimOf(row) {
         } else list.push((r) => String(r[a]) === String(b));
         return builder(list, mode);
       };
+      if (prop === 'whereExists') return (sub) => {
+        calls.push(['whereExists', sub.table]);
+        existsSubs.push(sub);
+        list.push(() => Boolean(tables.customers) && !tables.customers.deleted_at);
+        return builder(list, mode);
+      };
       if (prop === 'whereNull') return (k) => { calls.push(['whereNull', k]); list.push((r) => r[k] == null); return builder(list, mode); };
       if (prop === 'whereNot') return (k, v) => { if (mode === 'top') calls.push(['whereNot', k]); list.push((r) => r[k] !== v); return builder(list, mode); };
       if (prop === 'orWhereRaw') return (_sql, [iso]) => { const c = (r) => new Date(r.updated_at).getTime() === new Date(iso).getTime(); c.or = true; list.push(c); return builder(list, mode); };
@@ -145,7 +154,7 @@ function claimOf(row) {
       return undefined;
     },
   });
-  return { q: builder(conds, 'top'), calls, wins: () => conds.every((c) => c(row)) };
+  return { q: builder(conds, 'top'), calls, existsSubs, wins: () => conds.every((c) => c(row)) };
 }
 const convertsRow = (row) => async (_id, opts) => { const claim = claimOf(row); opts.onlyIfIdentity(claim.q); return claim.wins(); };
 const EXPECTED = { status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null };
@@ -168,7 +177,9 @@ test('the bar adds the card\u2019s version to the same UPDATE and converts when 
   leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return claim.wins(); });
   const res = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
   expect(res.status).toBe(200);
-  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id']]);
+  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id'], ['whereExists', 'customers']]);
+  // The subquery asks for the carded customer, not deleted.
+  expect(claim.existsSubs[0].conds).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
 });
 
 test.each([
@@ -193,4 +204,33 @@ test('a card for a lead that had a customer link pins that link', async () => {
   leadAttribution.markConverted.mockImplementation(convertsRow(row));
   expect((await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: { ...EXPECTED, customerId: 'linked-1' } })).status).toBe(200);
   expect((await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED })).status).toBe(409);
+});
+
+test('a customer deleted or merged away before the bar\u2019s write converts nothing (409); the page is unaffected', async () => {
+  // Deleted before the handler reads it: the bar's customer read excludes deleted rows.
+  tables.customers = { id: CUST, deleted_at: new Date() };
+  const early = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
+  expect(early).toEqual({ status: 404, json: { error: 'Customer not found' } });
+  expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+  // Deleted after the read, before the UPDATE: the claim's EXISTS no longer matches.
+  seed();
+  const row = FULL_LEAD();
+  leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => {
+    tables.customers = { id: CUST, deleted_at: new Date() };
+    const claim = claimOf(row);
+    opts.onlyIfIdentity(claim.q);
+    return claim.wins();
+  });
+  const late = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
+  expect(late.status).toBe(409);
+  expect(late.json.error).toMatch(/changed since the page loaded/);
+  // The page reads the customer exactly as before (no deleted_at condition) and adds no EXISTS.
+  seed();
+  tables.customers = { id: CUST, deleted_at: new Date() };
+  const customerReads = [];
+  const real = db.getMockImplementation();
+  db.mockImplementation((table) => { const q = real(table); if (table === 'customers') customerReads.push(q); return q; });
+  leadAttribution.markConverted.mockImplementationOnce(async () => true);
+  expect((await viaPage(BODY)).status).toBe(200);
+  expect(customerReads[0].conds).toEqual([['where', 'id', CUST]]);
 });

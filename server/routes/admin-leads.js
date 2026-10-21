@@ -1293,8 +1293,9 @@ router.post('/:id/activity', async (req, res, next) => {
 });
 
 // The card's pin as extra predicates on the win's own UPDATE: the lead is still unconverted, in the
-// status and at the edit time the card showed, with the customer link it showed.
-function withExpectedLead(identity, expected) {
+// status and at the edit time the card showed, with the customer link it showed, and its customer is live.
+// The carded customer must also still exist (not deleted or merged away) when the UPDATE runs.
+function withExpectedLead(identity, expected, customerId) {
   if (!expected) return identity;
   return (q) => {
     identity(q);
@@ -1302,6 +1303,7 @@ function withExpectedLead(identity, expected) {
       .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
     if (expected.customerId) q.where('customer_id', expected.customerId);
     else q.whereNull('customer_id');
+    q.whereExists(db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at'));
   };
 }
 
@@ -1318,7 +1320,10 @@ const leadConvertHandler = async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const customer = await db('customers').where('id', customerId).first();
+    // The bar's card also refuses a deleted customer (req.ibExpectedLead is set only by convertLeadFromBar).
+    let customerQuery = db('customers').where('id', customerId);
+    if (req.ibExpectedLead) customerQuery = customerQuery.whereNull('deleted_at');
+    const customer = await customerQuery.first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // Same stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
@@ -1337,7 +1342,7 @@ const leadConvertHandler = async (req, res, next) => {
       // re-asserting it in the win's own UPDATE. The Intelligence Bar's card adds the exact
       // lead version it showed (req.ibExpectedLead, set only by convertLeadFromBar; the page
       // never sets it, so the page's claim is unchanged).
-      onlyIfIdentity: withExpectedLead(unlessHandledSince(seen, req.body.seen_updated_at), req.ibExpectedLead),
+      onlyIfIdentity: withExpectedLead(unlessHandledSince(seen, req.body.seen_updated_at), req.ibExpectedLead, customerId),
     });
     if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();
