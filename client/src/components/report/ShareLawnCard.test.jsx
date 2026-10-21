@@ -57,7 +57,53 @@ describe('ShareLawnCard', () => {
     render(<ShareLawnCard {...props} />);
     fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
     await waitFor(() => expect(navigator.share).toHaveBeenCalled());
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Share your lawn' })).toBeEnabled());
+    // The built card is kept: the next tap shares it again without a rebuild.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled());
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('an expired tap (NotAllowedError): keeps the built card, shows Share and the save link, and a new tap shares it without a rebuild', async () => {
+    navigator.canShare = vi.fn(() => true);
+    navigator.share = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('expired'), { name: 'NotAllowedError' }))
+      .mockResolvedValueOnce(undefined);
+    const onTap = vi.fn();
+    render(<ShareLawnCard {...props} onTap={onTap} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    const again = await screen.findByRole('button', { name: 'Share' });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Save the picture' })).toBeInTheDocument();
+    const firstFile = navigator.share.mock.calls[0][0].files[0];
+    fireEvent.click(again);
+    await screen.findByText('Thank you for sharing.');
+    expect(buildLawnShareCard).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(onTap).toHaveBeenCalledTimes(1);
+    expect(navigator.share.mock.calls[1][0].files[0]).toBe(firstFile);
+  });
+
+  it('a second refusal keeps the card ready instead of looping or rebuilding', async () => {
+    navigator.canShare = vi.fn(() => true);
+    navigator.share = vi.fn(async () => { throw Object.assign(new Error('expired'), { name: 'NotAllowedError' }); });
+    render(<ShareLawnCard {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    await waitFor(() => expect(navigator.share).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('button', { name: 'Share' })).toBeEnabled();
+    expect(buildLawnShareCard).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('link', { name: 'Save the picture' })).toBeInTheDocument();
+  });
+
+  it('closing the sheet after a retry returns to the ready state', async () => {
+    navigator.canShare = vi.fn(() => true);
+    navigator.share = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('expired'), { name: 'NotAllowedError' }))
+      .mockRejectedValueOnce(Object.assign(new Error('closed'), { name: 'AbortError' }));
+    render(<ShareLawnCard {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    await waitFor(() => expect(navigator.share).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('button', { name: 'Share' })).toBeEnabled();
     expect(screen.queryByRole('alert')).toBeNull();
   });
 

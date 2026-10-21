@@ -280,16 +280,29 @@ async function reportAskBudgetFor(service, req, deps = {}) {
 // suppression DB read) ahead of both this and the limiter, and a param-gate
 // 404 would then go out without these headers.
 const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
+// The lawn card's photo (GATE_REPORT_WEB_SHARE) carries the same headers on every outcome, 404 and 429 included.
+const REPORT_SHARE_PHOTO_PATH_RE = /^\/[a-f0-9]{32}\/share-photo\/?$/i;
 function reportsAskPrivacyHeaders(req, res, next) {
-  if (REPORT_ASK_PATH_RE.test(req.path || '')) {
+  const path = req.path || '';
+  if (REPORT_ASK_PATH_RE.test(path) || REPORT_SHARE_PHOTO_PATH_RE.test(path)) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   }
   next();
 }
+// Dark lawn-card photo (GATE_REPORT_WEB_SHARE): a generic 404 BEFORE every limiter (the global /api one,
+// reportLimiter, sharePhotoLimiter) and before the token param read, so a dark probe spends no budget and
+// reads no row. Mounted app-level too (server/index.js), like the estimate map-image guard.
+function reportSharePhotoPreGuard(req, res, next) {
+  if (req.method === 'GET' && REPORT_SHARE_PHOTO_PATH_RE.test(req.path || '') && !webShareService.webShareEnabled()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
+}
 // Also mounted app-level ahead of the global /api limiter and JSON parser
 // (server/index.js); kept here so the router is self-contained.
 router.use(reportsAskPrivacyHeaders);
+router.use(reportSharePhotoPreGuard);
 
 router.use(reportLimiter);
 
@@ -2873,6 +2886,7 @@ module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
+module.exports.reportSharePhotoPreGuard = reportSharePhotoPreGuard;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;

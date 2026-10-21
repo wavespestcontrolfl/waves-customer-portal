@@ -212,6 +212,8 @@ app.use('/ingest', require('./routes/posthog-ingest'));
 // middleware — CORS preflights, the global /api limiter, body-parser errors —
 // so every response on those token routes carries them.
 app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
+// Dark lawn-card photo (GATE_REPORT_WEB_SHARE): generic 404 before the global limiter and the token read.
+app.use('/api/reports', reportsPublicRoutes.reportSharePhotoPreGuard);
 
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened

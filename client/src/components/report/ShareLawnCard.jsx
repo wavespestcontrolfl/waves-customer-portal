@@ -11,7 +11,7 @@ import { buildLawnShareCard, bareLink } from '../../lib/lawnShareCard';
 const SHARE_TEXT = 'A look at my lawn, from Waves Pest Control.';
 
 export default function ShareLawnCard({ token, score, apiBase, staffView = false, glass = false, onTap = null }) {
-  // idle | building | shared | saved | failed
+  // idle | building | shared | saved | ready (built, waiting for a fresh Share tap) | failed
   const [state, setState] = useState('idle');
   const [preview, setPreview] = useState(null);
   const previewRef = useRef(null);
@@ -27,8 +27,40 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
     return body.link;
   };
 
+  // The built card, kept so a second tap shares it without a rebuild.
+  const preparedRef = useRef(null);
+
+  const showPicture = (blob) => {
+    if (previewRef.current) URL.revokeObjectURL(previewRef.current);
+    previewRef.current = URL.createObjectURL(blob);
+    setPreview(previewRef.current);
+  };
+
+  // Hands the built file to the share sheet. The sheet needs a fresh tap: after a slow build the
+  // browser can refuse it (NotAllowedError, tap too old). Then the card stays ready for a new tap.
+  const sharePrepared = async ({ file, blob, link }) => {
+    try {
+      await navigator.share({ files: [file], text: `${SHARE_TEXT} ${bareLink(link)}` });
+      setState('shared');
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        setState(preparedRef.current ? 'ready' : 'idle');
+      } else if (err && err.name === 'NotAllowedError') {
+        showPicture(blob);
+        setState('ready');
+      } else {
+        setState('failed');
+      }
+    }
+  };
+
   const share = async () => {
     if (state === 'building') return;
+    if (preparedRef.current) {
+      setState('building');
+      await sharePrepared(preparedRef.current);
+      return;
+    }
     if (typeof onTap === 'function') onTap();
     setState('building');
     try {
@@ -41,19 +73,12 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
       });
       const file = new File([blob], 'my-lawn-waves.jpg', { type: 'image/jpeg' });
       if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({ files: [file], text: `${SHARE_TEXT} ${bareLink(link)}` });
-          setState('shared');
-        } catch (err) {
-          // Closing the share sheet is not an error.
-          setState(err && err.name === 'AbortError' ? 'idle' : 'failed');
-        }
+        preparedRef.current = { file, blob, link };
+        await sharePrepared(preparedRef.current);
         return;
       }
       // No file sharing here: show the picture and offer the download.
-      if (previewRef.current) URL.revokeObjectURL(previewRef.current);
-      previewRef.current = URL.createObjectURL(blob);
-      setPreview(previewRef.current);
+      showPicture(blob);
       setState('saved');
     } catch {
       setState('failed');
@@ -81,17 +106,17 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
           cursor: state === 'building' ? 'default' : 'pointer', opacity: state === 'building' ? 0.7 : 1,
         }}
       >
-        {state === 'building' ? 'Making your card...' : 'Share your lawn'}
+        {state === 'building' ? 'Making your card...' : state === 'ready' ? 'Share' : 'Share your lawn'}
       </button>
       <div aria-live="polite">
         {state === 'shared' ? <p style={{ margin: '10px 0 0', fontSize: 16 }}>Thank you for sharing.</p> : null}
         {state === 'failed' ? <p role="alert" style={{ margin: '10px 0 0', fontSize: 16 }}>We could not make your card. Please try again.</p> : null}
-        {state === 'saved' && preview ? (
+        {(state === 'saved' || state === 'ready') && preview ? (
           <div style={{ marginTop: 12 }}>
             <img src={preview} alt="Your lawn card" style={{ display: 'block', width: '100%', maxWidth: 360, borderRadius: 12 }} />
             <p style={{ margin: '8px 0 0', fontSize: 16, lineHeight: 1.45 }}>
               <a href={preview} download="my-lawn-waves.jpg" style={{ color: '#04395E', fontWeight: 700 }}>Save the picture</a>
-              {' '}or press and hold it to save.
+              {' '}or press and hold it to save.{state === 'ready' ? ' Tap Share again to open the share sheet.' : ''}
             </p>
           </div>
         ) : null}

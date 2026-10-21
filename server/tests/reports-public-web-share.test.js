@@ -295,6 +295,69 @@ describe('GET /reports/:token/share-photo', () => {
   });
 });
 
+describe('dark share-photo answers before every limiter (real limiters)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    gates.reportWebShareLive.mockReturnValue(false);
+    db.mockImplementation(() => { throw new Error('a dark probe must not read the database'); });
+  });
+
+  test('30 dark requests, with and without a trailing slash, are all 404 with privacy headers and no row read', async () => {
+    await withServer(async (baseUrl) => {
+      const statuses = [];
+      for (let i = 0; i < 30; i += 1) {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/share-photo${i % 2 ? '/' : ''}`);
+        statuses.push(res.status);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+        await res.arrayBuffer();
+      }
+      expect(statuses.every((st) => st === 404)).toBe(true);
+    });
+    expect(db).not.toHaveBeenCalled();
+    expect(webShare.readSharePhoto).not.toHaveBeenCalled();
+  });
+
+  test('dark probes do not spend the report limiter budget of the same address', async () => {
+    mockDbFor([paramGateRecord(), fullRecord()]);
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 25; i += 1) await (await fetch(`${baseUrl}/reports/${VALID_TOKEN}/share-photo`)).arrayBuffer();
+      db.mockReset();
+      mockDbFor([paramGateRecord(), fullRecord()]);
+      buildReportV1Data.mockImplementation(async () => ({ serviceLine: 'lawn', pdfUrl: `/api/reports/${VALID_TOKEN}`, applications: [] }));
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      expect(res.status).toBe(200);
+    });
+  });
+
+  test('the app-level guard answers 404 ahead of a one-request limiter, and passes other paths and a live gate', async () => {
+    const rateLimit = require('express-rate-limit');
+    const app = express();
+    app.use('/reports', reportsRouter.reportsAskPrivacyHeaders);
+    app.use('/reports', reportsRouter.reportSharePhotoPreGuard);
+    app.use(rateLimit({ windowMs: 60000, max: 1, standardHeaders: false, legacyHeaders: false }));
+    app.use((req, res) => res.status(200).json({ reached: true }));
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      for (let i = 0; i < 5; i += 1) {
+        const res = await fetch(`${base}/reports/${VALID_TOKEN}/share-photo${i % 2 ? '/' : ''}`);
+        expect(res.status).toBe(404);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+      }
+      // Live gate: the guard steps aside and the next layer (here the limiter) answers.
+      gates.reportWebShareLive.mockReturnValue(true);
+      expect((await fetch(`${base}/reports/${VALID_TOKEN}/share-photo`)).status).toBe(200);
+      // A different path is never touched by the guard, gate dark or not.
+      gates.reportWebShareLive.mockReturnValue(false);
+      expect((await fetch(`${base}/reports/${VALID_TOKEN}/data`)).status).toBe(429);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
 describe('the lawn card tap without GATE_REPORT_CROSS_SELL', () => {
   const referralShare = require('../services/referral-share');
   const referralEngine = require('../services/referral-engine');
