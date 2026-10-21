@@ -530,7 +530,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
   const { emailDigest, phoneDigest } = require('../services/receipt-destination-digest');
   const SEEN = new Date('2099-01-01T12:00:00.123Z');
   const COLUMNS = { customer_id: 'cust-1', scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
-  const pin = (over = {}) => ({ invoiceId: 'inv-1', status: 'sent', updatedAtMs: SEEN.getTime(), columns: COLUMNS, ...over });
+  const pin = (over = {}) => ({ invoiceId: 'inv-1', status: 'sent', updatedAtMs: SEEN.getTime(), columns: COLUMNS, paymentDate: require('../utils/datetime-et').etDateString(), closeout: null, ...over });
   const card = (over = {}) => openInvoice({ updated_at: SEEN, ...over });
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
@@ -550,6 +550,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
     db.mockImplementation((table) => {
       if (table === 'invoices') return recorder({ first: { ...pre } });
       if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+      if (table === 'scheduled_services') return recorder({ first: { id: 'sv-other', status: 'scheduled' } });
       if (table === 'activity_log') return recorder();
       if (table === 'notification_prefs') return recorder({ first: null });
       throw new Error(`unexpected table ${table}`);
@@ -611,6 +612,24 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
       expect(err).toMatchObject({ statusCode: 409, drift: true });
       expect(calls.update).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('a card shown on another ET day refuses with drift and records nothing (the payment is never dated differently than approved)', async () => {
+      const calls = settle();
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ paymentDate: '2020-01-01' })) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/day changed/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('a linked visit that changed (or is gone) since the card refuses with drift under the lock: nothing written', async () => {
+      const calls = settle({ locked: card({ scheduled_service_id: 'sv-other' }), pre: card({ scheduled_service_id: 'sv-other' }) });
+      const closeout = { visitId: 'sv-other', serviceType: 'Pest Control', date: '2099-01-01', updatedAtMs: 1 };
+      // The settle() fixture's visit row carries no matching edit time / date / type, as an edited visit would not.
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ columns: { ...COLUMNS, scheduled_service_id: 'sv-other' }, closeout })) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/linked visit changed/);
       expect(calls.paymentsInsert).toBeNull();
     });
 

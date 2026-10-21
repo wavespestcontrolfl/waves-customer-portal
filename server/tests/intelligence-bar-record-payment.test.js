@@ -405,6 +405,81 @@ describe('confirm', () => {
     expect(Invoices.recordPaymentFromBar.mock.calls[1][0].approvedPayment.settlementFence.closeoutTarget).toBe('visit-77');
   });
 
+  describe('the visit and the day the card showed (Codex r4)', () => {
+    const VISIT_EDITED = new Date('2099-01-01T09:00:00.000Z');
+    const closeout = { visitId: 'visit-77', serviceType: 'Pest Control', date: '2099-01-01', updatedAt: VISIT_EDITED, resuming: false };
+    const visitRow = (over = {}) => ({ id: 'visit-77', service_type: 'Pest Control', scheduled_date: new Date('2099-01-01T00:00:00Z'), updated_at: VISIT_EDITED, ...over });
+    afterEach(() => jest.useRealTimers());
+
+    async function fenceOf() {
+      db.schema = { hasTable: jest.fn(async () => false) };
+      const card = await preview();
+      await confirm(card);
+      return Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment.settlementFence;
+    }
+
+    test('a visit edited after the card (edit time, scheduled date or service type), or gone, refuses with drift', async () => {
+      issuedCloseoutTarget.mockResolvedValue(closeout);
+      state.scheduled_services.push(visitRow());
+      const fence = await fenceOf();
+      await expect(fence(db)).resolves.toBe(true);
+      for (const patch of [{ updated_at: new Date('2099-01-01T10:00:00Z') }, { scheduled_date: new Date('2099-01-05T00:00:00Z') }, { service_type: 'Lawn Care' }]) {
+        Object.assign(state.scheduled_services[0], patch);
+        await expect(fence(db)).rejects.toMatchObject({ statusCode: 409, drift: true });
+        Object.assign(state.scheduled_services[0], visitRow());
+      }
+      state.scheduled_services.length = 0;
+      await expect(fence(db)).rejects.toMatchObject({ drift: true });
+      delete db.schema;
+    });
+
+    test('the visit’s facts are in the pin: a visit edited between the card and Confirm refuses with preview_changed', async () => {
+      issuedCloseoutTarget.mockResolvedValue(closeout);
+      const card = await preview();
+      issuedCloseoutTarget.mockResolvedValue({ ...closeout, updatedAt: new Date('2099-01-01T10:00:00Z') });
+      expect(await confirm(card)).toMatchObject({ preview_changed: true });
+      issuedCloseoutTarget.mockResolvedValue({ ...closeout, date: '2099-01-09' });
+      expect(await confirm(card)).toMatchObject({ preview_changed: true });
+      expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+    });
+
+    test('a card with no closeout visit has no visit to re-assert (a visit that becomes closable later is the closeout target guard’s)', async () => {
+      db.schema = { hasTable: jest.fn(async () => false) };
+      const card = await preview();
+      expect(card._version.closeout_facts).toBeNull();
+      await confirm(card);
+      const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
+      await expect(settlementFence(db)).resolves.toBe(true);
+      delete db.schema;
+    });
+
+    // Fake only the clock; the rest of the event loop stays real.
+    const clockAt = (iso) => jest.useFakeTimers({ now: new Date(iso), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'clearImmediate', 'queueMicrotask', 'performance'] });
+
+    test('the card is stamped with its ET day; a settlement after midnight ET refuses; before midnight it passes', async () => {
+      db.schema = { hasTable: jest.fn(async () => false) };
+      clockAt('2099-01-02T04:59:00Z'); // 11:59 PM ET on Jan 1
+      const card = await preview();
+      expect(card.payment_date).toBe('2099-01-01');
+      expect(card._version.payment_date).toBe('2099-01-01');
+      await confirm(card);
+      const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
+      clockAt('2099-01-02T04:59:59Z');
+      await expect(settlementFence(db)).resolves.toBe(true);
+      clockAt('2099-01-02T05:00:01Z'); // 12:00:01 AM ET on Jan 2
+      await expect(settlementFence(db)).rejects.toMatchObject({ statusCode: 409, drift: true });
+      delete db.schema;
+    });
+
+    test('Confirm after midnight ET sees a new day in the re-derived card: preview_changed, nothing run', async () => {
+      clockAt('2099-01-02T04:59:00Z');
+      const card = await preview();
+      clockAt('2099-01-02T05:01:00Z');
+      expect(await confirm(card)).toMatchObject({ preview_changed: true });
+      expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+    });
+  });
+
   test('the card’s customer label says a receipt is attempted by its channels, not that one will be sent', async () => {
     const card = await preview({ send_receipt: true });
     const contract = buildContract({ toolName: 'record_payment', params: { ...BASE, send_receipt: true }, preview: card, summary: 'x' });

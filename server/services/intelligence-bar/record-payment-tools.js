@@ -293,7 +293,12 @@ function planEffects({ invoice, dueCents, method, reference, note, sendReceipt, 
 }
 
 // Everything the card approves: a change in any of it is drift.
-function versionOf({ invoice, dueCents, input, reach, closeout, body }) {
+// The visit the closeout would complete, as the card read it (null = none).
+const closeoutPin = (closeout) => (closeout
+  ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true }
+  : null);
+
+function versionOf({ invoice, dueCents, input, reach, closeout, paymentDate, body }) {
   return {
     invoice_id: invoice.id,
     status: invoice.status,
@@ -311,6 +316,9 @@ function versionOf({ invoice, dueCents, input, reach, closeout, body }) {
     note: input.note,
     receipt: input.sendReceipt ? digest([reach.email, reach.phone, reach.via]) : null,
     closeout_visit: closeout?.visitId || null,
+    // The visit's own facts (edit time, scheduled date, service type): a visit edited after the card is drift.
+    closeout_facts: closeout ? digest(closeoutPin(closeout)) : null,
+    payment_date: paymentDate,
     body: digest(body),
   };
 }
@@ -332,6 +340,8 @@ async function buildPlan(input) {
   const probe = await closeoutProbe(invoice);
   if (probe.error) return probe.error;
   const { closeout } = probe;
+  // One ET day for the whole card: shown, pinned, and re-asserted by the settlement's fence.
+  const paymentDate = etDateString();
   const customer = await db('customers').where({ id: invoice.customer_id }).first('first_name', 'last_name', 'company_name');
   const body = requestBody({ method: read.method, reference: read.reference, note: read.note, sendReceipt: read.sendReceipt, via: reach?.via });
   const effects = planEffects({ invoice, dueCents, method: read.method, reference: read.reference, note: read.note, sendReceipt: read.sendReceipt, reach, closeout });
@@ -348,20 +358,20 @@ async function buildPlan(input) {
     method: read.method,
     reference: read.reference || null,
     office_note: read.note || null,
-    payment_date: etDateString(),
+    payment_date: paymentDate,
     effects,
     receipt: read.sendReceipt
       ? `Receipt sent now by ${reach.via === 'both' ? 'email and text' : reach.via === 'email' ? 'email' : 'text'}`
       : 'No receipt is sent',
     sends_to_customer: read.sendReceipt,
     receipt_channels: read.sendReceipt ? (reach.via === 'both' ? 'email and text' : reach.via === 'email' ? 'email' : 'text') : null,
-    _version: versionOf({ invoice, dueCents, input: read, reach, closeout, body }),
+    _version: versionOf({ invoice, dueCents, input: read, reach, closeout, paymentDate, body }),
     _body: body,
     // What the settlement is handed (never shown): the amount due, the fence it runs before the Stripe retirement and again under
     // the invoice lock (record-payment-fences.js), and the receipt's destination check. Functions: not part of any pin or display.
     _approved: {
       expectedAmountCents: dueCents,
-      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none' }),
+      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none', paymentDate, closeout: closeoutPin(closeout) }),
       ...(read.sendReceipt ? { receiptGuard: receiptGuardFor({ email: emailDigest(reach.email), phone: phoneDigest(reach.phone) }) } : {}),
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',

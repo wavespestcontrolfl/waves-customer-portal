@@ -13,6 +13,8 @@
  *           (customer, visit link, service record, completion packet, payer links, total, credit). Before the lock the edit time
  *           is compared too; under the lock it cannot be (the combined-session release rewrites it), which is safe because the
  *           settlement builds the invoice notes from the locked row and the paid UPDATE writes no other unpinned column;
+ *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
+ *           been edited since (edit time, scheduled date, service type) or is gone;
  *         - a project's report is held for this payment ('held' / 'releasing'): paying would release it to the customer, which
  *           the card cannot disclose. Under the lock the project rows are locked FOR UPDATE;
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
@@ -26,6 +28,7 @@
  *       `relabel` words a refused leg: contact changed, the customer opted out of receipts, or the settings could not be read.
  */
 const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
+const { etDateString } = require('../../utils/datetime-et');
 
 const PINNED_COLUMNS = ['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied'];
 const MONEY_COLUMNS = new Set(['total', 'credit_applied']);
@@ -33,6 +36,8 @@ const columnValue = (row, key) => (MONEY_COLUMNS.has(key) ? String(Math.round((N
 const pinnedColumnsOf = (invoice) => Object.fromEntries(PINNED_COLUMNS.map((key) => [key, invoice[key] ?? null]));
 
 const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown — nothing was recorded';
+const DATE_TEXT = 'The day changed after the confirmation card was shown, so the payment would be recorded as of a different day — nothing was recorded';
+const VISIT_TEXT = 'The linked visit changed after the confirmation card was shown — nothing was recorded';
 const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 const CONTACT_CHANGED = 'receipt not sent: contact changed';
@@ -47,6 +52,24 @@ function rowMatchesPin(row, pin, { editTime }) {
   return PINNED_COLUMNS.every((key) => columnValue(row, key) === columnValue(pin.columns, key));
 }
 
+const dateOnly = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  const m = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+};
+
+// The visit the card said the payment's closeout would complete, as the card read it: its edit time, scheduled date and service type.
+// A visit edited (or gone) since refuses, rather than completing a changed visit. Read on the settlement's own handle: under the lock
+// that is the transaction, which by then holds the linked visit's lock (visitRefusesSettlement runs before the fence).
+async function closeoutVisitUnchanged(database, visit) {
+  const row = await database('scheduled_services').where({ id: visit.visitId }).first('id', 'updated_at', 'scheduled_date', 'service_type');
+  return Boolean(row)
+    && (row.updated_at ? new Date(row.updated_at).getTime() : null) === visit.updatedAtMs
+    && dateOnly(row.scheduled_date) === visit.date
+    && (row.service_type || null) === (visit.serviceType || null);
+}
+
 async function heldReportExists(database, invoiceId, { lock }) {
   const query = database('projects').where({ invoice_id: invoiceId });
   const projects = await (lock ? query.forUpdate() : query).select('id', 'report_hold_status');
@@ -59,13 +82,17 @@ async function annualTermExists(database, row) {
     && await database('annual_prepay_terms').where({ prepay_invoice_id: row.id }).first('id'));
 }
 
-// pin: { invoiceId, status, updatedAtMs, columns, closeoutTarget } as the card read the invoice. closeoutTarget is the visit the card
+// pin: { invoiceId, status, updatedAtMs, columns, closeoutTarget, closeout, paymentDate } as the card read the invoice. closeout is the
+// visit the closeout would complete { visitId, serviceType, date, updatedAtMs } (null = none); paymentDate is the ET day the card showed. closeoutTarget is the visit the card
 // said the payment's closeout would complete, or 'none': the settlement pins it in its transaction and hands it to the closeout
 // (invoice-issued-closeout.js approvedTarget), so a visit that became closable after the card is left open, on retries too.
 function settlementFenceFor(pin) {
   const fence = async (database, locked = null) => {
     const row = locked || await database('invoices').where({ id: pin.invoiceId }).first();
     if (!rowMatchesPin(row, pin, { editTime: !locked })) throw drift(DRIFT_TEXT);
+    // The ledger row and the invoice note are stamped with the ET day the settlement runs on: never a different day than the card's.
+    if (pin.paymentDate !== etDateString()) throw drift(DATE_TEXT);
+    if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
     if (await heldReportExists(database, pin.invoiceId, { lock: Boolean(locked) })) throw drift(HELD_REPORT_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
     return true;
