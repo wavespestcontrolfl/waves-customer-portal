@@ -78,6 +78,12 @@ const { KNOWN_CALLER_PHONE_COLS: CUSTOMER_PHONE_COLS } = require('../utils/known
 const NANP_DIGITS_SQL = (column) => `regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') ~ '^1{0,1}[2-9][0-9]{9}$'`; // {0,1}, never ?: knex reads ? as a binding
 const LAST10_SQL = (column) => `right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
 
+// The last 10 digits of every Google Business Profile tracking line.
+function gbpLines() {
+  const lines = require('../config/twilio-numbers').gbpTracking || {};
+  return Object.values(lines).map((l) => String(l.number || '').replace(/\D/g, '').slice(-10)).filter((d) => d.length === 10);
+}
+
 async function isRobodialerWave(row) {
   if (!row || row.customer_id) return false;
   if (!(Number(row.duration_seconds) < WAVE_MAX_SECONDS)) return false;
@@ -98,15 +104,23 @@ async function isRobodialerWave(row) {
     .where((qb) => qb.where('created_at', '<', at).orWhere('id', row.id))
     .whereRaw(NANP_DIGITS_SQL('from_phone'))
     .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
+    // Only wave-like calls count (Codex #6379 r3): a GBP line, under
+    // WAVE_MAX_SECONDS, no recording, nobody answered. An answered, long or
+    // voicemail call from the same block is a real caller, never a wave member.
+    .whereRaw(`${LAST10_SQL('to_phone')} IN (${gbpLines().map(() => '?').join(', ')})`, gbpLines())
+    .where('duration_seconds', '<', WAVE_MAX_SECONDS)
+    .whereNull('recording_sid').whereNull('recording_url')
+    .whereRaw("COALESCE(answered_by, '') NOT IN ('human', 'ai_agent')")
     // An unlinked call from a number on any customer phone slot is no robodialer.
-    .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE cu.deleted_at IS NULL AND ${LAST10_SQL('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => LAST10_SQL(`cu.${c}`)).join(', ')}))`)
+    // Full-country keys (Codex #6379 r3): +44 9415550303 on a slot is not +1 941-555-0303.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE cu.deleted_at IS NULL AND ${phoneKeySql('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => phoneKeySql(`cu.${c}`)).join(', ')}))`)
     .countDistinct({ n: db.raw(LAST10_SQL('from_phone')) })
     .first();
   if (Number(found?.n || 0) < WAVE_MIN_NUMBERS) return false;
   // Live customers only, as findKnownCallerCustomer reads them (Codex #6379 r2).
   const customer = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw(`? IN (${CUSTOMER_PHONE_COLS.map(LAST10_SQL).join(', ')})`, [digits])
+    .whereRaw(`? IN (${CUSTOMER_PHONE_COLS.map((c) => phoneKeySql(c)).join(', ')})`, [`1${digits}`])
     .first('id');
   return !customer;
 }

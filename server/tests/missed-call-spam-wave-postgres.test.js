@@ -20,6 +20,7 @@ const GBP_LINE = '+19413840224';
 const OFFICE_LINE = '+19412975749';
 jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn((n) => (n === '+19413840224' ? { type: 'gbp_tracking', label: 'GBP — Parrish' } : { type: 'location', label: 'Office' })),
+  gbpTracking: { parrish: { number: '+19413840224', label: 'GBP — Parrish' } },
 }));
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: jest.fn(async () => ({ bellWritten: true })),
@@ -154,6 +155,26 @@ jest.setTimeout(30000);
       { id: randomUUID(), first_name: 'Sample', last_name: 'Gone', phone: '+19415550303', deleted_at: new Date() },
       { id: randomUUID(), first_name: 'Sample', last_name: 'Gone', phone: '+19415550202', deleted_at: new Date() },
     ]);
+    expect(await isRobodialerWave(row)).toBe(true);
+  });
+
+  test('only wave-like block calls count: answered, long, voicemail or office-line history does not (Codex #6379 r3)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row,
+      call('+19415550101', 60, { answered_by: 'human', duration_seconds: 120 }),
+      call('+19415550202', 60, { duration_seconds: 45 }),
+      call('+19415550404', 60, { recording_sid: 'RE_sample' }),
+      call('+19415550505', 60, { to_phone: OFFICE_LINE }),
+    ]);
+    expect(await isRobodialerWave(row)).toBe(false);
+    await database('call_log').insert([call('+19415550606', 60), call('+19415550707', 60)]);
+    expect(await isRobodialerWave(row)).toBe(true);
+  });
+
+  test('an international customer slot sharing the last ten digits does not make a +1 caller known (Codex #6379 r3)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row, call('+19415550101', 60), call('+19415550202', 60)]);
+    await database('customers').insert({ id: randomUUID(), first_name: 'Sample', last_name: 'Abroad', phone: '+449415550303' });
     expect(await isRobodialerWave(row)).toBe(true);
   });
 
