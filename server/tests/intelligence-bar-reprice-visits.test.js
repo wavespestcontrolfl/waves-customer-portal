@@ -144,6 +144,39 @@ describe('the card', () => {
     expect(card.left_alone).toContainEqual(expect.objectContaining({ id: 'v-tpl', reason: expect.stringMatching(/plan's first visit/) }));
   });
 
+  test('when exclusions took every matching visit and one is a missing capability, the refusal is a coded gap (Codex #6371 r12)', async () => {
+    tables.scheduled_services = [
+      visit('v-tpl', '2099-03-05', { is_recurring: true, recurring_parent_id: null }),
+      visit('v-zero', '2099-04-05', { estimated_price: '0.00' }),
+      visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' }),
+    ];
+    const result = await preview();
+    expect(result.code).toBe('reprice_excluded_unsupported');
+    expect(result.error).toMatch(/^The bar can't change any upcoming .* visit for Robin Sample to \$49\.00 from here yet: /);
+    expect(result.error).toMatch(/plan's first visit/);
+    expect(result.error).toMatch(/a \$0 visit/);
+    expect(result.error).not.toMatch(/prepaid/);
+    expect(result.left_alone.map((v) => v.id).sort()).toEqual(['v-pre', 'v-tpl', 'v-zero']);
+    expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
+  });
+
+  test('exclusions that are only waits (prepaid, completed) keep the plain nothing_to_reprice', async () => {
+    tables.scheduled_services = [
+      visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' }),
+      visit('v-done', '2099-03-02', { status: 'completed' }),
+    ];
+    const result = await preview();
+    expect(result.code).toBe('nothing_to_reprice');
+    expect(result.left_alone).toHaveLength(2);
+  });
+
+  test('nothing matching at all keeps nothing_to_reprice', async () => {
+    tables.scheduled_services = [];
+    const result = await preview();
+    expect(result.error).toBeTruthy();
+    expect(result.code).not.toBe('reprice_excluded_unsupported');
+  });
+
   test("a visit the Schedule re-price block reports as holding money is left alone with that reason", async () => {
     Schedule.findBillingCoveredVisits.mockResolvedValue(new Map([['v-2', 'holding a card for a late-cancel fee'], ['v-term', 'covered by an annual prepay term']]));
     const card = await preview();

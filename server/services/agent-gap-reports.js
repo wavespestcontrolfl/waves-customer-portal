@@ -75,6 +75,9 @@ const CAPABILITY_GAP_CODES = new Set([
   // Billing-type, visit, invoice and closeout cases.
   'billing_mode_clear', 'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
   'needs_invoices_page', 'invoice_copy_too_long',
+  // Two records with different service addresses (the admin duplicate flow can keep the second) and links only the
+  // composer can send (Codex #6371 r12).
+  'address_conflict', 'customer_link_composer_only',
 ]);
 const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
@@ -471,7 +474,21 @@ function recordableRefusalCode(result) {
   // the bar cannot do this from here (the wording every tool refusal uses).
   if (!OTHER_SCREEN_RE.test(text) && !BAR_DECLINE_RE.test(text)) return null;
   if (!CODE_RE.test(code)) return OTHER_SCREEN_CODE;
+  return capabilityGapCode(code);
+}
+
+// The one rule for a code that is a missing capability: `*_unsupported` or listed.
+function capabilityGapCode(code) {
   return UNSUPPORTED_CODE_RE.test(code) || CAPABILITY_GAP_CODES.has(code) ? code : null;
+}
+
+// A successful result can carry the gaps it worked around (a batch move that
+// left its grouped stops behind): `capability_gaps: [{ code }]`. Each code goes
+// through the same rule as a top-level refusal (Codex #6371 r12).
+function nestedGapCodes(result) {
+  const entries = Array.isArray(result?.capability_gaps) ? result.capability_gaps : [];
+  const codes = entries.map((entry) => (typeof entry?.code === 'string' ? entry.code.trim() : ''));
+  return [...new Set(codes.filter((code) => CODE_RE.test(code) && capabilityGapCode(code)))];
 }
 
 // Fixed text only: the tool name and code, never the tool's input or message.
@@ -544,8 +561,8 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     lastTool = cleanTool(name) || lastTool;
     if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set() };
     if (meta.wrote === true) tail.wroteTools.add(name);
-    const code = failed ? recordableRefusalCode(result) : null;
-    if (code) tail.refusals.set(`${name}|${code}`, { tool: name, code });
+    const codes = failed ? [recordableRefusalCode(result)] : nestedGapCodes(result);
+    for (const code of codes.filter(Boolean)) tail.refusals.set(`${name}|${code}`, { tool: name, code });
   }
 
   function toolResult(name, result, failed, meta) {

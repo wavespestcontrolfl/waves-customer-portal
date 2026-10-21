@@ -202,7 +202,11 @@ async function appointmentPropertyPreview(conn, plan) {
     throw new Error('This visit contains a completed or cancelled service. Review it in Dispatch.');
   }
   if (plan.rows.some(row => row.is_recurring && !row.recurring_parent_id)) {
-    throw new Error('This appointment is also the recurring plan template. Use the Dispatch address editor to review the recurring-plan effects.');
+    // A coded refusal, not a throw: executeScheduleTool turns a throw into an uncoded fault that never reaches the gap list (Codex #6371 r12).
+    return {
+      error: 'The bar can\'t change the address of a recurring template appointment from here yet: this appointment is also the recurring plan template, so a change would reach the plan\'s later visits. Nothing was changed.',
+      code: 'recurring_template_property_unsupported',
+    };
   }
   const property = await conn('customer_properties').where({ id: plan.propertyId, customer_id: plan.anchor.customer_id, active: true }).first();
   if (!property || !['address_line1', 'city', 'state', 'zip'].every(field => typeof property[field] === 'string' && property[field].trim())) {
@@ -251,6 +255,7 @@ async function switchAppointmentProperty(input, actionContext) {
     await trx('scheduled_services').whereIn('id', plan.rows.map(row => row.id)).orderBy('id').forUpdate();
     const fresh = await planAppointmentAddress(trx, input.appointment_id, input.property_id, 'visit');
     const preview = await appointmentPropertyPreview(trx, fresh);
+    if (preview.error) return preview;
     if (previewFingerprint(preview) !== input._verified_address_fingerprint) return { error: 'The visit or property changed. Request a fresh confirmation card.', preview_changed: true };
     // Apply against the original lock plan: a moved stop cannot silently use
     // advisory locks acquired for an old property/date.
@@ -1111,6 +1116,14 @@ function batchMoveGroupRefusal(skipped) {
   };
 }
 
+// A batch move that goes ahead without its grouped stops is a success, so the
+// gap collector cannot see the refusal; it reads this note instead (Codex #6371 r12).
+function groupedStopGaps(skippedGrouped) {
+  return skippedGrouped.some((entry) => entry.kind === 'grouped')
+    ? { capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] }
+    : {};
+}
+
 async function moveStopsToDay(input, actionContext = {}) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
   const notifyCustomers = input.notify_customers === true;
@@ -1293,6 +1306,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       // committing will text the customers.
       will_text_customers: notifyCustomers,
       stops,
+      ...groupedStopGaps(skippedGrouped),
       ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
@@ -1703,6 +1717,7 @@ async function moveStopsToDay(input, actionContext = {}) {
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
     ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
+    ...groupedStopGaps(skippedGrouped),
   };
 }
 

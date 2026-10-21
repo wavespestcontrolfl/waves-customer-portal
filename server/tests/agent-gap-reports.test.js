@@ -701,6 +701,38 @@ describe('agent-gap-reports', () => {
       expect(insertedRows[0].summary).toContain(code);
     });
 
+    describe('capability_gaps on a successful result (Codex #6371 r12)', () => {
+      const SUCCESS = { proposal: true, stops: [], capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] };
+
+      test('a successful result that carries a capability gap records a blocked row on tool + code', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0 });
+        await collector.flush({ reply: 'Moved the others; one stayed.' });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'move_stops_to_day' });
+        expect(insertedRows[0].summary).toContain('grouped_visit_move_unsupported');
+      });
+
+      test('each nested code passes the same rule, and duplicates collapse', async () => {
+        const collector = collectorFor();
+        const nested = { ok: true, capability_gaps: [
+          { code: 'grouped_visit_move_unsupported' }, { code: 'grouped_visit_move_unsupported' },
+          { code: 'address_conflict' }, { code: 'invoice_send_queued' }, { code: 'Not A Code' }, { code: 7 }, null,
+        ] };
+        collector.toolResult('move_stops_to_day', nested, false, { round: 0 });
+        await collector.flush({ reply: 'Done.' });
+        expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['address_conflict', 'grouped_visit_move_unsupported']);
+      });
+
+      test('a result with no capability_gaps, or only by-design codes, records nothing', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', { ok: true }, false, { round: 0 });
+        collector.toolResult('move_stops_to_day', { ok: true, capability_gaps: [{ code: 'invoice_send_queued' }] }, false, { round: 0 });
+        await collector.flush({ reply: 'Done.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+    });
+
     test('a coded refusal that names another screen is recorded under its own code; a refused marker under other_screen', async () => {
       const collector = collectorFor();
       collector.toolResult('reprice_visits', { error: 'Change visit prices on the Schedule screen.', code: 'annual_prepay_customer' }, true, { round: 0 });

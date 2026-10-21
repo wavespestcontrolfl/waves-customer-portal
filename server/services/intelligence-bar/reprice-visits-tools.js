@@ -264,6 +264,10 @@ function committedReason(row, invoice) {
   return null;
 }
 
+// The tail of every exclusion reason that is a missing capability, not a state
+// the operator must wait out (Codex #6371 r12).
+const CANNOT_REPRICE = "the bar can't reprice from here";
+
 // Why a visit is left alone, from its own row and the linked records — null
 // when it can be repriced.
 function exclusionReason(row, { invoice, hasAddons }) {
@@ -272,10 +276,25 @@ function exclusionReason(row, { invoice, hasAddons }) {
   if (row.is_callback) return 'a free re-service visit';
   // A series' template visit: the Schedule edit carries its price into the
   // visits the plan adds later, beyond what this card approves.
-  if (row.is_recurring && !row.recurring_parent_id) return "the plan's first visit (later visits copy its price), which the bar can't reprice from here";
-  if (row.estimated_price != null && Number(row.estimated_price) === 0) return 'a $0 visit, which the bar can\'t reprice from here';
-  if (hasAddons) return 'has add-on lines, which the bar can\'t reprice from here';
+  if (row.is_recurring && !row.recurring_parent_id) return `the plan's first visit (later visits copy its price), which ${CANNOT_REPRICE}`;
+  if (row.estimated_price != null && Number(row.estimated_price) === 0) return `a $0 visit, which ${CANNOT_REPRICE}`;
+  if (hasAddons) return `has add-on lines, which ${CANNOT_REPRICE}`;
   return null;
+}
+
+// When exclusions took every matching visit and at least one is a missing
+// capability (a recurring template, a $0 visit, add-on lines), the refusal is
+// a coded gap naming those reasons, not the generic nothing_to_reprice; the
+// per-visit list stays in left_alone (Codex #6371 r12). Null otherwise.
+function allExcludedRefusal({ label, customerName, newPrice, excluded, unchanged, excludedOut }) {
+  const gaps = [...new Set(excluded.map(({ reason }) => reason).filter((reason) => reason.endsWith(CANNOT_REPRICE)))]
+    .map((reason) => reason.replace(new RegExp(`,? which ${CANNOT_REPRICE}$`), ''));
+  if (!gaps.length || unchanged.length) return null;
+  return {
+    error: `The bar can't change any upcoming ${label} visit for ${customerName} to ${money(newPrice)} from here yet: ${gaps.join('; ')}. Nothing was changed.`,
+    code: 'reprice_excluded_unsupported',
+    left_alone: excludedOut,
+  };
 }
 
 async function buildPlan(input) {
@@ -331,6 +350,8 @@ async function buildPlan(input) {
   const excludedOut = excluded.map(({ row, reason }) => ({ ...line(row), reason }));
   const unchangedOut = unchanged.map((row) => ({ ...line(row), price: money(newPrice) }));
   if (!candidates.length) {
+    const declined = allExcludedRefusal({ label: family.label, customerName, newPrice, excluded, unchanged, excludedOut });
+    if (declined) return declined;
     return {
       error: `No upcoming ${family.label} visit for ${customerName} can change to ${money(newPrice)}. Nothing was changed.`,
       code: 'nothing_to_reprice',
