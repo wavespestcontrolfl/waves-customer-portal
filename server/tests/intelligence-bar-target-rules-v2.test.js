@@ -454,3 +454,17 @@ describe('round 2 fixes (#6369): last visit and capped-name contacts', () => {
     expect(src).toMatch(/db\('service_records'\)[^;]*\.where\('status', 'completed'\)/);
   });
 });
+
+describe('lead edits keep the old cap (Codex #6369 security P2)', () => {
+  test('with the gate on, a third lead edit in one message is capped; customer edits still allow five', () => {
+    process.env.GATE_IB_TARGET_RULES_V2 = 'true';
+    try {
+      const lead = (n) => ({ type: 'tool_use', name: 'update_lead_status', input: { lead_id: `10000000-0000-4000-8000-00000000070${n}`, status: 'contacted' } });
+      const plan = OwnerDirect.messageDirectPlan([lead(1), lead(2), lead(3)]);
+      expect([...OwnerDirect.cappedTools(new Map(), plan)]).toContain('update_lead_status');
+      expect(OwnerDirect.cappedTools(new Map(), OwnerDirect.messageDirectPlan([lead(1), lead(2)])).size).toBe(0);
+    } finally {
+      delete process.env.GATE_IB_TARGET_RULES_V2;
+    }
+  });
+});

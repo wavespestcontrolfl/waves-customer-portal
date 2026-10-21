@@ -323,7 +323,11 @@ const DIRECT_CAP = 3;
 // tool; the 6th (and a message that plans a 6th) gets the bulk card. Off, the
 // cap above holds: the 3rd is the first refused.
 const DIRECT_EDITS_V2 = 5;
-const directCapThreshold = () => (ibTargetRulesV2Live() ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
+// Lead edits are not grounded to a named customer and lead text can come from
+// the public lead form (a prompt-injection path), so they keep the old cap
+// even with the gate on (Codex #6369 security P2).
+const UNGROUNDED_CAP_TOOLS = new Set(['update_lead_contact', 'update_lead_status']);
+const directCapThreshold = (toolName) => (ibTargetRulesV2Live() && !UNGROUNDED_CAP_TOOLS.has(toolName) ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
 const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
@@ -413,9 +417,8 @@ function messageDirectPlan(toolUses, isValid = () => true, taint = null, groundi
 // message's own commits must not count against the rest of the message.
 function cappedTools(committed, plan) {
   const capped = new Set();
-  const threshold = directCapThreshold();
   for (const [toolName, n] of plan) {
-    if (committed.has(SEED_FAILED) || (committed.get(toolName) || 0) + n >= threshold) capped.add(toolName);
+    if (committed.has(SEED_FAILED) || (committed.get(toolName) || 0) + n >= directCapThreshold(toolName)) capped.add(toolName);
   }
   return capped;
 }
@@ -521,7 +524,7 @@ You are talking to the owner. Do what they ask.
 // The owner prompt states exactly one direct-edit limit: today's (three or more
 // refused) while GATE_IB_TARGET_RULES_V2 is off, the new one (more than 5) while on.
 const LIMIT_SENTENCE_OFF = 'Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.';
-const LIMIT_SENTENCE_ON = `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card.`;
+const LIMIT_SENTENCE_ON = `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card. Lead edits (update_lead_contact, update_lead_status) keep the stricter limit: three or more in one request are refused.`;
 function ownerDirectPrompt() {
   return ibTargetRulesV2Live() ? OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_OFF, LIMIT_SENTENCE_ON) : OWNER_DIRECT_PROMPT;
 }
