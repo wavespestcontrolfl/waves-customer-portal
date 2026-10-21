@@ -197,7 +197,7 @@ test('a manual-only refusal that names a capability gap reaches the gap list thr
 
 test('a lookup outage stays out of the gap text (Codex #6371 r8)', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/closeout-repair-tools.js'), 'utf8');
-  expect(src).toMatch(/plan\.manual\.map\(\(m\) => m\.fix\)\.filter\(\(fix\) => fix && !\/could not be read\/i\.test\(fix\)\)/);
+  expect(src).toMatch(/plan\.manual\.map\(\(m\) => m\.fix\)\.filter\(\(fix\) => fix && !NOT_A_GAP_FIX\.test\(fix\)\)/);
   const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
   const outageOnly = { success: false, code: 'nothing_repairable', error: 'Nothing here is repairable by this command — see manual for where each open item gets fixed.', manual: [{ fact: 'invoice', fix: "The bar can't repair this from here: the customer's contact settings could not be read, so the bar can't send it from here" }] };
   expect(recordableRefusalCode(outageOnly)).toBeNull();

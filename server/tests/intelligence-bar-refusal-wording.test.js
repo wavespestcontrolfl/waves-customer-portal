@@ -316,3 +316,20 @@ describe('mixed batch refusals with an unreadable check stay faults (Codex #6371
     expect(block.slice(0, block.indexOf('} else if')).includes('errorCode =')).toBe(false);
   });
 });
+
+describe('successful results and switched-off steps stay out of the gap list (Codex #6371 r9)', () => {
+  const fs = require('fs'); const path = require('path');
+  test('the account summary reconciliation warning does not read as a decline', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/billing-reader-tools.js'), 'utf8');
+    const line = src.split('\n').find((l) => l.includes('need reconciliation and are NOT in total_due'));
+    expect(line).toBeTruthy();
+    expect(BAR_DECLINE_RE.test(line)).toBe(false);
+  });
+  test('closeout manual fixes that are switched off or unreadable are not promoted', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/closeout-repair-tools.js'), 'utf8');
+    const re = new RegExp(src.match(/const NOT_A_GAP_FIX = \/(.+)\/i;/)[1], 'i');
+    expect(re.test("The bar can't repair this from here: report email delivery is switched off")).toBe(true);
+    expect(re.test("The bar can't repair this from here: the customer's contact settings could not be read")).toBe(true);
+    expect(re.test("The bar can't bill this visit from here")).toBe(false);
+  });
+});
