@@ -94,6 +94,20 @@ async function allowedSurvivors(knex, scopeQuery, search, index) {
   return allowed.slice(0, MAX_SURVIVORS);
 }
 
+// The cached index can be up to five minutes old (a customer renamed since, or
+// deleted, is still in it). Read the matches' CURRENT names through the caller's
+// scoped query and score them again, as the Intelligence Bar does for its rows:
+// a customer whose current name no longer qualifies drops out, and the score
+// returned is the current one.
+async function rescoreCurrentNames(knex, scopeQuery, search, ranked, context) {
+  if (!ranked.length) return ranked;
+  const base = scopeQuery || knex('customers').whereNull('customers.deleted_at');
+  const rows = await base.clone().clearSelect().clearOrder()
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
+    .whereIn('customers.id', ranked.map((entry) => entry.id));
+  return rankNameMatches(search, rows, { v2: true, limit: rows.length || 1, context });
+}
+
 // Returns [{ id, score, reasons? }] best first, at most `limit` (8), never one
 // of `exactIds`. Any failure returns [] (the exact rows must still show).
 async function findSoundAlikeCustomers(knex, search, {
@@ -106,11 +120,13 @@ async function findSoundAlikeCustomers(knex, search, {
     const survivors = await allowedSurvivors(knex, scopeQuery, search, index);
     if (!survivors.length) return [];
     const skip = new Set(exactIds);
-    // Extra slots: an exact row may rank among the matches and is dropped.
+    // Extra slots: an exact row may rank among the matches and is dropped, and a
+    // customer renamed since the index was built may fail the rescore below.
     const ranked = rankNameMatches(search, survivors, {
-      v2: true, limit: cap + skip.size, context, prefiltered: true,
+      v2: true, limit: (cap + skip.size) * 2, context, prefiltered: true,
     });
-    return ranked.filter((entry) => !skip.has(entry.id)).slice(0, cap);
+    const current = await rescoreCurrentNames(knex, scopeQuery, search, ranked, context);
+    return current.filter((entry) => !skip.has(entry.id)).slice(0, cap);
   } catch (err) {
     logger.warn(`[customer-name-search] sound-alike search skipped: ${err.message}`);
     return [];

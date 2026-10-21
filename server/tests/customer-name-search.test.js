@@ -77,12 +77,37 @@ describe('findSoundAlikeCustomers', () => {
       clearSelect: () => scopeQuery,
       clearOrder: () => scopeQuery,
       select: () => scopeQuery,
-      whereIn: (_c, list) => { scoped.push(list); return Promise.resolve(list.includes('b') ? [{ id: 'b' }] : []); },
+      whereIn: (_c, list) => { scoped.push(list); return Promise.resolve(book.filter((r) => r.id === 'b' && list.includes(r.id))); },
     };
     const found = await findSoundAlikeCustomers(knex, 'Orlan damp', { scopeQuery });
     expect(found.map((r) => r.id)).toEqual(['b']);
-    expect(scoped.length).toBe(1);
+    // One read to keep the allowed survivors, one to rescore their current names.
+    expect(scoped.length).toBe(2);
     expect(scoped[0]).not.toContain('c');
+  });
+
+  test('a customer renamed after the index was built drops out; a kept one shows its current score', async () => {
+    const knex = fakeKnex(book);
+    // Warm the cache with the old names.
+    expect((await findSoundAlikeCustomers(knex, 'Orlan damp')).map((r) => r.id).sort()).toEqual(['a', 'b']);
+    // Now `a` is renamed in the database; the cached index still says Orlan Stompf.
+    const now = [{ id: 'a', first_name: 'Mavis', last_name: 'Quarles' }, book[1], book[2]];
+    const scopeQuery = {
+      clone: () => scopeQuery, clearSelect: () => scopeQuery, clearOrder: () => scopeQuery, select: () => scopeQuery,
+      whereIn: (_c, list) => Promise.resolve(now.filter((r) => list.includes(r.id))),
+    };
+    const found = await findSoundAlikeCustomers(knex, 'Orlan damp', { scopeQuery });
+    expect(found.map((r) => r.id)).toEqual(['b']);
+  });
+
+  test('a customer deleted after the index was built drops out', async () => {
+    const knex = fakeKnex(book);
+    await findSoundAlikeCustomers(knex, 'Orlan damp');
+    const scopeQuery = {
+      clone: () => scopeQuery, clearSelect: () => scopeQuery, clearOrder: () => scopeQuery, select: () => scopeQuery,
+      whereIn: (_c, list) => Promise.resolve(book.filter((r) => r.id !== 'a' && list.includes(r.id))),
+    };
+    expect((await findSoundAlikeCustomers(knex, 'Orlan damp', { scopeQuery })).map((r) => r.id)).toEqual(['b']);
   });
 
   test('loads the index with the Intelligence Bar loader and its 200,000 cap', async () => {
@@ -95,7 +120,7 @@ describe('findSoundAlikeCustomers', () => {
     const many = Array.from({ length: 501 }, (_, n) => ({ id: `c${String(n).padStart(3, '0')}`, first_name: 'Zara', last_name: 'Quillfern' }));
     const scopeQuery = {
       clone: () => scopeQuery, clearSelect: () => scopeQuery, clearOrder: () => scopeQuery, select: () => scopeQuery,
-      whereIn: (_c, list) => Promise.resolve(list.filter((id) => id === 'c500').map((id) => ({ id }))),
+      whereIn: (_c, list) => Promise.resolve(many.filter((r) => r.id === 'c500' && list.includes(r.id))),
     };
     const found = await findSoundAlikeCustomers(fakeKnex(many), 'Zara Quilfern', { scopeQuery });
     expect(found.map((r) => r.id)).toEqual(['c500']);

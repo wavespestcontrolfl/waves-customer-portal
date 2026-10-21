@@ -194,6 +194,22 @@ jest.setTimeout(120000);
       expect(none.body.customers).toEqual([]);
     });
 
+    test('warm cache: a customer renamed since the index was built is not suggested for the old name', async () => {
+      const before = await get('/admin/customers?search=Orlan%20damp');
+      expect(names(before.body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf']));
+      // No cache reset: the cached index still says "Orlan Stompf".
+      await db('customers').where({ id: ids.stompf }).update({ first_name: 'Mavis', last_name: 'Quarles' });
+      try {
+        const after = await get('/admin/customers?search=Orlan%20damp');
+        expect(names(after.body.customers)).not.toContain('Mavis Quarles');
+        expect(names(after.body.customers)).toContain('Orlan Stimpf');
+        const sched = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+        expect(sched.body.services.map((row) => row.customerName)).not.toContain('Mavis Quarles');
+      } finally {
+        await db('customers').where({ id: ids.stompf }).update({ first_name: 'Orlan', last_name: 'Stompf' });
+      }
+    });
+
     test('the directory filters still apply to approximate rows', async () => {
       const { body } = await get('/admin/customers?search=Orlan%20damp&tier=Gold');
       expect(names(body.customers)).toEqual(['Orlan Stompf']);
