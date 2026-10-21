@@ -50,6 +50,8 @@ function Shell({ children }) {
 
 function TechStrip({ tech, glass }) {
   const initial = tech.firstName.slice(0, 1).toUpperCase();
+  // An expired or missing signed photo falls back to the initial, as the tech note card does.
+  const [photoFailed, setPhotoFailed] = useState(false);
   const lines = [
     `${tech.firstName} was your technician today.`,
     tech.visitsAtHome ? `${tech.firstName} has treated your home ${tech.visitsAtHome} times.` : null,
@@ -58,8 +60,8 @@ function TechStrip({ tech, glass }) {
   return (
     <PeopleCard glass={glass} className="web-people-tech">
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        {tech.photoUrl ? (
-          <img src={tech.photoUrl} alt={`${tech.firstName}, your technician`} width={56} height={56} style={{ width: 56, height: 56, borderRadius: '50%', objectFit: 'cover', flex: 'none' }} />
+        {tech.photoUrl && !photoFailed ? (
+          <img src={tech.photoUrl} alt={`${tech.firstName}, your technician`} width={56} height={56} onError={() => setPhotoFailed(true)} style={{ width: 56, height: 56, borderRadius: '50%', objectFit: 'cover', flex: 'none' }} />
         ) : (
           <div aria-hidden="true" style={{ width: 56, height: 56, borderRadius: '50%', flex: 'none', background: NAVY, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, fontWeight: 700 }}>{initial}</div>
         )}

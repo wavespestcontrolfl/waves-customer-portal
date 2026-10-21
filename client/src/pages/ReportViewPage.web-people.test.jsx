@@ -62,6 +62,14 @@ describe('web report people cards', () => {
     expect(container.querySelector('.web-people-tech')).not.toBeNull();
   });
 
+  it('a technician photo that fails to load falls back to the initial', async () => {
+    const { container } = renderReport(payload({ tech: { firstName: 'Alex', photoUrl: 'https://img.example/expired.jpg', fdacsId: null, visitsAtHome: null } }));
+    await screen.findByText(/This report is provided for your records/);
+    fireEvent.error(screen.getByAltText('Alex, your technician'));
+    expect(screen.queryByAltText('Alex, your technician')).toBeNull();
+    expect(container.querySelector('.web-people-tech').textContent).toContain('A');
+  });
+
   it('technician strip without a photo shows the initial, and without a count says nothing about visits', async () => {
     renderReport(payload({ tech: { firstName: 'Alex', photoUrl: null, fdacsId: null, visitsAtHome: null } }));
     await screen.findByText(/This report is provided for your records/);
