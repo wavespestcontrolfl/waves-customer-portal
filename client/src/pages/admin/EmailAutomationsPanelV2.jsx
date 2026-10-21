@@ -29,6 +29,7 @@
 //   from a JSON payload. Watch for any unescaped HTML rendering on
 //   the preview side that could XSS the operator from a malformed
 //   template body.
+import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Badge, Button, Card, Switch, cn } from "../../components/ui";
@@ -342,7 +343,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
     const t = setTimeout(async () => {
       try {
         const data = await adminFetch(
-          `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
+          `/admin/customers?search=${encodeURIComponent(q)}&limit=8&suggest=1`,
         );
         if (!cancelled) setResults(data?.customers || []);
       } catch {
@@ -537,7 +538,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
                 )}
               {results.length > 0 && (
                 <div className="border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
-                  {results.map((c) => (
+                  {renderWithDidYouMean(results, (c) => (
                     <button
                       key={c.id}
                       type="button"

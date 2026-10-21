@@ -774,3 +774,49 @@ describe('name match v2: review round 5', () => {
     expect(named.customers[0].match).toBeDefined();
   });
 });
+
+describe('cachedNameIndex refreshes in the background (stale-while-revalidate)', () => {
+  const NM = require('../services/intelligence-bar/name-match');
+  const TTL = 5 * 60 * 1000;
+  const rows = (name) => [{ id: 1, first_name: name, last_name: 'Stompf', company_name: null }];
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const firstNames = async (promise) => (await promise).entries.map((entry) => entry.nameParts[0]);
+  beforeEach(() => NM.resetNameIndexCache());
+
+  test('an expired index answers at once while the new one builds; the next call gets the new one', async () => {
+    const load = jest.fn().mockResolvedValueOnce(rows('Orlan')).mockResolvedValueOnce(rows('Orland'));
+    expect(await firstNames(NM.cachedNameIndex('k', load, 0))).toEqual(['orlan']);
+    expect(await firstNames(NM.cachedNameIndex('k', load, TTL + 1))).toEqual(['orlan']);
+    expect(load).toHaveBeenCalledTimes(2);
+    await flush();
+    expect(await firstNames(NM.cachedNameIndex('k', load, TTL + 2))).toEqual(['orland']);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  test('one refresh at a time; a failed refresh keeps the old index and retries on the next call', async () => {
+    const load = jest.fn().mockResolvedValueOnce(rows('Orlan')).mockRejectedValueOnce(new Error('db down')).mockResolvedValueOnce(rows('Orland'));
+    await NM.cachedNameIndex('k', load, 0);
+    const during = NM.cachedNameIndex('k', load, TTL + 1);
+    NM.cachedNameIndex('k', load, TTL + 1);
+    expect(await firstNames(during)).toEqual(['orlan']);
+    await flush();
+    expect(load).toHaveBeenCalledTimes(2); // the second expired call started no second refresh
+    expect(await firstNames(NM.cachedNameIndex('k', load, TTL + 2))).toEqual(['orlan']);
+    await flush();
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(await firstNames(NM.cachedNameIndex('k', load, TTL + 3))).toEqual(['orland']);
+  });
+
+  test('an index older than 30 minutes is not served: the search waits for a fresh build', async () => {
+    const load = jest.fn().mockResolvedValueOnce(rows('Orlan')).mockResolvedValueOnce(rows('Orland'));
+    await NM.cachedNameIndex('k', load, 0);
+    expect(await firstNames(NM.cachedNameIndex('k', load, 30 * 60 * 1000 + 1))).toEqual(['orland']);
+  });
+
+  test('a failed first build is not cached', async () => {
+    const load = jest.fn().mockRejectedValueOnce(new Error('db down')).mockResolvedValueOnce(rows('Orlan'));
+    await expect(NM.cachedNameIndex('k', load, 0)).rejects.toThrow('db down');
+    await flush();
+    expect(await firstNames(NM.cachedNameIndex('k', load, 1))).toEqual(['orlan']);
+  });
+});
