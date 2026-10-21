@@ -2,7 +2,9 @@
  * GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web service report. Pure builders: the
  * lawn score and its history, the one action, the one hold (a fixed sentence), and the measured-rain window.
  */
-const { buildWebTop, buildWebTopRain, NO_ACTION, _test } = require('../services/service-report/report-web-top');
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn() }));
+const { buildWebTop, buildWebTopRain, attachWebTop, NO_ACTION, _test } = require('../services/service-report/report-web-top');
 
 const lawn = (over = {}) => ({
   serviceLine: 'lawn',
@@ -51,6 +53,17 @@ describe('buildWebTop', () => {
     data.reportV2.aftercare = { watering: '', neutral: false };
     expect(buildWebTop(data).action).toBe('Water in today\u2019s treatment by Sat 9 AM.');
     expect('action' in buildWebTop({ ...data, applicationMade: false })).toBe(false);
+  });
+
+  test('lawn: rain that watered the treatment in, or noActionNeeded, reads as nothing needed (never the rain line)', () => {
+    const rained = lawn();
+    rained.reportV2.banner = { state: 'water_in_by_rain', lines: ['Rain since your visit has watered today\u2019s treatment in.'] };
+    rained.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
+    expect(buildWebTop(rained).action).toBe(NO_ACTION);
+    const quiet = lawn();
+    quiet.reportV2.snapshot.noActionNeeded = true;
+    quiet.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
+    expect(buildWebTop(quiet).action).toBe(NO_ACTION);
   });
 
   test('lawn: no watering banner and nothing needed says so; otherwise no action', () => {
@@ -141,7 +154,7 @@ describe('buildWebTopRain', () => {
   test('three days each side, the visit day marked, the total after the visit day', async () => {
     const fetchMrmsDailyRain = reader(week);
     const rain = await buildWebTopRain({ service, fetchMrmsDailyRain, now });
-    expect(fetchMrmsDailyRain).toHaveBeenCalledWith({ latitude: 27.4, longitude: -82.5, start: '2026-10-07', end: '2026-10-13' });
+    expect(fetchMrmsDailyRain).toHaveBeenCalledWith({ latitude: 27.4, longitude: -82.5, start: '2026-10-07', end: '2026-10-13', signal: expect.any(AbortSignal) });
     expect(rain.days).toHaveLength(7);
     expect(rain.days.filter((d) => d.isVisit).map((d) => d.date)).toEqual(['2026-10-10']);
     expect(rain.sinceVisitInches).toBe(0.75);
@@ -181,10 +194,77 @@ describe('buildWebTopRain', () => {
     expect(await buildWebTopRain({ service, fetchMrmsDailyRain: reader([{ date: '2026-10-10', inches: 0.1 }]), now })).toBeNull();
   });
 
+  test('the memo keys on 4-decimal coordinates: two homes about 20 m apart are two reads', async () => {
+    const fetchMrmsDailyRain = reader(week);
+    await buildWebTopRain({ service: { ...service, customer_latitude: 27.40011, customer_longitude: -82.50011 }, fetchMrmsDailyRain, now });
+    await buildWebTopRain({ service: { ...service, customer_latitude: 27.40031, customer_longitude: -82.50031 }, fetchMrmsDailyRain, now });
+    expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(2);
+  });
+
+  test('the read gets an AbortSignal; the 3 s deadline aborts it and the bar is left out', async () => {
+    jest.useFakeTimers();
+    try {
+      let signal;
+      const fetchMrmsDailyRain = jest.fn(({ signal: s }) => { signal = s; return new Promise(() => {}); });
+      const pending = buildWebTopRain({ service, fetchMrmsDailyRain, now });
+      expect(signal.aborted).toBe(false);
+      await jest.advanceTimersByTimeAsync(3000);
+      expect(await pending).toBeNull();
+      expect(signal.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the deadline timer is cleared when the read wins', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMrmsDailyRain = jest.fn(async ({ signal }) => { expect(signal.aborted).toBe(false); return { days: week }; });
+      const rain = await buildWebTopRain({ service, fetchMrmsDailyRain, now });
+      expect(rain.days).toHaveLength(7);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a repeat read inside the cache window does not ask the radar again', async () => {
     const fetchMrmsDailyRain = reader(week);
     await buildWebTopRain({ service, fetchMrmsDailyRain, now });
     await buildWebTopRain({ service, fetchMrmsDailyRain, now });
     expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('attachWebTop (the /data route\u2019s one call)', () => {
+  const on = { reportWebTopLive: () => true };
+  const data = () => ({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'Trim the shrubs.' } } });
+  const { fetchMrmsDailyRain } = require('../services/mrms-qpe');
+  beforeEach(() => { fetchMrmsDailyRain.mockReset(); fetchMrmsDailyRain.mockResolvedValue(null); });
+
+  test('gate on beside simple web: webTop is set, an empty object when nothing to say', async () => {
+    expect((await attachWebTop(data(), {}, { simpleWeb: true, gates: on })).webTop).toEqual({ action: 'Trim the shrubs.' });
+    expect((await attachWebTop({ serviceLine: 'pest' }, {}, { simpleWeb: true, gates: on })).webTop).toEqual({});
+  });
+
+  test.each([
+    ['gate off', { simpleWeb: true, gates: { reportWebTopLive: () => false } }],
+    ['simple web off', { simpleWeb: false, gates: on }],
+    ['a partial gates module', { simpleWeb: true, gates: {} }],
+    ['no options', undefined],
+  ])('%s: the payload is untouched', async (_name, opts) => {
+    const out = await attachWebTop(data(), {}, opts);
+    expect('webTop' in out).toBe(false);
+  });
+
+  test('an internal-only report is untouched', async () => {
+    expect('webTop' in (await attachWebTop({ ...data(), internalOnly: true }, {}, { simpleWeb: true, gates: on }))).toBe(false);
+  });
+
+  test('a failure inside leaves the payload as it was', async () => {
+    const bad = { get serviceLine() { throw new Error('boom'); } };
+    const out = await attachWebTop(bad, {}, { simpleWeb: true, gates: on });
+    expect('webTop' in out).toBe(false);
+    expect(require('../services/logger').warn).toHaveBeenCalled();
   });
 });

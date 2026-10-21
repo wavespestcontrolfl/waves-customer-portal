@@ -16,6 +16,7 @@
 
 const { dateOnlyString, etDateString, addETDays } = require('../../utils/datetime-et');
 const { reentryCondition } = require('./lawn-report-facts');
+const logger = require('../logger');
 
 const TREND_POINTS = 6;
 const RAIN_DAYS_EACH_SIDE = 3;
@@ -72,15 +73,20 @@ function nextStepText(data) {
   return primary ? (termite.nextStep || data.typedReport?.todaysResult?.nextStep) : data.typedReport?.todaysResult?.nextStep;
 }
 
+// The lawn action. Rain that already watered the treatment in, or a report that says nothing is needed, reads as
+// "Nothing needed" (the aftercare line can still describe the water-in, and the banner then reports the rain).
+function lawnAction(data) {
+  const v2 = data.reportV2;
+  if (v2?.banner?.state === 'water_in_by_rain' || v2?.snapshot?.noActionNeeded === true) return NO_ACTION;
+  return treated(data) ? lawnWatering(v2) : null;
+}
+
 /**
  * The one action. Lawn: the watering line the page already recommends, so it is worded one way (a neutral "no special
  * watering" line is not an action). Other lines: the report's own next step.
  */
 function actionLine(data) {
-  if (data.serviceLine === 'lawn') {
-    const water = treated(data) ? lawnWatering(data.reportV2) : null;
-    return water || (data.reportV2?.snapshot?.noActionNeeded === true ? NO_ACTION : null);
-  }
+  if (data.serviceLine === 'lawn') return lawnAction(data);
   const step = sentence(nextStepText(data));
   if (!step) return null;
   return /^no (further )?action\b/i.test(step) ? NO_ACTION : step;
@@ -133,12 +139,21 @@ function rainWindow(service, now) {
 }
 
 async function readRain(win, fetchMrmsDailyRain) {
-  const key = `${win.lat.toFixed(3)},${win.lng.toFixed(3)},${win.start},${win.end}`;
+  // 4 decimals is about 11 m, finer than the radar's 1 km cell, so two homes never share a memo entry.
+  const key = `${win.lat.toFixed(4)},${win.lng.toFixed(4)},${win.start},${win.end}`;
   const hit = rainCache.get(key);
   if (hit && hit.until > Date.now()) return hit.result;
-  const timeout = new Promise((resolve) => { const t = setTimeout(() => resolve(null), RAIN_FETCH_TIMEOUT_MS); if (t.unref) t.unref(); });
-  const read = Promise.resolve(fetchMrmsDailyRain({ latitude: win.lat, longitude: win.lng, start: win.start, end: win.end })).catch(() => null);
-  const result = await Promise.race([read, timeout]);
+  // The read gets an AbortSignal and the deadline aborts it; the timer is cleared when the read wins.
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(null); }, RAIN_FETCH_TIMEOUT_MS); });
+  const read = Promise.resolve(fetchMrmsDailyRain({ latitude: win.lat, longitude: win.lng, start: win.start, end: win.end, signal: controller.signal })).catch(() => null);
+  let result;
+  try {
+    result = await Promise.race([read, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
   if (result) {
     if (rainCache.size >= RAIN_CACHE_MAX) rainCache.clear();
     rainCache.set(key, { until: Date.now() + RAIN_CACHE_MS, result });
@@ -171,4 +186,20 @@ async function buildWebTopRain({ service, fetchMrmsDailyRain, now = new Date() }
   };
 }
 
-module.exports = { buildWebTop, buildWebTopRain, NO_ACTION, _test: { rainCache } };
+/**
+ * The /data route's one call: while GATE_REPORT_WEB_TOP and the simple web switch are live (a partial gates module
+ * reads as off) and the report is not internal-only, put `webTop` on the payload. An object even when empty: the key is
+ * what trims the web page. Best effort: any failure leaves the payload as it was.
+ */
+async function attachWebTop(v1Data, service, { simpleWeb, gates } = {}) {
+  if (simpleWeb !== true || typeof gates?.reportWebTopLive !== 'function' || !gates.reportWebTopLive() || v1Data.internalOnly) return v1Data;
+  try {
+    const rain = await buildWebTopRain({ service, fetchMrmsDailyRain: require('../mrms-qpe').fetchMrmsDailyRain });
+    v1Data.webTop = buildWebTop(v1Data, rain) || {};
+  } catch (err) {
+    logger.warn(`[reports-public] web top skipped: ${err.message}`);
+  }
+  return v1Data;
+}
+
+module.exports = { buildWebTop, buildWebTopRain, attachWebTop, NO_ACTION, _test: { rainCache } };

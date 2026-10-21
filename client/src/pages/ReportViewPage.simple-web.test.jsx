@@ -295,21 +295,41 @@ describe('the first screen of the simple web report', () => {
     expect(screen.getByTestId('web-top').textContent).not.toMatch(/Lawn score/);
   });
 
-  it('trims the page: tap-to-open products, no letterhead, conditions on one line, one footer identity', async () => {
+  it('trims the page on screen: tap-to-open products, no letterhead, conditions on one line, one footer identity', async () => {
     const { container } = renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
     await screen.findByText(/This report is provided for your records/);
-    expect(container.querySelector('.doc-letterhead')).toBeNull();
+    const doc = container.querySelector('.service-report-document');
+    expect(doc.classList.contains('is-cut')).toBe(true);
+    // the cut parts stay in the markup, marked print-only (hidden on screen, shown in print)
+    expect(doc.querySelector('.doc-letterhead').classList.contains('doc-print-only')).toBe(true);
     expect(screen.getByRole('heading', { level: 1, name: 'SERVICE REPORT' })).toBeInTheDocument();
     const products = container.querySelectorAll('details.doc-web-product');
     expect(products.length).toBe(3);
-    expect(container.querySelector('.doc-products')).toBeNull();
+    expect(products[0].closest('.doc-screen-only')).not.toBeNull();
+    expect(doc.querySelector('table.doc-products').classList.contains('doc-print-only')).toBe(true);
     expect(products[0].querySelector('summary').textContent).toBe('LESCO K-Flow 0-0-25');
     expect(products[0].textContent).toMatch(/EPA Reg\. No\.:/);
     expect(products[0].hasAttribute('open')).toBe(false);
-    expect(container.textContent).not.toMatch(/Family-owned pest control and lawn care in Southwest Florida/);
-    // conditions: one line, no card of rows
-    expect(screen.queryByRole('heading', { level: 2, name: 'Conditions' })).toBeNull();
-    expect(container.textContent).toMatch(/Conditions:/);
+    const identity = [...doc.querySelectorAll('.doc-print-only')].find((el) => /Family-owned pest control and lawn care in Southwest Florida/.test(el.textContent));
+    expect(identity).toBeTruthy();
+    // conditions: the one line is screen-only, the card of rows is print-only
+    expect(screen.getByText('Conditions:').closest('.doc-screen-only')).not.toBeNull();
+    const card = screen.getByRole('heading', { level: 2, name: 'Conditions', hidden: true }).parentElement;
+    expect(card.classList.contains('doc-print-only')).toBe(true);
+  });
+
+  it('a browser Print of the live page is the full document: print rules hide the web parts and keep the full ones', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
+    await screen.findByText(/This report is provided for your records/);
+    const css = [...container.querySelectorAll('style')].map((el) => el.textContent).join('\n');
+    // screen-only trims are inside @media screen; the screen replacements and the top card hide in @media print
+    expect(css).toMatch(/@media screen \{[^@]*\.is-cut \.doc-print-only \{ display: none !important; \}/);
+    expect(css).toMatch(/@media print \{ \.service-report-document \.doc-screen-only \{ display: none !important; \} \}/);
+    expect(css).toMatch(/@media print \{ \.web-top-card \{ display: none !important; \} \}/);
+    expect(container.querySelector('[data-testid="web-top"]').classList.contains('web-top-card')).toBe(true);
+    // and nothing in the cut set is removed from the markup
+    expect(container.querySelector('.doc-letterhead')).not.toBeNull();
+    expect(container.querySelector('table.doc-products')).not.toBeNull();
   });
 
   it('conditions read as one line of facts', async () => {
@@ -322,7 +342,7 @@ describe('the first screen of the simple web report', () => {
     const { container } = renderReport(payload({ simpleWebReport: true, webTop: {} }));
     await screen.findByText(/This report is provided for your records/);
     expect(screen.queryByTestId('web-top')).toBeNull();
-    expect(container.querySelector('.doc-letterhead')).toBeNull();
+    expect(container.querySelector('.service-report-document').classList.contains('is-cut')).toBe(true);
   });
 
   it('pdf mode never takes the trims, even with the key', async () => {
@@ -332,6 +352,8 @@ describe('the first screen of the simple web report', () => {
       await screen.findByText(/This report is provided for your records/);
       expect(screen.queryByTestId('web-top')).toBeNull();
       expect(container.querySelector('.doc-letterhead')).not.toBeNull();
+      expect(container.querySelector('.doc-letterhead').classList.contains('doc-print-only')).toBe(false);
+      expect(container.querySelector('.is-cut')).toBeNull();
       expect(container.querySelector('details.doc-web-product')).toBeNull();
       expect(container.querySelector('.doc-products')).not.toBeNull();
     } finally {

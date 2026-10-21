@@ -10460,7 +10460,7 @@ const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 // work-order document the PDF prints, with one Download PDF button over it.
 // The server builds this payload as it builds the PDF's (same compliance
 // strips), and sets data.simpleWebReport only while the gate is live.
-const WEB_TOP_SHELL_CSS = '[data-brand-footer] [data-store-badges] { display: none !important; }';
+const WEB_TOP_SHELL_CSS = '[data-brand-footer] [data-store-badges] { display: none !important; } @media print { .web-top-card { display: none !important; } }';
 
 function SimpleWebReport({ data, token }) {
   // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the server sets glassWeb only

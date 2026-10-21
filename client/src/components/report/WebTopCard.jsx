@@ -1,20 +1,19 @@
 import React from 'react';
+import {
+  DOC, DOC_EYEBROW, DOC_FONT, FS, FW, LH, RADIUS, SP, docCard,
+} from '../../theme-doc';
+import { COLORS } from '../../theme-brand';
 
 // GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web service report. The server sends one
 // `webTop` object while the gate is live (server/services/service-report/report-web-top.js); every sentence here is
 // fixed or already on the report. No price, no product name. Text is 14px or larger.
 
-const NAVY = '#04395E';
-const MUTED = '#3F4A65';
-const GOOD = '#0F7B54';
-const WATCH = '#9A5B0B';
-const GOLD = '#C99A2E';
-const BAR = 'rgba(4, 57, 94, 0.72)';
-const TRACK = 'rgba(4, 57, 94, 0.12)';
+const TRACK_H = 64; // tallest rain bar, px of chart height (a data height, not a type size)
 
-const CARD_PLAIN = { background: '#fff', border: '1px solid #D8D0C0', borderRadius: 14 };
-const label = { fontSize: 14, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: NAVY, margin: 0 };
-const body = { fontSize: 17, lineHeight: 1.45, color: NAVY, margin: '4px 0 0' };
+// All type, space, colour and radius come from the document design system (docs/design/customer-doc-style-guide.md).
+const label = { ...DOC_EYEBROW, marginBottom: 0 };
+const body = { fontFamily: DOC_FONT, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink, margin: `${SP.xxs}px 0 0` };
+const fine = { fontFamily: DOC_FONT, fontSize: FS.body, lineHeight: LH.snug, color: DOC.muted };
 
 // A date as "Oct 7". The server sends YYYY-MM-DD; noon UTC read in UTC keeps the day whatever the viewer's zone.
 const noon = (ymd) => new Date(`${ymd}T12:00:00Z`);
@@ -26,7 +25,7 @@ function Card({ glass, children, ...rest }) {
   return (
     <section
       {...(glass ? { 'data-glass': 'card' } : {})}
-      style={{ ...(glass ? {} : CARD_PLAIN), boxSizing: 'border-box', minWidth: 0, padding: '14px 16px', marginTop: 12 }}
+      style={{ ...(glass ? {} : docCard()), boxSizing: 'border-box', minWidth: 0, padding: `${SP.sm}px ${SP.md}px`, marginTop: SP.sm }}
       {...rest}
     >
       {children}
@@ -36,33 +35,39 @@ function Card({ glass, children, ...rest }) {
 
 // "Up 11 points since your last visit." as a line with an arrow. The words carry the meaning; the arrow is a hint.
 function scoreChange(score) {
-  if (score.previous == null) return { arrow: '', color: MUTED, text: 'This is your starting score.' };
+  if (score.previous == null) return { arrow: '', color: DOC.muted, text: 'This is your starting score.' };
   const diff = score.value - score.previous;
-  if (diff === 0) return { arrow: '●', color: MUTED, text: 'Same as your last visit.' };
+  if (diff === 0) return { arrow: '●', color: DOC.muted, text: 'Same as your last visit.' };
   const points = Math.abs(diff) === 1 ? '1 point' : `${Math.abs(diff)} points`;
   return diff > 0
-    ? { arrow: '▲', color: GOOD, text: `Up ${points} since your last visit.` }
-    : { arrow: '▼', color: WATCH, text: `Down ${points} since your last visit.` };
+    ? { arrow: '▲', color: DOC.success, text: `Up ${points} since your last visit.` }
+    : { arrow: '▼', color: DOC.ink, text: `Down ${points} since your last visit.` };
 }
+
+// One column of a bar chart: the value above, the bar, then whatever sits under it.
+const column = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' };
 
 function ScoreStrip({ trend, note }) {
   const label6 = `Lawn score at your last ${trend.length} visits: ${trend.map((p) => `${p.label} ${p.value}`).join(', ')}.`;
   return (
-    <div style={{ marginTop: 14 }}>
-      <p style={{ ...label, textTransform: 'none', letterSpacing: 0 }}>{`Your last ${trend.length} visits`}</p>
-      <div role="img" aria-label={label6} style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 96, marginTop: 6 }}>
-        {trend.map((p, i) => (
-          <div key={`${p.label}-${i}`} style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
-            <span style={{ fontSize: 14, fontWeight: i === trend.length - 1 ? 700 : 400, color: NAVY, lineHeight: 1.2 }}>{p.value}</span>
-            <div style={{ width: '100%', maxWidth: 28, height: `${Math.max(4, Math.round(p.value * 0.72))}px`, marginTop: 2, borderRadius: 4, background: i === trend.length - 1 ? NAVY : BAR }} />
-          </div>
-        ))}
+    <div style={{ marginTop: SP.md }}>
+      <p style={{ ...fine, fontWeight: FW.semibold, color: DOC.ink, margin: 0 }}>{`Your last ${trend.length} visits`}</p>
+      <div role="img" aria-label={label6} style={{ display: 'flex', alignItems: 'flex-end', gap: SP.xs, height: 96, marginTop: SP.xs }}>
+        {trend.map((p, i) => {
+          const current = i === trend.length - 1;
+          return (
+            <div key={`${p.label}-${i}`} style={column}>
+              <span style={{ ...fine, fontWeight: current ? FW.bold : FW.regular, color: DOC.ink, lineHeight: LH.heading }}>{p.value}</span>
+              <div style={{ width: '100%', maxWidth: 28, height: `${Math.max(4, Math.round(p.value * 0.72))}px`, marginTop: 2, borderRadius: RADIUS.tag, background: DOC.brand, opacity: current ? 1 : 0.7 }} />
+            </div>
+          );
+        })}
       </div>
-      <div aria-hidden="true" style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 4, fontSize: 14, color: MUTED }}>
+      <div aria-hidden="true" style={{ ...fine, display: 'flex', justifyContent: 'space-between', gap: SP.xs, marginTop: SP.xxs }}>
         <span>{trend[0].label}</span>
         <span>{trend[trend.length - 1].label}</span>
       </div>
-      {note ? <p style={{ fontSize: 14, lineHeight: 1.45, color: MUTED, margin: '8px 0 0' }}>{note}</p> : null}
+      {note ? <p style={{ ...fine, margin: `${SP.xs}px 0 0` }}>{note}</p> : null}
     </div>
   );
 }
@@ -75,26 +80,26 @@ function RainBar({ rain, glass }) {
   const last = measured[measured.length - 1].date;
   const since = rain.sinceVisitInches;
   const sinceDays = Number(rain.sinceVisitDays) || 0;
-  const window = sinceDays === 1 ? 'the day' : `the ${sinceDays} days`;
+  const span = sinceDays === 1 ? 'the day' : `the ${sinceDays} days`;
   const visitDate = days.find((d) => d.isVisit)?.date;
   const afterVisit = Boolean(visitDate) && days.some((d) => d.date > visitDate);
   const summary = days.map((d) => `${dayName(d.date)} ${d.inches == null ? 'no reading' : `${inches(d.inches)} inch`}${d.isVisit ? ', day of your visit' : ''}`).join('; ');
   return (
     <Card glass={glass} aria-label="Rain at your home">
-      <h2 style={{ ...label, textTransform: 'none', letterSpacing: 0, fontSize: 17 }}>{afterVisit ? 'Rain after your visit' : 'Rain around your visit'}</h2>
-      <p style={{ fontSize: 14, color: MUTED, margin: '2px 0 0' }}>{`Measured at your home, ${dayDate(first)} to ${dayDate(last)}.`}</p>
-      <div role="img" aria-label={summary} style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 118, marginTop: 8 }}>
+      <h2 style={{ margin: 0, fontFamily: DOC_FONT, fontSize: FS.sub, fontWeight: FW.semibold, lineHeight: LH.heading, color: DOC.ink }}>{afterVisit ? 'Rain after your visit' : 'Rain around your visit'}</h2>
+      <p style={{ ...fine, margin: `${SP.xxs}px 0 0` }}>{`Measured at your home, ${dayDate(first)} to ${dayDate(last)}.`}</p>
+      <div role="img" aria-label={summary} style={{ display: 'flex', alignItems: 'flex-end', gap: SP.xxs, height: 118, marginTop: SP.xs }}>
         {days.map((d) => (
-          <div key={d.date} style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
-            <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.2 }}>{d.inches == null ? '–' : (d.inches > 0 ? inches(d.inches) : '0')}</span>
-            <div style={{ width: '100%', maxWidth: 26, height: `${d.inches == null ? 2 : Math.max(2, Math.round((d.inches / max) * 64))}px`, marginTop: 2, borderRadius: 4, background: d.isVisit ? GOLD : (d.inches ? BAR : TRACK) }} />
-            <span style={{ fontSize: 14, color: NAVY, fontWeight: d.isVisit ? 700 : 400, marginTop: 4 }}>{dayName(d.date)}</span>
-            <span style={{ fontSize: 14, color: MUTED, minHeight: 20, lineHeight: '20px' }}>{d.isVisit ? 'Visit' : ' '}</span>
+          <div key={d.date} style={column}>
+            <span style={{ ...fine, color: DOC.ink, lineHeight: LH.heading }}>{d.inches == null ? '–' : (d.inches > 0 ? inches(d.inches) : '0')}</span>
+            <div style={{ width: '100%', maxWidth: 26, height: `${d.inches == null ? 2 : Math.max(2, Math.round((d.inches / max) * TRACK_H))}px`, marginTop: 2, borderRadius: RADIUS.tag, background: d.isVisit ? COLORS.yellow : (d.inches ? DOC.brand : DOC.border), opacity: !d.isVisit && d.inches ? 0.7 : 1 }} />
+            <span style={{ ...fine, color: DOC.ink, fontWeight: d.isVisit ? FW.bold : FW.regular, marginTop: SP.xxs }}>{dayName(d.date)}</span>
+            <span style={{ ...fine, minHeight: SP.lg, lineHeight: `${SP.lg}px` }}>{d.isVisit ? 'Visit' : '\u00a0'}</span>
           </div>
         ))}
       </div>
-      {since != null && sinceDays > 0 ? <p style={body}>{since > 0 ? `In ${window} after your visit: ${inches(since)} in of rain.` : `In ${window} after your visit: no measurable rain.`}</p> : null}
-      <p style={{ fontSize: 14, lineHeight: 1.45, color: MUTED, margin: '6px 0 0', fontStyle: 'italic' }}>Based on NOAA radar and rain-gauge data — local totals may vary.</p>
+      {since != null && sinceDays > 0 ? <p style={body}>{since > 0 ? `In ${span} after your visit: ${inches(since)} in of rain.` : `In ${span} after your visit: no measurable rain.`}</p> : null}
+      <p style={{ ...fine, margin: `${SP.xs}px 0 0`, fontStyle: 'italic' }}>Based on NOAA radar and rain-gauge data — local totals may vary.</p>
     </Card>
   );
 }
@@ -107,27 +112,27 @@ function GlanceCard({ webTop, glass }) {
   return (
     <Card glass={glass} aria-label="Your visit at a glance">
       {score ? (
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: NAVY }}>Lawn score</span>
-          <span style={{ fontSize: 44, fontWeight: 700, lineHeight: 1, color: NAVY }}>{score.value}</span>
-          <span style={{ fontSize: 14, color: MUTED }}>out of 100</span>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: SP.xs, flexWrap: 'wrap' }}>
+          <span data-gt="eyebrow" style={label}>Lawn score</span>
+          <span style={{ fontFamily: DOC_FONT, fontSize: FS.h1, fontWeight: FW.bold, lineHeight: LH.solid, color: DOC.ink }}>{score.value}</span>
+          <span style={fine}>out of 100</span>
         </div>
       ) : null}
       {change ? (
-        <p style={{ ...body, color: change.color, fontWeight: 600 }}>
+        <p style={{ ...body, color: change.color, fontWeight: FW.semibold }}>
           {change.arrow ? <span aria-hidden="true">{change.arrow} </span> : null}{change.text}
         </p>
       ) : null}
       {strip ? <ScoreStrip trend={strip} note={trendNote} /> : null}
       {action ? (
-        <div style={{ marginTop: score ? 14 : 0 }}>
-          <p style={label}>Do this</p>
+        <div style={{ marginTop: score ? SP.md : 0 }}>
+          <p data-gt="eyebrow" style={label}>Do this</p>
           <p style={body}>{action}</p>
         </div>
       ) : null}
       {hold ? (
-        <div style={{ marginTop: action || score ? 12 : 0 }}>
-          <p style={label}>Hold off</p>
+        <div style={{ marginTop: action || score ? SP.sm : 0 }}>
+          <p data-gt="eyebrow" style={label}>Hold off</p>
           <p style={body}>{hold}</p>
         </div>
       ) : null}
@@ -135,13 +140,14 @@ function GlanceCard({ webTop, glass }) {
   );
 }
 
+// "web-top-card": the page's print rule hides it, so a browser Print of the page is the full document.
 export default function WebTopCard({ webTop, glass = false }) {
   if (!webTop || typeof webTop !== 'object') return null;
   const { score, action, hold, rain } = webTop;
   const showRain = Array.isArray(rain?.days) && rain.days.some((d) => d.inches != null);
   if (!score && !action && !hold && !showRain) return null;
   return (
-    <div data-testid="web-top" className="sr-shell" style={{ maxWidth: 760, margin: '0 auto', padding: '0 16px', boxSizing: 'border-box' }}>
+    <div data-testid="web-top" className="sr-shell web-top-card" style={{ maxWidth: 760, margin: '0 auto', padding: `0 ${SP.md}px`, boxSizing: 'border-box' }}>
       {score || action || hold ? <GlanceCard webTop={webTop} glass={glass} /> : null}
       {showRain ? <RainBar rain={rain} glass={glass} /> : null}
     </div>

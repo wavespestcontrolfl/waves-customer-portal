@@ -37,6 +37,7 @@ const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services
 
 const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectApplicatorTechnician, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
+const { attachWebTop } = require('../services/service-report/report-web-top');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -51,11 +52,6 @@ const { sessionMfaBlock } = require('../services/staff-mfa');
 // look. Only beside the simple web switch; a partial gates module reads as off.
 function glassWebLive(simpleWeb, gates) {
   return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
-}
-
-// GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web report. Same shape as the glass gate.
-function webTopLive(simpleWeb, gates) {
-  return simpleWeb === true && typeof gates.reportWebTopLive === 'function' && gates.reportWebTopLive();
 }
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
@@ -2641,18 +2637,8 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
-      // GATE_REPORT_WEB_TOP (owner 2026-10-20): the top card, score strip and rain bar. Best effort: a failed
-      // rain read leaves the rain bar out and never the report. Absent key = byte-identical payload.
-      if (webTopLive(simpleWeb, reportGates) && !v1Data.internalOnly) {
-        try {
-          const { buildWebTop, buildWebTopRain } = require('../services/service-report/report-web-top');
-          const rain = await buildWebTopRain({ service, fetchMrmsDailyRain: require('../services/mrms-qpe').fetchMrmsDailyRain });
-          // An object even when empty: the key is what trims the web page (products, letterhead, conditions, footer).
-          v1Data.webTop = buildWebTop(v1Data, rain) || {};
-        } catch (err) {
-          logger.warn(`[reports-public] web top skipped: ${err.message}`);
-        }
-      }
+      // GATE_REPORT_WEB_TOP (owner 2026-10-20): the top card, score strip and rain bar (the helper checks the gates).
+      await attachWebTop(v1Data, service, { simpleWeb, gates: reportGates });
       return res.json(v1Data);
     }
 
