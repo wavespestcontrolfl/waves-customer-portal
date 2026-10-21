@@ -98,7 +98,11 @@ function getVisitDuration(service) {
 }
 
 function generateServiceReportPDF(customer, service, products, res, extra = {}) {
-  const { compliance = [], invoice = null } = extra;
+  // withholdPlan (a CONTACT's own download, contact-session-projection.js
+  // contactSafeReportCustomer): the holder's plan stays off the page — the
+  // callback callout names the WaveGuard membership, so it goes too
+  // (codex #6363 r13 P2).
+  const { compliance = [], invoice = null, withholdPlan = false } = extra;
   const credentialText = extra.credentialText || 'Licensed & Insured';
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
 
@@ -286,7 +290,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WAVEGUARD CALLBACK CALLOUT
   // ══════════════════════════════════════════════════════
-  if (isCallback) {
+  if (isCallback && !withholdPlan) {
     if (y > 680) { doc.addPage(); y = 50; }
     doc.save();
     doc.roundedRect(L, y, W, 30, 4).fill('#E8F5E9');
@@ -961,7 +965,7 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
     // facts only — never the holder's name, phone, email or plan (the same
     // projection the contact's own session reads; codex #6363 r2 P1).
     const pdfCustomer = req.contactSession ? contactSafeReportCustomer(frozen.customer, req.contactSession) : frozen.customer;
-    generateServiceReportPDF(pdfCustomer, frozen.service, frozen.products, res, { compliance, invoice, credentialText });
+    generateServiceReportPDF(pdfCustomer, frozen.service, frozen.products, res, { compliance, invoice, credentialText, withholdPlan: !!req.contactSession });
   } catch (err) {
     next(err);
   }

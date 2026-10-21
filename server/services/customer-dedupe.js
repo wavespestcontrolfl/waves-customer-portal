@@ -1837,9 +1837,14 @@ function foldContactPrefRows(winnerRow, loserRow) {
   for (const col of [...CONTACT_PREF_TOGGLES, 'sms_enabled', 'email_enabled']) {
     patch[col] = (winnerRow[col] === false || loserRow[col] === false) ? false : (winnerRow[col] ?? loserRow[col] ?? null);
   }
-  for (const col of Object.values(CHANNEL_COLUMN_FOR)) {
+  for (const [purpose, col] of Object.entries(CHANNEL_COLUMN_FOR)) {
     const kept = winnerRow[col] || null;
-    patch[col] = (kept && kept !== 'both') ? kept : (loserRow[col] || kept);
+    const other = loserRow[col] || null;
+    // Two DIFFERENT single-channel choices (sms on one side, email on the
+    // other) leave no channel both agreed to — the purpose folds to OFF
+    // rather than widening either side's choice (codex #6363 r13 P1).
+    if (kept && other && kept !== 'both' && other !== 'both' && kept !== other) patch[purpose] = false;
+    patch[col] = (kept && kept !== 'both') ? kept : (other || kept);
   }
   patch.consent_attested_at = winnerRow.consent_attested_at || loserRow.consent_attested_at || null;
   return patch;

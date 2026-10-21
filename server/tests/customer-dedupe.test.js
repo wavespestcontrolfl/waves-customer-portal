@@ -1281,10 +1281,10 @@ describe('executeMerge', () => {
       expect(UNIQUE_COLLISION_HANDLERS.service_contact_notification_prefs).toBe(foldContactNotificationPrefs);
     });
 
-    it('moves phones the winner lacks whole; folds a shared phone: off on either side stays off, a single channel beats both, an attestation on either side stands', async () => {
+    it('moves phones the winner lacks whole; folds a shared phone: off on either side stays off, a single channel beats both, two different single channels turn the purpose off, an attestation on either side stands', async () => {
       const trx = fakeTrx([
-        { customer_id: WINNER, phone_key: '9415550202', tech_en_route: true, service_completed: null, sms_enabled: true, en_route_channel: 'both', tech_arrived_channel: 'sms', service_complete_channel: null, consent_attested_at: null },
-        { customer_id: LOSER, phone_key: '9415550202', tech_en_route: false, service_completed: true, sms_enabled: false, en_route_channel: 'email', tech_arrived_channel: 'email', service_complete_channel: 'email', consent_attested_at: '2026-10-01T00:00:00Z' },
+        { customer_id: WINNER, phone_key: '9415550202', tech_en_route: true, tech_arrived: true, appointment_confirmation: true, service_completed: null, sms_enabled: true, en_route_channel: 'both', tech_arrived_channel: 'sms', appointment_confirmation_channel: 'sms', service_complete_channel: null, consent_attested_at: null },
+        { customer_id: LOSER, phone_key: '9415550202', tech_en_route: false, tech_arrived: true, appointment_confirmation: true, service_completed: true, sms_enabled: false, en_route_channel: 'email', tech_arrived_channel: 'email', appointment_confirmation_channel: 'sms', service_complete_channel: 'email', consent_attested_at: '2026-10-01T00:00:00Z' },
         { customer_id: LOSER, phone_key: '9415550303', tech_en_route: false },
       ]);
       const summary = await foldContactNotificationPrefs(trx, 'service_contact_notification_prefs', 'customer_id', WINNER, LOSER);
@@ -1292,7 +1292,11 @@ describe('executeMerge', () => {
       expect(trx.rows.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303']]);
       expect(trx.rows[0]).toMatchObject({
         tech_en_route: false, service_completed: true, sms_enabled: false, email_enabled: null,
-        en_route_channel: 'email', tech_arrived_channel: 'sms', service_complete_channel: 'email',
+        // sms on one side, email on the other: no channel both agreed to — the purpose is off (codex r13 P1).
+        tech_arrived: false, tech_arrived_channel: 'sms',
+        // The same single channel on both sides is simply kept.
+        appointment_confirmation: true, appointment_confirmation_channel: 'sms',
+        en_route_channel: 'email', service_complete_channel: 'email',
         consent_attested_at: '2026-10-01T00:00:00Z', updated_at: 'NOW()',
       });
     });
