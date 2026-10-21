@@ -54,11 +54,22 @@ const MONEY_WORD = new RegExp(
 
 // A number that names a record, not an amount.
 const IDENTIFIER_BEFORE = /(?:\b(?:invoice|inv|ticket|order|account|acct|confirmation|job|number|no|unit|apt|apartment|suite|ste|lot|room|route|zip|code|pin|passcode|combo|combination|gate|lockbox|keypad|door|point)\b\.?|#)\s*(?:number|no\.?|#)?\s*(?:is|was|of)?\s*#?\s*$/i;
-const UNIT_AFTER = /^\s*(?:%|(?:(?:more|extra|additional|linear|square|cubic|fluid|total|of|about|another)\s+){0,2}(?:cents?|oz|ounces?|g|grams?|kgs?|kilograms?|mg|milligrams?|ml|milliliters?|millilitres?|l|liters?|cc|tbsp|tsp|tablespoons?|teaspoons?|cups?|fl|gal|gals|gallons?|lbs?|pounds?|sq\.?\s*ft|square\s+(?:feet|foot)|sf|feet|foot|ft|inch(?:es)?|acres?|minutes?|mins?|hours?|hrs?|seconds?|days?|weeks?|years?|months?\s+(?:ago|old)|percent|x\b|bags?|units?|stops?|ml|liters?|litres?|pints?|quarts?|miles?|mi\b|mph|degrees?|psi|ppm|bait\s+stations?|stations?|traps?|points?|pieces?|people|customers?|houses?|homes?|doors?|windows?|rooms?)\b)/i;
-const STREET_AFTER = /^\s+(?:[A-Za-z'.]+\s+){0,2}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
+// Quantity words (a number followed by one of these is a quantity, not an amount).
+const UNIT_WORDS = 'cents?|oz|ounces?|g|grams?|kgs?|kilograms?|mg|milligrams?|ml|milliliters?|millilitres?|l|liters?|cc|tbsp|tsp|tablespoons?|teaspoons?|cups?|fl|gal|gals|gallons?|lbs?|pounds?|sq\\.?\\s*ft|square\\s+(?:feet|foot)|sf|feet|foot|ft|inch(?:es)?|acres?|minutes?|mins?|hours?|hrs?|seconds?|days?|weeks?|years?|months?\\s+(?:ago|old)|percent|x\\b|bags?|units?|stops?|ml|liters?|litres?|pints?|quarts?|miles?|mi\\b|mph|degrees?|psi|ppm|bait\\s+stations?|stations?|traps?|points?|pieces?|people|customers?|houses?|homes?|doors?|windows?|rooms?|yards?|yds?|meters?|metres?|km|kilometers?';
+const UNIT_MODS = '(?:(?:more|extra|additional|linear|square|cubic|fluid|total|of|about|another)\\s+){0,2}';
+const UNIT_AFTER = new RegExp(`^\\s*(?:%|${UNIT_MODS}(?:${UNIT_WORDS})\\b)`, 'i');
+// Unit-first phrasing: "rate in milliliters is 6133", "area in square feet: 6133".
+const UNIT_BEFORE = new RegExp(`\\b(?:in|of|per|by|measured\\s+in)\\s+${UNIT_MODS}(?:${UNIT_WORDS})\\s*(?:is|was|are|were|=|:)?\\s*$`, 'i');
+// A label that follows the number: "6133 was the invoice number", "6133 is the gate code".
+const ID_AFTER = /^\s*(?:(?:is|was|are|were)\s+)?(?:(?:the|our|their|his|her|my|a|an)\s+)?(?:(?:invoice|ticket|order|account|acct|confirmation|job|zip|gate|door|lockbox|keypad|access|security|alarm)\b|pin\b|passcode\b|code\b|combo\b|combination\b)/i;
+const STREET_AFTER = /^\s+(?:(?!(?:a|an|per|for|the|each|every|and|at|on|to|is|was|are|total|month|monthly|visit)\b)[A-Za-z'.]+\s+){0,6}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
 const CLOCK_AFTER = /^\s*(?:a\.?\s?m\b|p\.?\s?m\b|o'?clock|in\s+the\s+(?:morning|afternoon|evening)|tomorrow|today|tonight)/i;
 const CLOCK_BEFORE = /\b(?:at|by|around|before|after|until|till|from|between)\s+$/i;
 const DATE_BEFORE = /\b(?:dated|since|year|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:\w+\s+)?$/i;
+// A year needs date context right before it (a month name, in, since, year, of...). A money word right
+// before it ("charge 2026", "price in 2026") makes it an amount to flag, not a year.
+const YEAR_BEFORE = /\b(?:in|since|year|of|dated|during|until|by|before|after|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:\w+,?\s+)?$/i;
+const MONEY_BEFORE_YEAR = /\b(?:price[ds]?|pricing|charge[ds]?|charging|costs?|rates?|invoice[ds]?|pa(?:y|id|ys|ying)|total|amount|quote[ds]?|fees?|bill(?:ed)?|owe[sd]?|balance|refund(?:ed)?|discount)(?:\s+(?:of|is|was|at|for|to|the|a))*\s+$/i;
 const PRICE_AFTER = /^\s*(?:dollars?|bucks?|a\s+month|per\b|each\b|\/\s?mo|monthly|every\b)/i;
 
 const fmtDollars = (n) => `$${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
@@ -102,6 +113,8 @@ function moneyHere(text, start, end, { clock = null, consumedMoney = false } = {
   const w = windows(text, start, end);
   if (IDENTIFIER_BEFORE.test(w.beforeRaw)) return false;
   if (UNIT_AFTER.test(w.afterRaw)) return false;
+  if (ID_AFTER.test(w.afterRaw)) return false;
+  if (UNIT_BEFORE.test(w.beforeRaw)) return false;
   if (!consumedMoney && DATE_BEFORE.test(w.beforeRaw)) return false;
   if (STREET_AFTER.test(w.afterRaw)) return false;
   const cued = consumedMoney || MONEY_WORD.test(w.cue) || /\$\s*$/.test(w.beforeRaw);
@@ -195,7 +208,12 @@ function normalizeSpokenMoney(input) {
     const dollarSign = m[1].includes('$');
     if (value <= 2000) continue;
     const nextIsDollars = PRICE_AFTER.test(text.slice(end, end + 30)) || /^\s*(?:dollars?|bucks?)\b/i.test(text.slice(end, end + 12));
-    if (value >= 2001 && value <= 2100 && !dollarSign && !nextIsDollars) continue; // a year
+    const before = text.slice(Math.max(0, start - 50), start);
+    if (value >= 2001 && value <= 2100 && !dollarSign && !nextIsDollars
+      && YEAR_BEFORE.test(before) && !MONEY_BEFORE_YEAR.test(before)) continue; // a year
+    // "at 2230", "by 1430": a 24-hour clock time, unless the amount is stated ("at 2230 a month")
+    if (!dollarSign && !nextIsDollars && CLOCK_BEFORE.test(before)
+      && Number(heard.slice(0, 2)) <= 23 && Number(heard.slice(2)) <= 59) continue;
     if (!moneyHere(text, start, end, { consumedMoney: dollarSign })) continue;
     if (seen.has(heard)) continue;
     seen.add(heard);

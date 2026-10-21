@@ -78,13 +78,13 @@ describe('Intelligence Bar dictated amounts', () => {
     const call = fetch.mock.calls.find(([url, opts]) => String(url).includes('/intelligence-bar/query') && opts?.method === 'POST');
     return call ? JSON.parse(call[1].body) : null;
   };
-  async function dictateAndAsk(spoken, typedAfter) {
+  async function dictateAndAsk(spoken, typedAfter, ambiguous = [AMBIGUOUS], edits = []) {
     useIsMobile.mockReturnValue(false);
     await openBar(null);
     const mic = micProps.filter((props) => props.title === 'Dictate your question').at(-1);
-    act(() => mic.onAppend(spoken, { money: { changes: [], ambiguous: [AMBIGUOUS] } }));
+    act(() => mic.onAppend(spoken, { money: { changes: [], ambiguous } }));
     const box = await screen.findByPlaceholderText(/Ask anything|Tell me|Ask/);
-    if (typedAfter) fireEvent.change(box, { target: { value: typedAfter } });
+    for (const value of [...edits, typedAfter].filter(Boolean)) fireEvent.change(box, { target: { value } });
     fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() => expect(queryBody()).not.toBeNull());
     return queryBody();
@@ -112,5 +112,27 @@ describe('Intelligence Bar dictated amounts', () => {
     const body = await dictateAndAsk(spoken, edited === spoken ? undefined : edited);
     if (kept) expect(body.dictation_money).toEqual([AMBIGUOUS]);
     else expect(body.dictation_money).toBeUndefined();
+  });
+
+  it('a space after the dollar sign still counts as the same amount', async () => {
+    const body = await dictateAndAsk('charge $ 6133 a month');
+    expect(body.dictation_money).toEqual([AMBIGUOUS]);
+  });
+
+  it('keeps one entry per amount, so repeats cannot crowd out a fourth amount (cap is three)', async () => {
+    const amounts = ['1111', '2222', '3333', '4444'].map((heard) => ({ heard, candidates: [`$${heard.slice(0, 2)}.${heard.slice(2)}`, `$${heard}`] }));
+    const list = [amounts[0], amounts[0], amounts[0], amounts[1], amounts[2], amounts[3]];
+    const body = await dictateAndAsk('prices 1111 2222 3333 4444', undefined, list);
+    expect(body.dictation_money.map((a) => a.heard)).toEqual(['1111', '2222', '3333']);
+  });
+
+  it('once an edit takes the dictated digits out, typing them back in is not flagged', async () => {
+    const body = await dictateAndAsk('charge 6133 a month', 'charge 6133 a month, as agreed', [AMBIGUOUS], ['charge 5000 a month']);
+    expect(body.dictation_money).toBeUndefined();
+  });
+
+  it('an edit that keeps the digits keeps the flag', async () => {
+    const body = await dictateAndAsk('charge 6133 a month', 'charge 6133 a month, as agreed', [AMBIGUOUS], ['charge 6133']);
+    expect(body.dictation_money).toEqual([AMBIGUOUS]);
   });
 });

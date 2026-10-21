@@ -60,11 +60,22 @@ function taskLoadReopens(loaded, held, operation) {
 
 // The dictated amounts still in the message being sent, as the request's dictation_money field
 // (empty when none: nothing is added to the request).
+// The digits as their own number: not inside a larger number, a decimal ("6133.00") or a comma group.
+// An optional "$" (with optional space, as the server reads it) belongs to the amount.
+function standaloneAmount(question, digits) {
+  return new RegExp(`(?<![\\d.,$])(?:\\$\\s?)?${digits}(?![\\d]|[.,]\\d)`).test(String(question));
+}
+
 function dictationMoneyFor(question, ambiguous) {
-  // The digits as their own number: not inside a larger number, a decimal ("6133.00") or a comma group.
-  const standalone = (digits) => new RegExp(`(?<![\\d.,$])\\$?${digits}(?![\\d]|[.,]\\d)`).test(String(question));
-  const kept = (ambiguous || []).filter((item) => /^\d{4}$/.test(String(item?.heard || "")) && standalone(item.heard));
-  return kept.length ? { dictation_money: kept.slice(0, 3).map(({ heard, candidates }) => ({ heard, candidates })) } : {};
+  const seen = new Set();
+  const kept = [];
+  for (const item of ambiguous || []) {
+    const heard = String(item?.heard || "");
+    if (!/^\d{4}$/.test(heard) || seen.has(heard) || !standaloneAmount(question, heard)) continue;
+    seen.add(heard); // one entry per amount, so a repeat cannot crowd out the next amount
+    kept.push({ heard, candidates: item.candidates });
+  }
+  return kept.length ? { dictation_money: kept.slice(0, 3) } : {};
 }
 
 function dismissedThreadKey() {
@@ -951,6 +962,14 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     }
     setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
   }, []);
+
+  // A flagged amount stays only while its digits are in the message. Once an edit takes them out the flag
+  // is gone for good: digits typed in later are the operator's own, not a dictated guess.
+  useEffect(() => {
+    if (dictationMoneyRef.current.length) {
+      dictationMoneyRef.current = dictationMoneyRef.current.filter((item) => standaloneAmount(prompt, item.heard));
+    }
+  }, [prompt]);
 
   const close = () => setOpen(false);
 
