@@ -529,3 +529,27 @@ describe('a preferred-time request with no funnel row stays on the Leads page', 
   });
 });
 
+describe('a lead already linked to a customer', () => {
+  beforeEach(() => { state.leads[0].customer_id = CUST; });
+  test('selecting the linked customer, or none, converts to it', async () => {
+    expect((await preview()).customer_id).toBe(CUST);
+    const none = await executeLeadConvertTool('convert_lead', { lead_id: LEAD }, ADMIN);
+    expect(none).toMatchObject({ preview: true, customer_id: CUST });
+    expect((await preview({ customer_id: CUST.toUpperCase() })).preview).toBe(true);
+  });
+  test('a different customer would replace the link: refused, naming the linked one', async () => {
+    state.customers.push({ id: OTHER, first_name: 'Robyn', last_name: 'Other', phone: '(941) 555-0999', deleted_at: null });
+    const res = await preview({ customer_id: OTHER });
+    expect(res).toMatchObject({ code: 'lead_linked_elsewhere', linked_customer_id: CUST });
+    expect(res.error).toMatch(/already linked to Robin Sample\. Convert it to that customer, or change the link on the Leads page/);
+    expect(res.preview).toBeUndefined();
+  });
+  test('the link is pinned: a link made or changed after the card is drift', async () => {
+    state.leads[0].customer_id = null;
+    const card = await preview();
+    state.leads[0].customer_id = OTHER;
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
+    expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
+  });
+});
+

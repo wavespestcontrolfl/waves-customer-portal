@@ -46,7 +46,7 @@ const LEAD_CONVERT_TOOLS = [
     name: 'convert_lead',
     description: `Convert ONE lead to a customer: the Leads page "Convert to Customer" button. It marks the lead won and links it to an EXISTING customer record you name; it does not create a customer (create one first with create_customer if there is none). The first call returns a PREVIEW and writes nothing: the lead, the customer it would link to, how the customer's phone and email compare with the lead's, any other customers that share them, the figures given, and exactly what changes. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
 Effects: the lead becomes won with the customer linked (and the monthly value, first-service value and WaveGuard tier you gave), the lead's ad funnel row moves to booked, the lead's own estimate is attached to the customer when it has none, and an activity row is added to the lead. Nothing is sent to the customer or anyone (no text, email or call), nothing is booked or charged, no estimate is accepted, and Auto Pay is not touched.
-Pass lead_id. Pass customer_id when you know it; without it the call returns the customers that match the lead's phone or email and writes nothing, so ask the operator which one. Refused: lead not found, lead already converted, customer not found.
+Pass lead_id. Pass customer_id when you know it (a lead already linked to a customer converts to that customer only); without it the call returns the customers that match the lead's phone or email and writes nothing, so ask the operator which one. Refused: lead not found, lead already converted, customer not found.
 Use for: "convert this lead", "convert lead to customer", "make this lead a customer", "turn the lead into a customer", "mark this lead won and link it to the customer"`,
     input_schema: {
       type: 'object',
@@ -197,7 +197,14 @@ async function resolveTargets(input) {
   const badValue = [['monthly_value', 100000], ['initial_service_value', 1000000]]
     .find(([key, max]) => input[key] !== undefined && !(Number.isFinite(input[key]) && input[key] >= 0 && input[key] <= max));
   if (badValue) return refusal(`${badValue[0]} must be a dollar amount from 0 to ${badValue[1]}`, 'invalid_value');
-  const rawCustomer = String(input?.customer_id || '').trim();
+  // A lead already linked to a customer converts to THAT customer: with none named it uses the link; a different
+  // one would silently replace the link, so it is refused.
+  let rawCustomer = String(input?.customer_id || '').trim();
+  if (lead.customer_id && !rawCustomer) rawCustomer = String(lead.customer_id);
+  if (lead.customer_id && rawCustomer.toLowerCase() !== String(lead.customer_id).toLowerCase()) {
+    const linked = await db('customers').where({ id: lead.customer_id }).first('first_name', 'last_name', 'company_name');
+    return refusal(`${leadName} is already linked to ${personName(linked) || 'another customer'}. Convert it to that customer, or change the link on the Leads page.`, 'lead_linked_elsewhere', { lead_id: lead.id, linked_customer_id: lead.customer_id });
+  }
   if (!rawCustomer) {
     const { matches: candidates, truncated } = await contactMatches(lead);
     return refusal(
