@@ -1177,9 +1177,9 @@ jest.setTimeout(30000);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
-  // Robodialer wave / burst (the bell's classifiers): a block wave under
-  // GATE_MISSED_CALL_SPAM_WAVE gets no text; a burst is still texted and only
-  // stamped; a gate that is off sends as today. Stamp: missed_call_text_spam_shadow.
+  // Robodialer wave / burst (the bell's classifiers): no spam rule ever stops a
+  // text. The call is only stamped missed_call_text_spam_shadow 'block' | 'burst',
+  // whichever spam gates are on or off.
   describe('robodialer wave and burst', () => {
     const GBP = '+19413840224';
     const gatesOff = (...off) => isEnabled.mockImplementation((gate) => !off.includes(gate));
@@ -1211,11 +1211,14 @@ jest.setTimeout(30000);
       expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT, call_log_id: row.id });
     });
 
-    test('block wave, gate on: skipped:SPAM_WAVE, nothing sent', async () => {
+    test('block wave, wave gate on: the text still goes, stamped block for the measure', async () => {
       const row = await blockWaveOf();
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'SPAM_WAVE' });
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_text_outcome).toBe('sent');
+      expect(metadata.missed_call_text_spam_shadow).toBe('block');
     });
 
     test('burst, burst gate off: the text goes as today, stamped missed_call_text_spam_shadow burst', async () => {

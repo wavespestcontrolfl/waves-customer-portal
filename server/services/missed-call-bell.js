@@ -391,35 +391,32 @@ function leaseStale(token, now = Date.now()) {
   return !Number.isFinite(t) || now - t > LEASE_MS;
 }
 
-// What a robodialer call does to the bell (returns true | 'quiet' | false).
-//  - Block wave with GATE_MISSED_CALL_SPAM_WAVE on: the call settles with no bell
-//    (true; stamped missed_call_spam_wave: 'block').
-//  - Burst with GATE_MISSED_CALL_SPAM_BURST on: the bell row is still written but
-//    no push goes out ('quiet'; stamped missed_call_spam_wave: 'burst_quiet'). A
-//    burst never removes delivery evidence (Codex #6392 r1): a caller can prime a
-//    line and length with two numbers, and real people who hang up at the beep
-//    cluster on one length, so a genuine prospect must stay on the bell.
+// What a robodialer call does to the bell: it QUIETS the push and keeps the bell
+// row; no spam rule ever removes delivery evidence (Codex #6392 r1 and r2: a
+// caller can prime a number block or a line and length with fresh numbers so a
+// genuine first-time prospect matches, and real people who hang up at the beep
+// cluster on one length). Returns true when the push must be skipped.
+//  - Block wave with GATE_MISSED_CALL_SPAM_WAVE on: stamped missed_call_spam_wave: 'block_quiet'.
+//  - Burst with GATE_MISSED_CALL_SPAM_BURST on: stamped 'burst_quiet'.
 //  - A flagged call whose gate is off rings as before, stamped
 //    missed_call_spam_wave_shadow (block) or missed_call_spam_burst_shadow (burst).
-// `fenced` is the caller's lease-fenced update.
-async function settleRobodialerWave(row, fenced) {
+// The row settles normally after delivery. `fenced` is the caller's lease-fenced update.
+async function quietRobodialerPush(row, fenced) {
   const flags = await classifySpamWave(row); // fails open inside
   const block = flags.block && spamGateOn('missedCallSpamWave');
-  const burst = !block && flags.burst && spamGateOn('missedCallSpamBurst');
+  const burst = flags.burst && spamGateOn('missedCallSpamBurst');
   const stamps = {};
   if (flags.block && !block) stamps.missed_call_spam_wave_shadow = true;
-  if (flags.burst && !burst && !spamGateOn('missedCallSpamBurst')) stamps.missed_call_spam_burst_shadow = true;
-  if (block) Object.assign(stamps, { missed_call_settled_at: new Date().toISOString(), missed_call_spam_wave: 'block' });
-  if (burst) stamps.missed_call_spam_wave = 'burst_quiet';
+  if (flags.burst && !burst) stamps.missed_call_spam_burst_shadow = true;
+  if (block || burst) stamps.missed_call_spam_wave = block ? 'block_quiet' : 'burst_quiet';
   if (!Object.keys(stamps).length) return false;
-  const write = fenced().update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) });
-  if (block) { await write; return true; }
-  await write.catch(() => {}); // the quiet push matters more than its stamp
-  return burst ? 'quiet' : false;
+  // The quiet push matters more than its stamp: a failed write still quiets it.
+  await fenced().update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => {});
+  return Boolean(block || burst);
 }
 
-// A quiet burst call writes its bell row but never pushes; every other call
-// keeps the supersession check. Both must pass, and `false` stops the push.
+// A quiet call writes its bell row but never pushes; every other call keeps the
+// supersession check. `false` stops the push.
 const pushGuard = (quiet, stillMissed) => (quiet ? () => false : stillMissed);
 
 // Shadow for gates A and B while they are off: stamp
@@ -597,8 +594,7 @@ async function ringMissedCallIfUnanswered(callSid) {
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
       if (prior) { await settle(); return false; }
     }
-    const spam = await settleRobodialerWave(row, fenced);
-    if (spam === true) return false;
+    const quiet = await quietRobodialerPush(row, fenced);
     const customer = row.customer_id
       ? await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone')
       : null;
@@ -632,7 +628,7 @@ async function ringMissedCallIfUnanswered(callSid) {
         // Re-read right before the push (same supersession pattern as the
         // SMS bell): a recording that landed while the badge was computing
         // must not produce a contradictory missed-call push (hook P1).
-        beforePush: pushGuard(spam === 'quiet', stillMissed),
+        beforePush: pushGuard(quiet, stillMissed),
         // And right before the bell row is written: a redial answered while
         // preferences loaded must not leave a missed-call bell.
         shouldContinue: stillMissed,

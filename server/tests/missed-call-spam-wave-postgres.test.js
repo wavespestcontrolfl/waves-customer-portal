@@ -2,8 +2,8 @@
 // schema removed after the suite; the bell delivery (triggerNotification) is
 // mocked. Pins the robodialer-wave rule of the missed-call bell (owner
 // 2026-10-20 "yes"): a GBP line, under 30 s, no voicemail, 3+ unknown numbers
-// from one 6-digit block in 14 days. Gate on = settled with no bell; gate off
-// = the bell rings as before and the call is stamped for the shadow read.
+// from one 6-digit block in 14 days. Gate on = bell row written, push quiet;
+// gate off = the bell rings as before and the call is stamped for the shadow read.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -82,15 +82,33 @@ jest.setTimeout(30000);
   }
   const stored = (row) => database('call_log').where({ id: row.id }).first();
 
-  test('gate on: the third number of a block on a GBP line settles with no bell', async () => {
+  test('gate on: the third number of a block on a GBP line keeps its bell row, sends no push, and settles', async () => {
     await earlierWave();
     const row = call('+19415550303', 10);
     await database('call_log').insert(row);
-    expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(false);
-    expect(triggerNotification).not.toHaveBeenCalled();
+    // What the real trigger reports when beforePush stops the push after the bell row is written.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
+    expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const { beforePush } = triggerNotification.mock.calls[0][2];
+    expect(await beforePush({ dispatching: false })).toBe(false);
+    expect(await beforePush({ dispatching: true })).toBe(false);
     const { metadata } = await stored(row);
-    expect(metadata.missed_call_spam_wave).toBe('block');
+    expect(metadata.missed_call_spam_wave).toBe('block_quiet');
     expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
+    // Gate D (push check) reads a skipped push as deliberate: no retry, no daily alert.
+    expect(metadata.missed_call_push_retries).toBeUndefined();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a block wave and a burst together, both gates on, are stamped block_quiet', async () => {
+    const gbp = { to_phone: GBP_LINE, duration_seconds: 24 };
+    await database('call_log').insert([call('+19415550101', 120, gbp), call('+19415550202', 90, gbp)]);
+    const row = call('+19415550303', 10, gbp);
+    await database('call_log').insert(row);
+    expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+    expect(await triggerNotification.mock.calls[0][2].beforePush({ dispatching: false })).toBe(false);
+    expect((await stored(row)).metadata.missed_call_spam_wave).toBe('block_quiet');
   });
 
   test('gate off: the wave call still rings, stamped for the shadow read', async () => {
