@@ -6725,8 +6725,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // every customer question was paying for this scan nobody reads, under
   // the general report limiter, repeatedly.
   let upcomingVisitsCard = null;
-  if (opts.mode === 'live' && opts.upcomingVisitsCard === true
-    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+  // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the simple web view is built in 'pdf' mode, so the card above never ran
+  // for it. opts.webPeopleNext asks for the same property-scoped visits and reschedule links in that build; the route
+  // moves them into webPeople.nextVisit. The gate itself is read by the route, which is the only caller that sets it.
+  const webPeopleNext = opts.webPeopleNext === true;
+  if (webPeopleNext || (opts.mode === 'live' && opts.upcomingVisitsCard === true
+    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true')) {
     // GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): a LAWN report's card shows one
     // visit, the next upcoming LAWN visit at this property (never another
     // line's). The card then starts EMPTY and stays empty when there is none (or
@@ -6963,7 +6967,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // short-link row each time. null when no link applies (too close
           // to the visit, dispatch-owned pending, grouped visit, ...) and on
           // ANY failure: the report never breaks.
-          const planReschedule = reportPlanRescheduleLive();
+          const planReschedule = reportPlanRescheduleLive() || webPeopleNext;
           const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
           const visits = await Promise.all(matched.map(async (row) => {
             let rescheduleUrl = null;
@@ -7583,6 +7587,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // opted in (codex round-5 P2, e.g. the Q&A endpoint) — same
     // opts.upcomingVisitsCard check the work above already gated on.
     ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
+    // GATE_REPORT_WEB_PEOPLE: the visits for webPeople.nextVisit. The route deletes this key after it reads it.
+    ...(webPeopleNext ? { webPeopleNext: Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : [] } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same

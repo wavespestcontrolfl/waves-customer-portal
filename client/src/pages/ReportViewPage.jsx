@@ -14,6 +14,7 @@ import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reen
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
+import { WebPeopleBottom, WebPeopleTop } from '../components/report/WebPeopleCards';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
@@ -486,7 +487,7 @@ function nextServiceName(serviceType) {
   return String(serviceType || '').trim() || null;
 }
 
-function formatNextAppointmentLabel(nextAppointment) {
+export function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
   // calendarDateFromDateOnlyValue instead of string-concatenating T12:00:00Z:
   // if scheduledDate ever arrives as a full timestamp, the concat produced an
@@ -619,7 +620,7 @@ async function submitReportEvent(token, eventName, metadata = {}) {
   }
 }
 
-function trackReportEvent(token, eventName, metadata = {}) {
+export function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   // Staff reads (data payload flagged staffViewer — the /data fetch carried
   // the portal JWT) post NO interaction events: this endpoint is
@@ -5429,7 +5430,7 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 // pre-existing serviceLine switch, so legacy mosquito building-perimeter
 // traces keep their spray replay and every lawn/pest report renders
 // exactly as before.
-function tracedVariantFallback(traced, serviceLine) {
+export function tracedVariantFallback(traced, serviceLine) {
   if (traced?.variant) return traced.variant;
   if (traced?.captureMode === 'yard') return 'outline';
   return serviceLine === 'lawn' ? 'outline' : 'spray';
@@ -10508,7 +10509,9 @@ function SimpleWebReport({ data, token }) {
           <RecapVideoCard recap={data.recap} token={token} />
         </div>
       ) : null}
+      <WebPeopleTop data={data} glass={glass} />
       <ServiceReportDocument data={data} token={token} web glass={glass} />
+      <WebPeopleBottom data={data} token={token} glass={glass} />
     </div>
   );
 }

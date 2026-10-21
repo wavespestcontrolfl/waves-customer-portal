@@ -1,0 +1,173 @@
+'use strict';
+
+/**
+ * GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the `webPeople` payload key of the simple web service report.
+ *
+ * Four small decisions, all from data the report already holds or a read-only query. Nothing is written and nothing is
+ * sent. Every sentence the customer reads is a fixed sentence built on the page from these values; no value here is
+ * model text.
+ *
+ *   tech       first name, photo and FDACS applicator number from the staff record the report already uses, plus how
+ *              many visits that technician has done at this home.
+ *   treatedMap true when the technician traced a treatment map for this visit (lawn, pest and the other lines).
+ *   nextVisit  the next visit at this property and its self-serve reschedule link. The link is the one the
+ *              "Your plan" card uses (reschedule-link.js, with the public reschedule page's own eligibility verdict).
+ *   review     the Google review link, only for a good visit and a quiet customer (see reviewLinkFor).
+ */
+
+const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
+
+const REVIEW_MIN_LAWN_SCORE = 85;
+const QUIET_DAYS = 30;
+// satisfaction_responses.rating is 1-10; 6 or lower is not a happy customer.
+const LOW_RATING_MAX = 6;
+const NEGATIVE_CALL_SENTIMENTS = ['negative', 'frustrated'];
+const MIN_VISITS_TO_SAY = 2;
+
+function parseJsonObject(value) {
+  if (value && typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstNameOf(name) {
+  return String(name || '').trim().split(/\s+/)[0] || null;
+}
+
+function lawnScoreOf(data) {
+  const raw = data?.lawnAssessment?.scores?.overallScore;
+  if (raw == null || raw === '') return null;
+  const score = Number(raw);
+  return Number.isFinite(score) ? score : null;
+}
+
+// A pest visit with nothing to follow up: treated, not a re-service, no high finding, no area that needed attention
+// and no follow-up planned.
+function isCleanPestVisit(data) {
+  if (data?.serviceLine !== 'pest' || data.isCallback === true || data.treatmentPerformed === false) return false;
+  const findings = Array.isArray(data.findings) ? data.findings : [];
+  if (findings.some((f) => ['critical', 'high'].includes(String(f?.severity || '').toLowerCase()))) return false;
+  const items = Array.isArray(data.serviceCoverage?.items) ? data.serviceCoverage.items : [];
+  const needsAction = ['inaccessible', 'skipped', 'not_serviced', 'needs_attention', 'needs_follow_up'];
+  if (items.some((item) => needsAction.includes(String(item?.status || '').toLowerCase()))) return false;
+  return !data.followUp && !data.reportV2?.followUp;
+}
+
+function goodVisit(data) {
+  if (data?.serviceLine === 'lawn') {
+    const score = lawnScoreOf(data);
+    return score != null && score >= REVIEW_MIN_LAWN_SCORE;
+  }
+  return isCleanPestVisit(data);
+}
+
+// True when the customer complained, rated low or sounded unhappy on a call in the last QUIET_DAYS. A failed read
+// throws, and the caller then shows no link: the link needs proof of a quiet month.
+async function hadNegativeContact(knex, customerId, now) {
+  const since = new Date(now.getTime() - QUIET_DAYS * 86400000);
+  const [complaint, lowRating, badCall] = await Promise.all([
+    knex('customer_interactions').where({ customer_id: customerId, interaction_type: 'complaint' })
+      .where('created_at', '>', since).first('id'),
+    knex('satisfaction_responses').where('customer_id', customerId).where('created_at', '>', since)
+      .where((qb) => qb.where('rating', '<=', LOW_RATING_MAX).orWhere('flagged_for_followup', true)).first('id'),
+    knex('call_log').where('customer_id', customerId).where('created_at', '>', since)
+      .whereIn('sentiment', NEGATIVE_CALL_SENTIMENTS).first('id'),
+  ]);
+  return Boolean(complaint || lowRating || badCall);
+}
+
+// The same eligibility the old report's review card used (customer has not already left a review, the server-resolved
+// office), tightened to a good visit and a quiet month.
+async function reviewLinkFor(data, service, knex, now) {
+  if (data.hasLeftGoogleReview || data.reviewRequestEligible === false) return null;
+  const url = data.reviewLocation?.reviewUrl;
+  if (!url || !service.customer_id || !goodVisit(data)) return null;
+  try {
+    if (await hadNegativeContact(knex, service.customer_id, now)) return null;
+  } catch {
+    return null;
+  }
+  return { url, locationId: data.reviewLocation.id || null };
+}
+
+// How many visits this technician has done at this home, counted as the plan card counts a visit: performed,
+// customer-visible, one stop once however many services it held.
+async function visitsAtHome(knex, service) {
+  if (!service.technician_id || !service.customer_id) return 0;
+  const booking = service.scheduled_service_id
+    ? await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('property_id')
+    : null;
+  const rows = await knex('service_records as sr')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .where('sr.customer_id', service.customer_id)
+    .where('sr.technician_id', service.technician_id)
+    .where('sr.status', 'completed')
+    .where('sr.service_date', '<=', service.service_date)
+    .modify((qb) => { if (booking?.property_id) qb.where('ss.property_id', booking.property_id); })
+    .select('sr.id', 'sr.scheduled_service_id', 'sr.structured_notes', 'ss.visit_id')
+    .limit(500);
+  const stops = new Set(rows
+    .filter((row) => !serviceRecordSuppressesCustomerArtifacts(row)
+      && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
+    .map((row) => (row.visit_id ? `visit:${row.visit_id}` : `booking:${row.scheduled_service_id || row.id}`)));
+  return stops.size;
+}
+
+async function techFor(data, service, knex) {
+  const name = data.technician?.name || data.technicianName;
+  const firstName = firstNameOf(name);
+  if (!firstName) return null;
+  let count = 0;
+  try {
+    count = await visitsAtHome(knex, service);
+  } catch { /* the strip still shows without the count */ }
+  return {
+    firstName,
+    photoUrl: data.technician?.photoUrl || null,
+    // Already on the report (applicatorFdacsId): withheld there when the license is expired or the identity changed.
+    fdacsId: data.applicatorFdacsId || null,
+    visitsAtHome: count >= MIN_VISITS_TO_SAY ? count : null,
+  };
+}
+
+function nextVisitFor(visits) {
+  const next = Array.isArray(visits) ? visits[0] : null;
+  if (!next || !next.scheduledDate) return null;
+  return {
+    serviceType: next.serviceType || null,
+    scheduledDate: next.scheduledDate,
+    windowStart: next.windowStart || null,
+    // The existing self-serve reschedule page decides whether the visit can still move; null hides the button.
+    rescheduleUrl: typeof next.rescheduleUrl === 'string' && next.rescheduleUrl ? next.rescheduleUrl : null,
+  };
+}
+
+/**
+ * @param {object} args
+ * @param {object} args.data      the simple web payload, built in 'pdf' mode
+ * @param {object} args.service   the joined service record row
+ * @param {Array}  args.nextVisits upcoming visits from the build (webPeopleNext)
+ * @returns {Promise<object|null>} the webPeople payload, or null when there is nothing to show
+ */
+async function buildWebPeople({ data, service, knex, nextVisits, now = new Date() }) {
+  if (!data || !service) return null;
+  const [tech, review] = await Promise.all([
+    techFor(data, service, knex),
+    reviewLinkFor(data, service, knex, now),
+  ]);
+  const nextVisit = nextVisitFor(nextVisits);
+  const out = {
+    ...(tech ? { tech } : {}),
+    ...(data.treatmentMap?.traced?.snapshotUrl ? { treatedMap: true } : {}),
+    ...(nextVisit ? { nextVisit } : {}),
+    ...(review ? { review } : {}),
+  };
+  return Object.keys(out).length ? out : null;
+}
+
+module.exports = { buildWebPeople, isCleanPestVisit, REVIEW_MIN_LAWN_SCORE };

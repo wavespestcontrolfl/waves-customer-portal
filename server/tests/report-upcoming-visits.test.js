@@ -1297,3 +1297,37 @@ describe('lawn report plan card: only the next lawn visit (GATE_LAWN_REPORT_CLAR
     expect((await render(LAWN_REPORT, FOUR()))).not.toHaveProperty('upcomingVisitsCard');
   });
 });
+
+describe('webPeopleNext (GATE_REPORT_WEB_PEOPLE): the simple web view builds in pdf mode and still gets the next visit', () => {
+  const fixtures = () => ({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+      { id: 'scheduled-lawn', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00' },
+    ],
+  });
+
+  test('pdf mode with the opt-in: visits and reschedule links, though both report gates are off, and no upcomingVisitsCard key', async () => {
+    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-web-people', makeKnex(fixtures()), { mode: 'pdf', webPeopleNext: true });
+    expect(data.webPeopleNext).toEqual([{
+      serviceType: 'Lawn Care Treatment', scheduledDate: todayPlus(5), windowStart: '08:00:00', rescheduleUrl: 'https://short.test/l/scheduled-lawn',
+    }]);
+    expect(data).not.toHaveProperty('upcomingVisitsCard');
+    expect(buildRescheduleLink).toHaveBeenCalledWith('scheduled-lawn', { customerId: 'customer-1', reuseExisting: true });
+  });
+
+  test('pdf mode without the opt-in: no key and nothing minted', async () => {
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-no-opt-in', makeKnex(fixtures()), { mode: 'pdf' });
+    expect(data).not.toHaveProperty('webPeopleNext');
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
+  test('a visit the public reschedule page would refuse (in progress) gets no link', async () => {
+    const f = fixtures();
+    f.scheduled_services[1] = { ...f.scheduled_services[1], status: 'en_route' };
+    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-web-people-busy', makeKnex(f), { mode: 'pdf', webPeopleNext: true });
+    expect(data.webPeopleNext[0].rescheduleUrl).toBeNull();
+  });
+});

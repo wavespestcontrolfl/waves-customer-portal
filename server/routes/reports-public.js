@@ -42,6 +42,7 @@ const { applyReportIdentitySnapshot } = require('../services/service-report/repo
 // before it reaches a query (#3168).
 const ASSESSMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const { verifyAssessmentPin } = require('../services/service-report/assessment-pin');
+const { buildWebPeople } = require('../services/service-report/report-web-people');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
@@ -51,6 +52,11 @@ const { sessionMfaBlock } = require('../services/staff-mfa');
 // look. Only beside the simple web switch; a partial gates module reads as off.
 function glassWebLive(simpleWeb, gates) {
   return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
+}
+
+// GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): people cards on the simple web report. Same rule.
+function webPeopleLive(simpleWeb, gates) {
+  return simpleWeb === true && typeof gates.reportWebPeopleLive === 'function' && gates.reportWebPeopleLive();
 }
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
@@ -471,6 +477,8 @@ async function buildServiceReportV1ResponseData(service, token, {
   // OPT-IN on the same terms (GATE_LAWN_WATER_IN_RAIN): only the /data render and the PDF render print the
   // lawn watering banner, so only they pay for the rain lookup. /ask and /map.svg never do.
   lawnWaterInRain = false,
+  // GATE_REPORT_WEB_PEOPLE: the simple web view asks the build for the next visit and its reschedule link.
+  webPeopleNext = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -493,6 +501,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnPhotoFindings,
     lawnRainfastWatch,
     lawnWaterInRain,
+    webPeopleNext,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2593,7 +2602,11 @@ router.get('/:token/data', async (req, res, next) => {
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
         lawnWaterInRain: true,
+        webPeopleNext: simpleWeb && webPeopleLive(simpleWeb, reportGates),
       });
+      // The next-visit rows are for webPeople only; the key never leaves the server.
+      const webPeopleVisits = v1Data.webPeopleNext;
+      delete v1Data.webPeopleNext;
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports
@@ -2636,6 +2649,12 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
+      // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the people cards. The key is absent when the gate is off or nothing shows.
+      if (webPeopleLive(simpleWeb, reportGates)) {
+        const webPeople = await buildWebPeople({ data: v1Data, service, knex: db, nextVisits: webPeopleVisits })
+          .catch((err) => { logger.warn(`[reports-public] webPeople skipped: ${err.message}`); return null; });
+        if (webPeople) v1Data.webPeople = webPeople;
+      }
       return res.json(v1Data);
     }
 
