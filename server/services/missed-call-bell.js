@@ -354,11 +354,20 @@ async function holdForPushRetry({ row, stats, fenced, pushRetry, firstPassSubs }
   return true;
 }
 
+// True when the bell write was suppressed only because a callback is in flight
+// (GATE_CALLBACK_NEEDS_ANSWER defer arm): the call is still missed by the
+// answered-proof test. If that callback rings out, nothing rang, so the call
+// must not settle; the sweep retries after the callback ends. Gate off, both
+// tests are the same SQL and this is always false.
+const deferredOnlyCheck = (stillMissed, stillMissedFinal) => async () => !(await stillMissed()) && Boolean(await stillMissedFinal());
+
 // The end of one delivery pass: settle it, release the lease for the next
 // sweep, or (gate D) hold the call for the push retry.
-async function finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs }) {
-  const delivered = pushRetry || Boolean(stats && !stats.error
-    && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
+async function finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs, deferredOnly }) {
+  const deferred = !pushRetry && Boolean(stats?.suppressed) && !stats.bellWritten
+    && await deferredOnly().catch(() => false);
+  const delivered = !deferred && (pushRetry || Boolean(stats && !stats.error
+    && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced)));
   if (!delivered) {
     await fenced().update({ metadata: db.raw("metadata - 'missed_call_notified_at'") }).catch(() => {});
     return;
@@ -434,6 +443,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     // The post-check below retires the bell for good, so it needs proof of an
     // answered callback, not a callback that may still be ringing.
     const stillMissedFinal = stillMissedWith(calledBackSql({ retire: true }));
+    const deferredOnly = deferredOnlyCheck(stillMissed, stillMissedFinal);
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
@@ -455,7 +465,7 @@ async function ringMissedCallIfUnanswered(callSid) {
         ...(pushRetry ? { pushOnly: true } : {}),
       });
     } finally {
-      await finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs });
+      await finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs, deferredOnly });
     }
     // Post-check (hook P1): a recording that persisted between the claim
     // and here makes this call the voicemail lane's — retire the bell just
