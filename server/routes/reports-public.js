@@ -1401,23 +1401,81 @@ async function referralViaLawnCard(service) {
 }
 
 // POST /api/reports/:token/events — token-scoped report interaction events.
+// The service record row the report data is built from (the /data route and the web tile's tap read it the same way).
+function loadReportServiceRow(token) {
+  return db('service_records')
+    .where({ report_view_token: token })
+    .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
+    .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+    .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
+      // Report address = the visit's stamped service address when present
+      // (a phone-booked rental completes at the rental, not the primary
+      // home); the customer mirror is the fallback (codex round-9 P2).
+      db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+      db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+      db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+      db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+      db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+      // Stored office = the review resolver's last resort (tracking-number
+      // leads with an area-label city, no mapped ZIP, no coords) — without
+      // it the report CTA falls through to the default office (codex r6).
+      'customers.nearest_location_id',
+      'customers.has_left_google_review',
+      'customers.waveguard_tier',
+      // Map center follows the treated parcel: stamped visit coords first,
+      // the primary home only for non-divergent stamps (codex round-9 P2).
+      db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+      db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+      // A stamped (rental) address that diverges from the home: the weekly
+      // watering plan is computed for the HOME parcel/county, so the report
+      // for the other property must not carry it (codex #3565 r6 P1).
+      db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
+      'technicians.name as technician_name',
+      'technicians.photo_url as technician_photo_url',
+      'technicians.avatar_url as technician_avatar_url',
+      'technicians.photo_s3_key as technician_photo_s3_key',
+      // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+      // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+      'technicians.fl_applicator_license as technician_fdacs_id',
+      'technicians.license_expiry as technician_license_expiry')
+    .first()
+    .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
+}
+
 // The web report tile's tap is a cross_sell_requested event that names the tile; while either of the tile's
 // gates is dark, or the visit is a callback, the tap answers the same 409 as a stale offer, before any recompute or write.
 async function webTileTapGate(req, res, next) {
   try {
     const metadata = req.body?.metadata;
+    const webActions = require('../services/service-report/web-actions');
     const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-      && metadata.source === require('../services/service-report/web-actions').WEB_TILE_SOURCE;
+      && metadata.source === webActions.WEB_TILE_SOURCE;
     if (!named) return next();
     const stale = () => res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
-    if (!require('../services/service-report/web-actions').webTileTapAllowed(metadata, require('../config/feature-gates'))) return stale();
+    if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))) return stale();
     // A complaint-driven (callback) visit never carries the tile, whatever GATE_RESERVICE_REPORT_COPY says, so a tap
     // from a page that somehow showed one is refused here too.
-    if (FULL_TOKEN_RE.test(req.params.token || '')) {
-      const record = await db('service_records').where({ report_view_token: req.params.token }).first('is_callback');
-      if (record?.is_callback === true) return stale();
+    if (!FULL_TOKEN_RE.test(req.params.token || '')) return next();
+    const record = await db('service_records').where({ report_view_token: req.params.token }).first('is_callback');
+    if (record?.is_callback === true) return stale();
+    // The tap must still match the CURRENT report: re-derive the tile's structured decision (the same table /data uses)
+    // from a fresh build, and refuse unless the same kind of finding still stands for the same service. A stale tab can
+    // therefore never create a request or an estimate for a finding the report no longer shows. The build asks for none
+    // of the /data render's live-only opt-ins (offers, plan card, lawn lighting, ...): the table's categories do not
+    // depend on them, and each of those stays opted into by the render alone.
+    const service = await loadReportServiceRow(req.params.token);
+    if (!service || service.report_template_version !== 'service_report_v1') return next();
+    let current;
+    try {
+      current = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', staffViewer: false });
+    } catch (err) {
+      logger.warn(`[reports-public] tile tap re-derive failed: ${err.message}`);
+      return res.status(503).json({ error: 'Could not record the request — please try again' });
     }
-    return next();
+    const stands = !current.internalOnly && current.isCallback !== true && webActions.findingKinds(current)
+      .some((row) => row.kind === metadata.kind && row.family === metadata.serviceKey);
+    return stands ? next() : stale();
   } catch (err) { return next(err); }
 }
 
@@ -2251,7 +2309,7 @@ async function resolveWebPhotoCustomer(req, res, next) {
 const lazyPhotoIdLimiter = (name) => (req, res, next) => require('./photo-id').photoIdLimiters[name](req, res, next);
 
 // The body is checked BEFORE any quota counts, so a malformed request never spends one.
-function validateWebPhotoBody(req, res, next) {
+async function validateWebPhotoBody(req, res, next) {
   const { validateRequestPhotos, decodedBase64Bytes } = require('../utils/request-photo-validation');
   const photos = req.body?.photos;
   if (!Array.isArray(photos) || photos.length !== 1) return res.status(400).json({ error: 'Attach one photo.' });
@@ -2259,6 +2317,17 @@ function validateWebPhotoBody(req, res, next) {
   if (!validated.ok) return res.status(validated.status || 400).json({ error: validated.error });
   if (decodedBase64Bytes(photos[0].slice(photos[0].indexOf(',') + 1)) > WEB_PHOTO_MAX_BYTES) {
     return res.status(413).json({ error: `That photo is too large. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.` });
+  }
+  // The image header's pixel count too, BEFORE the quota row and the shared limiter: a tiny file that claims
+  // a huge image is refused here without consuming an attempt (the same guard the transcode uses).
+  try {
+    const { assertPhotoWithinPixels } = require('../utils/photo-pixel-guard');
+    await assertPhotoWithinPixels(Buffer.from(photos[0].slice(photos[0].indexOf(',') + 1), 'base64'));
+  } catch (err) {
+    if (err && err.code === 'photo_too_large') {
+      return res.status(413).json({ error: `That photo is too large. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.` });
+    }
+    return next(err);
   }
   req.reportPhotoDataUrls = validated.photos;
   return next();
@@ -2756,44 +2825,7 @@ router.get('/:token/data', async (req, res, next) => {
     // This is the customer-facing document view. The token gates the report,
     // and the document should mirror other customer documents by showing the
     // service address.
-    const service = await db('service_records')
-      .where({ report_view_token: req.params.token })
-      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
-      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        // Report address = the visit's stamped service address when present
-        // (a phone-booked rental completes at the rental, not the primary
-        // home); the customer mirror is the fallback (codex round-9 P2).
-        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
-        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
-        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
-        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
-        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
-        // Stored office = the review resolver's last resort (tracking-number
-        // leads with an area-label city, no mapped ZIP, no coords) — without
-        // it the report CTA falls through to the default office (codex r6).
-        'customers.nearest_location_id',
-        'customers.has_left_google_review',
-        'customers.waveguard_tier',
-        // Map center follows the treated parcel: stamped visit coords first,
-        // the primary home only for non-divergent stamps (codex round-9 P2).
-        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
-        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
-        // A stamped (rental) address that diverges from the home: the weekly
-        // watering plan is computed for the HOME parcel/county, so the report
-        // for the other property must not carry it (codex #3565 r6 P1).
-        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
-        'technicians.name as technician_name',
-        'technicians.photo_url as technician_photo_url',
-        'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key',
-        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
-        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
-        'technicians.fl_applicator_license as technician_fdacs_id',
-        'technicians.license_expiry as technician_license_expiry')
-      .first()
-      .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
+    const service = await loadReportServiceRow(req.params.token);
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
     serviceRecordId = service.id;

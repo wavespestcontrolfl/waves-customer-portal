@@ -128,6 +128,7 @@ describe('web-actions: finding tile (structured identity only)', () => {
     expect(`${tile.sentence} ${tile.body} ${tile.button}`).not.toMatch(/\$|per visit|per month/i);
     expect(tile.tap).toEqual({
       source: 'web_actions_finding_tile',
+      kind: 'weeds',
       serviceKey: 'lawn_care', serviceLabel: 'Lawn Care', optionId: 'lawn-enhanced', perApplication: 61.5, offerMode: 'priced', fingerprint: 'fp-1',
     });
   });
@@ -600,15 +601,42 @@ describe('POST /reports/:token/photo-check quota and storage', () => {
 });
 
 describe('the finding tile tap rechecks its gates', () => {
-  const TILE_META = { source: 'web_actions_finding_tile', serviceKey: 'lawn_care', serviceLabel: 'Lawn Care', optionId: 'x', perApplication: 61.5, offerMode: 'priced', fingerprint: 'fp' };
+  const TILE_META = { source: 'web_actions_finding_tile', kind: 'weeds', serviceKey: 'lawn_care', serviceLabel: 'Lawn Care', optionId: 'x', perApplication: 61.5, offerMode: 'priced', fingerprint: 'fp' };
   const tap = (baseUrl, metadata) => fetch(`${baseUrl}/reports/${VALID_TOKEN}/events`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eventName: 'cross_sell_requested', channel: 'public_report', metadata }),
   });
+
+  // Every service_records read answers the same record, and the tables the report build touches are stubbed;
+  // `touched` lists every table a request reads or writes, `writes` every insert/update.
+  let touched;
+  let writes;
+  const tileDb = (record = {}) => {
+    const row = { id: 'service-1', customer_id: 'customer-1', report_template_version: 'service_report_v1', structured_notes: null, is_callback: false, first_name: 'Pat', last_name: 'Tester', ...record };
+    touched = [];
+    writes = [];
+    db.mockImplementation((table) => {
+      touched.push(table);
+      const base = chain({
+        first: jest.fn().mockResolvedValue(row),
+        insert: jest.fn(async () => { writes.push(table); return 1; }),
+        update: jest.fn(async () => { writes.push(table); return 1; }),
+      });
+      if (table === 'service_products') return chain({ where: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records' || table === 'service_records as sr' || table === 'activity_log') return base;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  };
+  const liveReport = (insights = [insight('weeds')], extra = {}) => buildReportV1Data.mockImplementation(async () => ({
+    serviceLine: 'lawn', reportV2: { insights }, pdfUrl: `/api/reports/${VALID_TOKEN}`, applications: [], ...extra,
+  }));
 
   beforeEach(() => {
     jest.clearAllMocks();
     setGates();
     mockDb();
+    tileDb();
+    liveReport();
+    buildReportCrossSell.mockResolvedValue(offer());
   });
 
   test('the offer made for the tile carries the tile source in its tap metadata', async () => {
@@ -651,20 +679,66 @@ describe('the finding tile tap rechecks its gates', () => {
     }
   });
 
-  test('both gates live: the tap goes on to the normal path (the offer is recomputed server-side)', async () => {
+  test('both gates live and the report still shows the same finding: the tap goes on to the normal path (offer recomputed)', async () => {
     await withServer(async (baseUrl) => {
       await tap(baseUrl, TILE_META); // its own fingerprint check may still answer 409 downstream; what matters is it got past the tile gate
     });
     expect(buildReportCrossSell).toHaveBeenCalled();
   });
 
+  test('a stale tab: the report\'s insight changed, so the tap answers 409 and creates no request or estimate', async () => {
+    liveReport([insight('weeds', 'healthy')]);
+    await withServer(async (baseUrl) => {
+      const res = await tap(baseUrl, TILE_META);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/no longer available/);
+    });
+    expect(buildReportCrossSell).not.toHaveBeenCalled(); // never reached the offer recompute
+    expect(writes).toEqual([]); // nothing inserted or updated anywhere
+    expect(touched.every((t) => /service_records|service_products|activity_log/.test(t))).toBe(true);
+    expect(touched).not.toContain('service_requests');
+    expect(touched).not.toContain('estimates');
+  });
+
+  test.each([
+    ['the finding is gone from the report', () => liveReport([])],
+    ['it is a different kind of finding now', () => liveReport([insight('pest_pressure', 'needs_attention')], { serviceLine: 'tree_shrub' })],
+    ['the report became a callback', () => liveReport([insight('weeds')], { isCallback: true })],
+    ['the report went internal-only', () => liveReport([insight('weeds')], { internalOnly: true })],
+  ])('%s: the tap answers 409 and nothing is written', async (_name, change) => {
+    change();
+    await withServer(async (baseUrl) => {
+      expect((await tap(baseUrl, TILE_META)).status).toBe(409);
+    });
+    expect(buildReportCrossSell).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  test('a tap whose kind or service the table does not pair is refused even while the finding stands', async () => {
+    await withServer(async (baseUrl) => {
+      expect((await tap(baseUrl, { ...TILE_META, kind: 'shrub_pests' })).status).toBe(409);
+      expect((await tap(baseUrl, { ...TILE_META, serviceKey: 'pest_control' })).status).toBe(409);
+      expect((await tap(baseUrl, { ...TILE_META, kind: undefined })).status).toBe(409);
+    });
+    expect(buildReportCrossSell).not.toHaveBeenCalled();
+  });
+
+  test('a failed re-derive fails closed with a retry message and no write', async () => {
+    buildReportV1Data.mockImplementation(async () => { throw new Error('db down'); });
+    await withServer(async (baseUrl) => {
+      const res = await tap(baseUrl, TILE_META);
+      expect(res.status).toBe(503);
+    });
+    expect(writes).toEqual([]);
+  });
+
   test('the old report card\'s tap (no tile source) is not affected by the tile gates', async () => {
     setGates({ actions: false, click: false });
     await withServer(async (baseUrl) => {
       const { source: _tile, ...oldCard } = TILE_META;
-      const res = await tap(baseUrl, oldCard);
-      expect(res.status).not.toBe(409);
+      await tap(baseUrl, oldCard); // may still 409 on its own fingerprint check; what matters is the tile gate did not stop it
     });
+    expect(buildReportCrossSell).toHaveBeenCalled();
   });
 
   test('webTileTapAllowed reads the gates strictly', () => {
@@ -703,5 +777,41 @@ describe('POST /reports/:token/photo-check palm subject', () => {
     expect(webActions.photoSubjectForLine('palm')).toBe('palm');
     expect(webActions.photoSubjectForLine('tree_shrub')).toBeNull();
     expect(webActions.photoSubjectForLine(undefined)).toBeNull();
+  });
+});
+
+describe('POST /reports/:token/photo-check pixel bomb is refused before any counter', () => {
+  const sharp = require('sharp');
+  async function bombJpeg(width, height) {
+    const jpeg = Buffer.from(await sharp({ create: { width: 8, height: 8, channels: 3, background: '#808080' } }).jpeg().toBuffer());
+    for (let i = 0; i < jpeg.length - 9; i += 1) {
+      if (jpeg[i] === 0xff && (jpeg[i + 1] === 0xc0 || jpeg[i + 1] === 0xc2)) { jpeg.writeUInt16BE(height, i + 5); jpeg.writeUInt16BE(width, i + 7); return jpeg; }
+    }
+    throw new Error('no SOF');
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setGates();
+    mockDb();
+    photoId.runCustomerPhotoId.mockResolvedValue({ status: 200, body: { result: { summary: 'ok' }, next_step: { kind: 'request' } } });
+    homeCheck = jest.spyOn(webActions, 'visitIsAtPrimaryHome').mockResolvedValue(true);
+  });
+  afterEach(() => homeCheck.mockRestore());
+
+  test('a tiny file claiming 60000 x 60000 pixels answers 413 with the phone and spends neither the token quota nor the shared limiter', async () => {
+    const bomb = `data:image/jpeg;base64,${(await bombJpeg(60000, 60000)).toString('base64')}`;
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 8; i += 1) {
+        const res = await post(baseUrl, { photos: [bomb] });
+        expect(res.status).toBe(413);
+        expect((await res.json()).error).toContain(PHONE);
+      }
+      // the quota is untouched: all 5 real attempts still succeed afterwards
+      for (let i = 0; i < 5; i += 1) expect((await post(baseUrl, { photos: [JPEG(2000)] })).status).toBe(200);
+    });
+    expect(events.filter((e) => e.event_name === 'report_photo_check_call')).toHaveLength(5);
+    expect(photoId.photoIdLimiters.sharedDailyLimiter).toHaveBeenCalledTimes(5);
+    expect(photoId.runCustomerPhotoId).toHaveBeenCalledTimes(5);
   });
 });

@@ -65,6 +65,8 @@ async function buildFindingTile(data, { buildCrossSell }) {
     tap: {
       // Names the web report tile, so the server rechecks its gates when it is tapped.
       source: WEB_TILE_SOURCE,
+      // The structured finding the tile was made for; the tap re-derives it from the current report.
+      kind: match.kind,
       serviceKey: offer.serviceKey,
       serviceLabel: offer.label,
       optionId: offer.option?.id || null,
