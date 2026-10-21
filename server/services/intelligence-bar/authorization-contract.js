@@ -129,6 +129,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 // send_invoice: its card lines come from its own preview
 // (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
+// void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -193,6 +195,7 @@ const ACTION_LABELS = {
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
+  void_invoice: 'Void an invoice (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -817,6 +820,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // label leads with its topic.
   if (toolName === 'accept_estimate' && Array.isArray(preview?.card_lines)) {
     for (const l of preview.card_lines) push(l.kind, l.label, l.before !== undefined ? { before: l.before, after: l.after } : {});
+  }
+  // void_invoice: the invoice, what the void does and that nothing is sent.
+  if (toolName === 'void_invoice' && preview?.preview === true) {
+    for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

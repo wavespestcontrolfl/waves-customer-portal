@@ -684,6 +684,35 @@ async function stopInvoiceFollowupSequence(invoiceId, reason) {
   }
 }
 
+// The Intelligence Bar's void_invoice card pins the invoice version it showed (voidInvoice's `expected`
+// option, set only by the void route's in-process bar shim; the Invoices page never passes it). Compared
+// on the row read at the start (so a changed invoice is refused before any Stripe call) and again as
+// extra predicates on the void's own UPDATE (so a change after that read loses atomically).
+// expected: { status, updatedAt (ms or null), total, creditApplied, paymentIntentId }.
+function assertVoidExpected(row, expected) {
+  if (!expected) return;
+  const ms = (v) => (v ? new Date(v).getTime() : null);
+  const cents = (v) => Math.round((Number(v) || 0) * 100);
+  const changed = row.status !== expected.status
+    || ms(row.updated_at) !== (expected.updatedAt ?? null)
+    || cents(row.total) !== cents(expected.total)
+    || cents(row.credit_applied) !== cents(expected.creditApplied)
+    || Boolean(row.payment_recorded_at)
+    || (row.stripe_payment_intent_id || null) !== (expected.paymentIntentId || null);
+  if (changed) throw new Error("Invoice status changed while voiding — re-check and retry");
+}
+function applyVoidExpected(q, expected) {
+  if (!expected) return q;
+  if (expected.updatedAt) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
+  else q.whereNull("updated_at");
+  q.whereRaw("ROUND(COALESCE(total, 0) * 100) = ?", [Math.round((Number(expected.total) || 0) * 100)])
+    .whereRaw("ROUND(COALESCE(credit_applied, 0) * 100) = ?", [Math.round((Number(expected.creditApplied) || 0) * 100)])
+    .whereNull("payment_recorded_at");
+  if (expected.paymentIntentId) q.where("stripe_payment_intent_id", expected.paymentIntentId);
+  else q.whereNull("stripe_payment_intent_id");
+  return q;
+}
+
 function isInvoiceNumberCollision(err) {
   return err?.code === "23505" &&
     `${err.constraint || ""} ${err.detail || ""}`.includes("invoice_number");
@@ -10891,7 +10920,7 @@ const InvoiceService = {
     return edited;
   },
 
-  async voidInvoice(id, { requireUnsettled = false } = {}) {
+  async voidInvoice(id, { requireUnsettled = false, expected } = {}) {
     // Refuse to void a paid invoice. A paid invoice has a payments-ledger
     // row + (usually) a Stripe charge; flipping it to "void" silently
     // hides the revenue from dashboards but leaves the money collected
@@ -10900,6 +10929,9 @@ const InvoiceService = {
     // transition matrix so the unit tests can verify it without DB.
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
+    // The bar's pinned version (see voidExpectedMismatch): a changed invoice stops here, before any
+    // Stripe call. Absent for every other caller, so nothing below differs for them.
+    assertVoidExpected(current, expected);
     assertInvoiceVoidable(current.status);
     // Phase 2: an accrued invoice on a FINALIZED/sent statement is a billed line —
     // refuse to void it (which would change the document under the frozen total);
@@ -11022,8 +11054,7 @@ const InvoiceService = {
       if (requireUnsettled) {
         await assertInvoiceGenuinelyUnsettledLocked(trx, id);
       }
-      const [updated] = await trx("invoices")
-        .where({ id, status: current.status })
+      const [updated] = await applyVoidExpected(trx("invoices").where({ id, status: current.status }), expected)
         .update({ status: "void", send_claim_token: null, updated_at: new Date() })
         .returning("*");
       if (!updated) {

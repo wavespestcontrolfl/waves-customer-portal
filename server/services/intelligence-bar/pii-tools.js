@@ -39,6 +39,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'correct_invoice_address',
   // accept_estimate previews name the customer and a masked email.
   'accept_estimate',
+  // void_invoice previews name the customer and the invoice.
+  'void_invoice',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
