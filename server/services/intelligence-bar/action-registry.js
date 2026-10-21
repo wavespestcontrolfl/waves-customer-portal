@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibVoidInvoiceLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -71,6 +71,7 @@ const MODULES = [
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
   ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
+  ['void-invoice-tools', 'VOID_INVOICE_TOOLS', 'executeVoidInvoiceTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['address-tools', 'ADDRESS_TOOLS', 'executeAddressTool'],
@@ -134,6 +135,7 @@ const GATED_ACTIONS = {
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
   accept_estimate: () => ibAcceptEstimateLive(),
+  void_invoice: () => ibVoidInvoiceLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
 };

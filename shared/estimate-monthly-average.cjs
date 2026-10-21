@@ -4,7 +4,7 @@
 // (owner ruling 2026-10-20, GATE_ESTIMATE_MONTHLY_AVERAGE).
 //
 // The per-application price STAYS the price. This module only derives the
-// smaller "about $X a month" line that sits under it. It never prices anything:
+// smaller "$X a month" line that sits under it. It never prices anything:
 // every figure comes from numbers a surface already shows (per-application
 // price and visit count per recurring service) and from the estimate's stored
 // monthly total, which is the authority the plan average must equal.
@@ -116,7 +116,7 @@ function buildMonthlyAverage({ services, planMonthly, credit = null, bundleDisco
   };
 }
 
-const aboutMonth = (amount) => `about ${money(amount)} a month`;
+const monthlyText = (amount) => `${money(amount)} a month`;
 
 // "Your plan averages" label, with the bundle clause when one applies.
 function planLabel(model) {
@@ -139,10 +139,10 @@ function emailParts(model, oneTime = null) {
   if (model.multi) {
     // The per-application prices stay the prices (they sit on each card and in
     // the PDF); the average never stands alone as THE price (owner 2026-10-20).
-    priceLine = `Priced per application · plan averages ${aboutMonth(model.planMonthly)}`;
+    priceLine = `Priced per application · plan averages ${monthlyText(model.planMonthly)}`;
   } else {
     const only = model.services[0];
-    priceLine = `${money(only.perApplication)} per application · ${aboutMonth(model.planMonthly)}`;
+    priceLine = `${money(only.perApplication)} per application · ${monthlyText(model.planMonthly)}`;
   }
   const included = [];
   if (model.bundlePct > 0) included.push('bundle savings');
@@ -164,7 +164,7 @@ module.exports = {
   RECONCILE_TOLERANCE,
   buildMonthlyAverage,
   planLabel,
-  aboutMonth,
+  monthlyText,
   emailParts,
   money,
 };

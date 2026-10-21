@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
@@ -934,6 +934,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // void_invoice: the card names the invoice, the customer and the amount; the lines ride the contract.
+  void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -973,6 +977,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
+  void_invoice: '_verified_invoice_void_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -3361,7 +3367,7 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). Never create an invoice, change an amount, charge a card, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. Never create an invoice, change an amount, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
@@ -3951,6 +3957,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // an owner-direct fallback read is unscoped.
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
+              // Name matcher v2 ranks the customer on screen first. Route-derived
+              // (the page the operator is viewing), never model input; absent when dark.
+              ...(nameMatchV2Live() ? { pageCustomerId: TaskContext.pageIds(pageData || {}).customer_id || null } : {}),
               // General admin read (owner ruling 2026-10-12): the request's own
               // login and bearer token, set here from the authenticated request,
               // never from model input; read_admin_data forwards the token on
