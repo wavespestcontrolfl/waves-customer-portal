@@ -282,6 +282,8 @@ async function buildPlan(input) {
   const addressFields = Object.keys(body).filter(writeRules.bodyKeyLooksLikeAddress);
   // The card shows the current text with credentials scrubbed (the model sees it too); the pin covers the raw value.
   const shown = redactSecrets(snapshot.current, newState());
+  // The label carries stored names and subjects, so it is scrubbed the same way; the pin covers the raw label.
+  const shownLabel = redactSecrets(snapshot.label, newState());
   const changes = Object.keys(body).sort().map(field => ({ field, before: shown[field], after: body[field] }));
   const version = digestOf({
     m: row.method, e: row.endpoint, p: pathParams, b: body, c: bound.customerId, d: row.digest,
@@ -289,7 +291,7 @@ async function buildPlan(input) {
   });
   return {
     row, path: built.path, paramIndexes: built.paramIndexes, body, pathParams, customerId: bound.customerId,
-    changes, addressFields, version, label: snapshot.label, recordVersion: snapshot.version,
+    changes, addressFields, version, label: shownLabel, recordVersion: snapshot.version,
   };
 }
 

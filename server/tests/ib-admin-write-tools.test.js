@@ -753,6 +753,26 @@ describe('the record snapshot: label, current values, version', () => {
     expect(callsOf()).toHaveLength(0);
   });
 
+  test('credentials in a template name or subject are scrubbed from the record label (card, preview and receipt), yet the pin covers the raw label', async () => {
+    const version = catalog.entries.find(e => e.endpoint === '/admin/email-templates/versions/:id');
+    world.email_template_versions[0].subject = 'Portal password: hunter2hunter2 https://example.s3.amazonaws.com/f?X-Amz-Signature=abcdef0123456789';
+    const first = await propose(inputFor(version));
+    for (const text of [JSON.stringify(first), JSON.stringify(cardLines(first)), JSON.stringify(displayParams(first))]) {
+      expect(text).not.toContain('hunter2hunter2');
+      expect(text).not.toContain('X-Amz-Signature');
+    }
+    const done = await propose({ ...inputFor(version), confirmed: true, _approved_edit_pin: first._version });
+    expect(JSON.stringify(done)).not.toContain('hunter2hunter2');
+    expect(done).toMatchObject({ success: true });
+    world = seedWorld();
+    world.email_template_versions[0].subject = 'Portal password: different9different9';
+    expect((await propose(inputFor(version)))._version).not.toBe(first._version);
+    const sms = catalog.entries.find(e => e.endpoint === '/admin/sms-templates/:id');
+    world = seedWorld();
+    world.sms_templates[0].name = 'Gate PIN is 4821 password: hunter2hunter2';
+    expect(JSON.stringify(await propose(inputFor(sms)))).not.toContain('hunter2hunter2');
+  });
+
   test('credentials in the current text are scrubbed on the card, yet the pin covers the real text', async () => {
     const entry = catalog.entries.find(e => e.endpoint === '/admin/dispatch/:serviceId/note');
     world.scheduled_services[0].notes = 'Alarm password: hunter2hunter2 and see https://example.s3.amazonaws.com/f?X-Amz-Signature=abcdef0123456789';
