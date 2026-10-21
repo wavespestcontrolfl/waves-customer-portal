@@ -105,26 +105,38 @@ function withoutTrackBearers(tracker) {
   return { ...tracker, trackToken: null, trackUrl: null };
 }
 
-// An upcoming-visit entry with its action bearers removed.
-function withoutVisitBearers(visit) {
+// The holder's plan-coverage facts a visit entry carries for the portal's
+// plan cards (recurring / callback / WaveGuard family). A contact's view
+// withholds the holder's plan everywhere else (/auth/me, the report PDF,
+// the refused coverage-only payload), so the ordinary /api/schedule and
+// /api/schedule/next entries drop them too (codex #6363 r15 P2): the
+// visit's date, window, service type, status and technician stay.
+const PLAN_SIGNAL_KEYS = ['isRecurring', 'isCallback', 'waveguardQualifying', 'serviceFamily'];
+
+// A visit entry for a contact: no action bearer, no plan signal.
+function contactVisit(visit) {
   if (!visit) return visit;
-  return { ...visit, rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null };
+  const out = { ...visit, rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null };
+  for (const key of PLAN_SIGNAL_KEYS) delete out[key];
+  return out;
 }
 
 // The GET /api/schedule payload for a contact: no re-service card, no
-// overlay handoff, no per-visit bearer.
+// overlay handoff, no cancellable-work flag (a holder's action signal), no
+// per-visit bearer or plan signal.
 function contactSchedulePayload(payload) {
   return {
     ...payload,
+    hasCancellableWork: false,
     reservice: null,
     overlayHandoff: false,
-    upcoming: (payload.upcoming || []).map(withoutVisitBearers),
+    upcoming: (payload.upcoming || []).map(contactVisit),
   };
 }
 
 // The GET /api/schedule/next payload for a contact.
 function contactNextPayload(payload) {
-  return { ...payload, next: withoutVisitBearers(payload.next) };
+  return { ...payload, next: contactVisit(payload.next) };
 }
 
 module.exports = {
@@ -135,5 +147,5 @@ module.exports = {
   withoutTrackBearers,
   contactSchedulePayload,
   contactNextPayload,
-  _test: { WITHHELD_REPORT_ARTIFACTS },
+  _test: { WITHHELD_REPORT_ARTIFACTS, PLAN_SIGNAL_KEYS },
 };

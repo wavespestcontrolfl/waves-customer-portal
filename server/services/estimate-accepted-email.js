@@ -298,6 +298,19 @@ async function resolveRecipient({ customerId, estimateId }) {
     : null;
   const own = usableEmail(customer?.email) ? null : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
   let email = clean(own ? own.customer_email : customer?.email);
+  // The estimate's own address under a linked row may be the slot-1
+  // on-location contact's (the occupant who requested it under the holder's
+  // record), and that contact's email master switch (contact login,
+  // GATE_CONTACT_LOGIN) governs this send like every other (codex #6363 r15
+  // P2): the dispatch-time reroute the deferred sends use moves it to the
+  // holder, or holds it (null) when the holder has no address — then the
+  // account-primary step below applies, as it would for an empty estimate
+  // address. The holder's own address and a stranger's pass through; the
+  // row's own address (the `own` branch not taken) is the holder's by
+  // definition and is never re-resolved.
+  if (own && customer && usableEmail(email)) {
+    email = clean((await require('./contact-notification-prefs').rerouteForContactEmailOptOut(customer.id, email)).email);
+  }
   if (!usableEmail(email) && customer) email = clean((await withAccountPrimaryContact({ ...customer, email: '' })).email);
   if (!usableEmail(email)) return null;
   return { email, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };

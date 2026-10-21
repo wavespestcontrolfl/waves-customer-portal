@@ -123,16 +123,25 @@ describe('pure projections', () => {
     expect(projection.withoutTrackBearers(null)).toBeNull();
   });
 
-  test('contactSchedulePayload / contactNextPayload drop every bearer and the re-service card', () => {
+  test('contactSchedulePayload / contactNextPayload drop every bearer, the re-service card, the cancellable flag and the plan signals (codex r15)', () => {
     const out = projection.contactSchedulePayload({
       hasCancellableWork: true, reservice: { url: '/reservice/rt', lanes: ['pest'] }, overlayHandoff: true,
-      upcoming: [{ id: 'a', date: '2099-01-05', rescheduleUrl: '/reschedule/t1', calendarUrl: '/api/public/appointment/t1/calendar.ics', calendarExpiresAt: '2099-01-05T17:00:00Z' }],
+      upcoming: [{
+        id: 'a', date: '2099-01-05', serviceType: 'Pest Control', status: 'confirmed', technician: 'Adam', serviceDisplayName: null,
+        isRecurring: true, isCallback: false, waveguardQualifying: true, serviceFamily: 'pest',
+        rescheduleUrl: '/reschedule/t1', calendarUrl: '/api/public/appointment/t1/calendar.ics', calendarExpiresAt: '2099-01-05T17:00:00Z',
+      }],
     });
+    expect(out.hasCancellableWork).toBe(false);
     expect(out.reservice).toBeNull();
     expect(out.overlayHandoff).toBe(false);
-    expect(out.upcoming[0]).toEqual({ id: 'a', date: '2099-01-05', rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null });
+    expect(out.upcoming[0]).toEqual({
+      id: 'a', date: '2099-01-05', serviceType: 'Pest Control', status: 'confirmed', technician: 'Adam', serviceDisplayName: null,
+      rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null,
+    });
+    for (const key of projection._test.PLAN_SIGNAL_KEYS) expect(key in out.upcoming[0]).toBe(false);
     expect(projection.contactNextPayload({ next: null })).toEqual({ next: null });
-    expect(projection.contactNextPayload({ next: { id: 'n', rescheduleUrl: '/reschedule/t', calendarUrl: 'c', calendarExpiresAt: 'e' } }).next)
+    expect(projection.contactNextPayload({ next: { id: 'n', isRecurring: true, isCallback: true, rescheduleUrl: '/reschedule/t', calendarUrl: 'c', calendarExpiresAt: 'e' } }).next)
       .toEqual({ id: 'n', rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null });
   });
 
@@ -186,12 +195,17 @@ describe('GET /schedule and /schedule/next for a contact session', () => {
       expect(body.upcoming[0]).toMatchObject({ id: 'svc-1', date: '2099-01-05', technician: 'Adam', rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null });
       expect(body.reservice).toBeNull();
       expect(body.overlayHandoff).toBe(false);
+      // The holder's plan facts stay off the ordinary payload too (codex r15).
+      expect(body.hasCancellableWork).toBe(false);
+      for (const key of ['isRecurring', 'isCallback', 'waveguardQualifying', 'serviceFamily']) expect(body.upcoming[0]).not.toHaveProperty(key);
       expect(JSON.stringify(body)).not.toMatch(/tok-1|rt-1/);
     });
     db.mockImplementation(() => chain([row]));
     await withServer(async (get) => {
       const { body } = await get('/schedule/next');
       expect(body.next).toMatchObject({ id: 'svc-1', rescheduleUrl: null, calendarUrl: null, calendarExpiresAt: null });
+      expect(body.next).not.toHaveProperty('isRecurring');
+      expect(body.next).not.toHaveProperty('isCallback');
       expect(JSON.stringify(body)).not.toContain('tok-1');
     });
   });
