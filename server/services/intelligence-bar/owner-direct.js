@@ -280,8 +280,8 @@ const TRUSTED_READS = new Set([
   'get_revenue_overview', 'compare_revenue_periods', 'get_service_line_pnl', 'get_tech_revenue_performance',
   // pricing config the team wrote
   'get_waveguard_tiers', 'read_pricing_config',
-  // control replies
-  'offer_choices', 'find_admin_reads',
+  // control replies (server-authored metadata)
+  'offer_choices', 'find_admin_reads', 'discover_capabilities',
 ]);
 
 const actionPolicy = require('./action-policy.json');
@@ -350,7 +350,13 @@ async function threadTaintVerdict(actorId, threadId) {
 //     is only reached with threads off or after a failed append;
 //   - the first message of a conversation (no history, no thread id) is not.
 // `needed` is false when owner-direct is off, where the flag decides nothing.
-async function loadRequestTaint({ history, threadId, actorId, needed = true, fullAccess = false, conversationHistory = [] }) {
+async function loadRequestTaint(args) {
+  const taint = await loadUntrustedTaint(args);
+  if (args.needed !== false && await sameNameChoicePending(args.actorId, args.threadId)) taint.sameNameCandidates = true;
+  return taint;
+}
+
+async function loadUntrustedTaint({ history, threadId, actorId, needed = true, fullAccess = false, conversationHistory = [] }) {
   const taint = newRequestTaint(history);
   if (taint.untrustedRead || !needed) return taint;
   const verdict = await threadTaintVerdict(actorId, threadId);
@@ -429,7 +435,31 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // path (customer edits, create_customer and the other exempt tools) asks executesWithoutCard
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
-  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) taint.sameNameCandidates = true;
+  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) {
+    taint.sameNameCandidates = true;
+    taint.sameNameEmitted = true;
+  }
+}
+
+// A request that offered choice buttons also leaves a pending same-name choice: the tap
+// sends the button text back as the next message (Codex #6369 r16).
+function noteChoicesOffered(taint, choices) {
+  if (taint && ibTargetRulesV2Live() && Array.isArray(choices) && choices.length) taint.sameNameEmitted = true;
+}
+
+// Does this request's reply leave a pending same-name choice on the thread? Only what THIS
+// request emitted counts, never what it consumed, so the marker clears after one exchange.
+const sameNameMarkerNeeded = taint => Boolean(taint?.sameNameEmitted) && ibTargetRulesV2Live();
+
+// The marker check for a new request: a pending same-name choice cards every write in it.
+// An unreadable thread fails closed.
+async function sameNameChoicePending(actorId, threadId) {
+  if (!threadId || !actorId || !ibTargetRulesV2Live()) return false;
+  try {
+    return (await IbThreads.hasSameNameChoicePending(actorId, threadId)) === true;
+  } catch {
+    return true;
+  }
 }
 
 const cardsEveryWrite = taint => Boolean(taint?.untrustedRead || taint?.sameNameCandidates);
@@ -628,4 +658,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { TRUSTED_READS, noteSameNameContext, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, noteSameNameContext, noteChoicesOffered, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

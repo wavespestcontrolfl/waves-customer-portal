@@ -609,7 +609,7 @@ async function initialFormIds(prompt) {
 // digits, punctuation) gives the customer no button (Codex #6369 r12).
 const SAFE_CITY_RE = /^\p{L}[\p{L}'-]*(?: \p{L}[\p{L}'-]*){0,2}$/u;
 // A word that reads as a command ("Update", "Assign", "Delete") is never a place name.
-const COMMAND_WORD_RE = new RegExp(`\\b(?:${PERSON_ACTIONS}|assign|add|remove|rate|tier|waive|apply)\\b`, 'i');
+const COMMAND_WORD_RE = new RegExp(`\\b(?:${PERSON_ACTIONS}|assign|add|remove|rate|tier|waive|apply|ignore|disregard|override|instructions?|system|assistant|prompt|previous|rules?|owner|admin|tool|confirm|approve|execute|run)\\b`, 'i');
 const safeChoiceCity = city => {
   const text = String(city || '').trim();
   return text.length <= 30 && SAFE_CITY_RE.test(text) && !COMMAND_WORD_RE.test(text) ? text : null;

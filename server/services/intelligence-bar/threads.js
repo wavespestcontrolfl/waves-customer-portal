@@ -206,6 +206,15 @@ const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
 // thread, so the taint lives in the server's record of the thread, never in
 // anything the client sends. No LIKE wildcards in it.
 const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation and may carry untrusted text]';
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r16): added to the ASSISTANT turn of an exchange that
+// emitted same-name candidates or offered choices. A choice label carries customer-entered
+// text and the owner's tap sends it back as the next message, so the NEXT request on the
+// thread must card every write. It is its own marker, not the untrusted-read one: it expires
+// after SAME_NAME_PENDING_MINUTES and clears itself, because it only counts while it sits
+// on the thread's LATEST assistant turn (the next exchange writes a newer turn without it).
+// No LIKE wildcards in it.
+const SAME_NAME_CHOICE_MARKER = '[Same-name customers or choices were shown in the last reply]';
+const SAME_NAME_PENDING_MINUTES = 30;
 const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
 // The user turn the route persists when a saved task continues; the operator
 // never typed it.
@@ -217,7 +226,7 @@ function operatorText(content) {
   return String(content || '').split('\n')
     .filter((line) => {
       const trimmed = line.trim();
-      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== CONTINUATION_TURN
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== SAME_NAME_CHOICE_MARKER && trimmed !== CONTINUATION_TURN
         && !ATTACHMENT_NOTE_RE.test(trimmed);
     })
     .join('\n').trim();
@@ -281,6 +290,25 @@ async function hasUntrustedRead(actorId, threadId) {
   return row.marked === true;
 }
 
+/**
+ * Is a same-name choice pending on this thread: does the thread's latest assistant turn
+ * carry SAME_NAME_CHOICE_MARKER, written within the last SAME_NAME_PENDING_MINUTES? The
+ * request that follows consumes it (its own newer assistant turn replaces the latest one).
+ * Throws when the thread cannot be read so the caller can fail closed.
+ */
+async function hasSameNameChoicePending(actorId, threadId) {
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .first(db.raw(`EXISTS (
+      SELECT 1 FROM ib_thread_turns t
+      WHERE t.thread_id = ib_threads.id AND t.role = 'assistant'
+        AND t.seq = (SELECT MAX(seq) FROM ib_thread_turns WHERE thread_id = ib_threads.id AND role = 'assistant')
+        AND t.content LIKE ?
+        AND t.created_at >= NOW() - (? || ' minutes')::interval) AS pending`, [`%${SAME_NAME_CHOICE_MARKER}%`, String(SAME_NAME_PENDING_MINUTES)]));
+  if (!row) throw new Error('thread not readable');
+  return row.pending === true;
+}
+
 async function listThreads(actorId, limit = 20) {
   if (!actorId) return [];
   return db('ib_threads')
@@ -314,7 +342,9 @@ module.exports = {
   IMAGE_TAINT_MARKER,
   PII_TAINT_MARKER,
   UNTRUSTED_READ_MARKER,
+  SAME_NAME_CHOICE_MARKER,
   hasUntrustedRead,
+  hasSameNameChoicePending,
   CONTINUATION_TURN,
   purgeExpiredThreads,
   deriveTitle,

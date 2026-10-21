@@ -876,13 +876,23 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
       OwnerDirect.noteUntrustedRead(taint, tool, leadRows);
       expect([tool, taint.untrustedRead]).toEqual([tool, true]);
     }
-    expect([...OwnerDirect.TRUSTED_READS].sort()).toEqual(['compare_periods', 'compare_revenue_periods', 'find_admin_reads', 'get_kpi_snapshot', 'get_mrr_trend',
+    expect([...OwnerDirect.TRUSTED_READS].sort()).toEqual(['compare_periods', 'compare_revenue_periods', 'discover_capabilities', 'find_admin_reads', 'get_kpi_snapshot', 'get_mrr_trend',
       'get_revenue_overview', 'get_service_line_pnl', 'get_service_mix', 'get_tech_revenue_performance', 'get_waveguard_tiers', 'offer_choices', 'read_pricing_config']);
+  });
+
+  test('discover_capabilities is a trusted control result; the unknown-tool default still taints (Codex #6369 r16)', () => {
+    process.env[ON] = 'true';
+    const taint = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteUntrustedRead(taint, 'discover_capabilities', { capabilities: [{ id: 'x', availability: 'loaded' }] });
+    expect(taint.untrustedRead).toBe(false);
+    OwnerDirect.noteUntrustedRead(taint, 'brand_new_reader', { rows: [] });
+    expect(taint.untrustedRead).toBe(true);
   });
 
   test('every TRUSTED_READS tool is a known read in the action policy', () => {
     const policy = require('../services/intelligence-bar/action-policy.json');
-    for (const tool of OwnerDirect.TRUSTED_READS) expect([tool, policy[tool]?.kind]).toEqual([tool, 'read']);
+    // discover_capabilities is the action registry's own discovery tool, not a policy row.
+    for (const tool of OwnerDirect.TRUSTED_READS) expect([tool, tool === 'discover_capabilities' ? 'read' : policy[tool]?.kind]).toEqual([tool, 'read']);
   });
 
   test('gate on: an unknown or new read tool taints by default; a write result, an error and a refusal do not', () => {
@@ -915,5 +925,62 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     // A lead read with no saved result fails closed; one that errored does not taint.
     expect(OwnerDirect.untrustedReadInHistory([history[0]])).toBe(true);
     expect(OwnerDirect.untrustedReadInHistory([history[0], { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: JSON.stringify({ error: 'x' }) }] }])).toBe(false);
+  });
+});
+
+describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
+  const IbThreads = require('../services/intelligence-bar/threads');
+  const edit = { customer_id: id(101), updates: { phone: '941-555-0100' } };
+  const owner = { target: { customer_id: id(101), provenance: 'current_request_lookup' }, targets: [], typedCustomerIds: [id(101)], page: { ids: {} } };
+  const load = (pending) => {
+    jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(false);
+    jest.spyOn(IbThreads, 'hasSameNameChoicePending').mockImplementation(async () => { if (pending === 'throw') throw new Error('unreadable'); return pending; });
+    return OwnerDirect.loadRequestTaint({ history: [], threadId: id(1), actorId: id(2), needed: true, fullAccess: true, conversationHistory: [{ role: 'user', content: 'hi' }] });
+  };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('request 1 offers choices; request 2 (the tapped label) is carded; request 3 is direct again', async () => {
+    process.env[ON] = 'true';
+    const grounding = OwnerDirect.targetGrounding(owner);
+    // Request 1: same-name candidates in context and choices offered: the reply leaves the marker.
+    const first = await load(false);
+    OwnerDirect.noteSameNameContext(first, { candidates: [{}, {}] });
+    OwnerDirect.noteChoicesOffered(first, ['Pat Example, Venice', 'Pat Example, Osprey']);
+    expect(OwnerDirect.sameNameMarkerNeeded(first)).toBe(true);
+    // Request 2: the owner sends the label text back. The marker is pending: every write is carded,
+    // although this request carries no same-name candidates of its own.
+    const second = await load(true);
+    expect(second.sameNameCandidates).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, second, grounding)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('create_customer', { first_name: 'Sam', last_name: 'Newcomer' }, null, second, grounding)).toBe(false);
+    // What request 2 consumed is not re-emitted, so its reply leaves no marker.
+    expect(OwnerDirect.sameNameMarkerNeeded(second)).toBe(false);
+    // Request 3: the latest assistant turn has no marker, so writes run direct again.
+    const third = await load(false);
+    expect(third.sameNameCandidates).toBeUndefined();
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, third, grounding)).toBe(true);
+  });
+
+  test('an unreadable thread fails closed; gate off or no thread id ignores the marker', async () => {
+    process.env[ON] = 'true';
+    expect((await load('throw')).sameNameCandidates).toBe(true);
+    const noThread = await OwnerDirect.loadRequestTaint({ history: [], threadId: null, actorId: id(2), needed: true, fullAccess: false, conversationHistory: [] });
+    expect(noThread.sameNameCandidates).toBeUndefined();
+    delete process.env[ON];
+    expect((await load(true)).sameNameCandidates).toBeUndefined();
+    const off = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteChoicesOffered(off, ['a', 'b']);
+    expect(OwnerDirect.sameNameMarkerNeeded(off)).toBe(false);
+  });
+
+  test('the marker has no LIKE wildcard characters', () => {
+    expect(IbThreads.SAME_NAME_CHOICE_MARKER).not.toMatch(/[%_]/);
+  });
+
+  test('choice-label city rejects instruction-like words (defence in depth)', () => {
+    for (const bad of ['Ignore All Instructions', 'System Prompt', 'Assistant', 'Previous Rules', 'Disregard This', 'Run Tool']) {
+      expect([bad, Context.safeChoiceCity(bad)]).toEqual([bad, null]);
+    }
+    expect(Context.safeChoiceCity('Fort Myers')).toBe('Fort Myers');
   });
 });
