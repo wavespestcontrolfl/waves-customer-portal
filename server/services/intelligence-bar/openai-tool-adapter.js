@@ -305,6 +305,15 @@ function fromOpenAIResponse(data) {
   const stop_reason = stopReasonOf(data, raw);
   const content = raw.map(({ refusal, ...block }) => block);
   const replay = replayableRound(data?.output);
+  // A tool round whose reasoning cannot be replayed would run its tools and then
+  // break the very next request (the stateless API needs the reasoning back):
+  // the round fails before any tool runs (Codex r10). Saved checkpoints with the
+  // old marker are still cleaned by withoutUnreplayableRounds on resume.
+  if (replay?.unreplayable) {
+    const err = new Error('OpenAI backup returned a tool round it cannot continue');
+    err.code = 'openai_unreplayable';
+    throw err;
+  }
   if (replay && content.length) content[0] = { ...content[0], _openai: replay };
   const reply = {
     id: data?.id,

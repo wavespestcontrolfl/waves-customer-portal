@@ -130,8 +130,8 @@ describe('fromOpenAIResponse', () => {
     const reply = Adapter.fromOpenAIResponse({
       id: 'resp_9', model: 'gpt-test', status: 'completed', usage: { input_tokens: 4, output_tokens: 2 },
       output: [
-        { type: 'reasoning', id: 'rs_1', summary: [] },
-        { type: 'message', content: [{ type: 'output_text', text: 'Let me check.' }] },
+        { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc_rs_1' },
+        { type: 'message', id: 'msg_1', content: [{ type: 'output_text', text: 'Let me check.' }] },
         { type: 'function_call', id: 'fc_1', call_id: 'call_77', name: 'query_customers', arguments: '{"search":"Jeff"}' },
       ],
     });
@@ -195,7 +195,9 @@ describe('reasoning replay', () => {
     const trailing = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), fc('fc_1', 'c1'), reasoning('rs_2')] });
     expect(Adapter.toInputItems([{ role: 'assistant', content: trailing.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]).map(i => i.id || `out:${i.call_id}`))
       .toEqual(['rs_1', 'fc_1', 'out:c1']);
-    const bare = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), fc('fc_1', 'c1')] });
+    // A checkpoint saved before Codex r10 can still hold the unreplayable marker.
+    const good = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), fc('fc_1', 'c1')] });
+    const bare = { content: good.content.map((block, i) => (i === 0 ? { ...block, _openai: { unreplayable: true } } : block)) };
     const plain = Adapter.toInputItems([{ role: 'assistant', content: bare.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]);
     expect(plain.map(i => i.type)).toEqual(['function_call', 'function_call_output']);
     expect(plain[0].id).toBeUndefined();
@@ -217,9 +219,11 @@ describe('reasoning replay', () => {
       .toEqual(['function_call', 'function_call_output']);
   });
 
-  test('reasoning that cannot be replayed on a round with calls is flagged; a round with no reasoning is not', () => {
-    const flagged = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), fc('fc_1', 'c1')] });
-    expect(flagged.content[0]._openai).toEqual({ unreplayable: true });
+  test('a tool round whose reasoning cannot be replayed fails before any tool runs; a round with no reasoning is fine (Codex r10)', () => {
+    expect(() => Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), fc('fc_1', 'c1')] }))
+      .toThrow(expect.objectContaining({ code: 'openai_unreplayable' }));
+    expect(() => Adapter.fromOpenAIResponse({ output: [{ ...reasoning('rs_1'), id: '' }, fc('fc_1', 'c1')] }))
+      .toThrow(expect.objectContaining({ code: 'openai_unreplayable' }));
     expect(Adapter.fromOpenAIResponse({ output: [fc('fc_1', 'c1')] }).content[0]._openai).toBeUndefined();
   });
 });

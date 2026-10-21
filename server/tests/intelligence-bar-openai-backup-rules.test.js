@@ -167,7 +167,10 @@ describe('resume of a backup task after a tool round', () => {
 
   test('a round whose reasoning cannot be replayed is dropped with its result: no function_call goes out without its reasoning', async () => {
     process.env.GATE_IB_OPENAI_BACKUP = 'true';
-    const { caller, live } = resumed(history(Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), call('fc_1', 'c1')] })));
+    // A checkpoint saved before Codex r10 can still hold the unreplayable marker.
+    const good = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), call('fc_1', 'c1')] });
+    const oldRound = { content: good.content.map((block, i) => (i === 0 ? { ...block, _openai: { unreplayable: true } } : block)) };
+    const { caller, live } = resumed(history(oldRound));
     await caller.startFromTask();
     const items = Adapter.toInputItems(live.messages);
     expect(items.map(i => i.type || i.role)).toEqual(['user']);
@@ -186,6 +189,8 @@ describe('resume of a backup task after a tool round', () => {
       expect(err).toBeInstanceOf(Error);
       expect(err.message).not.toMatch(/ask must not run/);
       expect(ModelFailure.isModelCallError(err)).toBe(true);
+      // Attributed to the provider that failed (Codex r10).
+      expect(ModelFailure.modelFailureCode(err)).toMatch(/^openai_/);
     } finally { global.fetch = savedFetch; }
   });
 

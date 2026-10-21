@@ -161,9 +161,10 @@ function createModelCaller({ context, actionScope, task, read, apply, markTask, 
         messages: finalRound ? finalMessages(live.messages) : live.messages });
     } catch (backupErr) {
       logger.error(`[intelligence-bar] OpenAI backup failed (code=${errorCode(backupErr)})`);
-      // A failed backup is a failed model call too (a resumed backup task has no
-      // Anthropic error to rethrow), so the model-failure notice covers it.
-      throw ModelFailure.tagModelCallError(origin || backupErr);
+      // A failed backup is a failed model call too, so the model-failure notice
+      // covers it: the Anthropic error when this request switched over, else (a
+      // resumed backup task) the OpenAI error, attributed to OpenAI (Codex r10).
+      throw origin ? ModelFailure.tagModelCallError(origin) : ModelFailure.tagModelCallError(backupErr, 'openai');
     }
   }
 
