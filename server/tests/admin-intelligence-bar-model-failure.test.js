@@ -484,7 +484,7 @@ describe('round 2 fixes (#6368)', () => {
 
   test('a middle round that succeeds does not close the bell; only a finished answer does', async () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
-    const callSite = src.indexOf('.catch(err => { throw ModelFailure.tagModelCallError(err); });');
+    const callSite = src.indexOf('.catch(err => { throw ModelFailure.tagModelCallError(err); })');
     const close = src.indexOf('ModelFailure.closeFailureBellOnRecovery({ lane:');
     expect(callSite).toBeGreaterThan(0);
     expect(close).toBeGreaterThan(callSite);
@@ -635,5 +635,23 @@ describe('round 4 Codex fixes (#6368)', () => {
       raise.mockRestore();
       db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
     }
+  });
+});
+
+describe('the failure code names the provider that failed (#6373 Codex r10)', () => {
+  const MF = require('../services/intelligence-bar/model-failure');
+  test('an Anthropic error keeps its anthropic_ codes', () => {
+    expect(MF.modelFailureCode(MF.tagModelCallError(Object.assign(new Error('x'), { status: 529 })))).toBe('anthropic_529');
+    expect(MF.modelFailureCode(MF.tagModelCallError(new Error('dropped')))).toBe('anthropic_error');
+  });
+  test('an OpenAI backup error is attributed to openai, with its own adapter codes', () => {
+    expect(MF.modelFailureCode(MF.tagModelCallError(Object.assign(new Error('x'), { status: 500 }), 'openai'))).toBe('openai_500');
+    expect(MF.modelFailureCode(MF.tagModelCallError(Object.assign(new Error('x'), { code: 'openai_empty' }), 'openai'))).toBe('openai_empty');
+    expect(MF.modelFailureCode(MF.tagModelCallError(new Error('dropped'), 'openai'))).toBe('openai_error');
+  });
+  test('an error keeps its first tag', () => {
+    const err = MF.tagModelCallError(Object.assign(new Error('x'), { status: 503 }));
+    MF.tagModelCallError(err, 'openai');
+    expect(MF.modelFailureCode(err)).toBe('anthropic_503');
   });
 });
