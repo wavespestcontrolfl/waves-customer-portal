@@ -667,6 +667,13 @@ const singleTarget = (customer, provenance) => {
 // customer. A request relying on the unavailable viewed record still stops.
 const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause(r.prompt)) && !r.named.length ? r.page : null);
 
+// GATE_IB_TARGET_RULES_V2, owner-direct scope: the on-screen customer is the pick among
+// several same-name customers only when the message typed nothing that names a customer.
+// A typed city, phone or email (one customer or several) is explicit evidence: it beats
+// the page, so there is no on-screen pick and the same-name note handles the choice
+// (Codex #6369 r13, pre-push audit).
+const sameNamePick = (scope, r) => (scope && r.typedIds.length === 0 && !r.typedIds.identityConflict ? r.page.customer || null : null);
+
 // Candidates, whom this message names (GATE_IB_TARGET_RULES_V2) and the first
 // selection. The typed ids ride on the context so an owner-direct edit can tell a
 // named customer from one the model found. identityConflict: the typed name and a
@@ -679,7 +686,7 @@ async function candidatesStage(r) {
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
-  r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, scope ? r.page.customer : null);
+  r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
   return null;
 }
 

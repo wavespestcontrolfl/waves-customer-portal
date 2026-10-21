@@ -498,6 +498,19 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(third.target).toBeNull();
     expect(third.ambiguous).toBe(true);
     expect(Context.ownerDirectContext(third).sameNameNote).toMatch(/2 customers share the name/);
+    // An explicit pick of the other account beats the page: viewing Venice (id 100) and
+    // typing the Sarasota customer's city or phone does not pick Venice: no target, the typed pick is carried (Codex #6369 r13, pre-push audit).
+    const viaCity = await Context.resolve({ prompt: 'update Pat Example in Sarasota phone', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+    expect(viaCity.target).toBeNull();
+    expect(viaCity.typedCustomerIds).toEqual([id(101)]);
+    expect(Context.ownerDirectContext(viaCity).sameNameNote).toContain(id(101));
+    const viaPhone = await Context.resolve({ prompt: `update Pat Example 941-555-0101 phone`, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+    expect(viaPhone.target).toBeNull();
+    expect(viaPhone.typedCustomerIds).toEqual([id(101)]);
+    // Typed evidence that names two customers picks neither, on screen or not.
+    customers.push({ ...sameName(1)[0], id: id(300), first_name: 'Alice', last_name: 'Jones', city: 'Venice', phone: '9415550300', hiddenFromName: true });
+    const two = await Context.resolve({ prompt: 'update Pat Example 941-555-0101 and 941-555-0300 phone', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+    expect(two.target).toBeNull();
     // Other admins (no owner-direct scope) keep today's behavior.
     const other = await withPage(id(101), false);
     expect(other.target).toBeNull();
