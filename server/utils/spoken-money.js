@@ -153,7 +153,7 @@ function normalizeSpokenMoney(input) {
   };
 
   // 1. "sixty one dollars and thirty three cents" / "61 dollars 33 cents" -> $61.33
-  apply(new RegExp(`(?<![\\w$.,-])(?<!${NUMWORD_RE}[-\\s])(?<!${NUMWORD_RE}\\s+and\\s)(${ANY}|\\d{1,6})\\s+dollars?(?:\\s+and)?\\s+(${U100}|\\d{1,2})\\s+cents?\\b`, 'i'), (m, s, e) => {
+  apply(new RegExp(`(?<![\\w$.,-])(?<!\\d\\s)(?<!${NUMWORD_RE}[-\\s])(?<!${NUMWORD_RE}\\s+and\\s)(${ANY}|\\d{1,6})\\s+dollars?(?:\\s+and)?\\s+(${U100}|\\d{1,2})\\s+cents?\\b`, 'i'), (m, s, e) => {
     const d = /^\d+$/.test(m[1]) ? Number(m[1]) : wordsToNumber(m[1]);
     const c = /^\d+$/.test(m[2]) ? Number(m[2]) : wordsToNumber(m[2]);
     if (d == null || c == null || c > 99) return null;
@@ -253,10 +253,11 @@ const squash = (v) => String(v).toLowerCase().replace(/\s+/g, ' ').trim();
 function ambiguousAmountNote(list, question) {
   const entries = cleanDictationMoney(list);
   if (!entries.length) return '';
-  const parsed = typeof question === 'string' ? normalizeSpokenMoney(question) : { changes: [] };
+  const parsed = typeof question === 'string' ? normalizeSpokenMoney(question) : { changes: [], ambiguous: [] };
   const lines = [];
   for (const { heard } of entries) {
     if (/^\d{4}$/.test(heard)) {
+      if (!parsed.ambiguous.some((a) => a.heard === heard)) continue; // the current question must still flag it
       const cents = fmtDollarsCents(Number(heard.slice(0, 2)), Number(heard.slice(2)));
       lines.push(`The operator's dictated amount '${heard}' is ambiguous: ask with offer_choices between ${cents} and ${fmtDollars(Number(heard))} before using it.`);
       continue;
