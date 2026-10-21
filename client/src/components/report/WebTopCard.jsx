@@ -6,7 +6,7 @@ import { COLORS } from '../../theme-brand';
 import { doThisLine, holdOffLine } from '../../pages/serviceReportLines';
 
 // GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web service report. The server sends one
-// `webTop` object while the gate is live (the lawn score, its strip and the measured rain). "Do this" and "Hold off"
+// `webTop` object while the gate is live (the lawn score, its strip and the measured rain). "Do this" and "Re-entry"
 // are picked here from the same lists ServiceReportDocument prints (pages/serviceReportLines.js), so the card can never
 // say anything the document does not. No price, no product name. Text is 14px or larger.
 
@@ -136,7 +136,7 @@ function GlanceCard({ webTop, data, glass }) {
       ) : null}
       {hold ? (
         <div style={{ marginTop: action || score ? SP.sm : 0 }}>
-          <p data-gt="eyebrow" style={label}>Hold off</p>
+          <p data-gt="eyebrow" style={label}>Re-entry</p>
           <p style={body}>{hold}</p>
         </div>
       ) : null}

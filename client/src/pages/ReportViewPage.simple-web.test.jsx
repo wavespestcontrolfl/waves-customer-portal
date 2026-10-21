@@ -238,7 +238,7 @@ describe('the first screen of the simple web report', () => {
     expect(container.textContent).toMatch(/Family-owned pest control and lawn care in Southwest Florida/);
   });
 
-  it('with webTop: the card shows before the document; Do this and Hold off come from the document\u2019s own lists', async () => {
+  it('with webTop: the card shows before the document; Do this and Re-entry come from the document\u2019s own lists', async () => {
     const { container } = renderReport(payload({
       simpleWebReport: true,
       webTop: webTop(),
@@ -254,7 +254,7 @@ describe('the first screen of the simple web report', () => {
     // the first customer-owned recommendation (a Waves-owned "We will..." line is skipped)
     expect(card.textContent).toMatch(/Do this\s*Water the lawn lightly this week\./);
     // the document's first re-entry bullet, and the document prints the same bullet
-    expect(card.textContent).toMatch(/Hold off\s*Ready to walk on once the application has dried\./);
+    expect(card.textContent).toMatch(/Re-entry\s*Ready to walk on once the application has dried\./);
     expect(container.querySelector('.service-report-document').textContent).toMatch(/Re-entry & precautions[•\s]*Ready to walk on once the application has dried\./);
     expect(container.querySelector('.service-report-document').textContent).toMatch(/What we recommend.*Water the lawn lightly this week\./);
     expect(card.compareDocumentPosition(container.querySelector('.service-report-document')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -298,7 +298,7 @@ describe('the first screen of the simple web report', () => {
     expect(card.textContent).toMatch(/This is your starting score\./);
     expect(card.textContent).not.toMatch(/Your last/);
     expect(card.textContent).toMatch(/Do this\s*Nothing needed from you today\./);
-    expect(card.textContent).not.toMatch(/Hold off/);
+    expect(card.textContent).not.toMatch(/Re-entry/);
     cleanup();
     renderReport(payload({ simpleWebReport: true, webTop: {} }));
     await screen.findByText(/This report is provided for your records/);
