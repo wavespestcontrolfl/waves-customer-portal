@@ -15,10 +15,14 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../models/db', () => jest.fn());
 // The slot-1 contact's own email master switch (contact login): declined =
 // the mail goes to the account holder instead.
-jest.mock('../services/contact-notification-prefs', () => ({ contactDeclinesChannel: jest.fn(async () => false) }));
+// …and the address-wide re-read at the dispatch boundary (codex r22).
+jest.mock('../services/contact-notification-prefs', () => ({
+  contactDeclinesChannel: jest.fn(async () => false),
+  contactEmailDeclines: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
-const { contactDeclinesChannel } = require('../services/contact-notification-prefs');
+const { contactDeclinesChannel, contactEmailDeclines } = require('../services/contact-notification-prefs');
 const EmailTemplates = require('../services/email-template-library');
 const ProjectEmail = require('../services/project-email');
 
@@ -65,9 +69,30 @@ describe('project email service', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     contactDeclinesChannel.mockResolvedValue(false);
+    contactEmailDeclines.mockResolvedValue(false);
     // Project already carries a prep_token, so ensurePrepToken's select
     // returns it and no mint/update path runs.
     db.mockImplementation(() => dbChain({ prep_token: 'preptok123' }));
+  });
+
+  test('the dispatch boundary re-reads the contact\'s email switch: a decline that lands during the library\'s awaits aborts before the provider (codex #6363 r22)', async () => {
+    const withContact = customer({ service_contact_email: 'tenant@example.com', service_contact_name: 'Terry Tenant', service_contact_phone: '+19415550202' });
+    // The library resolves template / idempotency / suppression, then asks
+    // onQueued; false aborts before the provider.
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      if (opts.onQueued && (await opts.onQueued()) === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+      return { sent: true, message: { provider_message_id: 'sg-1' } };
+    });
+    contactEmailDeclines.mockResolvedValueOnce(true);
+    const res = await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://portal.wavespestcontrol.com/report/project/x' });
+    expect(res).toEqual({ ok: false, blocked: true, deduped: false, reason: 'contact_declined', messageId: null });
+    expect(contactEmailDeclines).toHaveBeenCalledWith('cust-1', 'tenant@example.com');
+    // Allowed at the handoff: the send goes through as before.
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      expect(await opts.onQueued()).toBe(true);
+      return { sent: true, message: { provider_message_id: 'sg-2' } };
+    });
+    expect(await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x' })).toMatchObject({ ok: true, messageId: 'sg-2' });
   });
 
   test('sends project report ready through the template library', async () => {

@@ -278,6 +278,17 @@ describe('GET /schedule and /schedule/next for a contact session', () => {
     });
   });
 
+  test('a contact with no upcoming visit gets the empty /schedule/next answer through the same projection — the scope echo, never the resolved property id (codex r22)', async () => {
+    mockSession.contact = OCCUPANT;
+    wireTables({ scheduled_services: [], customers: [customerRow] });
+    await withServer(async (get) => {
+      const { status, body } = await get('/schedule/next');
+      expect(status).toBe(200);
+      expect(body).toEqual({ propertyScope: { enabled: false, propertyId: null, closed: false }, next: null });
+      expect(JSON.stringify(body)).not.toContain('prop-1');
+    });
+  });
+
   test('a contact asking for allProperties=1 gets the ordinary contact projection, never the coverage payload (codex r14)', async () => {
     mockSession.contact = OCCUPANT;
     wireTables(scheduleTables);

@@ -858,7 +858,11 @@ router.get('/next', async (req, res, next) => {
       .first();
 
     if (!nextService) {
-      return res.json({ propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null });
+      // The contact projection applies to the empty answer too (codex #6363
+      // r22 P2): the resolved scope would otherwise name the primary
+      // property's id (or its closed state) to a client whose scope is off.
+      const empty = { propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null };
+      return res.json(req.contactSession ? contactNextPayload(empty) : empty);
     }
     if (allProperties) {
       // Coverage projection only — no reschedule/calendar bearer links.

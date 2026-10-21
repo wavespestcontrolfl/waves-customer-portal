@@ -255,6 +255,7 @@ async function sendProjectTemplate({
   if (!isEmailLike(recipient.email)) {
     return { ok: false, skipped: true, reason: 'missing_email' };
   }
+  const customerId = customer?.id || project?.customer_id || null;
 
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
@@ -262,13 +263,24 @@ async function sendProjectTemplate({
       to: recipient.email,
       payload,
       recipientType: 'customer',
-      recipientId: customer?.id || project?.customer_id || null,
+      recipientId: customerId,
       triggerEventId: triggerEventId || `${templateKey}:${project?.id || customer?.id || 'manual'}`,
       idempotencyKey,
       categories,
       suppressionGroupKey,
       attachments,
+      // The contact's OWN email switch as of the provider handoff (codex
+      // #6363 r22 P2): the recipient resolved above, but a contact who turns
+      // email off while the library resolves the template, idempotency and
+      // suppression is not emailed. Address-wide, deny wins across the slots
+      // carrying the address; fails closed on an unreadable table. The
+      // holder's own address and the gate off never decline.
+      onQueued: async () => !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email)),
     });
+    if (result?.aborted) {
+      logger.info(`[project-email] ${templateKey} for project ${project?.id || 'unknown'} held at the dispatch boundary — the contact declined email`);
+      return { ok: false, blocked: true, deduped: false, reason: 'contact_declined', messageId: null };
+    }
     return normalizeTemplateResult(result);
   } catch (err) {
     logger.error(`[project-email] ${templateKey} failed for project ${project?.id || 'unknown'}: ${err.message}`);

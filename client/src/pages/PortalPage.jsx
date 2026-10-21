@@ -5408,7 +5408,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           plan may not include (tranche-1 truth fix) */}
       {/* resolveActiveTierName, not raw tier truthiness: 'One-Time' / 'Commercial'
           are non-member tiers and must not resurrect the panel (codex P2). */}
-      {upcomingOnly.length === 0 && (hasPlanWork || !!resolveActiveTierName(customer)) && (
+      {/* A contact session has no plan facts at all (no tier, no cancellable
+          work) and still needs the panel — its own copy below (codex r22). */}
+      {upcomingOnly.length === 0 && (hasPlanWork || !!resolveActiveTierName(customer) || contactSession) && (
         // A cancelled account (C4) can't create requests — every
         // request-creation route is blocked for this session, so the copy
         // must not instruct an impossible action (codex GH r14 P2).

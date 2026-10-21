@@ -103,6 +103,14 @@ describe('ScheduleTab — contact session is view-only', () => {
     expect(await screen.findByTestId('contact-notification-card')).toBeInTheDocument();
   });
 
+  it('with nothing booked, a contact sees the no-visits panel with the contact copy and no Request action (codex r22)', async () => {
+    api.getSchedule.mockResolvedValue({ upcoming: [], hasCancellableWork: false });
+    render(<ScheduleTab customer={contactCustomer} onRequestVisit={null} />);
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    expect(await screen.findByText(/Nothing is on the calendar for this property yet/)).toBeInTheDocument();
+    expect(screen.queryByText('Request a Visit')).not.toBeInTheDocument();
+  });
+
   it('a holder session renders the mutations and the holder cards, and no contact card', async () => {
     api.getNotificationPrefs.mockResolvedValue({ appointmentConfirmation: true });
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [] });

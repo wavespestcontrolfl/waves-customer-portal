@@ -5,6 +5,20 @@ import { clearNativeBadge } from '../native/nativeBadge';
 
 const AuthContext = createContext(null);
 
+// Contact session (GATE_CONTACT_LOGIN): /auth/me names an on-location contact
+// signed in with their own number as actor.kind 'contact'. One reader for the
+// loader's effects and the context's `isContact`.
+export function isContactSession(customer) {
+  return customer?.actor?.kind === 'contact';
+}
+
+// Which sessions mount the notification bell: not a cancelled account, not a
+// contact (the bell rows carry the holder's billing). The loader clears the
+// native badge for the sessions that do not.
+export function sessionMountsBell(customer) {
+  return customer?.cancelled !== true && !isContactSession(customer);
+}
+
 // Server auth routes send intentional customer copy in the JSON `error`
 // field ("Invalid code", rate-limit sentences) — show those verbatim. But
 // api.js also throws raw non-JSON bodies (proxy HTML error pages) and
@@ -261,10 +275,10 @@ export function AuthProvider({ children }) {
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
-      // Cancelled accounts never mount the bell, including on a fresh launch.
-      // Neither does a contact session (GATE_CONTACT_LOGIN): the bell rows
-      // carry the holder's billing.
-      if (data?.cancelled === true || data?.actor?.kind === 'contact') void clearNativeBadge();
+      // Cancelled accounts and contact sessions never mount the bell,
+      // including on a fresh launch (sessionMountsBell).
+      const contact = isContactSession(data);
+      if (!sessionMountsBell(data)) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
       const propertyReadSeq = ++propertyReadSeqRef.current;
@@ -301,7 +315,7 @@ export function AuthProvider({ children }) {
       // would receive the holder's billing pushes. A device that still holds
       // a holder's registration (a logout whose release failed) is released
       // instead, token-scoped (codex #6363 r4 P1).
-      if (data?.actor?.kind === 'contact') void deactivateNativePushToken();
+      if (contact) void deactivateNativePushToken();
       else flushNativePushToken();
     } catch (err) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
@@ -606,7 +620,7 @@ export function AuthProvider({ children }) {
       isAuthenticated: !!customer,
       // Contact session (GATE_CONTACT_LOGIN): an on-location contact signed
       // in with their own number — the shell narrows to Visits + Documents.
-      isContact: customer?.actor?.kind === 'contact',
+      isContact: isContactSession(customer),
       sendCode,
       verifyCode,
       switchProperty,

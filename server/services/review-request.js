@@ -5576,6 +5576,11 @@ const ReviewService = {
     // MAY have reached SendGrid (GH Codex #3856 r9 P2).
     let dispatched = false;
     let summaryBlock = null;
+    // The contact's OWN email switch, re-read at the provider handoff (codex
+    // #6363 r22 P2): sendOutreachTouch read it before the template library's
+    // own awaits; a decline that lands in between still holds the email —
+    // the fence the inline copy's claim and the appointment email have.
+    let contactDeclinedAtDispatch = false;
     try {
       const EmailLib = require("./email-template-library");
       result = await EmailLib.sendTemplate({
@@ -5635,11 +5640,25 @@ const ReviewService = {
         // SendGrid body out of the transport log; the sanitized catch below
         // (request id + error class) is the only log.
         suppressProviderErrorLog: true,
-        onQueued: () => { dispatched = true; },
+        onQueued: async () => {
+          // Fail closed: an unreadable choices table reads as declined.
+          if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email")) {
+            contactDeclinedAtDispatch = true;
+            return false;
+          }
+          dispatched = true;
+        },
       });
     } catch (err) {
       logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
       return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err });
+    }
+    if (contactDeclinedAtDispatch) {
+      // The same terminal opt-out sendOutreachTouch reports when the contact's
+      // switch was already off at its own read: nothing reached the provider.
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" })
+        .catch((bookErr) => logger.error(`[review] post-decline email bookkeeping failed (requestId=${request.id} errType=${bookErr?.name || "Error"})`));
+      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: "opted_out" };
     }
 
     // Send returned — bookkeeping failures here must NOT requeue (the email

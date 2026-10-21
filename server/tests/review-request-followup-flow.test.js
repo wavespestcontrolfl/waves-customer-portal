@@ -1386,6 +1386,36 @@ describe('review request follow-up flow', () => {
       expect(rrUpdate).toHaveBeenCalledWith(CLAIM_STAMP);
     });
 
+    test('_sendOutreachEmail re-reads the contact\'s OWN email switch at the dispatch boundary: a decline that lands during the library\'s awaits aborts before the provider, terminal opted_out (codex #6363 r22)', async () => {
+      process.env.GATE_CONTACT_LOGIN = 'true';
+      const rrUpdate = jest.fn().mockResolvedValue(1);
+      try {
+        db.mockImplementation((table) => {
+          if (table === 'review_requests') return chain({ update: rrUpdate });
+          // The contact's row: email off — written between sendOutreachTouch's read and the handoff.
+          if (table === 'service_contact_notification_prefs') return chain({ select: jest.fn().mockResolvedValue([{ phone_key: '9415550202', email_enabled: false }]) });
+          throw new Error(`Unexpected table query: ${table}`);
+        });
+        const args = { request: { id: 'rr-11' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan', phone: '+19415550202', role: 'service_contact' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };
+        EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+          if ((await opts.onQueued({ id: 'em-11' })) === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+          throw new Error('must not dispatch');
+        });
+        expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, blocked: true, terminal: true, channel: 'email', requestId: 'rr-11', reason: 'opted_out' });
+        expect(rrUpdate).toHaveBeenCalledWith({ status: 'suppressed' });
+        // Email still on at the handoff: dispatched as before.
+        db.mockImplementation((table) => {
+          if (table === 'review_requests') return chain({ update: rrUpdate });
+          if (table === 'service_contact_notification_prefs') return chain({ select: jest.fn().mockResolvedValue([]) });
+          throw new Error(`Unexpected table query: ${table}`);
+        });
+        EmailLib.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued({ id: 'em-12' }); return { sent: true }; });
+        expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: true, sent: true, channel: 'email', requestId: 'rr-11' });
+      } finally {
+        delete process.env.GATE_CONTACT_LOGIN;
+      }
+    });
+
     test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
       const rrUpdateOneOff = jest.fn().mockResolvedValue(1);
       db.mockImplementation((table) => {
