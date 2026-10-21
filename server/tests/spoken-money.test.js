@@ -75,6 +75,15 @@ const REWRITES = [
   ['charge for two hundred linear feet', SAME],
   ['charge for two hundred more square feet', SAME],
   ['price for a hundred and five extra gallons', SAME],
+  // metric, mass and volume units
+  ['application rate is one hundred milliliters', SAME],
+  ['rate is one hundred grams', SAME],
+  ['charge for a hundred and five ml', SAME],
+  ['price for two hundred kg', SAME],
+  ['rate of 500 mg', SAME],
+  ['cost of two hundred liters', SAME],
+  ['rate is two hundred oz', SAME],
+  ['mix 500 g, the price is 61 33', 'mix 500 g, the price is $61.33'],
   // cents are not dollars
   ['charge one hundred fifty five cents', SAME],
   ['charge 61 33 cents', SAME],

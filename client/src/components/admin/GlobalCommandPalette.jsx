@@ -61,7 +61,9 @@ function taskLoadReopens(loaded, held, operation) {
 // The dictated amounts still in the message being sent, as the request's dictation_money field
 // (empty when none: nothing is added to the request).
 function dictationMoneyFor(question, ambiguous) {
-  const kept = (ambiguous || []).filter((item) => item?.heard && String(question).includes(item.heard));
+  // The digits as their own number: not inside a larger number, a decimal ("6133.00") or a comma group.
+  const standalone = (digits) => new RegExp(`(?<![\\d.,$])\\$?${digits}(?![\\d]|[.,]\\d)`).test(String(question));
+  const kept = (ambiguous || []).filter((item) => /^\d{4}$/.test(String(item?.heard || "")) && standalone(item.heard));
   return kept.length ? { dictation_money: kept.slice(0, 3).map(({ heard, candidates }) => ({ heard, candidates })) } : {};
 }
 

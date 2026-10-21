@@ -99,4 +99,18 @@ describe('Intelligence Bar dictated amounts', () => {
     const body = await dictateAndAsk('charge 6133 a month', 'charge $61.33 a month');
     expect(body.dictation_money).toBeUndefined();
   });
+
+  it.each([
+    ['charge $6133 a month', 'charge $6133 a month', true],
+    ['charge 6133 a month', 'it is 6133, ok', true],
+    ['charge 6133 a month', 'charge $6133.00 a month', false],
+    ['charge 6133 a month', 'charge 16133 a month', false],
+    ['charge 6133 a month', 'charge $6,133 a month', false],
+    ['charge 6133 a month', 'charge 61330 a month', false],
+    ['charge 6133 a month', 'charge 6133.5 a month', false],
+  ])('dictated %j then edited to %j: flag kept=%s', async (spoken, edited, kept) => {
+    const body = await dictateAndAsk(spoken, edited === spoken ? undefined : edited);
+    if (kept) expect(body.dictation_money).toEqual([AMBIGUOUS]);
+    else expect(body.dictation_money).toBeUndefined();
+  });
 });
