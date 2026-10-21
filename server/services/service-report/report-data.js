@@ -4446,11 +4446,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // geometry read is not proof of default zones, so nothing is frozen. The
   // render never reads it.
   let coverageReadFailed = false;
+  // GATE_REPORT_WEB_PEOPLE: a failed findings read is not proof of a clean visit (see webPeopleReadsOk).
+  let findingsReadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => { coverageReadFailed = true; return null; }),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => { coverageReadFailed = true; return []; }),
-    knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
+    knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { findingsReadFailed = true; return []; }),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
@@ -6764,7 +6766,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // line's). The card then starts EMPTY and stays empty when there is none (or
     // a read fails), so the plan section falls back to no visit line rather than
     // naming another line's visit in its place. Other lines are untouched.
-    const lawnOnly = serviceLine === 'lawn' && lawnReportClarityLive();
+    // The people card's next visit is the next visit at the property on any line, so it skips the lawn-only filter.
+    const lawnOnly = !webPeopleNext && serviceLine === 'lawn' && lawnReportClarityLive();
     const visitCap = lawnOnly ? 1 : 6;
     if (lawnOnly) upcomingVisitsCard = reportPlanRescheduleLive() ? { visits: [], merged: true } : { visits: [] };
     try {
@@ -7618,6 +7621,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // opts.upcomingVisitsCard check the work above already gated on.
     ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
     // GATE_REPORT_WEB_PEOPLE: the visits for webPeople.nextVisit. The route deletes this key after it reads it.
+    // webPeopleReadsOk: false when the findings or zones read failed, so the review card fails closed. The route deletes both keys.
+    ...(webPeopleNext ? { webPeopleReadsOk: !findingsReadFailed && !coverageReadFailed } : {}),
     ...(webPeopleNext ? { webPeopleNext: (Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : []).map(({ serviceType, scheduledDate, windowStart }) => ({ serviceType, scheduledDate, windowStart })) } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —

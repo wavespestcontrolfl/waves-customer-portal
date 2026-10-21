@@ -106,7 +106,7 @@ describe('GET /reports/:token/data people cards (GATE_REPORT_WEB_PEOPLE)', () =>
     gates.reportWebPeopleLive.mockReturnValue(false);
     buildReportV1Data.mockImplementation(async (_s, _t, _db, opts) => ({
       pdfUrl: `/api/reports/${VALID_TOKEN}`,
-      ...(opts.webPeopleNext ? { webPeopleNext: VISITS } : {}),
+      ...(opts.webPeopleNext ? { webPeopleNext: VISITS, webPeopleReadsOk: true } : {}),
     }));
     buildWebPeople.mockResolvedValue(PEOPLE);
   });
@@ -130,8 +130,10 @@ describe('GET /reports/:token/data people cards (GATE_REPORT_WEB_PEOPLE)', () =>
       const { body } = await getData(baseUrl);
       expect(body.webPeople).toEqual(PEOPLE);
       expect('webPeopleNext' in body).toBe(false);
+      expect('webPeopleReadsOk' in body).toBe(false);
       expect(buildReportV1Data.mock.calls[0][3].webPeopleNext).toBe(true);
       expect(buildWebPeople.mock.calls[0][0].nextVisits).toEqual(VISITS);
+      expect(buildWebPeople.mock.calls[0][0].readsOk).toBe(true);
     });
   });
 

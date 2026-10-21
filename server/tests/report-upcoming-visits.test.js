@@ -1324,4 +1324,38 @@ describe('webPeopleNext (GATE_REPORT_WEB_PEOPLE): the simple web view builds in 
     expect(data).not.toHaveProperty('webPeopleNext');
     expect(buildRescheduleLink).not.toHaveBeenCalled();
   });
+
+  test('a lawn report with both gates on: the people card still gets the soonest visit on any line (a pest visit before the next lawn visit); the plan card stays lawn-only', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const lawn = { ...BASE_SERVICE, id: 'service-lawn', service_line: 'lawn', service_type: 'Lawn Care Treatment Program' };
+    const fixtures = {
+      ...BASE_FIXTURES,
+      scheduled_services: [
+        { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Lawn Care Treatment Program' },
+        { id: 'v-pest', customer_id: 'customer-1', scheduled_date: todayPlus(3), status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '08:00:00' },
+        { id: 'v-lawn', customer_id: 'customer-1', scheduled_date: todayPlus(20), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00' },
+      ],
+    };
+    const web = await buildReportV1Data(lawn, 'token-web-people-lawn', makeKnex(fixtures), { mode: 'pdf', webPeopleNext: true, upcomingVisitsCard: true });
+    expect(web.webPeopleNext[0]).toEqual({ serviceType: 'Quarterly Pest Control Service', scheduledDate: todayPlus(3), windowStart: '08:00:00' });
+    const live = await buildReportV1Data(lawn, 'token-plan-card-lawn', makeKnex(fixtures), { mode: 'live', upcomingVisitsCard: true });
+    expect(live.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+
+  // The builder's own .catch handler runs on a rejected findings read, as a real knex failure would.
+  const findingsReadFails = (base) => (table) => {
+    if (table !== 'service_findings') return base(table);
+    const failing = { where: () => failing, orderBy: () => failing, catch: (handler) => Promise.resolve().then(() => handler(new Error('boom'))) };
+    return failing;
+  };
+
+  test('webPeopleReadsOk: true when the findings and zones reads worked, false when the findings read failed', async () => {
+    const ok = await buildReportV1Data(BASE_SERVICE, 'token-reads-ok', makeKnex(fixtures()), { mode: 'pdf', webPeopleNext: true });
+    expect(ok.webPeopleReadsOk).toBe(true);
+    const bad = await buildReportV1Data(BASE_SERVICE, 'token-reads-bad', findingsReadFails(makeKnex(fixtures())), { mode: 'pdf', webPeopleNext: true });
+    expect(bad.webPeopleReadsOk).toBe(false);
+    const none = await buildReportV1Data(BASE_SERVICE, 'token-reads-none', makeKnex(fixtures()), { mode: 'pdf' });
+    expect(none).not.toHaveProperty('webPeopleReadsOk');
+  });
 });

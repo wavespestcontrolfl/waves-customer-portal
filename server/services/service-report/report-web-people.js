@@ -16,6 +16,7 @@
 
 const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
 const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
+const { isGenericTechnicianLabel } = require('../../utils/technician-name');
 const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
 
 const REVIEW_MIN_LAWN_SCORE = 85;
@@ -85,7 +86,9 @@ async function hadNegativeContact(knex, customerId, now) {
 
 // The same eligibility the old report's review card used (customer has not already left a review, the server-resolved
 // office), tightened to a good visit and a quiet month.
-async function reviewLinkFor(data, service, knex, now) {
+async function reviewLinkFor(data, service, knex, now, readsOk) {
+  // The clean-visit check reads findings and coverage; when either read failed the visit is not proven clean.
+  if (readsOk !== true) return null;
   if (data.hasLeftGoogleReview || data.reviewRequestEligible === false) return null;
   const url = data.reviewLocation?.reviewUrl;
   if (!url || !service.customer_id || !goodVisit(data)) return null;
@@ -129,7 +132,9 @@ async function visitsAtHome(knex, service) {
 }
 
 async function techFor(data, service, knex) {
+  // The payload says "Your Waves technician" when no real technician is on the visit: no strip for a placeholder.
   const name = data.technician?.name || data.technicianName;
+  if (isGenericTechnicianLabel(name)) return null;
   const firstName = firstNameOf(name);
   if (!firstName) return null;
   let count = 0;
@@ -161,13 +166,14 @@ function nextVisitFor(visits) {
  * @param {object} args.data      the simple web payload, built in 'pdf' mode
  * @param {object} args.service   the joined service record row
  * @param {Array}  args.nextVisits upcoming visits from the build (webPeopleNext)
+ * @param {boolean} args.readsOk  the build's findings and zones reads succeeded (webPeopleReadsOk); false = no review link
  * @returns {Promise<object|null>} the webPeople payload, or null when there is nothing to show
  */
-async function buildWebPeople({ data, service, knex, nextVisits, now = new Date() }) {
+async function buildWebPeople({ data, service, knex, nextVisits, readsOk = false, now = new Date() }) {
   if (!data || !service) return null;
   const [tech, review] = await Promise.all([
     techFor(data, service, knex),
-    reviewLinkFor(data, service, knex, now),
+    reviewLinkFor(data, service, knex, now, readsOk),
   ]);
   const nextVisit = nextVisitFor(nextVisits);
   const out = {
