@@ -25,8 +25,8 @@
  *   receiptGuard { check, relabel }  the provider-boundary check for the inline receipt (beforeProviderHandoff on the receipt email
  *       and text). It allows a send only to the email / phone the card showed (digests, receipt-destination-digest.js); the App leg
  *       is never approved. The email also needs the customer's receipt opt-out to read false (the manual email ignores it on its own).
- *       `terminal()` tells the receipt queue how to finish a job already queued for the invoice when a leg was refused (never back to
- *       the drain). `relabel` words a refused leg: contact changed, the customer opted out of receipts, or the settings could not be read.
+ *       `terminal(emailDelivered)` tells the receipt queue how to finish a job already queued for the invoice when the email did not
+ *       go out, whether a leg was refused or not (never back to the drain). `relabel` words a refused leg: contact changed, the customer opted out of receipts, or the settings could not be read.
  */
 const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
 const { etDateString } = require('../../utils/datetime-et');
@@ -128,9 +128,12 @@ function receiptGuardFor(approved) {
   // What a refused leg means for a receipt job already queued for the invoice: it must not go back to the drain, which would send
   // to the live destination without this check. An opt-out is the queue's own opt-out close; anything else is parked as failed
   // for a person (the App leg's refusal is no email or text decision and does not count).
-  const terminal = () => {
+  // A guarded send whose email did not go out, for ANY reason (a provider failure included), is parked too: handing the job back
+  // would let the drain retry to the live destination without this check. emailDelivered closes the job in the release anyway.
+  const terminal = (emailDelivered = false) => {
+    if (emailDelivered) return null;
     const reasons = ['email', 'sms'].filter((channel) => refused.has(channel)).map((channel) => refused.get(channel));
-    if (!reasons.length) return null;
+    if (!reasons.length) return { status: 'failed', lastError: 'receipt_not_delivered_from_card' };
     if (reasons.every((reason) => reason === OPTED_OUT)) return { status: 'completed', lastError: null, emailResult: { ok: false, error: 'receipt_opted_out' } };
     return { status: 'failed', lastError: reasons.includes(CONTACT_CHANGED) ? 'contact_changed_since_card' : 'receipt_settings_unreadable_since_card' };
   };

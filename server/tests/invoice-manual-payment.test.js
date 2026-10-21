@@ -783,7 +783,15 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
         expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'receipt_settings_unreadable_since_card' });
       });
 
-      test('nothing refused: no terminal; the page path (no guard) passes none either', async () => {
+      test('a provider failure with nothing refused still parks the job: it is never handed back to the unguarded drain (Codex r5b)', async () => {
+        settle();
+        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
+        sendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider timeout' });
+        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+        expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'receipt_not_delivered_from_card' });
+      });
+
+      test('nothing refused and the email delivered: no terminal; the page path (no guard) passes none either', async () => {
         settle();
         senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
         await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
