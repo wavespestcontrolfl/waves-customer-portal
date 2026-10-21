@@ -1510,16 +1510,25 @@ async function webTileTapGate(req, res, next) {
     }
     if (stands === null) return next();
     if (!stands.stands) return stale();
-    // Stamp the evidence AFTER the rebuild (its own snapshot writes are done): the write transaction compares against this.
+    // Stamp the evidence AFTER the rebuild (its own snapshot writes are done), then rebuild once more and stamp again:
+    // the stamp is bound to the decision only when the finding still stands on the second build and both stamps match
+    // (an edit between the first build and the first stamp shows in the second build; one after it changes the stamp).
+    // The write transaction compares against this stamp.
     try {
       req.webTileService = stands.service;
       req.webTileLine = stands.line;
-      req.webTileEvidence = await webActions.tileEvidence(stands.service, stands.line, db);
+      const first = await webActions.tileEvidence(stands.service, stands.line, db);
+      if (!first) return stale();
+      const again = await webTileStillStands(req.params.token, metadata);
+      if (!again || !again.stands || again.line !== stands.line) return stale();
+      const second = await webActions.tileEvidence(again.service, again.line, db);
+      if (!second || !webActions.tileEvidenceUnchanged(first, second)) return stale();
+      req.webTileEvidence = second;
     } catch (err) {
       logger.warn(`[reports-public] tile tap evidence read failed: ${err.message}`);
       return res.status(503).json({ error: 'Could not record the request — please try again' });
     }
-    return req.webTileEvidence ? next() : stale();
+    return next();
   } catch (err) { return next(err); }
 }
 

@@ -783,7 +783,19 @@ describe('the finding tile tap rechecks its gates', () => {
       await attempt(200);
       expect(tx.writes).toContain('insert:service_requests');
       expect(tx.locks).toEqual(['customers', 'service_records', 'lawn_assessments']); // lock order: customer, service record, assessment
-      expect(buildReportV1Data).toHaveBeenCalledTimes(1); // the preflight only
+      expect(buildReportV1Data).toHaveBeenCalledTimes(2); // the preflight's two builds only, none in the transaction
+    });
+
+    test('the assessment turns healthy between the first build and the first stamp: the second build refuses, 409, no transaction', async () => {
+      let builds = 0;
+      buildReportV1Data.mockImplementation(async () => {
+        builds += 1;
+        return { serviceLine: 'lawn', reportV2: { insights: [insight('weeds', builds === 1 ? 'needs_attention' : 'healthy')] }, pdfUrl: '/x', applications: [] };
+      });
+      await attempt(409);
+      expect(builds).toBe(2);
+      expect(tx.touched).not.toContain('customers'); // refused before the write transaction
+      noWrites();
     });
 
     test('the assessment row changed (updated_at bumped) between the preflight and the write: 409, no writes', async () => {
