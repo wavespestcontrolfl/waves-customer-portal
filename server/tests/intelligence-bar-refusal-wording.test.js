@@ -56,6 +56,7 @@ const NEGATED_REDIRECT = /\b(?:do not|don't|never|not)\b[^.;]{0,30}\b(?:send|poi
 const NOT_A_REFUSAL = [
   'the customer saves a payment method on the page', // the Auto Pay link card
   'regroup from Dispatch if needed', // the address-change card's effects line
+  "is on the operator's screen", // the name matcher's ranking note (match.reasons), not a redirect
 ];
 
 function stringsOf(file) {
