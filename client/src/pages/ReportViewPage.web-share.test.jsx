@@ -38,7 +38,7 @@ describe('the share your lawn button on the simple web report', () => {
   });
 
   it('with webShare at 85 or more: the button shows after the document', async () => {
-    const { container } = renderReport(payload({ glassWeb: true, webShare: { score: 85 } }));
+    const { container } = renderReport(payload({ glassWeb: true, webShare: { score: 85, assessmentId: 'as-1' } }));
     await screen.findByText(/This report is provided for your records/);
     const button = screen.getByRole('button', { name: 'Share your lawn' });
     const doc = container.querySelector('.service-report-document');

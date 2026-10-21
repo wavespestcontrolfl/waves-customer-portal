@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { buildLawnShareCard, bareLink } from '../../lib/lawnShareCard';
+import { canSaveNative, saveBlobNative } from '../../native/nativeFile';
 
 // "Share your lawn" (GATE_REPORT_WEB_SHARE, owner 2026-10-20, idea 8). Shown by
 // the web report only when the server sent `webShare` (lawn score 85 or more,
@@ -10,11 +11,13 @@ import { buildLawnShareCard, bareLink } from '../../lib/lawnShareCard';
 // score, the Waves logo and the referral link; never the address or the name.
 const SHARE_TEXT = 'A look at my lawn, from Waves Pest Control.';
 
-export default function ShareLawnCard({ token, score, apiBase, staffView = false, glass = false, onTap = null }) {
+export default function ShareLawnCard({ token, score, assessmentId, apiBase, staffView = false, glass = false, onTap = null }) {
   // idle | building | shared | saved | ready (built, waiting for a fresh Share tap) | failed
   const [state, setState] = useState('idle');
   const [preview, setPreview] = useState(null);
   const previewRef = useRef(null);
+  const blobRef = useRef(null);
+  const [saveFailed, setSaveFailed] = useState(false);
   useEffect(() => () => { if (previewRef.current) URL.revokeObjectURL(previewRef.current); }, []);
 
   const fetchLink = async () => {
@@ -31,6 +34,7 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
   const preparedRef = useRef(null);
 
   const showPicture = (blob) => {
+    blobRef.current = blob;
     if (previewRef.current) URL.revokeObjectURL(previewRef.current);
     previewRef.current = URL.createObjectURL(blob);
     setPreview(previewRef.current);
@@ -66,7 +70,8 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
     try {
       const link = await fetchLink();
       const blob = await buildLawnShareCard({
-        photoUrl: `${apiBase}/reports/${token}/share-photo`,
+        // The server serves the photo of the very assessment that was scored, and only for this report.
+        photoUrl: `${apiBase}/reports/${token}/share-photo?assessment=${encodeURIComponent(assessmentId || '')}`,
         logoUrl: '/waves-logo.png',
         score,
         link,
@@ -82,6 +87,18 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
       setState('saved');
     } catch {
       setState('failed');
+    }
+  };
+
+  // The Capacitor app's webview ignores a blob <a download>: hand the picture to the OS share sheet instead.
+  const savePicture = async (event) => {
+    if (!canSaveNative() || !blobRef.current) return;
+    event.preventDefault();
+    setSaveFailed(false);
+    try {
+      await saveBlobNative(blobRef.current, 'my-lawn-waves.jpg');
+    } catch {
+      setSaveFailed(true);
     }
   };
 
@@ -115,9 +132,10 @@ export default function ShareLawnCard({ token, score, apiBase, staffView = false
           <div style={{ marginTop: 12 }}>
             <img src={preview} alt="Your lawn card" style={{ display: 'block', width: '100%', maxWidth: 360, borderRadius: 12 }} />
             <p style={{ margin: '8px 0 0', fontSize: 16, lineHeight: 1.45 }}>
-              <a href={preview} download="my-lawn-waves.jpg" style={{ color: '#04395E', fontWeight: 700 }}>Save the picture</a>
+              <a href={preview} download="my-lawn-waves.jpg" onClick={savePicture} style={{ color: '#04395E', fontWeight: 700 }}>Save the picture</a>
               {' '}or press and hold it to save.{state === 'ready' ? ' Tap Share again to open the share sheet.' : ''}
             </p>
+            {saveFailed ? <p role="alert" style={{ margin: '8px 0 0', fontSize: 16 }}>We could not save the picture. Please try again.</p> : null}
           </div>
         ) : null}
       </div>

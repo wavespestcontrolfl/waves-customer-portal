@@ -10515,6 +10515,7 @@ function SimpleWebReport({ data, token }) {
         <ShareLawnCard
           token={token}
           score={data.webShare.score}
+          assessmentId={data.webShare.assessmentId}
           apiBase={API_BASE}
           staffView={data.staffViewer === true}
           glass={glass}

@@ -1716,7 +1716,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'report_template_version', 'structured_notes', 'is_callback')
+      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
@@ -1731,7 +1731,10 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
       return res.status(404).json({ error: 'Report not found' });
     }
     // The lawn card (GATE_REPORT_WEB_SHARE) takes the same tap without the cross-sell gate.
-    if (!require('../config/feature-gates').isEnabled('reportCrossSell') && !webShareService.webShareEnabled()) {
+    // Without the cross-sell gate the only card that can ask is the lawn card, so the visit must be one
+    // /data offers it for: the same eligibility function, re-run before any promoter enrollment.
+    if (!require('../config/feature-gates').isEnabled('reportCrossSell')
+      && !(webShareService.webShareEnabled() && await webShareService.resolveShareEligibility(service))) {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Enrollment + share copy live in ONE composer shared with the estimate
@@ -1769,22 +1772,25 @@ const sharePhotoLimiter = rateLimit({
 // GET /api/reports/:token/share-photo — the front-yard photo for the shareable lawn card
 // (GATE_REPORT_WEB_SHARE). Same-origin on purpose: the photo bucket sets no CORS headers, so a
 // browser canvas could not export an image that drew a signed S3 URL. Resized, upright, with the
-// file metadata (GPS) removed. Dark gate, unknown token, suppressed or callback report, or no
-// front photo = the same generic 404.
+// file metadata (GPS) removed. Dark gate, unknown token, suppressed or callback report, an ineligible
+// visit (not lawn, score under 85, no front photo) or an assessment that is not this visit's = the same generic 404.
 router.get('/:token/share-photo', sharePhotoLimiter, async (req, res, next) => {
-  if (!FULL_TOKEN_RE.test(req.params.token || '') || !webShareService.webShareEnabled()) {
+  const assessmentId = typeof req.query.assessment === 'string' ? req.query.assessment.trim() : '';
+  if (!FULL_TOKEN_RE.test(req.params.token || '') || !webShareService.webShareEnabled() || !assessmentId || assessmentId.length > 64) {
     return res.status(404).json({ error: 'Report not found' });
   }
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'report_template_version', 'structured_notes', 'is_callback')
+      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
-    if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service) || service.is_callback === true) {
+    if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    const photo = await webShareService.findShareFrontPhoto(service);
-    if (!photo) return res.status(404).json({ error: 'Report not found' });
+    // The assessment /data scored must be this visit's own, and the visit must be eligible (same rule as the offer).
+    const eligible = await webShareService.resolveShareEligibility(service, { requestedAssessmentId: assessmentId });
+    if (!eligible) return res.status(404).json({ error: 'Report not found' });
+    const photo = eligible.photo;
     const bytes = await webShareService.readSharePhoto(photo);
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'no-store');

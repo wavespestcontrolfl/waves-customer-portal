@@ -9,9 +9,14 @@ vi.mock('../../lib/lawnShareCard', async () => ({
   buildLawnShareCard: vi.fn(async () => new Blob(['jpeg'], { type: 'image/jpeg' })),
 }));
 import { buildLawnShareCard } from '../../lib/lawnShareCard';
+import { canSaveNative, saveBlobNative } from '../../native/nativeFile';
+vi.mock('../../native/nativeFile', () => ({
+  canSaveNative: vi.fn(() => false),
+  saveBlobNative: vi.fn(async () => true),
+}));
 import ShareLawnCard from './ShareLawnCard';
 
-const props = { token: 'tok123', score: 88, apiBase: '/api' };
+const props = { token: 'tok123', score: 88, assessmentId: 'as-1', apiBase: '/api' };
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ code: 'ABC', link: 'https://wavespestcontrol.com/r/ABC' }) })));
@@ -44,7 +49,7 @@ describe('ShareLawnCard', () => {
     expect(onTap).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith('/api/reports/tok123/referral-link', { method: 'POST' });
     expect(buildLawnShareCard).toHaveBeenCalledWith({
-      photoUrl: '/api/reports/tok123/share-photo', logoUrl: '/waves-logo.png', score: 88, link: 'https://wavespestcontrol.com/r/ABC',
+      photoUrl: '/api/reports/tok123/share-photo?assessment=as-1', logoUrl: '/waves-logo.png', score: 88, link: 'https://wavespestcontrol.com/r/ABC',
     });
     const shared = navigator.share.mock.calls[0][0];
     expect(shared.files[0].type).toBe('image/jpeg');
@@ -105,6 +110,38 @@ describe('ShareLawnCard', () => {
     await waitFor(() => expect(navigator.share).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('button', { name: 'Share' })).toBeEnabled();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('in the app (canSaveNative): Save the picture hands the built blob to the native share sheet, not the blob link', async () => {
+    canSaveNative.mockReturnValue(true);
+    render(<ShareLawnCard {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    const save = await screen.findByRole('link', { name: 'Save the picture' });
+    const notPrevented = fireEvent.click(save);
+    expect(notPrevented).toBe(false); // preventDefault: the dead blob download is skipped
+    await waitFor(() => expect(saveBlobNative).toHaveBeenCalledTimes(1));
+    const [blob, name] = saveBlobNative.mock.calls[0];
+    expect(blob).toBeInstanceOf(Blob);
+    expect(name).toBe('my-lawn-waves.jpg');
+    canSaveNative.mockReturnValue(false);
+  });
+
+  it('in the app, a failed native save shows one fixed message', async () => {
+    canSaveNative.mockReturnValue(true);
+    saveBlobNative.mockRejectedValueOnce(new Error('disk'));
+    render(<ShareLawnCard {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    fireEvent.click(await screen.findByRole('link', { name: 'Save the picture' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('We could not save the picture. Please try again.');
+    canSaveNative.mockReturnValue(false);
+  });
+
+  it('on the web the link keeps its plain download (no native call)', async () => {
+    render(<ShareLawnCard {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    const save = await screen.findByRole('link', { name: 'Save the picture' });
+    expect(fireEvent.click(save)).toBe(true);
+    expect(saveBlobNative).not.toHaveBeenCalled();
   });
 
   it('no file sharing: shows the picture with a save link', async () => {

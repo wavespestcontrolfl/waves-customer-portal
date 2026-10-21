@@ -14,6 +14,7 @@
  */
 const db = require('../../models/db');
 const shotList = require('../lawn-photo-shots');
+const { detectServiceLine } = require('./service-line-configs');
 const featureGates = require('../../config/feature-gates');
 const logger = require('../logger');
 
@@ -26,14 +27,10 @@ function webShareEnabled(gates = featureGates) {
     && typeof gates.reportWebShareLive === 'function' && gates.reportWebShareLive();
 }
 
-// The best front-yard photo of the visit's own assessment (the one the report
-// shows), or null. Same pick order as the report's photo read.
-async function findShareFrontPhoto(service, { knex = db } = {}) {
-  const { loadLinkedLawnAssessment } = require('./report-data');
-  const assessment = await loadLinkedLawnAssessment(service, knex);
-  if (!assessment?.id) return null;
+// The best front-yard photo of one assessment (the pick order the report's photo read uses), or null.
+async function frontPhotoOf(assessmentId, knex) {
   const rows = await knex('lawn_assessment_photos')
-    .where({ assessment_id: assessment.id, customer_visible: true })
+    .where({ assessment_id: assessmentId, customer_visible: true })
     .orderBy('is_best_photo', 'desc')
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
@@ -44,18 +41,39 @@ async function findShareFrontPhoto(service, { knex = db } = {}) {
 }
 
 /**
- * The /data payload key: `{ score }` only for a lawn visit scoring 85 or more
- * that has a front photo, while the referral program is active. Null = no key.
- * Callback visits take no share offer (a complaint visit is no moment for it).
+ * THE eligibility rule for the lawn card, used by /data (to offer it), the share-photo route (to serve the
+ * photo) and the referral-link route (before any promoter enrollment): a lawn visit that is not a callback,
+ * whose own assessment scores 85 or more and has a customer-visible front-yard photo. When
+ * `requestedAssessmentId` is given it must be that very assessment (the one /data scored). Suppressed
+ * reports and the referral program's state are the callers' checks. Returns
+ * { score, assessmentId, photo } or null.
+ */
+async function resolveShareEligibility(service, { knex = db, requestedAssessmentId = null } = {}) {
+  if (!service || service.is_callback === true) return null;
+  const line = service.service_line || detectServiceLine(service.service_type);
+  if (line !== 'lawn') return null;
+  const { loadLinkedLawnAssessment, formatLawnAssessmentScore } = require('./report-data');
+  const assessment = await loadLinkedLawnAssessment(service, knex);
+  if (!assessment?.id) return null;
+  if (requestedAssessmentId != null && String(assessment.id) !== String(requestedAssessmentId)) return null;
+  const score = Number(formatLawnAssessmentScore(assessment)?.overallScore);
+  if (!Number.isFinite(score) || score < WEB_SHARE_MIN_SCORE) return null;
+  const photo = await frontPhotoOf(assessment.id, knex);
+  if (!photo) return null;
+  return { score: Math.round(score), assessmentId: String(assessment.id), photo };
+}
+
+/**
+ * The /data payload key: `{ score, assessmentId }` for an eligible visit (see resolveShareEligibility) while
+ * the referral program is active. Null = no key.
  */
 async function buildWebShare(v1Data, service, { knex = db, referralEngine = require('../referral-engine') } = {}) {
-  if (v1Data?.serviceLine !== 'lawn' || v1Data.internalOnly || v1Data.isCallback === true) return null;
-  const score = Number(v1Data.reportV2?.snapshot?.overallScore);
-  if (!Number.isFinite(score) || score < WEB_SHARE_MIN_SCORE) return null;
-  if (!(await findShareFrontPhoto(service, { knex }))) return null;
+  if (v1Data?.internalOnly) return null;
+  const eligible = await resolveShareEligibility(service, { knex });
+  if (!eligible) return null;
   const settings = await referralEngine.getLiveSettings();
   if (!settings?.program_active) return null;
-  return { score: Math.round(score) };
+  return { score: eligible.score, assessmentId: eligible.assessmentId };
 }
 
 // The /data route's one call: adds `webShare` to a live simple-web payload while both gates are on. Best-effort
@@ -81,4 +99,4 @@ async function readSharePhoto(photoRow, { photoService = require('../photos'), s
     .toBuffer();
 }
 
-module.exports = { WEB_SHARE_MIN_SCORE, webShareEnabled, findShareFrontPhoto, buildWebShare, attachWebShare, readSharePhoto };
+module.exports = { WEB_SHARE_MIN_SCORE, webShareEnabled, resolveShareEligibility, buildWebShare, attachWebShare, readSharePhoto };

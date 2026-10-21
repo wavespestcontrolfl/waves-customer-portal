@@ -1,11 +1,15 @@
 /**
- * Shareable lawn card server pieces (GATE_REPORT_WEB_SHARE): the offer rule
- * (lawn, score 85+, front photo, active referral program, no callback) and the
- * front photo bytes (upright, at most 1600 px, no metadata).
+ * Shareable lawn card server pieces (GATE_REPORT_WEB_SHARE): the ONE eligibility rule (lawn line, not a
+ * callback, the visit's own assessment scores 85+, a front photo), the offer built from it (+ active referral
+ * program), and the front photo bytes (upright, at most 1600 px, no metadata).
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/service-report/report-data', () => ({ loadLinkedLawnAssessment: jest.fn() }));
+jest.mock('../services/service-report/report-data', () => ({
+  loadLinkedLawnAssessment: jest.fn(),
+  // The real one maps the row's category scores; here the row carries its overall score directly.
+  formatLawnAssessmentScore: jest.fn((row) => (row ? { overallScore: row.overall } : null)),
+}));
 
 const sharp = require('sharp');
 const { loadLinkedLawnAssessment } = require('../services/service-report/report-data');
@@ -21,7 +25,9 @@ function photosKnex(rows) {
   return jest.fn(() => q);
 }
 
-const lawnPayload = (score, extra = {}) => ({ serviceLine: 'lawn', reportV2: { snapshot: { overallScore: score } }, ...extra });
+const FRONT = [{ s3_key: 'k/front.jpg', zone: 'front' }];
+const lawnService = (extra = {}) => ({ id: 's1', service_type: 'Lawn Care Visit', is_callback: false, ...extra });
+const assessmentRow = (overall, id = 'a1') => ({ id, overall });
 const activeProgram = { getLiveSettings: jest.fn().mockResolvedValue({ program_active: true }) };
 
 describe('webShareEnabled', () => {
@@ -34,72 +40,105 @@ describe('webShareEnabled', () => {
   });
 });
 
-describe('findShareFrontPhoto', () => {
-  beforeEach(() => loadLinkedLawnAssessment.mockResolvedValue({ id: 'a1' }));
+describe('resolveShareEligibility', () => {
+  beforeEach(() => { loadLinkedLawnAssessment.mockReset(); loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(88)); });
+  const resolve = (service = lawnService(), opts = {}) => webShare.resolveShareEligibility(service, { knex: photosKnex(FRONT), ...opts });
 
-  test('picks the first front photo in the report order, only customer-visible rows are read', async () => {
+  test('a lawn visit at 85+ with a front photo: score, assessment id and the photo row', async () => {
+    expect(await resolve()).toEqual({ score: 88, assessmentId: 'a1', photo: FRONT[0] });
+    loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(85));
+    expect((await resolve()).score).toBe(85);
+    loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(91.4));
+    expect((await resolve()).score).toBe(91);
+  });
+
+  test('the service line may come from the stored service_line', async () => {
+    expect(await resolve({ id: 's1', service_line: 'lawn', service_type: 'Visit' })).not.toBeNull();
+  });
+
+  test('a pest (or other non-lawn) visit: null, and no assessment is read', async () => {
+    expect(await resolve(lawnService({ service_line: 'pest', service_type: 'Quarterly Pest Control' }))).toBeNull();
+    expect(loadLinkedLawnAssessment).not.toHaveBeenCalled();
+  });
+
+  test('a callback visit: null', async () => {
+    expect(await resolve(lawnService({ is_callback: true }))).toBeNull();
+    expect(loadLinkedLawnAssessment).not.toHaveBeenCalled();
+  });
+
+  test('84 and under, or no readable score: null', async () => {
+    loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(84));
+    expect(await resolve()).toBeNull();
+    loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(null));
+    expect(await resolve()).toBeNull();
+    loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(undefined));
+    expect(await resolve()).toBeNull();
+  });
+
+  test('no front photo (other zone, pending upload, none): null', async () => {
+    expect(await resolve(lawnService(), { knex: photosKnex([{ s3_key: 'k/back.jpg', zone: 'back' }]) })).toBeNull();
+    expect(await resolve(lawnService(), { knex: photosKnex([{ s3_key: 'pending/x.jpg', zone: 'front' }]) })).toBeNull();
+    expect(await resolve(lawnService(), { knex: photosKnex([]) })).toBeNull();
+  });
+
+  test('no linked assessment: null', async () => {
+    loadLinkedLawnAssessment.mockResolvedValue(null);
+    expect(await resolve()).toBeNull();
+  });
+
+  test('picks the first front photo in report order; only customer-visible rows of THAT assessment are read', async () => {
     const knex = photosKnex([
       { s3_key: 'k/back.jpg', zone: 'back' },
       { s3_key: 'k/front.jpg', zone: ' Front ' },
       { s3_key: 'k/front2.jpg', zone: 'front' },
     ]);
-    const row = await webShare.findShareFrontPhoto({ id: 's1' }, { knex });
-    expect(row.s3_key).toBe('k/front.jpg');
+    expect((await webShare.resolveShareEligibility(lawnService(), { knex })).photo.s3_key).toBe('k/front.jpg');
     expect(knex().where).toHaveBeenCalledWith({ assessment_id: 'a1', customer_visible: true });
   });
 
-  test('no front photo, a pending upload, or no assessment = null', async () => {
-    expect(await webShare.findShareFrontPhoto({ id: 's1' }, { knex: photosKnex([{ s3_key: 'k/back.jpg', zone: 'back' }]) })).toBeNull();
-    expect(await webShare.findShareFrontPhoto({ id: 's1' }, { knex: photosKnex([{ s3_key: 'pending/x.jpg', zone: 'front' }]) })).toBeNull();
-    loadLinkedLawnAssessment.mockResolvedValue(null);
-    expect(await webShare.findShareFrontPhoto({ id: 's1' }, { knex: photosKnex([]) })).toBeNull();
+  test('a requested assessment must be this visit\'s own assessment', async () => {
+    expect((await resolve(lawnService(), { requestedAssessmentId: 'a1' })).assessmentId).toBe('a1');
+    expect(await resolve(lawnService(), { requestedAssessmentId: 'someone-elses' })).toBeNull();
+  });
+
+  test('a read failure throws (callers answer their own failure)', async () => {
+    loadLinkedLawnAssessment.mockRejectedValue(new Error('db down'));
+    await expect(resolve()).rejects.toThrow();
   });
 });
 
 describe('buildWebShare', () => {
-  const knex = photosKnex([{ s3_key: 'k/front.jpg', zone: 'front' }]);
-  beforeEach(() => loadLinkedLawnAssessment.mockResolvedValue({ id: 'a1' }));
-  const build = (payload, opts = {}) => webShare.buildWebShare(payload, { id: 's1' }, { knex, referralEngine: activeProgram, ...opts });
+  beforeEach(() => { loadLinkedLawnAssessment.mockReset(); loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(88)); });
+  const build = (payload = {}, opts = {}) => webShare.buildWebShare(payload, lawnService(), { knex: photosKnex(FRONT), referralEngine: activeProgram, ...opts });
 
-  test('85 and up with a front photo: the score is offered', async () => {
-    expect(await build(lawnPayload(85))).toEqual({ score: 85 });
-    expect(await build(lawnPayload(91.4))).toEqual({ score: 91 });
+  test('an eligible visit: the score and the assessment it scored', async () => {
+    expect(await build()).toEqual({ score: 88, assessmentId: 'a1' });
   });
 
-  test('84 and under: no offer', async () => {
-    expect(await build(lawnPayload(84))).toBeNull();
-    expect(await build(lawnPayload(null))).toBeNull();
-    expect(await build({ serviceLine: 'lawn' })).toBeNull();
-  });
-
-  test('not a lawn report, an internal-only report or a callback visit: no offer', async () => {
-    expect(await build(lawnPayload(95, { serviceLine: 'pest' }))).toBeNull();
-    expect(await build(lawnPayload(95, { internalOnly: true }))).toBeNull();
-    expect(await build(lawnPayload(95, { isCallback: true }))).toBeNull();
-  });
-
-  test('no front photo: no offer', async () => {
-    expect(await build(lawnPayload(95), { knex: photosKnex([{ s3_key: 'k/back.jpg', zone: 'back' }]) })).toBeNull();
+  test('an internal-only payload or an ineligible visit: no offer', async () => {
+    expect(await build({ internalOnly: true })).toBeNull();
+    loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(70));
+    expect(await build()).toBeNull();
   });
 
   test('inactive or unreadable referral program: no offer', async () => {
-    expect(await build(lawnPayload(95), { referralEngine: { getLiveSettings: jest.fn().mockResolvedValue({ program_active: false }) } })).toBeNull();
-    expect(await build(lawnPayload(95), { referralEngine: { getLiveSettings: jest.fn().mockResolvedValue(null) } })).toBeNull();
-    await expect(build(lawnPayload(95), { referralEngine: { getLiveSettings: jest.fn().mockRejectedValue(new Error('x')) } })).rejects.toThrow();
+    expect(await build({}, { referralEngine: { getLiveSettings: jest.fn().mockResolvedValue({ program_active: false }) } })).toBeNull();
+    expect(await build({}, { referralEngine: { getLiveSettings: jest.fn().mockResolvedValue(null) } })).toBeNull();
+    await expect(build({}, { referralEngine: { getLiveSettings: jest.fn().mockRejectedValue(new Error('x')) } })).rejects.toThrow();
   });
 
-  test('the offer carries nothing but the score', async () => {
-    expect(Object.keys(await build(lawnPayload(90, { customerName: 'Pat Tester', address: '1 Main St' })))).toEqual(['score']);
+  test('the offer carries nothing but the score and the assessment id', async () => {
+    expect(Object.keys(await build({ customerName: 'Pat Tester', address: '1 Main St' })).sort()).toEqual(['assessmentId', 'score']);
   });
 });
 
 describe('attachWebShare', () => {
   const onGates = { reportSimpleWebLive: () => true, reportWebShareLive: () => true };
-  const service = { id: 's1' };
-  beforeEach(() => { loadLinkedLawnAssessment.mockReset(); loadLinkedLawnAssessment.mockResolvedValue({ id: 'a1' }); });
+  const service = lawnService();
+  beforeEach(() => { loadLinkedLawnAssessment.mockReset(); loadLinkedLawnAssessment.mockResolvedValue(assessmentRow(95)); });
 
   test('gate off (or simple web off): the payload is untouched and nothing is read', async () => {
-    const payload = lawnPayload(95);
+    const payload = {};
     await webShare.attachWebShare(payload, service, { reportSimpleWebLive: () => true, reportWebShareLive: () => false });
     await webShare.attachWebShare(payload, service, { reportSimpleWebLive: () => false, reportWebShareLive: () => true });
     expect('webShare' in payload).toBe(false);
@@ -107,14 +146,14 @@ describe('attachWebShare', () => {
   });
 
   test('an internal-only payload is untouched', async () => {
-    const payload = lawnPayload(95, { internalOnly: true });
+    const payload = { internalOnly: true };
     await webShare.attachWebShare(payload, service, onGates);
     expect('webShare' in payload).toBe(false);
   });
 
   test('a read failure leaves the page as it is', async () => {
     loadLinkedLawnAssessment.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONN' }));
-    const payload = lawnPayload(95);
+    const payload = {};
     await expect(webShare.attachWebShare(payload, service, onGates)).resolves.toBeUndefined();
     expect('webShare' in payload).toBe(false);
   });

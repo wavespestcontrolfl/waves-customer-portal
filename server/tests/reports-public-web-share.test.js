@@ -58,7 +58,7 @@ jest.mock('../services/service-report/report-data', () => ({
 jest.mock('../services/service-report/web-share', () => ({
   ...jest.requireActual('../services/service-report/web-share'),
   attachWebShare: jest.fn(),
-  findShareFrontPhoto: jest.fn(),
+  resolveShareEligibility: jest.fn(),
   readSharePhoto: jest.fn(),
 }));
 jest.mock('../services/referral-share', () => ({
@@ -113,6 +113,13 @@ async function withServer(fn) {
 }
 
 const VALID_TOKEN = '0123456789abcdef0123456789abcdef';
+// The report limiter is per address and the photo limiter per token, both in memory for the whole file:
+// reset the first before each test and give each photo read its own token.
+let tokenCounter = 0;
+const freshToken = () => { tokenCounter += 1; return `${String(tokenCounter).padStart(8, '0')}${VALID_TOKEN.slice(8)}`; };
+beforeEach(() => {
+  ['127.0.0.1', '::1', '::ffff:127.0.0.1'].forEach((key) => reportsRouter.reportLimiter.resetKey(key));
+});
 
 function mockDb(overrides = {}) {
   const fullRecord = {
@@ -236,10 +243,10 @@ describe('GET /reports/:token/share-photo', () => {
     jest.clearAllMocks();
     gates.reportSimpleWebLive.mockReturnValue(true);
     gates.reportWebShareLive.mockReturnValue(true);
-    webShare.findShareFrontPhoto.mockResolvedValue({ s3_key: 'lawn/front.jpg', zone: 'front' });
+    webShare.resolveShareEligibility.mockResolvedValue({ score: 88, assessmentId: 'as-1', photo: { s3_key: 'lawn/front.jpg', zone: 'front' } });
     webShare.readSharePhoto.mockResolvedValue(JPEG);
   });
-  const get = (baseUrl) => fetch(`${baseUrl}/reports/${VALID_TOKEN}/share-photo`);
+  const get = (baseUrl, query = '?assessment=as-1') => fetch(`${baseUrl}/reports/${freshToken()}/share-photo${query}`);
 
   test('serves the photo as a private same-origin JPEG', async () => {
     mockDbFor([paramGateRecord(), fullRecord()]);
@@ -265,7 +272,8 @@ describe('GET /reports/:token/share-photo', () => {
     expect(webShare.readSharePhoto).not.toHaveBeenCalled();
   });
 
-  test('callback report: 404', async () => {
+  test('callback report: the eligibility rule refuses it, so 404', async () => {
+    webShare.resolveShareEligibility.mockImplementation(async (service) => (service.is_callback === true ? null : { score: 88, assessmentId: 'as-1', photo: {} }));
     mockDbFor([paramGateRecord(), fullRecord({ is_callback: true })]);
     await withServer(async (baseUrl) => {
       expect((await get(baseUrl)).status).toBe(404);
@@ -273,11 +281,35 @@ describe('GET /reports/:token/share-photo', () => {
   });
 
   test('no front photo: 404', async () => {
-    webShare.findShareFrontPhoto.mockResolvedValue(null);
+    webShare.resolveShareEligibility.mockResolvedValue(null);
     mockDbFor([paramGateRecord(), fullRecord()]);
     await withServer(async (baseUrl) => {
       expect((await get(baseUrl)).status).toBe(404);
     });
+  });
+
+  test('asks for the assessment the page scored, and only for this report', async () => {
+    mockDbFor([paramGateRecord(), fullRecord()]);
+    await withServer(async (baseUrl) => {
+      expect((await get(baseUrl)).status).toBe(200);
+    });
+    expect(webShare.resolveShareEligibility).toHaveBeenCalledWith(expect.objectContaining({ id: 'service-1' }), { requestedAssessmentId: 'as-1' });
+  });
+
+  test('an assessment that is not this visit\'s (the resolver refuses): 404, no photo read', async () => {
+    webShare.resolveShareEligibility.mockResolvedValue(null);
+    mockDbFor([paramGateRecord(), fullRecord()]);
+    await withServer(async (baseUrl) => {
+      expect((await get(baseUrl, '?assessment=someone-elses')).status).toBe(404);
+    });
+    expect(webShare.readSharePhoto).not.toHaveBeenCalled();
+  });
+
+  test.each(['', '?assessment=', `?assessment=${'x'.repeat(65)}`, '?assessment[]=a'])('a missing or odd assessment (%s): 404 before any row read', async (query) => {
+    await withServer(async (baseUrl) => {
+      expect((await get(baseUrl, query)).status).toBe(404);
+    });
+    expect(webShare.resolveShareEligibility).not.toHaveBeenCalled();
   });
 
   test('suppressed report: 404 for a non-staff caller', async () => {
@@ -300,7 +332,7 @@ describe('GET /reports/:token/share-photo', () => {
       jest.clearAllMocks();
       gates.reportWebShareLive.mockReturnValue(true);
       gates.reportSimpleWebLive.mockReturnValue(true);
-      webShare.findShareFrontPhoto.mockResolvedValue({ key: 'k' });
+      webShare.resolveShareEligibility.mockResolvedValue({ score: 88, assessmentId: 'as-1', photo: { s3_key: 'lawn/front.jpg', zone: 'front' } });
       setup();
       await withServer(async (baseUrl) => {
         const res = path ? await fetch(`${baseUrl}${path}`) : await get(baseUrl);
@@ -309,8 +341,8 @@ describe('GET /reports/:token/share-photo', () => {
       });
     };
     await read(() => mockDbFor([paramGateRecord({ structured_notes: { typedReportDelivery: 'shadow' } })]));
-    await read(() => mockDbFor([paramGateRecord(), fullRecord({ is_callback: true })]));
-    await read(() => { webShare.findShareFrontPhoto.mockResolvedValue(null); mockDbFor([paramGateRecord(), fullRecord()]); });
+    await read(() => { webShare.resolveShareEligibility.mockResolvedValue(null); mockDbFor([paramGateRecord(), fullRecord({ is_callback: true })]); });
+    await read(() => { webShare.resolveShareEligibility.mockResolvedValue(null); mockDbFor([paramGateRecord(), fullRecord()]); });
     await read(() => { gates.reportWebShareLive.mockReturnValue(false); mockDbFor([paramGateRecord(), fullRecord()]); });
     await read(() => {}, '/reports/not-a-token/share-photo');
     expect(new Set(bodies).size).toBe(1);
@@ -382,9 +414,9 @@ describe('dark share-photo answers before every limiter (real limiters)', () => 
       // The same address still has its full budget: a valid-token read is served, not 429.
       db.mockReset();
       mockDbFor([paramGateRecord(), fullRecord()]);
-      webShare.findShareFrontPhoto.mockResolvedValue({ s3_key: 'lawn/front.jpg', zone: 'front' });
+      webShare.resolveShareEligibility.mockResolvedValue({ score: 88, assessmentId: 'as-1', photo: { s3_key: 'lawn/front.jpg', zone: 'front' } });
       webShare.readSharePhoto.mockResolvedValue(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
-      const ok = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/share-photo`);
+      const ok = await fetch(`${baseUrl}/reports/${freshToken()}/share-photo?assessment=as-1`);
       expect(ok.status).toBe(200);
     });
   });
@@ -439,17 +471,54 @@ describe('the lawn card tap without GATE_REPORT_CROSS_SELL', () => {
     referralShare.buildReferralShareForCustomer.mockResolvedValue({ code: 'ABC123', link: 'https://example.test/r/ABC123' });
     referralEngine.getLiveSettings.mockResolvedValue({ program_active: true });
   });
-  const post = (baseUrl, path, body) => fetch(`${baseUrl}/reports/${VALID_TOKEN}${path}`, {
+  const post = (baseUrl, path, body) => fetch(`${baseUrl}/reports/${freshToken()}${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
   });
 
   test('referral-link answers while the share gates are on', async () => {
+    webShare.resolveShareEligibility.mockResolvedValue({ score: 88, assessmentId: 'as-1', photo: {} });
     mockDbFor([fullRecord()]);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, '/referral-link');
       expect(res.status).toBe(200);
       expect((await res.json()).code).toBe('ABC123');
     });
+  });
+
+  test('referral-link without cross-sell needs an eligible lawn visit: the same eligibility /data used', async () => {
+    mockDbFor([fullRecord({ service_type: 'Lawn Care' })]);
+    webShare.resolveShareEligibility.mockResolvedValue({ score: 88, assessmentId: 'as-1', photo: {} });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, '/referral-link')).status).toBe(200);
+    });
+    expect(webShare.resolveShareEligibility).toHaveBeenCalledWith(expect.objectContaining({ id: 'service-1', service_type: 'Lawn Care' }));
+  });
+
+  test('referral-link for an ineligible visit (pest, low score, no photo, callback) enrolls nobody and answers like gates off', async () => {
+    webShare.resolveShareEligibility.mockResolvedValue(null);
+    mockDbFor([fullRecord()]);
+    const bodies = [];
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/referral-link');
+      expect(res.status).toBe(404);
+      bodies.push(await res.json());
+    });
+    gates.reportWebShareLive.mockReturnValue(false);
+    mockDbFor([fullRecord()]);
+    await withServer(async (baseUrl) => {
+      bodies.push(await (await post(baseUrl, '/referral-link')).json());
+    });
+    expect(bodies[0]).toEqual(bodies[1]);
+    expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('with the cross-sell gate on, the report referral card works as it always did (no lawn-card check)', async () => {
+    gates.isEnabled.mockReturnValue(true);
+    mockDbFor([fullRecord()]);
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, '/referral-link')).status).toBe(200);
+    });
+    expect(webShare.resolveShareEligibility).not.toHaveBeenCalled();
   });
 
   test('referral-link stays a 404 with both the cross-sell and share gates off', async () => {
