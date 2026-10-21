@@ -402,6 +402,89 @@ function Bullet({ children }) {
   );
 }
 
+// One product's facts under its name: active ingredient, method, targets, areas, label safety, watering in.
+// The PDF table and the web tap-to-open list print the same block.
+function ProductFacts({ app, product, hideAreas, data }) {
+  return (
+    <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
+      {product.active_ingredient && <div><strong style={{ color: INK, fontWeight: 600 }}>Active ingredient:</strong> {product.active_ingredient}</div>}
+      {app.methodLabel && <div><strong style={{ color: INK, fontWeight: 600 }}>Method:</strong> {app.methodLabel}</div>}
+      {/* A pest product prints no per-product Target (the
+          label line on the web card replaces the
+          three-pest list) and no Areas line (owner
+          2026-10-05). Other lines keep both. */}
+      {!hideAreas && Array.isArray(app.targets) && app.targets.length > 0 && (
+        <div><strong style={{ color: INK, fontWeight: 600 }}>Target:</strong> {app.targets.join(', ')}</div>
+      )}
+      {!hideAreas && (
+        <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+      )}
+      {(product.precaution_summary || product.reentry_summary) && (
+        <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
+      )}
+      {/* Owner-approved product wording
+          (GATE_REPORT_PRODUCT_COPY, 2026-09-28) is
+          LIVE-VIEW ONLY (codex P1 2026-09-28): the
+          server strips `report_copy` from every
+          pdf/static/sms_preview payload before it
+          reaches this document (the PDF cache key
+          doesn't vary on the gate), so there is
+          nothing to render here — see
+          stripLiveOnlyReportProductCopy in
+          report-data.js and ReportViewPage.jsx for the
+          live-view rendering of this field. */}
+      {/* Legacy lawn reports (no reportV2) carry approved
+          watering-in guidance ONLY here — dropping it
+          loses a required instruction. */}
+      {product.irrigation_notes && (
+        <div><strong style={{ color: INK, fontWeight: 600 }}>Watering in:</strong> {product.irrigation_notes}</div>
+      )}
+    </div>
+  );
+}
+
+// GATE_REPORT_WEB_TOP (owner 2026-10-20), web only: each product is one tap-to-open row. The name shows; the EPA
+// number, rate, total and the label lines open under it.
+function WebProductList({ apps, hideAreas, data, reportCleanup }) {
+  return (
+    <div>
+      {apps.map((app, index) => {
+        const product = app.product || {};
+        const name = product.name || app.productName || 'Product';
+        return (
+          <details key={app.id || `${name}-${index}`} className="doc-web-product" style={{ borderBottom: index < apps.length - 1 ? `1px solid ${HAIR}` : 'none' }}>
+            <summary style={{ fontSize: 11.5, fontWeight: 700, color: INK }}>{name}</summary>
+            <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5, paddingBottom: 8 }}>
+              <div><strong style={{ color: INK, fontWeight: 600 }}>EPA Reg. No.:</strong> {epaReg(app) || '—'}</div>
+              <div><strong style={{ color: INK, fontWeight: 600 }}>Rate:</strong> {rateLabel(app, reportCleanup) || '—'}</div>
+              <div><strong style={{ color: INK, fontWeight: 600 }}>Total applied:</strong> {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}</div>
+            </div>
+            <ProductFacts app={app} product={product} hideAreas={hideAreas} data={data} />
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
+// GATE_REPORT_WEB_TOP, web only: the visit's conditions in one line instead of a card of rows.
+function ConditionsLine({ conditions, rainLabel, rainValue, gc }) {
+  const parts = conditions ? [
+    conditions.temp_f != null && `${conditions.temp_f} °F`,
+    conditions.humidity_pct != null && `${conditions.humidity_pct}% humidity`,
+    conditions.wind_mph != null && `${conditions.wind_mph} mph wind`,
+    rainValue != null && `${rainLabel} ${rainValue} in`,
+    conditions.sky,
+  ].filter(Boolean) : [];
+  return (
+    <div className="doc-keep" {...gc}>
+      <div style={{ fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+        <strong>Conditions:</strong> {parts.length ? parts.join(' · ') : 'Not recorded for this visit.'}
+      </div>
+    </div>
+  );
+}
+
 // `web` (GATE_REPORT_SIMPLE_WEB, owner 2026-10-17): the same document is the
 // page a customer sees at the report link. It then IS the online report, so
 // the lines that point "to your online report" read as plain facts instead.
@@ -409,6 +492,10 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // GATE_REPORT_GLASS_WEB: glass dressing for the web view only; the PDF never
   // gets it, whatever the payload says.
   const { on: glassOn, gc, footer: footerProps, rootClass: glassClass, rootBackground } = glassView(web, glass);
+  // GATE_REPORT_WEB_TOP (owner 2026-10-20): the server sends `webTop` (an object, even an empty one) only to the
+  // web view while the gate is live. It also trims the web page: tap-to-open products, no letterhead, conditions on
+  // one line, one footer identity. The PDF never carries it.
+  const webCut = web && Boolean(data.webTop);
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -1114,6 +1201,12 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         /* A long link (the products-and-safety URL) wraps instead of running
            past a 320px phone at that scale. */
         .service-report-document.is-web a { overflow-wrap: anywhere; }
+        /* GATE_REPORT_WEB_TOP: a product is one tap-to-open row. The summary is the
+           tap target; the arrow is drawn, not typed. */
+        .service-report-document.is-web .doc-web-product > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; cursor: pointer; list-style: none; }
+        .service-report-document.is-web .doc-web-product > summary::-webkit-details-marker { display: none; }
+        .service-report-document.is-web .doc-web-product > summary::after { content: '\\25BE'; font-size: 11.5px; color: ${MUTED}; }
+        .service-report-document.is-web .doc-web-product[open] > summary::after { content: '\\25B4'; }
         /* GATE_REPORT_SIMPLE_WEB: on a phone or a narrow tablet the web view
            stacks what the letter-size page sets side by side. A media query
            sees the unzoomed viewport, so the breakpoint is 640px of page width
@@ -1133,6 +1226,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {/* Letterhead and title: one glass card on the web view, plain otherwise */}
         <GlassBlock>
         {/* Letterhead */}
+        {!webCut && (
         <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
@@ -1142,6 +1236,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             <div>Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}</div>
           </div>
         </div>
+        )}
 
         {/* Title row */}
         <div className="doc-keep doc-title-row" style={{
@@ -1156,7 +1251,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         </GlassBlock>
 
         {/* Info grid */}
-        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: webCut ? '1.2fr 1.1fr' : '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
           {/* minWidth:0 on each column: grid otherwise honours a long unbroken
               email's min-content width and squeezes the other two columns. */}
           <div style={{ minWidth: 0 }} {...gc}>
@@ -1180,21 +1275,24 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             <InfoRow label="Time out">{fmtTime(data.visitTiming?.exitedAt)}</InfoRow>
             <InfoRow label="Contact">{interaction}</InfoRow>
           </div>
-          <div {...gc}>
-            <SectionHeader>Conditions</SectionHeader>
-            {conditions ? (
-              <>
-                <InfoRow label="Temp">{conditions.temp_f != null ? `${conditions.temp_f} °F` : null}</InfoRow>
-                <InfoRow label="Humidity">{conditions.humidity_pct != null ? `${conditions.humidity_pct}%` : null}</InfoRow>
-                <InfoRow label="Wind">{conditions.wind_mph != null ? `${conditions.wind_mph} mph` : null}</InfoRow>
-                <InfoRow label={rainLabel}>{rainValue != null ? `${rainValue} in` : null}</InfoRow>
-                <InfoRow label="Sky">{conditions.sky}</InfoRow>
-              </>
-            ) : (
-              <div style={{ fontSize: 11, color: MUTED, padding: '2px 0' }}>Not recorded for this visit.</div>
-            )}
-          </div>
+          {!webCut && (
+            <div {...gc}>
+              <SectionHeader>Conditions</SectionHeader>
+              {conditions ? (
+                <>
+                  <InfoRow label="Temp">{conditions.temp_f != null ? `${conditions.temp_f} °F` : null}</InfoRow>
+                  <InfoRow label="Humidity">{conditions.humidity_pct != null ? `${conditions.humidity_pct}%` : null}</InfoRow>
+                  <InfoRow label="Wind">{conditions.wind_mph != null ? `${conditions.wind_mph} mph` : null}</InfoRow>
+                  <InfoRow label={rainLabel}>{rainValue != null ? `${rainValue} in` : null}</InfoRow>
+                  <InfoRow label="Sky">{conditions.sky}</InfoRow>
+                </>
+              ) : (
+                <div style={{ fontSize: 11, color: MUTED, padding: '2px 0' }}>Not recorded for this visit.</div>
+              )}
+            </div>
+          )}
         </div>
+        {webCut && <ConditionsLine conditions={conditions} rainLabel={rainLabel} rainValue={rainValue} gc={gc} />}
 
         {/* Summary */}
         {summaryParagraphs.length > 0 && (
@@ -1506,78 +1604,49 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {appliedProducts.length > 0 && (
           <div {...gc}>
             <SectionHeader>Products applied</SectionHeader>
-            <table className="doc-products" style={{ fontSize: 11 }}>
-              <thead className="doc-keep-with-next">
-                <tr>
-                  {['Product', 'EPA Reg. No.', 'Rate', 'Total applied'].map((heading, i) => (
-                    <th key={heading} style={{
-                      textAlign: i === 0 ? 'left' : 'right', padding: '4px 6px 4px 0',
-                      color: MUTED, fontSize: 9.5, fontWeight: 700, letterSpacing: '0.06em',
-                      textTransform: 'uppercase', borderBottom: `1px solid ${LINE}`,
-                    }}>{heading}</th>
-                  ))}
-                </tr>
-              </thead>
-              {appliedProducts.map((app, index) => {
-                  const product = app.product || {};
-                  const name = product.name || app.productName || 'Product';
-                  return (
-                    <tbody className="doc-product-row" key={app.id || `${name}-${index}`}>
-                      <tr>
-                        <td style={{ padding: '6px 6px 1px 0', fontWeight: 700, color: INK }}>{name}</td>
-                        <td style={{ padding: '6px 0 1px', textAlign: 'right', whiteSpace: 'nowrap' }}>{epaReg(app) || '—'}</td>
-                        <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          {/* both halves or neither: a bare "5" can't be read
-                              as ounces, gallons or grams in a pesticide
-                              record, which is worse than showing nothing. */}
-                          {rateLabel(app, reportCleanup)}
-                        </td>
-                        <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td colSpan={4} style={{ padding: `0 0 8px 0`, borderBottom: index < appliedProducts.length - 1 ? `1px solid ${HAIR}` : 'none' }}>
-                          <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
-                            {product.active_ingredient && <div><strong style={{ color: INK, fontWeight: 600 }}>Active ingredient:</strong> {product.active_ingredient}</div>}
-                            {app.methodLabel && <div><strong style={{ color: INK, fontWeight: 600 }}>Method:</strong> {app.methodLabel}</div>}
-                            {/* A pest product prints no per-product Target (the
-                                label line on the web card replaces the
-                                three-pest list) and no Areas line (owner
-                                2026-10-05). Other lines keep both. */}
-                            {!hideAreas && Array.isArray(app.targets) && app.targets.length > 0 && (
-                              <div><strong style={{ color: INK, fontWeight: 600 }}>Target:</strong> {app.targets.join(', ')}</div>
-                            )}
-                            {!hideAreas && (
-                              <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
-                            )}
-                            {(product.precaution_summary || product.reentry_summary) && (
-                              <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
-                            )}
-                            {/* Owner-approved product wording
-                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) is
-                                LIVE-VIEW ONLY (codex P1 2026-09-28): the
-                                server strips `report_copy` from every
-                                pdf/static/sms_preview payload before it
-                                reaches this document (the PDF cache key
-                                doesn't vary on the gate), so there is
-                                nothing to render here — see
-                                stripLiveOnlyReportProductCopy in
-                                report-data.js and ReportViewPage.jsx for the
-                                live-view rendering of this field. */}
-                            {/* Legacy lawn reports (no reportV2) carry approved
-                                watering-in guidance ONLY here — dropping it
-                                loses a required instruction. */}
-                            {product.irrigation_notes && (
-                              <div><strong style={{ color: INK, fontWeight: 600 }}>Watering in:</strong> {product.irrigation_notes}</div>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    </tbody>
-                  );
-              })}
-            </table>
+            {webCut ? (
+              <WebProductList apps={appliedProducts} hideAreas={hideAreas} data={data} reportCleanup={reportCleanup} />
+            ) : (
+              <table className="doc-products" style={{ fontSize: 11 }}>
+                <thead className="doc-keep-with-next">
+                  <tr>
+                    {['Product', 'EPA Reg. No.', 'Rate', 'Total applied'].map((heading, i) => (
+                      <th key={heading} style={{
+                        textAlign: i === 0 ? 'left' : 'right', padding: '4px 6px 4px 0',
+                        color: MUTED, fontSize: 9.5, fontWeight: 700, letterSpacing: '0.06em',
+                        textTransform: 'uppercase', borderBottom: `1px solid ${LINE}`,
+                      }}>{heading}</th>
+                    ))}
+                  </tr>
+                </thead>
+                {appliedProducts.map((app, index) => {
+                    const product = app.product || {};
+                    const name = product.name || app.productName || 'Product';
+                    return (
+                      <tbody className="doc-product-row" key={app.id || `${name}-${index}`}>
+                        <tr>
+                          <td style={{ padding: '6px 6px 1px 0', fontWeight: 700, color: INK }}>{name}</td>
+                          <td style={{ padding: '6px 0 1px', textAlign: 'right', whiteSpace: 'nowrap' }}>{epaReg(app) || '—'}</td>
+                          <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            {/* both halves or neither: a bare "5" can't be read
+                                as ounces, gallons or grams in a pesticide
+                                record, which is worse than showing nothing. */}
+                            {rateLabel(app, reportCleanup)}
+                          </td>
+                          <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td colSpan={4} style={{ padding: `0 0 8px 0`, borderBottom: index < appliedProducts.length - 1 ? `1px solid ${HAIR}` : 'none' }}>
+                            <ProductFacts app={app} product={product} hideAreas={hideAreas} data={data} />
+                          </td>
+                        </tr>
+                      </tbody>
+                    );
+                })}
+              </table>
+            )}
             {/* Same gate as the web section: only a visit that applied a
                 product prints Poison Control. The tel: link stays tappable
                 in the PDF. */}
@@ -2025,8 +2094,13 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
               /* moments + the gauge shot carry no hash, so displaying one
                  correctly defeats the claim rather than over-claiming */
               ? ' Photos hash-chained and tamper-evident.' : ''}
-            <br />
-            Waves Pest Control, LLC · Family-owned pest control and lawn care in Southwest Florida · Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}
+            {/* The web page's own footer already names Waves, the service area and the license. */}
+            {!webCut && (
+              <>
+                <br />
+                Waves Pest Control, LLC · Family-owned pest control and lawn care in Southwest Florida · Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}
+              </>
+            )}
           </div>
         </div>
 

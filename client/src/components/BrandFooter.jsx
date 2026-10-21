@@ -93,7 +93,7 @@ function GooglePlayBadgeSvg({ fill }) {
 function StoreBadges({ ctaColor }) {
   if (isNativeApp()) return null;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, minWidth: 0, maxWidth: '100%' }}>
+    <div data-store-badges="" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, minWidth: 0, maxWidth: '100%' }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ctaColor, fontFamily: FONTS.heading, lineHeight: 1.5, maxWidth: 320 }}>
         Track, pay, message — one tap.
       </div>

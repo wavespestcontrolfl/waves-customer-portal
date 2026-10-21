@@ -211,3 +211,119 @@ describe('the report tools and Ask Waves on the glass simple web report', () => 
     expect(reportAskPrompts({ serviceLine: 'pest' }, 'pest')).toEqual(['What should I watch for next?', 'When is my next service?']);
   });
 });
+
+// GATE_REPORT_WEB_TOP (owner 2026-10-20): the server adds webTop beside simpleWebReport; the web page then shows the top
+// card, the score strip and the rain bar, and trims the page (tap-to-open products, no letterhead, conditions on one
+// line, one footer identity). The PDF never takes it.
+describe('the first screen of the simple web report', () => {
+  const webTop = () => ({
+    score: { value: 72, previous: 61 },
+    trend: [{ label: 'Aug 1', value: 61 }, { label: 'Sep 1', value: 66 }, { label: 'Oct 1', value: 72 }],
+    action: 'Water in today’s treatment by Sat 9 AM.',
+    hold: 'Keep pets off the lawn until it is dry.',
+    rain: {
+      days: [
+        { date: '2026-10-09', inches: 0, isVisit: false }, { date: '2026-10-10', inches: 0.2, isVisit: true },
+        { date: '2026-10-11', inches: 0.5, isVisit: false }, { date: '2026-10-12', inches: null, isVisit: false },
+      ],
+      sinceVisitInches: null,
+    },
+  });
+
+  it('without webTop: no top card and the page is as it was', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.queryByTestId('web-top')).toBeNull();
+    expect(container.querySelector('.doc-letterhead')).not.toBeNull();
+    expect(container.querySelector('details.doc-web-product')).toBeNull();
+    expect(container.querySelector('.doc-products')).not.toBeNull();
+    expect(container.textContent).toMatch(/Family-owned pest control and lawn care in Southwest Florida/);
+  });
+
+  it('with webTop: the card shows before the document with the fixed sentences', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
+    await screen.findByText(/This report is provided for your records/);
+    const card = screen.getByTestId('web-top');
+    expect(card.textContent).toMatch(/Lawn score\s*72\s*out of 100/);
+    expect(card.textContent).toMatch(/Up 11 points since your last visit\./);
+    expect(card.textContent).toMatch(/Your last 3 visits/);
+    expect(card.textContent).toMatch(/Do this\s*Water in today.s treatment by Sat 9 AM\./);
+    expect(card.textContent).toMatch(/Hold off\s*Keep pets off the lawn until it is dry\./);
+    expect(card.compareDocumentPosition(container.querySelector('.service-report-document')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('the rain bar is dated, marks the visit day and leaves a gap day blank', async () => {
+    renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
+    await screen.findByText(/This report is provided for your records/);
+    const rain = screen.getByLabelText('Rain at your home');
+    expect(rain.textContent).toMatch(/Rain since your visit/);
+    expect(rain.textContent).toMatch(/Measured at your home, Oct 9 to Oct 11\./);
+    expect(rain.textContent).toMatch(/Visit/);
+    expect(within(rain).getByRole('img').getAttribute('aria-label')).toMatch(/Sat 0.2 inch, day of your visit.*Mon no reading/);
+    expect(rain.textContent).not.toMatch(/Since your visit:/);
+  });
+
+  it('a total since the visit prints when every later day is measured', async () => {
+    const t = webTop();
+    t.rain = { days: t.rain.days.slice(0, 3), sinceVisitInches: 0.5 };
+    renderReport(payload({ simpleWebReport: true, webTop: t }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/Since your visit: 0.5 in of rain\./);
+  });
+
+  it('a first visit has no strip; a pest card has no score', async () => {
+    renderReport(payload({ simpleWebReport: true, webTop: { score: { value: 70, previous: null }, hold: 'Keep pets off treated areas until they are dry.' } }));
+    await screen.findByText(/This report is provided for your records/);
+    const card = screen.getByTestId('web-top');
+    expect(card.textContent).toMatch(/This is your starting score\./);
+    expect(card.textContent).not.toMatch(/Your last/);
+    cleanup();
+    renderReport(payload({ simpleWebReport: true, webTop: { action: 'Nothing needed from you today.' } }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByTestId('web-top').textContent).not.toMatch(/Lawn score/);
+  });
+
+  it('trims the page: tap-to-open products, no letterhead, conditions on one line, one footer identity', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(container.querySelector('.doc-letterhead')).toBeNull();
+    expect(screen.getByRole('heading', { level: 1, name: 'SERVICE REPORT' })).toBeInTheDocument();
+    const products = container.querySelectorAll('details.doc-web-product');
+    expect(products.length).toBe(3);
+    expect(container.querySelector('.doc-products')).toBeNull();
+    expect(products[0].querySelector('summary').textContent).toBe('LESCO K-Flow 0-0-25');
+    expect(products[0].textContent).toMatch(/EPA Reg\. No\.:/);
+    expect(products[0].hasAttribute('open')).toBe(false);
+    expect(container.textContent).not.toMatch(/Family-owned pest control and lawn care in Southwest Florida/);
+    // conditions: one line, no card of rows
+    expect(screen.queryByRole('heading', { level: 2, name: 'Conditions' })).toBeNull();
+    expect(container.textContent).toMatch(/Conditions:/);
+  });
+
+  it('conditions read as one line of facts', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, webTop: {}, conditions: { temp_f: 82, humidity_pct: 60, wind_mph: 5, sky: 'Sunny' } }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(container.textContent).toMatch(/Conditions: 82 °F · 60% humidity · 5 mph wind · Rain this week [\d.]+ in · Sunny/);
+  });
+
+  it('an empty webTop still trims the page and shows no card', async () => {
+    const { container } = renderReport(payload({ simpleWebReport: true, webTop: {} }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.queryByTestId('web-top')).toBeNull();
+    expect(container.querySelector('.doc-letterhead')).toBeNull();
+  });
+
+  it('pdf mode never takes the trims, even with the key', async () => {
+    window.history.pushState({}, '', '/report/test-simple-web?mode=pdf');
+    try {
+      const { container } = renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
+      await screen.findByText(/This report is provided for your records/);
+      expect(screen.queryByTestId('web-top')).toBeNull();
+      expect(container.querySelector('.doc-letterhead')).not.toBeNull();
+      expect(container.querySelector('details.doc-web-product')).toBeNull();
+      expect(container.querySelector('.doc-products')).not.toBeNull();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+});

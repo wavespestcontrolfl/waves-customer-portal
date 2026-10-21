@@ -60,6 +60,7 @@ import {
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
+import WebTopCard from '../components/report/WebTopCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -10459,6 +10460,8 @@ const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 // work-order document the PDF prints, with one Download PDF button over it.
 // The server builds this payload as it builds the PDF's (same compliance
 // strips), and sets data.simpleWebReport only while the gate is live.
+const WEB_TOP_SHELL_CSS = '[data-brand-footer] [data-store-badges] { display: none !important; }';
+
 function SimpleWebReport({ data, token }) {
   // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the server sets glassWeb only
   // while that gate is live. The page-level useGlassSurface already mounted
@@ -10502,6 +10505,8 @@ function SimpleWebReport({ data, token }) {
           ><Download size={16} /> Download PDF</a>
         </div>
       ) : null}
+      {/* GATE_REPORT_WEB_TOP (owner 2026-10-20): top card, score strip and rain bar; the shell footer keeps its social row and drops its app badges (the header holds the store links). */}
+      {data.webTop ? <><style>{WEB_TOP_SHELL_CSS}</style><WebTopCard webTop={data.webTop} glass={glass} /></> : null}
       {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
       {data.recap?.ready ? (
         <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>

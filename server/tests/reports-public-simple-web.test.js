@@ -22,7 +22,9 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   reportSimpleWebLive: jest.fn(() => false),
   reportGlassWebLive: jest.fn(() => false),
+  reportWebTopLive: jest.fn(() => false),
 }));
+jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -254,6 +256,74 @@ describe('GET /reports/:token/data glass look (GATE_REPORT_GLASS_WEB)', () => {
     await withServer(async (baseUrl) => {
       const { body } = await getData(baseUrl);
       expect('glassWeb' in body).toBe(false);
+    });
+  });
+});
+
+describe('GET /reports/:token/data first screen (GATE_REPORT_WEB_TOP)', () => {
+  const lawn = () => ({
+    ...payload(),
+    serviceLine: 'lawn',
+    applicationMade: true,
+    reportV2: { snapshot: { overallScore: 74 }, trends: { overall: [{ label: 'Aug 1', value: 70 }, { label: 'Sep 1', value: 74 }] } },
+    advisory: { pet_advisory: 'Keep pets off until dry.' },
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    gates.reportGlassWebLive.mockReturnValue(false);
+    gates.reportWebTopLive.mockReturnValue(false);
+    buildReportV1Data.mockImplementation(async () => lawn());
+  });
+
+  test('gate off: no webTop key', async () => {
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.simpleWebReport).toBe(true);
+      expect('webTop' in body).toBe(false);
+    });
+  });
+
+  test('gate on, simple web on: webTop carries the score, the strip and the hold', async () => {
+    gates.reportWebTopLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.webTop.score).toEqual({ value: 74, previous: 70 });
+      expect(body.webTop.trend).toHaveLength(2);
+      expect(body.webTop.hold).toBe('Keep pets off the lawn until it is dry.');
+      expect('rain' in body.webTop).toBe(false);
+    });
+  });
+
+  test('gate on, simple web off: no webTop key', async () => {
+    gates.reportWebTopLive.mockReturnValue(true);
+    gates.reportSimpleWebLive.mockReturnValue(false);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect('webTop' in body).toBe(false);
+    });
+  });
+
+  test.each(['pdf', 'static', 'sms_preview'])('gate on: mode=%s carries no webTop key', async (mode) => {
+    gates.reportWebTopLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl, `?mode=${mode}`);
+      expect('webTop' in body).toBe(false);
+    });
+  });
+
+  test('gate on: a report with nothing to say carries an empty webTop (it still trims the page)', async () => {
+    gates.reportWebTopLive.mockReturnValue(true);
+    buildReportV1Data.mockImplementation(async () => payload());
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.webTop).toEqual({});
     });
   });
 });

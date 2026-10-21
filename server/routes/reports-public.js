@@ -53,6 +53,11 @@ function glassWebLive(simpleWeb, gates) {
   return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
 }
 
+// GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web report. Same shape as the glass gate.
+function webTopLive(simpleWeb, gates) {
+  return simpleWeb === true && typeof gates.reportWebTopLive === 'function' && gates.reportWebTopLive();
+}
+
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
 // solely when the request carries a valid staff JWT — the report page
@@ -2636,6 +2641,18 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
+      // GATE_REPORT_WEB_TOP (owner 2026-10-20): the top card, score strip and rain bar. Best effort: a failed
+      // rain read leaves the rain bar out and never the report. Absent key = byte-identical payload.
+      if (webTopLive(simpleWeb, reportGates) && !v1Data.internalOnly) {
+        try {
+          const { buildWebTop, buildWebTopRain } = require('../services/service-report/report-web-top');
+          const rain = await buildWebTopRain({ service, fetchMrmsDailyRain: require('../services/mrms-qpe').fetchMrmsDailyRain });
+          // An object even when empty: the key is what trims the web page (products, letterhead, conditions, footer).
+          v1Data.webTop = buildWebTop(v1Data, rain) || {};
+        } catch (err) {
+          logger.warn(`[reports-public] web top skipped: ${err.message}`);
+        }
+      }
       return res.json(v1Data);
     }
 
