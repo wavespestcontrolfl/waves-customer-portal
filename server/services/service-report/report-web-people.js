@@ -56,7 +56,8 @@ function isCleanPestVisit(data) {
   if (findings.some((f) => ['critical', 'high'].includes(String(f?.severity || '').toLowerCase()))) return false;
   const items = Array.isArray(data.serviceCoverage?.items) ? data.serviceCoverage.items : [];
   const needsAction = ['inaccessible', 'skipped', 'not_serviced', 'needs_attention', 'needs_follow_up'];
-  if (items.some((item) => needsAction.includes(String(item?.status || '').toLowerCase()))) return false;
+  // A completed or treated item can still carry a recorded follow-up (service-coverage.js needsFollowUp).
+  if (items.some((item) => item?.needsFollowUp === true || needsAction.includes(String(item?.status || '').toLowerCase()))) return false;
   return !data.followUp && !data.reportV2?.followUp;
 }
 

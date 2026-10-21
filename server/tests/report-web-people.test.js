@@ -97,6 +97,8 @@ describe('clean pest visit', () => {
     ['a high finding', { findings: [{ severity: 'high' }] }],
     ['an area that needed attention', { serviceCoverage: { items: [{ status: 'needs_attention' }] } }],
     ['a planned follow-up', { followUp: { reason: 'x' } }],
+    ['a completed item with a recorded follow-up', { serviceCoverage: { items: [{ status: 'completed', needsFollowUp: true }] } }],
+    ['a treated item with a recorded follow-up', { serviceCoverage: { items: [{ status: 'treated', needsFollowUp: true }] } }],
     ['another line', { serviceLine: 'mosquito' }],
   ])('%s is not clean', (_label, patch) => {
     expect(isCleanPestVisit({ ...clean(), ...patch })).toBe(false);
