@@ -629,71 +629,79 @@ async function typedTarget(scope, prompt, namedResult) {
   return { typedIds, typed: scope ? { typedCustomerIds: [...typedIds], ...(typedIds.identityConflict ? { identityConflict: true } : {}) } : {} };
 }
 
-async function resolve({ prompt, pageData, selectedTarget, ownerDirectScope = false }) {
+// resolve() is a short pipeline. `r` is the shared state; each stage owns one
+// concern and returns either a finished result (the pipeline stops) or null (the
+// next stage runs). The last stage always returns the context.
+async function resolveBase({ prompt, pageData, selectedTarget, ownerDirectScope = false }) {
   // Object(null) is {} — an absent or null selection reads as no customer id.
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
   const selectedId = String(Object(selectedTarget).customer_id || '').toLowerCase() || null;
   const [page, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt, ownerDirectScope), verifiedFilterWords(prompt)]);
-  const named = namedResult.matches;
-  const nameHint = namesRequested(prompt, filterWords);
-  // A stale page hint cannot block an unrelated task or an explicitly named
-  // customer. A request relying on the unavailable viewed record still stops.
-  if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
-  let candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  const v2 = targetRulesV2Scope(ownerDirectScope);
-  candidates = await labelledCandidates(v2, candidates, named);
-  // Whom this message names (GATE_IB_TARGET_RULES_V2): carried on the context so
-  // an owner-direct edit can tell a named customer from one the model found.
-  // identityConflict: the typed name and a typed phone or email point at
-  // different customers; owner-direct then trusts no name-resolved target.
-  const { typedIds, typed } = await typedTarget(v2, prompt, namedResult);
+  return { prompt, ownerDirectScope, selectedId, page, namedResult, named: namedResult.matches, nameHint: namesRequested(prompt, filterWords) };
+}
+
+const singleTarget = (customer, provenance) => {
+  const target = customerTarget(customer, provenance);
+  return { target, targets: [target], ambiguous: false };
+};
+
+// A stale page hint cannot block an unrelated task or an explicitly named
+// customer. A request relying on the unavailable viewed record still stops.
+const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause(r.prompt)) && !r.named.length ? r.page : null);
+
+// Candidates, whom this message names (GATE_IB_TARGET_RULES_V2) and the first
+// selection. The typed ids ride on the context so an owner-direct edit can tell a
+// named customer from one the model found. identityConflict: the typed name and a
+// typed phone or email point at different customers; owner-direct then trusts no
+// name-resolved target.
+async function candidatesStage(r) {
+  const scope = targetRulesV2Scope(r.ownerDirectScope);
+  r.candidates = await labelledCandidates(scope, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult));
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
-  const cohort = setQuantified(prompt) || namedResult.multiple;
-  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort, nameHint);
-  if (selectedId) {
-    // A selection is bound to this request's own fresh candidates: it is
-    // accepted only as one of the rows the request resolved to (duplicate-name
-    // disambiguation, the one flow that supplies a selection). A request that
-    // named nobody, matched nothing, hit the lookup cap, or asked for a set
-    // has no candidate to select, so no stale-selection grammar is
-    // load-bearing: an unrecognized phrasing can only over-refuse.
-    const selected = named.some(c => c.id === selectedId) && !cohort && namedResult.complete ? await customerById(selectedId) : null;
-    if (!selected) {
-      // selectable: a fresh customer choice re-resolves this request.
-      return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
-    }
-    const target = customerTarget(selected, 'operator_selection');
-    selection = { target, targets: [target], ambiguous: false };
-  }
-  // A lookup at its cap has more rows than it can list, and no listed row can
-  // be selected (the selection check above requires a complete lookup), so
-  // the rows are never presented as choices. The request is answered and
-  // closed with the way to identify the customer instead of parked behind
-  // buttons that all conflict.
-  // A capped name plus a phone or email that names exactly one of them is resolved
-  // (Codex #6369 r10): use that customer, never ask again for a phone or email.
-  const capped = !namedResult.complete && !cohort && !selectedId;
-  const contactPick = capped ? await contactResolvedCustomer(typedIds) : null;
-  if (contactPick) {
-    const target = customerTarget(contactPick, 'current_request_lookup');
-    selection = { target, targets: [target], ambiguous: false };
-  } else if (capped) {
-    return { page, candidates: [], target: null, targets: [], ambiguous: false,
-      error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
-      code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint, ...typed };
-  }
-  // Only the leading recipient expression establishes a raw contact. A later
-  // "text <number>" inside a note or an unresolved person's message is data.
-  const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
-  const readRecipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you)\s+)*(?:(?:show|read|get|find|look up|check|summarize)\s+(?:(?:the|our)\s+)?(?:customer\s+)?(?:conversation|thread|messages|texts|sms|calls|call history|details|history)\s+(?:with|for|from|to|on)|what\s+(?:did|have)\s+we\s+(?:say|send|said|sent)\s+to(?:\s+(?:the\s+)?customer\s+on)?)\s+(.+)/i)?.[1] || '';
+  r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
+  r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint);
+  return null;
+}
+
+// A selection is bound to this request's own fresh candidates: it is accepted only
+// as one of the rows the request resolved to (duplicate-name disambiguation, the one
+// flow that supplies a selection). A request that named nobody, matched nothing, hit
+// the lookup cap, or asked for a set has no candidate to select, so no
+// stale-selection grammar is load-bearing: an unrecognized phrasing can only over-refuse.
+async function selectionStage(r) {
+  if (!r.selectedId) return null;
+  const selected = r.named.some(c => c.id === r.selectedId) && !r.cohort && r.namedResult.complete ? await customerById(r.selectedId) : null;
+  // selectable: a fresh customer choice re-resolves this request.
+  if (!selected) return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
+  r.selection = singleTarget(selected, 'operator_selection');
+  return null;
+}
+
+// A lookup at its cap has more rows than it can list, and no listed row can be
+// selected, so the rows are never presented as choices. A phone or email that names
+// exactly one of them resolves that customer (Codex #6369 r10); otherwise the request
+// is answered and closed with the way to identify the customer instead of parked
+// behind buttons that all conflict.
+async function cappedStage(r) {
+  if (r.namedResult.complete || r.cohort || r.selectedId) return null;
+  const pick = await contactResolvedCustomer(r.typedIds);
+  if (pick) { r.selection = singleTarget(pick, 'current_request_lookup'); return null; }
+  return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false,
+    error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
+    code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(r.prompt)), namesRequested: r.nameHint, ...r.typed };
+}
+
+// The record ids the message asks for: "this property" style page references, an
+// explicit review, and explicit child ids that narrow even same-customer operations.
+function requestedRecordFields(prompt, page, nameHint) {
   const reviewClause = targetClause(prompt);
   const [explicitReview] = [...reviewClause.matchAll(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)].map(match => match[1].toLowerCase());
   const reviewReference = explicitReview || (!nameHint
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|stop|visit|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${recordKind(match[1])}_id`; return [kind, page.ids[kind] || null]; }));
-  // Explicit current-request child IDs narrow even same-customer operations.
   // Keep all deliberately named records for compound requests; body text never
   // enters this clause and page hints cannot replace the explicit selection.
   const explicitRecords = {};
@@ -707,21 +715,46 @@ async function resolve({ prompt, pageData, selectedTarget, ownerDirectScope = fa
   for (const [kind, ids] of Object.entries(explicitRecords)) {
     requestedRecords[kind] = ids.filter(id => !Object.hasOwn(requestedRecords, kind) || id === requestedRecords[kind]);
   }
-  return { page, candidates, ...selection, ...typed, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
+  return { requestedRecords, reviewReference: reviewReference || null };
+}
+
+// Only the leading recipient expression establishes a raw contact. A later
+// "text <number>" inside a note or an unresolved person's message is data.
+function recipientFields(prompt) {
+  const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
+  const readRecipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you)\s+)*(?:(?:show|read|get|find|look up|check|summarize)\s+(?:(?:the|our)\s+)?(?:customer\s+)?(?:conversation|thread|messages|texts|sms|calls|call history|details|history)\s+(?:with|for|from|to|on)|what\s+(?:did|have)\s+we\s+(?:say|send|said|sent)\s+to(?:\s+(?:the\s+)?customer\s+on)?)\s+(.+)/i)?.[1] || '';
+  return {
+    explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
+      .map(match => normalizeEmail(match[1])),
+    explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
+      .map(match => match[1].replace(/\D/g, '').slice(-10)),
+    explicitReadPhones: [...readRecipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
+      .map(match => match[1].replace(/\D/g, '').slice(-10)),
+  };
+}
+
+function contextStage(r) {
+  const { prompt, page, nameHint } = r;
+  return { page, candidates: r.candidates, ...r.selection, ...r.typed, ...requestedRecordFields(prompt, page, nameHint), requestPhrase: normalizeName(targetClause(prompt)),
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
     namesRequested: nameHint,
     // A phone or email literal in the target clause identifies one customer
     // even when no send/read recipient grammar captured it.
     contactRequested: [...targetClause(prompt).matchAll(CONTACT_LITERAL_RE)].length > 0,
-    reviewReference: reviewReference || null,
     bulkLeadRequest: !nameHint && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
-    explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
-      .map(match => normalizeEmail(match[1])),
-    explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
-      .map(match => match[1].replace(/\D/g, '').slice(-10)),
-    explicitReadPhones: [...readRecipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
-      .map(match => match[1].replace(/\D/g, '').slice(-10)) };
+    ...recipientFields(prompt) };
+}
+
+const RESOLVE_STAGES = [pageErrorStage, candidatesStage, selectionStage, cappedStage, contextStage];
+
+async function resolve(input) {
+  const r = await resolveBase(input);
+  for (const stage of RESOLVE_STAGES) {
+    const result = await stage(r);
+    if (result) return result;
+  }
+  return null;
 }
 
 async function unlinkedRecordIsReferenced(record, context) {
