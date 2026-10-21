@@ -72,8 +72,6 @@ const toPage = (error, reason, invoiceId) => refusal(`${error} Void it from the 
 const MONEY_STATUSES = new Set(['paid', 'processing', 'refunded', 'partially_refunded', 'partial', 'disputed']);
 // The Stripe states of an invoice's own PaymentIntent that mean no payment was attempted: the handler cancels it.
 const UNCONFIRMED_PI = new Set(['requires_payment_method', 'requires_confirmation']);
-// A payments row in one of these states moved no money (anything else, refunds included, did or may have).
-const NO_MONEY_PAYMENT = new Set(['failed', 'canceled', 'cancelled']);
 const INVOICE_LINK_KEYS = ['invoice_id', 'dispute_invoice_id', 'waves_invoice_id'];
 
 function parseLines(raw) {
@@ -100,23 +98,28 @@ async function resolveInvoice(input) {
   return invoice ? { invoice } : refusal('Invoice not found', 'invoice_not_found');
 }
 
-// Payments tied to this invoice by the portal's own linkage (metadata invoice keys, the invoice's PaymentIntent or
-// charge id, the manual-payment description). A row naming a different invoice is that invoice's.
-async function linkedPayments(invoice) {
-  const rows = await db('payments')
+// A payments row that moved no money: failed (with its PaymentIntent, so the outcome is known), canceled. A failed row with no
+// PaymentIntent may hide a charge whose outcome is unknown, so it counts as money.
+const PAYMENT_MOVED_NO_MONEY_SQL = "(LOWER(COALESCE(payments.status, '')) IN ('failed', 'canceled', 'cancelled') "
+  + "AND NOT (LOWER(COALESCE(payments.status, '')) = 'failed' AND payments.stripe_payment_intent_id IS NULL))";
+
+// Any payments row tied to this invoice by the portal's own linkage (metadata invoice keys, the invoice's PaymentIntent or
+// charge id, the manual-payment description) that did or may have moved money. A row naming a different invoice is that
+// invoice's. One existence query with the status filter in SQL and no limit: a pile of failed attempts cannot hide a later
+// disputed or refunded payment.
+function disqualifyingPayment(invoice) {
+  const id = String(invoice.id);
+  return db('payments')
     .where(function linkedToInvoice() {
-      for (const key of INVOICE_LINK_KEYS) this.orWhereRaw(`payments.metadata::jsonb ->> '${key}' = ?`, [String(invoice.id)]);
+      for (const key of INVOICE_LINK_KEYS) this.orWhereRaw(`payments.metadata::jsonb ->> '${key}' = ?`, [id]);
       if (invoice.stripe_payment_intent_id) this.orWhereRaw('payments.stripe_payment_intent_id = ?', [String(invoice.stripe_payment_intent_id)]);
       if (invoice.stripe_charge_id) this.orWhereRaw('payments.stripe_charge_id = ?', [String(invoice.stripe_charge_id)]);
       if (/^[A-Za-z0-9-]+$/.test(String(invoice.invoice_number || ''))) this.orWhereRaw('payments.description LIKE ?', [`Invoice ${invoice.invoice_number} — %`]);
     })
-    .limit(25)
-    .select('id', 'status', 'metadata', 'stripe_payment_intent_id');
-  return (rows || []).filter((row) => {
-    const meta = typeof row.metadata === 'string' ? (() => { try { return JSON.parse(row.metadata); } catch { return {}; } })() : (row.metadata || {});
-    const named = INVOICE_LINK_KEYS.map((key) => meta?.[key]).filter(Boolean).map(String);
-    return !(named.length && !named.includes(String(invoice.id)));
-  });
+    // A row that names ANOTHER invoice explicitly (a combined payment's sibling share) is that invoice's.
+    .whereRaw(`(${INVOICE_LINK_KEYS.map((key) => `NULLIF(payments.metadata::jsonb ->> '${key}', '') IS NULL`).join(' AND ')} OR ${INVOICE_LINK_KEYS.map((key) => `payments.metadata::jsonb ->> '${key}' = ?`).join(' OR ')})`, INVOICE_LINK_KEYS.map(() => id))
+    .whereRaw(`NOT ${PAYMENT_MOVED_NO_MONEY_SQL}`)
+    .first('payments.id', 'payments.status');
 }
 
 // Money received or in flight, from the invoice row and its database links: the by_owner_rule refusals.
@@ -132,8 +135,7 @@ async function moneyRefusal(invoice) {
   if (invoice.payment_recorded_at) return ownerRule(`A payment is already recorded on invoice ${invoice.invoice_number}.`, 'payment_recorded', at);
   if (invoice.stripe_charge_id) return ownerRule(`Invoice ${invoice.invoice_number} has a card charge on file.`, 'charge_on_file', at);
   if (invoice.paid_at && status !== 'prepaid') return ownerRule(`Invoice ${invoice.invoice_number} carries a paid date.`, 'paid_date', at);
-  const payments = await linkedPayments(invoice);
-  const moved = payments.find((p) => !NO_MONEY_PAYMENT.has(String(p.status || '').toLowerCase()) || (!p.stripe_payment_intent_id && String(p.status).toLowerCase() === 'failed'));
+  const moved = await disqualifyingPayment(invoice);
   if (moved) return ownerRule(`A payment (${moved.status}) is on file for invoice ${invoice.invoice_number}.`, 'payment_on_file', at);
   const depositLine = parseLines(invoice.line_items).find((li) => li?.category === 'deposit_credit');
   if (depositLine) return ownerRule(`Invoice ${invoice.invoice_number} applies a deposit the customer already paid.`, 'deposit_collected', at);
@@ -385,6 +387,7 @@ async function executeVoidInvoiceTool(toolName, input = {}, actionContext = {}) 
 module.exports = {
   VOID_INVOICE_TOOLS,
   executeVoidInvoiceTool,
+  disqualifyingPayment,
   voidInvoiceLive,
   cardLines,
 };

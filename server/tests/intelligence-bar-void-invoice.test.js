@@ -47,7 +47,7 @@ function freshState() {
       line_items: [{ description: 'Quarterly Pest Control', amount: 129 }],
     }],
     customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample' }],
-    payments: [], payer_statements: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [],
+    payments: [], paymentQueries: [], payer_statements: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [],
     scheduled_services: [{ id: VISIT, status: 'completed', scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '11:00:00' }],
   };
 }
@@ -56,8 +56,20 @@ function freshState() {
 // payments linkage) are ignored, so `payments` holds exactly the rows linked to the invoice. Any write throws.
 function makeDb() {
   function builder(table) {
-    const q = { wheres: [], nots: [], nulls: [], single: false };
+    const q = { wheres: [], nots: [], nulls: [], single: false, limited: false, raws: [] };
     const rows = () => {
+      if (table === 'payments') {
+        // The eligibility read is one existence query with the status filter in SQL (mirrored here) and no limit; the
+        // real SQL runs against Postgres in intelligence-bar-void-invoice-payments-postgres.test.js.
+        state.paymentQueries.push({ limited: q.limited, raws: q.raws.length });
+        const moved = (state.payments || []).filter((row) => {
+          const status = String(row.status || '').toLowerCase();
+          const noMoney = ['failed', 'canceled', 'cancelled'].includes(status) && !(status === 'failed' && !row.stripe_payment_intent_id);
+          const named = Object.values(row.metadata || {}).filter(Boolean).map(String);
+          return !noMoney && !(named.length && !named.includes(INV));
+        });
+        return q.single ? moved[0] : moved;
+      }
       const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
         && q.nots.every(([k, v]) => String(row[k]) !== String(v))
         && q.nulls.every((k) => row[k] == null));
@@ -70,6 +82,8 @@ function makeDb() {
         if (prop === 'whereNot') return (k, v) => { q.nots.push([k, v]); return b; };
         if (prop === 'whereNull') return (k) => { q.nulls.push(k); return b; };
         if (prop === 'first') return () => { q.single = true; return b; };
+        if (prop === 'limit') return () => { q.limited = true; return b; };
+        if (prop === 'whereRaw') return (sql) => { q.raws.push(String(sql)); return b; };
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
         return () => b;
       },
@@ -285,6 +299,16 @@ describe('money received or in flight is refused as by_owner_rule (preview and C
     expect(await preview()).toMatchObject({ code: 'unverified' });
     mockRetrievePi.mockResolvedValue(null);
     expect(await preview()).toMatchObject({ code: 'unverified' });
+  });
+
+  test('30 failed attempts and one disputed payment: refused (the read has no limit and filters status in SQL)', async () => {
+    state.payments = [
+      ...Array.from({ length: 30 }, (_, i) => ({ id: `f${i}`, status: 'failed', metadata: { invoice_id: INV }, stripe_payment_intent_id: `pi_f${i}` })),
+      { id: 'd1', status: 'disputed', metadata: { invoice_id: INV }, stripe_payment_intent_id: 'pi_d1' },
+    ];
+    expect(await preview()).toMatchObject({ code: 'by_owner_rule', reason: 'payment_on_file' });
+    expect(state.paymentQueries.length).toBeGreaterThan(0);
+    expect(state.paymentQueries.every((query) => query.limited === false && query.raws > 0)).toBe(true);
   });
 
   test('a payment row that names another invoice is that invoice’s, and a failed row with a PaymentIntent moved nothing', async () => {
