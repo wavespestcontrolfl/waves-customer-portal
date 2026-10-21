@@ -2408,6 +2408,23 @@ const gates = {
   // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
   // Off → byte-identical to before.
   missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
+  // Missed-call bell gaps (owner 2026-10-20, "ALL", after the call audit). Admin
+  // bell only: none of the four sends a customer text, email or call. Each ships
+  // dark; off = byte-identical to before, except gates A and B stamp
+  // metadata.missed_call_gap_shadow on the calls they would have rung.
+  // A: a customer on file who reached voicemail and left an empty recording
+  // (no speech) rings the bell.
+  missedCallEmptyVmCustomer: process.env.GATE_MISSED_CALL_EMPTY_VM_CUSTOMER === 'true',
+  // B: a customer's inbound call that ended `completed` with no answered_by and
+  // no recording (the status-callback fallback insert, the ingest watchdog)
+  // counts as unanswered for the bell.
+  missedCallNoOutcomeCustomer: process.env.GATE_MISSED_CALL_NO_OUTCOME_CUSTOMER === 'true',
+  // C: our dialed callback counts as "the caller got through" only when the
+  // customer leg was answered, not when the staff leg pressed 1 (bridged_at).
+  callbackNeedsAnswer: process.env.GATE_CALLBACK_NEEDS_ANSWER === 'true',
+  // D: a missed-call bell whose push reached no phone is retried once by the
+  // 2-minute sweep, then settled; one admin alert per ET day names the failure.
+  missedCallPushCheck: process.env.GATE_MISSED_CALL_PUSH_CHECK === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
