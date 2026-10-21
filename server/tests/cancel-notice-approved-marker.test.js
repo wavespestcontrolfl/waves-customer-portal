@@ -18,12 +18,16 @@ describe('pending_approved is minted only for the approved send and read only by
     expect(jobStatus).toContain("(notifyCustomer === 'caller' ? (cancelNoticeApproved ? 'pending_approved' : 'pending_notify') : 'pending')");
     expect(jobStatus).toContain("if (notifyCustomer === 'caller' && !cancelNoticeApproved) {");
     // The state is minted in exactly one place (the claim's targetState); every other mention is a comment.
-    const codeLines = jobStatus.split('\n').filter((line) => !line.trim().startsWith('//') && line.includes("'pending_approved'"));
+    const codeLines = jobStatus.split('\n').filter((line) => !line.trim().startsWith('//') && line.includes("? 'pending_approved'"));
     expect(codeLines).toHaveLength(1);
   });
 
   test('the approved marker is mandatory: a failed claim aborts the cancellation instead of committing without it', () => {
     expect(jobStatus).toMatch(/\} catch \(claimErr\) \{\s*\n(?:\s*\/\/.*\n)*\s*if \(cancelNoticeApproved\) throw claimErr;/);
+  });
+
+  test('an approved text whose claim touched no row is accepted only when the row is terminal / already marked / absent', () => {
+    expect(jobStatus).toMatch(/if \(cancelNoticeApproved && !claimedRows\) \{\s*\n\s*const existing = await sp\('appointment_reminders'\)\.where\(\{ scheduled_service_id: jobId \}\)\.first\('cancellation_notice_state'\);\s*\n\s*if \(existing && !\['suppressed', 'sent', 'pending_approved'\]\.includes\(existing\.cancellation_notice_state\)\) \{\s*\n\s*throw new Error/);
   });
 
   test('the Dispatch handler passes cancelNoticeApproved only for the bar\'s approved text', () => {

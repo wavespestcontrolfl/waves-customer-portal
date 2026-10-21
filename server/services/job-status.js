@@ -671,6 +671,16 @@ async function transitionJobStatus({
                 });
               })
               .update({ cancellation_notice_at: claimTs, cancellation_notice_state: targetState, updated_at: claimTs });
+            // The approved text needs its marker (or a terminal state) on the row: when the claim touched nothing because
+            // an older pending / pending_notify claim already sits there (a restoration whose marker clear failed), that
+            // claim stays eligible for the sweep and would send the live template after a crash. Abort the cancellation.
+            // No reminder row at all is fine: nothing can send.
+            if (cancelNoticeApproved && !claimedRows) {
+              const existing = await sp('appointment_reminders').where({ scheduled_service_id: jobId }).first('cancellation_notice_state');
+              if (existing && !['suppressed', 'sent', 'pending_approved'].includes(existing.cancellation_notice_state)) {
+                throw new Error('approved cancellation text: an older notice claim holds this reminder, so the approved marker could not be written');
+              }
+            }
             // The immediate post-commit worker runs only for hook-owned
             // paths; 'caller' claims are settled by the route (or sweep).
             if (claimedRows && targetState === 'pending' && notifyCustomer !== 'caller') cancelNoticeClaimTs = claimTs;
