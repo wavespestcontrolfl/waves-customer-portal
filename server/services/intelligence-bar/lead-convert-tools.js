@@ -320,11 +320,14 @@ async function buildPlan(input) {
     _version: versionOf({ lead, customer, others, othersTruncated, estimate, funnel, body }),
     _body: body,
     _funnel_before: funnel.state,
+    _estimate_before: estimate.state,
     _expected: {
       leadId: lead.id,
       status: lead.status,
       updatedAt: msOf(lead.updated_at),
       customerId: lead.customer_id || null,
+      // The lead's contact as the card showed it (re-read by the claim).
+      lead: Object.fromEntries(['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'].map((c) => [c, lead[c] ?? null])),
       // The customer as the card showed it (the columns the claim re-reads).
       customer: Object.fromEntries(['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip'].map((c) => [c, customer[c] ?? null])),
       // The estimates the card listed: the only ones the backfill may attach.
@@ -347,29 +350,41 @@ async function verifiedPlan(input, pinned) {
 }
 
 // What the card promised and the conversion's best-effort steps may have missed, read back after the commit.
-async function unmetPromises(plan) {
-  const problems = [];
-  try {
-    const approved = plan._expected.estimateIds || [];
-    if (approved.length) {
-      const rows = (await db('estimates').whereIn('id', approved).select('id', 'customer_id')) || [];
-      const attached = rows.filter((r) => String(r.customer_id) === String(plan.customer_id)).length;
-      if (attached < approved.length) problems.push(`${attached} of ${approved.length} estimates attached`);
-    }
-    const before = plan._funnel_before || [];
-    if (before.length) {
-      const after = (await db('ad_service_attribution').where({ lead_id: plan.lead_id }).select('funnel_stage', 'customer_id')) || [];
-      const settled = ['booked', 'completed'];
-      if (after.length < before.length || after.some((r) => !settled.includes(r.funnel_stage))) problems.push('funnel row not moved to booked');
-      // A row that moved and had no owner is now this customer's; a row already this customer's stays.
-      const expectedOwned = before.filter(([stage, owner]) => owner === plan.customer_id || (!owner && !settled.includes(stage))).length;
-      const owned = after.filter((r) => String(r.customer_id) === String(plan.customer_id)).length;
-      if (owned < expectedOwned) problems.push('funnel row not linked to the customer');
-    }
-  } catch {
-    problems.push('what was attached and moved could not be read back');
+async function estimateProblems(plan) {
+  const approved = plan._expected.estimateIds || [];
+  if (approved.length) {
+    const rows = (await db('estimates').whereIn('id', approved).select('id', 'customer_id')) || [];
+    const attached = rows.filter((r) => String(r.customer_id) === String(plan.customer_id)).length;
+    return attached < approved.length ? [`${attached} of ${approved.length} estimates attached`] : [];
   }
+  // No attach was planned for the linked estimate (already on this or another customer, or gone): its owner must be as the card showed.
+  const before = plan._estimate_before || {};
+  if (!before.estimate_id || before.missing) return [];
+  const row = await db('estimates').where({ id: before.estimate_id }).first('customer_id');
+  return String(row?.customer_id || '') === String(before.customer_id || '') ? [] : ['the lead\u2019s estimate changed owner'];
+}
+
+async function funnelProblems(plan) {
+  const before = plan._funnel_before || [];
+  const after = (await db('ad_service_attribution').where({ lead_id: plan.lead_id }).select('funnel_stage', 'customer_id')) || [];
+  // Read back even when the card showed no row: a row that appeared and was moved is an effect the card did not list.
+  if (after.length > before.length) return ['a funnel row appeared that the card did not show and was moved'];
+  if (!before.length) return [];
+  const problems = [];
+  const settled = ['booked', 'completed'];
+  if (after.length < before.length || after.some((r) => !settled.includes(r.funnel_stage))) problems.push('funnel row not moved to booked');
+  // A row that moved and had no owner is now this customer's; a row already this customer's stays.
+  const expectedOwned = before.filter(([stage, owner]) => owner === plan.customer_id || (!owner && !settled.includes(stage))).length;
+  if (after.filter((r) => String(r.customer_id) === String(plan.customer_id)).length < expectedOwned) problems.push('funnel row not linked to the customer');
   return problems;
+}
+
+async function unmetPromises(plan) {
+  try {
+    return [...(await estimateProblems(plan)), ...(await funnelProblems(plan))];
+  } catch {
+    return ['what was attached and moved could not be read back'];
+  }
 }
 
 async function commitConvert(input) {

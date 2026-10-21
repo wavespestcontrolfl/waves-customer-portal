@@ -247,6 +247,7 @@ describe('the confirmed run', () => {
       // The lead version the card showed: the handler's own UPDATE must still match it.
       expected: {
         leadId: LEAD, status: 'contacted', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), customerId: null,
+        lead: { first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285' },
         customer: { first_name: 'Robin', last_name: 'Sample', company_name: null, phone: '(941) 555-0142', email: 'ROBIN@example.test', address_line1: '12 Sample Way', city: 'Venice', zip: '34285' },
         estimateIds: [EST], estimateLinked: true,
       },
@@ -498,6 +499,31 @@ describe('the read-back after the commit', () => {
     state.ad_service_attribution = [{ lead_id: LEAD, funnel_stage: 'booked', customer_id: null }, { lead_id: LEAD, funnel_stage: 'lost', customer_id: OTHER }];
     const card = await preview();
     expect(await confirm(card)).toMatchObject({ success: true });
+  });
+
+  test('a funnel row the card did not show that appeared and was moved is reported', async () => {
+    state.ad_service_attribution = [];
+    state.estimates[0].customer_id = null;
+    const card = await preview();
+    stage(async () => { state.estimates[0].customer_id = CUST; state.ad_service_attribution = [{ lead_id: LEAD, funnel_stage: 'booked', customer_id: CUST }]; return wonJson; });
+    expect((await confirm(card)).problems).toEqual(['a funnel row appeared that the card did not show and was moved']);
+    // No row before and none after: success.
+    state.ad_service_attribution = [];
+    state.estimates[0].customer_id = null;
+    const again = await preview();
+    stage(async () => { state.estimates[0].customer_id = CUST; return wonJson; });
+    expect(await confirm(again)).toMatchObject({ success: true });
+  });
+
+  test('a linked estimate the card showed as already owned: its owner is read back', async () => {
+    state.estimates[0].customer_id = OTHER;
+    const card = await preview();
+    stage(async () => { movesFunnel(); return wonJson; });
+    expect(await confirm(card)).toMatchObject({ success: true });
+    state.estimates[0].customer_id = OTHER;
+    const again = await preview();
+    stage(async () => { movesFunnel(); state.estimates[0].customer_id = CUST; return wonJson; });
+    expect((await confirm(again)).problems).toEqual(['the lead\u2019s estimate changed owner']);
   });
 
   test('a read-back that fails says what could not be checked, not success', async () => {

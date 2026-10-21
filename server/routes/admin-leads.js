@@ -1297,6 +1297,12 @@ router.post('/:id/activity', async (req, res, next) => {
 // live and unchanged (the columns the card showed); and the estimates the card listed are exactly the
 // unowned ones this conversion will attach.
 const CUSTOMER_SNAPSHOT_COLUMNS = ['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip'];
+// The lead's contact columns the card showed (a contact or address edit does not always move updated_at).
+const LEAD_SNAPSHOT_COLUMNS = ['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'];
+function whereColumnsMatch(builder, columns, snapshot) {
+  for (const column of columns) builder.whereRaw(`COALESCE(${column}::text, '') = ?`, [String(snapshot?.[column] ?? '')]);
+  return builder;
+}
 function withExpectedLead(identity, expected, customerId) {
   if (!expected) return identity;
   return (q) => {
@@ -1305,9 +1311,8 @@ function withExpectedLead(identity, expected, customerId) {
       .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
     if (expected.customerId) q.where('customer_id', expected.customerId);
     else q.whereNull('customer_id');
-    const customer = db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at');
-    for (const column of CUSTOMER_SNAPSHOT_COLUMNS) customer.whereRaw(`COALESCE(${column}::text, '') = ?`, [String(expected.customer?.[column] ?? '')]);
-    q.whereExists(customer);
+    whereColumnsMatch(q, LEAD_SNAPSHOT_COLUMNS, expected.lead);
+    q.whereExists(whereColumnsMatch(db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at'), CUSTOMER_SNAPSHOT_COLUMNS, expected.customer));
     // The approved estimates are all still unowned, and (lead with no linked estimate) no other unowned
     // estimate is tagged with this lead.
     const ids = expected.estimateIds || [];

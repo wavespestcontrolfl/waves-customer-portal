@@ -177,6 +177,10 @@ function claimOf(row) {
         if (/^\(SELECT COUNT/.test(sql)) {
           calls.push(['whereRaw', 'estimates']);
           list.push(() => (tables.estimates || []).filter((e) => e.customer_id == null && first.includes(e.id)).length === count);
+        } else if (/^COALESCE\((\w+)::text/.test(sql)) {
+          const column = /^COALESCE\((\w+)::text/.exec(sql)[1];
+          calls.push(['whereRaw', `lead.${column}`]);
+          list.push((r) => String(r[column] ?? '') === first);
         } else {
           calls.push(['whereRaw', 'updated_at']);
           list.push((r) => new Date(r.updated_at).getTime() === new Date(first).getTime());
@@ -192,9 +196,13 @@ const convertsRow = (row) => async (_id, opts) => { const claim = claimOf(row); 
 const EXPECTED = {
   leadId: LEAD, status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null,
   customer: Object.fromEntries(Object.entries(CUSTOMER_FIELDS).filter(([k]) => k !== 'deleted_at')),
+  lead: { first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285' },
   estimateIds: [], estimateLinked: true,
 };
-const FULL_LEAD = () => ({ id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null, converted_at: null, customer_id: null });
+const FULL_LEAD = () => ({
+  id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null, converted_at: null, customer_id: null,
+  first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285',
+});
 
 test('the page path is unchanged: its claim carries only the handled rule, with or without a changed lead', async () => {
   const claim = claimOf(FULL_LEAD());
@@ -213,7 +221,9 @@ test('the bar adds the card\u2019s version to the same UPDATE and converts when 
   leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return claim.wins(); });
   const res = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
   expect(res.status).toBe(200);
-  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id'], ['whereExists', 'customers'], ['whereRaw', 'estimates']]);
+  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id'],
+    ...['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'].map((c) => ['whereRaw', `lead.${c}`]),
+    ['whereExists', 'customers'], ['whereRaw', 'estimates']]);
   // The subquery asks for the carded customer, not deleted.
   expect(claim.existsSubs[0].conds.slice(0, 2)).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
   // ...and the columns the card showed.
@@ -336,3 +346,19 @@ describe('estimates tagged with the lead (no linked estimate)', () => {
     expect(claim.calls).toEqual([['where', 'fn']]);
   });
 });
+
+test.each([
+  ['name', { last_name: 'Changed' }],
+  ['phone', { phone: '+19415550999' }],
+  ['email', { email: 'new@example.test' }],
+  ['street (updated_at unmoved)', { address: '99 Other Way' }],
+  ['city', { city: 'Nokomis' }],
+  ['zip', { zip: '34202' }],
+])('a lead %s edit between the card and the write answers 409; the page ignores it', async (_name, change) => {
+  const row = { ...FULL_LEAD(), ...change };
+  leadAttribution.markConverted.mockImplementationOnce(convertsRow(row));
+  expect((await run(EXPECTED)).status).toBe(409);
+  leadAttribution.markConverted.mockImplementationOnce(convertsRow(row));
+  expect((await viaPage(BODY)).status).toBe(200);
+});
+
