@@ -2055,7 +2055,10 @@ async function resolveWebPhotoCustomer(req, res, next) {
       .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
       .where('sr.report_view_token', req.params.token)
       .select('sr.id', 'sr.customer_id', 'sr.report_template_version', 'sr.structured_notes', 'sr.service_type', 'sr.service_line',
-        db.raw(`${stampedDivergesSql('ss', 'c')} as stamped_address_diverges`))
+        // What the shared visit-scope chain needs to prove the visit is at the home (unit-aware).
+        'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
+        'ss.property_id', 'ss.source_estimate_id',
+        'c.address_line1 as cust_address_line1', 'c.address_line2 as cust_address_line2', 'c.city as cust_city', 'c.zip as cust_zip')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service) || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
@@ -2087,9 +2090,10 @@ router.post('/:token/photo-check', resolveWebPhotoCustomer, lazyPhotoIdLimiter('
       type,
       customerId: service.customer_id,
       dataUrls: validated.photos,
-      // A visit at another address than the home is never "covered": the re-service
-      // picker books the on-file address (same rule as the portal photo ID).
-      isSecondary: service.stamped_address_diverges === true,
+      // Coverage is offered only for a visit PROVABLY at the home (unit-aware, linked
+      // properties and creating estimates included): the re-service picker books the
+      // on-file address. Anything unproven reads as a secondary property, so no "covered".
+      isSecondary: !(await webActions.visitIsAtPrimaryHome(service, db)),
     });
     const answer = webActions.photoAnswer(type, reply);
     return res.status(answer.ok ? 200 : answer.status).json(answer.ok

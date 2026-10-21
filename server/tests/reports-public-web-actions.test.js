@@ -236,7 +236,6 @@ function mockDb(overrides = {}) {
     structured_notes: null,
     service_type: 'Lawn Care',
     service_line: 'lawn',
-    stamped_address_diverges: false,
     first_name: 'Pat',
     last_name: 'Tester',
     ...overrides,
@@ -362,6 +361,7 @@ const post = (baseUrl, body) => fetch(`${baseUrl}/reports/${VALID_TOKEN}/photo-c
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 
+let homeCheck;
 describe('POST /reports/:token/photo-check', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -371,7 +371,10 @@ describe('POST /reports/:token/photo-check', () => {
       status: 200,
       body: { result: { observations: 'Some thinning.' }, next_step: { kind: 'reservice', url: '/reservice/standing-token-123' } },
     });
+    // The premises proof has its own suite (web-actions-home-check.test.js); here it is a switch.
+    homeCheck = jest.spyOn(webActions, 'visitIsAtPrimaryHome').mockResolvedValue(true);
   });
+  afterEach(() => homeCheck.mockRestore());
 
   test('dark gate: 404 before the limiters run, with no database read for the customer', async () => {
     setGates({ actions: false });
@@ -427,12 +430,19 @@ describe('POST /reports/:token/photo-check', () => {
     }));
   });
 
-  test('a visit at another address than the home is treated as a secondary property', async () => {
-    mockDb({ stamped_address_diverges: true });
+  test('a visit that cannot be proven at the home is treated as a secondary property, so coverage is withheld', async () => {
+    homeCheck.mockResolvedValue(false);
     await withServer(async (baseUrl) => {
       await post(baseUrl, { photos: [JPEG(2000)] });
     });
     expect(photoId.runCustomerPhotoId).toHaveBeenCalledWith(expect.objectContaining({ isSecondary: true }));
+  });
+
+  test('the premises proof gets the visit stamp, property link and customer address from the record', async () => {
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, { photos: [JPEG(2000)] });
+    });
+    expect(homeCheck).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'customer-1' }), db);
   });
 
   test('body checks: exactly one photo, an image data URL, 750 KB or less', async () => {

@@ -89,6 +89,34 @@ async function buildFindingTile(data, { buildCrossSell }) {
   };
 }
 
+// True only when the visit is PROVABLY at the customer's primary home, by the shared
+// visit-scope chain (visit-property-scope.js): the visit's own address stamp (unit
+// included), else its property link, else its creating estimate, compared with the
+// customer's own address; a visit with no evidence at all counts only on an account
+// proven to have a single premises. Anything unproven, or any failed read, is false,
+// and the photo answer then never says "covered" and never offers the booking button
+// (the re-service picker books the on-file address, so another unit or a linked
+// secondary property must not read as covered).
+async function visitIsAtPrimaryHome(row, knex) {
+  try {
+    const linkage = require('../estimate-property-linkage');
+    const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
+    const mirrorKey = linkage.normalizedStampedStreet(row.cust_address_line1, row.cust_address_line2, row.cust_city, row.cust_zip) || null;
+    if (!mirrorKey) return false;
+    let failed = false;
+    const scope = await resolveVisitPropertyScope(row, knex, { onLookupFailure: () => { failed = true; } });
+    if (failed) return false;
+    if (scope.hasEvidence) return !!scope.key && sameResolvedProperty(scope.key, mirrorKey);
+    // The single-premises fallback proves nothing from a customer address with no locality.
+    if (linkage.scopeKeyLacksLocality(mirrorKey)) return false;
+    const customer = await knex('customers').where({ id: row.customer_id }).first('has_multi_home');
+    return await customerHasOnlyPrimaryPremises(knex, row.customer_id, customer, mirrorKey, { unresolvedFails: true });
+  } catch (err) {
+    require('../logger').warn(`[web-actions] home check failed, coverage withheld: ${err.message}`);
+    return false;
+  }
+}
+
 // Photo ID handler type for the report's service line.
 function photoTypeForLine(serviceLine) {
   if (serviceLine === 'lawn') return 'lawn';
@@ -181,6 +209,7 @@ module.exports = {
   buildFindingTile,
   findingKinds,
   photoTypeForLine,
+  visitIsAtPrimaryHome,
   photoAnswer,
   FINDING_KINDS,
   OUTCOME_COPY,
