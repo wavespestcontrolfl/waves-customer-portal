@@ -183,16 +183,16 @@ async function list(actorId, sessionId) {
   // query and the receipt-derived filter below decides.
   const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled']))
     .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at',
-      db.raw("(request->>'had_images')::boolean AS had_images"));
+      db.raw("(request->>'had_images')::boolean AS had_images"), db.raw("request->>'model_provider' AS model_provider"));
   if (!tasks.length) return tasks;
   const actions = PendingActions.taskSteps(await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id)));
   const recent = new Set(latest);
   return tasks.map(task => {
     const receipts = actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt);
-    const resumableFailure = task.state === 'failed' && !continuationError({ ...task, request: { had_images: task.had_images === true } }, receipts);
+    const resumableFailure = task.state === 'failed' && !continuationError({ ...task, request: { had_images: task.had_images === true, model_provider: task.model_provider || undefined } }, receipts);
     return { ...task, state: exposedTaskState(task, receipts), resumableFailure };
   }).filter(task => recent.has(task.id) || OPEN_STATES.has(task.state) || task.resumableFailure)
-    .map(({ resumableFailure, had_images, ...task }) => task);
+    .map(({ resumableFailure, had_images, model_provider, ...task }) => task);
 }
 
 // Run from the existing IB retention sweep even while the platform gate is off.

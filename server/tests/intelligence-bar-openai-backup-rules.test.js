@@ -103,6 +103,13 @@ describe('saved task provider', () => {
     expect(IbTasks.continuationError(task({}), [])).toBeNull();
   });
 
+  test('the task list judges resumability with the saved provider too, so list and resume agree (Codex r4)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/tasks.js'), 'utf8');
+    expect(src).toMatch(/db\.raw\("request->>'model_provider' AS model_provider"\)/);
+    expect(src).toMatch(/request: \{ had_images: task\.had_images === true, model_provider: task\.model_provider \|\| undefined \}/);
+    expect(src).toMatch(/\.map\(\(\{ resumableFailure, had_images, model_provider, \.\.\.task \}\) => task\)/);
+  });
+
   test('markModelProvider merges the mark into the task request under the runner token', async () => {
     await IbTasks.markModelProvider('t1', 'actor-1', 'runner-1', Backup.BACKUP_PROVIDER);
     expect(mockWhere).toHaveBeenCalledWith({ id: 't1', actor_id: 'actor-1', runner_token: 'runner-1' });
