@@ -305,6 +305,8 @@ describe('dollars and a number without cents (pre-push audit r3)', () => {
   test('no whole-dollar suggestion drops the cents', () => {
     expect(normalizeSpokenMoney('charge one hundred dollars and fifty five').changes).toEqual([]);
     expect(normalizeSpokenMoney('charge one hundred dollars and 55').changes).toEqual([]);
+    expect(normalizeSpokenMoney('charge one hundred dollars fifty five').changes).toEqual([]);
+    expect(normalizeSpokenMoney('charge one hundred dollars, 55').changes).toEqual([]);
     expect(normalizeSpokenMoney('charge one hundred dollars and fifty five cents').changes).toEqual([expect.objectContaining({ to: '$100.55' })]);
     expect(normalizeSpokenMoney('charge one hundred dollars and the rest later').changes).toEqual([expect.objectContaining({ to: '$100' })]);
   });
