@@ -357,6 +357,26 @@ describe('a coded refusal is a gap only under a gap code (Codex #6371 r10)', () 
   });
 });
 
+describe('a coded refusal is classified by its code, not its wording (Codex #6371 r13)', () => {
+  test('annual_prepay_lane records with wording that has no decline phrase', () => {
+    const result = { success: false, code: 'annual_prepay_lane', error: 'The billing type was not changed from the bar. Nothing was changed.' };
+    expect(BAR_DECLINE_RE.test(result.error)).toBe(false);
+    expect(recordableRefusalCode(result)).toBe('annual_prepay_lane');
+  });
+  test('an _unsupported code records without decline wording', () => {
+    expect(recordableRefusalCode({ success: false, code: 'free_visit_unsupported', error: 'Free visits go through the office.' })).toBe('free_visit_unsupported');
+  });
+  test('by-design, unlisted, gate-off and unrecorded codes stay null whatever the wording', () => {
+    for (const code of ['by_owner_rule', 'invoice_send_queued', 'void_invoice_not_enabled', 'gate_off', 'no_rerunnable_checks']) {
+      expect(recordableRefusalCode({ success: false, code, error: "The bar can't do this from here yet." })).toBeNull();
+    }
+  });
+  test('nothing_repairable still needs decline wording', () => {
+    expect(recordableRefusalCode({ success: false, code: 'nothing_repairable', error: 'Nothing here is repairable by this command.' })).toBeNull();
+    expect(recordableRefusalCode({ success: false, code: 'nothing_repairable', error: "The bar can't repair this from here yet." })).toBe('nothing_repairable');
+  });
+});
+
 describe('every code main recorded is classified once (pre-push audit on Codex #6371 r10)', () => {
   const decline = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
   test.each([

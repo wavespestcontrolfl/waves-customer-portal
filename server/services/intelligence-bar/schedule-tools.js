@@ -1116,12 +1116,16 @@ function batchMoveGroupRefusal(skipped) {
   };
 }
 
-// A batch move that goes ahead without its grouped stops is a success, so the
-// gap collector cannot see the refusal; it reads this note instead (Codex #6371 r12).
-function groupedStopGaps(skippedGrouped) {
-  return skippedGrouped.some((entry) => entry.kind === 'grouped')
-    ? { capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] }
-    : {};
+// A batch move that goes ahead without some of its stops is a success, so the
+// gap collector cannot see the refusals; it reads this note instead (Codex #6371 r12, r13).
+// One code per kind of skipped stop: grouped, frozen, and collective (series) moves.
+function skippedMoveGaps(skippedGrouped, skippedCollective) {
+  const codes = [
+    skippedGrouped.some((entry) => entry.kind === 'grouped') && 'grouped_visit_move_unsupported',
+    skippedGrouped.some((entry) => entry.kind === 'frozen') && 'frozen_visit_move_unsupported',
+    skippedCollective.length > 0 && 'collective_move_unsupported',
+  ].filter(Boolean);
+  return codes.length ? { capability_gaps: codes.map((code) => ({ code })) } : {};
 }
 
 async function moveStopsToDay(input, actionContext = {}) {
@@ -1306,7 +1310,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       // committing will text the customers.
       will_text_customers: notifyCustomers,
       stops,
-      ...groupedStopGaps(skippedGrouped),
+      ...skippedMoveGaps(skippedGrouped, skippedCollective),
       ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
@@ -1717,7 +1721,7 @@ async function moveStopsToDay(input, actionContext = {}) {
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
     ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
-    ...groupedStopGaps(skippedGrouped),
+    ...skippedMoveGaps(skippedGrouped, skippedCollective),
   };
 }
 

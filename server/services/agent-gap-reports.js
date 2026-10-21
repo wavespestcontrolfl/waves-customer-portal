@@ -62,6 +62,8 @@ const GATE_OFF_CODE_RE = /(?:^|_)(?:not_enabled|gate_off)$/;
 // bar working as built, whatever its wording says (Codex #6371 r10: wording
 // alone kept turning ordinary refusals into build work).
 const UNSUPPORTED_CODE_RE = /_unsupported$/;
+// The listed code whose refusal is a gap only when its text declines.
+const TEXT_CHECKED_CODE = 'nothing_repairable';
 // Every coded refusal main recorded through its "use the X screen" text was
 // classified once here (10-21): a case the bar could be built to handle is a
 // gap; a wait, a fence, an outage, a safety check, data the operator must fix
@@ -466,15 +468,20 @@ function recordableRefusalCode(result) {
   const code = typeof result.code === 'string' ? result.code.trim() : '';
   if (BY_DESIGN_REFUSAL_CODES.has(code)) return null;
   if (RECORDED_REFUSAL_CODES.has(code)) return code;
-  const text = [result.error, result.refused].filter((value) => typeof value === 'string').join(' ');
   // A feature that is built but switched off is not a missing capability:
   // every *_not_enabled / *gate_off code stays out of the gap list (Codex #6371 r6).
   if (UNRECORDED_DECLINE_CODES.has(code) || GATE_OFF_CODE_RE.test(code)) return null;
+  const coded = CODE_RE.test(code);
+  // A coded refusal is classified by its code alone: the code lists are the
+  // reviewed classification, and wording no longer decides (Codex #6371 r13).
+  // `nothing_repairable` is the one code that is a gap only when the text
+  // declines (field evidence alone is not).
+  if (coded && code !== TEXT_CHECKED_CODE) return capabilityGapCode(code);
+  const text = [result.error, result.refused].filter((value) => typeof value === 'string').join(' ');
   // A refusal that sends the operator to another screen, or that says plainly
   // the bar cannot do this from here (the wording every tool refusal uses).
   if (!OTHER_SCREEN_RE.test(text) && !BAR_DECLINE_RE.test(text)) return null;
-  if (!CODE_RE.test(code)) return OTHER_SCREEN_CODE;
-  return capabilityGapCode(code);
+  return coded ? capabilityGapCode(code) : OTHER_SCREEN_CODE;
 }
 
 // The one rule for a code that is a missing capability: `*_unsupported` or listed.

@@ -14,11 +14,13 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
-jest.mock('../services/rebooker', () => ({ needsLifecycleRewind: jest.fn(() => false), collectiveMoveGateOn: jest.fn(() => false) }));
+const mockRebooker = { needsLifecycleRewind: jest.fn(() => false), collectiveMoveGateOn: jest.fn(() => false) };
+jest.mock('../services/rebooker', () => mockRebooker);
+const mockFrozen = new Set();
 const mockMembers = new Map();
 jest.mock('../services/visit-groups', () => ({
   openMembers: jest.fn(async (conn, visitId) => mockMembers.get(visitId) || [{ id: visitId }]),
-  frozenVisitVerdict: jest.fn(async () => ({ frozen: false })),
+  frozenVisitVerdict: jest.fn(async (conn, visitId) => (mockFrozen.has(visitId) ? { frozen: true, reason: 'has_records' } : { frozen: false })),
   dateOnly: (value) => String(value).slice(0, 10),
 }));
 let mockPlan;
@@ -68,5 +70,24 @@ describe('move_stops_to_day with a grouped stop beside movable ones', () => {
     const proposal = await run(false);
     expect(proposal.proposal).toBe(true);
     expect(proposal).not.toHaveProperty('capability_gaps');
+  });
+
+  test('frozen and collective (series) skips each add their own code, deduped, in the proposal (Codex #6371 r13)', async () => {
+    mockStops.splice(0, mockStops.length,
+      stop('s1', null),
+      stop('s2', 'visit-frozen'),
+      stop('s3', 'visit-frozen-2'),
+      { ...stop('s4', null), is_recurring: true });
+    mockFrozen.add('visit-frozen');
+    mockFrozen.add('visit-frozen-2');
+    mockRebooker.collectiveMoveGateOn.mockReturnValue(true);
+    try {
+      const proposal = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2', 's3', 's4'], new_date: '2099-01-05' });
+      expect(proposal.stops.map((s) => s.id)).toEqual(['s1']);
+      expect(proposal.capability_gaps).toEqual([{ code: 'frozen_visit_move_unsupported' }, { code: 'collective_move_unsupported' }]);
+    } finally {
+      mockRebooker.collectiveMoveGateOn.mockReturnValue(false);
+      mockFrozen.clear();
+    }
   });
 });

@@ -286,9 +286,13 @@ function exclusionReason(row, { invoice, hasAddons }) {
 // capability (a recurring template, a $0 visit, add-on lines), the refusal is
 // a coded gap naming those reasons, not the generic nothing_to_reprice; the
 // per-visit list stays in left_alone (Codex #6371 r12). Null otherwise.
-function allExcludedRefusal({ label, customerName, newPrice, excluded, unchanged, excludedOut }) {
-  const gaps = [...new Set(excluded.map(({ reason }) => reason).filter((reason) => reason.endsWith(CANNOT_REPRICE)))]
+function capabilityExclusions(excluded) {
+  return [...new Set(excluded.map(({ reason }) => reason).filter((reason) => reason.endsWith(CANNOT_REPRICE)))]
     .map((reason) => reason.replace(new RegExp(`,? which ${CANNOT_REPRICE}$`), ''));
+}
+
+function allExcludedRefusal({ label, customerName, newPrice, excluded, unchanged, excludedOut }) {
+  const gaps = capabilityExclusions(excluded);
   if (!gaps.length || unchanged.length) return null;
   return {
     error: `The bar can't change any upcoming ${label} visit for ${customerName} to ${money(newPrice)} from here yet: ${gaps.join('; ')}. Nothing was changed.`,
@@ -379,6 +383,8 @@ async function buildPlan(input) {
       ...(hasStoredDiscount(row) ? { discount_note: 'its discount stamp is replaced: the new price is the full visit price' } : {}),
     })),
     left_alone: excludedOut,
+    // A partial plan still leaves capability exclusions behind; the gap collector reads this (Codex #6371 r13).
+    ...(capabilityExclusions(excluded).length ? { capability_gaps: [{ code: 'reprice_excluded_unsupported' }] } : {}),
     already_at_price: unchangedOut,
     customer_message: NO_MESSAGE,
     _version: pinsVersion(pins, { customer_id: String(customer.id), new_price: Math.round(newPrice * 100), family: family.tag, lane: lane.mode, refreshable_prepay_term: false }),

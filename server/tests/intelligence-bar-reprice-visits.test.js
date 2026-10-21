@@ -160,6 +160,19 @@ describe('the card', () => {
     expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
   });
 
+  test('a partial plan with a capability exclusion carries the gap note; one with only waits does not (Codex #6371 r13)', async () => {
+    tables.scheduled_services = [
+      visit('v-1', '2099-03-10'),
+      visit('v-zero', '2099-04-05', { estimated_price: '0.00' }),
+    ];
+    const card = await preview();
+    expect(card.preview).toBe(true);
+    expect(card.visits.map((v) => v.id)).toEqual(['v-1']);
+    expect(card.capability_gaps).toEqual([{ code: 'reprice_excluded_unsupported' }]);
+    tables.scheduled_services = [visit('v-1', '2099-03-10'), visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' })];
+    expect(await preview()).not.toHaveProperty('capability_gaps');
+  });
+
   test('exclusions that are only waits (prepaid, completed) keep the plain nothing_to_reprice', async () => {
     tables.scheduled_services = [
       visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' }),
