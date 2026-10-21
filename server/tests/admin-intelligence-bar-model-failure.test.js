@@ -602,6 +602,7 @@ describe('round 4 Codex fixes (#6368)', () => {
     };
     try {
       expect(await run('2026-10-21T01:00:05Z')).toEqual({ rang: 1, closed: 1, lock: 1 });
+      expect(raise.mock.calls[0][2].metadata.lastFailureAt).toBe('2026-10-21T01:00:00.000Z');
       expect(await run('2026-10-21T00:59:00Z')).toEqual({ rang: 1, closed: 0, lock: 1 });
       expect(await run(null)).toEqual({ rang: 1, closed: 0, lock: 1 });
     } finally {

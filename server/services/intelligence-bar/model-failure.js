@@ -197,7 +197,7 @@ async function stampLastFailure(lane, now = new Date()) {
   }
 }
 
-async function ringFailureBell({ code, gap, lane }) {
+async function ringFailureBell({ code, gap, lane, failedAt = Date.now() }) {
   try {
     const { raiseAdminAlert } = require('../admin-alert-compose');
     const failures = gap?.occurrences
@@ -220,7 +220,9 @@ async function ringFailureBell({ code, gap, lane }) {
       dedupeWindowMs: BELL_WINDOW_MS,
       // A row a recovery marked done does not hide a new outage in the same hour.
       dedupeOpenOnly: true,
-      metadata: { source: 'ib-model-failure', lane: lane === 'tech' ? 'tech' : 'admin', code, ...(gap?.id ? { gapId: gap.id } : {}) },
+      // The failure time rides on a NEW bell too, so a recovery whose answer
+      // began after this failure (but before the row existed) can close it.
+      metadata: { source: 'ib-model-failure', lane: lane === 'tech' ? 'tech' : 'admin', code, lastFailureAt: new Date(failedAt).toISOString(), ...(gap?.id ? { gapId: gap.id } : {}) },
     });
     return Boolean(result) && !result.suppressed;
   } catch (err) {
@@ -240,7 +242,7 @@ async function ringFailureBell({ code, gap, lane }) {
 // exhaust the pool under a burst of failures (pre-push audit).
 async function ringUnlessRecovered({ code, gap, lane, failedAt }) {
   await stampLastFailure(lane, new Date(failedAt));
-  await ringFailureBell({ code, gap, lane });
+  await ringFailureBell({ code, gap, lane, failedAt });
   try {
     const db = require('../../models/db');
     return await db.transaction(async (trx) => {
