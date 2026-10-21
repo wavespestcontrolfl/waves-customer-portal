@@ -28,10 +28,11 @@ import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // - Tech assignment dropdown: confirm "any available tech" vs an
 //   explicit assignment doesn't get silently swapped if the
 //   availability API responds slowly.
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
+import DidYouMean, { isApproximateRow } from '../admin/DidYouMean';
 import useModalFocus from '../../hooks/useModalFocus';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
@@ -5079,8 +5080,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 />
                 {customerSearch.trim().length >= 2 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', zIndex: 20 }}>
-                    {customerResults.map(c => (
-                      <button type="button" key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row u-focus-ring" style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    {customerResults.map((c, at) => (
+                      <Fragment key={c.id}>
+                      {isApproximateRow(c) && !isApproximateRow(customerResults[at - 1]) && <DidYouMean />}
+                      <button type="button" onClick={() => selectCustomer(c)} className="waves-sq-row u-focus-ring" style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 500 }}>
                             {c.firstName} {c.lastName}
@@ -5099,6 +5102,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           {c.tier && <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
                         </div>
                       </button>
+                      </Fragment>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>

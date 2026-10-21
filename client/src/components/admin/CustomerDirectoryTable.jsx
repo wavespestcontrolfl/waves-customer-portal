@@ -1,4 +1,5 @@
 import CustomerHealthGrade from "./CustomerHealthGrade";
+import DidYouMean, { isApproximateRow } from "./DidYouMean";
 import { Fragment, useEffect, useRef } from "react";
 import { ArrowDown, ArrowUp, MoreHorizontal, Phone, MessageSquare, PenLine, Trash2 } from "lucide-react";
 import { Button, buttonStyles, Table, THead, TBody, TR, TH, TD } from "../ui";
@@ -46,11 +47,12 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
         </TH>
         <TH>Property</TH><TH>WaveGuard Tier</TH><TH>Next service</TH><TH>Attention</TH><TH><span className="sr-only">Actions</span></TH>
       </TR></THead>
-      <TBody>{customers.map((customer) => {
+      <TBody>{customers.map((customer, at) => {
         const name = [customer.firstName, customer.lastName].filter(Boolean).join(" ") || "Unnamed customer";
         const address = customer.address;
         const tier = ["Bronze", "Silver", "Gold", "Platinum"].find((label) => label.toLowerCase() === String(customer.tier || "").trim().toLowerCase());
         return <Fragment key={customer.id}>
+          {isApproximateRow(customer) && !isApproximateRow(customers[at - 1]) && <TR className="customer-directory-did-you-mean"><TD colSpan={6} className="p-0"><DidYouMean /></TD></TR>}
           <TR className="customer-directory-record">
             <TD className="customer-directory-identity">
               <div className="flex items-center gap-2">

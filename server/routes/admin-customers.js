@@ -9,6 +9,7 @@ const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('..
 const LeadScorer = require('../services/lead-scorer');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const { stageLifecycleStamps } = require('../services/customer-stages');
 const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
@@ -2479,6 +2480,33 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
   }
 });
 
+// Sound-alike rows (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found fewer than 3
+// customers and reads as a name, "Did you mean" rows follow the exact ones on page 1. The
+// exact rows, `total` and the paging do not change; `approximateCount` says how many rows at
+// the end of `customers` carry `approximate: true`. `unsearched()` is the directory query with
+// its filters and the technician's assigned-visit scope but no text search, so the survivors are
+// read back through the same limits. Gate off: the rows come back untouched and `extra` is empty.
+async function appendApproximateCustomers({ page, search, totalCount, exactRows, mappedRows, unsearched, withListColumns }) {
+  // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
+  const enabled = require('../config/feature-gates').customerSearchFuzzyLive();
+  if (!enabled || !search) return { rows: mappedRows, extra: {} };
+  let approximate = [];
+  if (page === 1 && shouldSearchSoundAlike(search, totalCount)) {
+    const scopeQuery = unsearched();
+    const ranked = await findSoundAlikeCustomers(db, search, { scopeQuery, exactIds: exactRows.map((row) => row.id) });
+    if (ranked.length) {
+      const rank = new Map(ranked.map((entry, at) => [entry.id, at]));
+      const found = await withListColumns(scopeQuery.clone())
+        .select(matchedHomeAddressSql(db, undefined))
+        .whereIn('customers.id', ranked.map((entry) => entry.id));
+      approximate = found
+        .sort((a, b) => rank.get(a.id) - rank.get(b.id))
+        .map((row) => ({ ...mapCustomerListRow(row), approximate: true, matchReasons: ranked[rank.get(row.id)].reasons || [] }));
+    }
+  }
+  return { rows: approximate.length ? [...mappedRows, ...approximate] : mappedRows, extra: { approximateCount: approximate.length } };
+}
+
 // GET /api/admin/customers — directory + pipeline
 router.get('/', async (req, res, next) => {
   try {
@@ -2526,7 +2554,8 @@ router.get('/', async (req, res, next) => {
     const effectiveSort = isTechRequest ? techSafeSort(sort) : sort;
     const healthColumns = await getHealthScoreColumns();
 
-    let query = scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters, healthColumns)).select(
+    // The directory columns, shared by the exact rows and the approximate (sound-alike) rows below.
+    const withListColumns = (base) => base.select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
@@ -2556,6 +2585,7 @@ router.get('/', async (req, res, next) => {
       // column shows $0 for every real customer.
       db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
     );
+    let query = withListColumns(scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters, healthColumns)));
 
     // Keep first-name browsing and explicit metric sorts; when searching by
     // name, prefer close identity matches to incidental address/email hits.
@@ -2595,8 +2625,21 @@ router.get('/', async (req, res, next) => {
     // pipeline/marketing aggregates — same response shape so the shared
     // search UIs keep working.
     const mappedRows = customers.map(mapCustomerListRow);
+
+    // Sound-alike rows after the exact ones (GATE_CUSTOMER_SEARCH_FUZZY; see appendApproximateCustomers).
+    const fuzzy = await appendApproximateCustomers({
+      page, search: filters.search, totalCount, exactRows: customers, mappedRows,
+      // The directory's own filters and the technician's scope, no text search.
+      unsearched: () => scopeTechAssigned(applyCustomerListFilters(
+        db('customers').whereNull('customers.deleted_at'),
+        { ...filters, search: undefined, searchHomes: false }, healthColumns,
+      )),
+      withListColumns,
+    });
+    const listRows = fuzzy.rows;
     res.json({
-      customers: isTechRequest ? mappedRows.map(techSafeListRow) : mappedRows,
+      customers: isTechRequest ? listRows.map(techSafeListRow) : listRows,
+      ...fuzzy.extra,
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
       pipelineCounts: isTechRequest ? {} : pipelineMap,
