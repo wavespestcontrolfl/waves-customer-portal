@@ -87,6 +87,22 @@ describe('buildWebTop', () => {
     expect(buildWebTop({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'x'.repeat(200) } } })).toBeNull();
   });
 
+  test('termite: a primary dashboard\u2019s next step wins over a frozen "No action needed" (station evidence escalated)', () => {
+    const typedReport = { todaysResult: { nextStep: 'No action needed.' } };
+    const termiteReportV2 = { source: 'primary', nextStep: 'We will recheck the stations next month.' };
+    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2 }).action).toBe('We will recheck the stations next month.');
+    // a primary dashboard with no next step of its own falls back to the typed step
+    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2: { source: 'primary' } }).action).toBe(NO_ACTION);
+  });
+
+  test('termite: a companion dashboard or a re-service visit that applied nothing keeps the typed step', () => {
+    const typedReport = { todaysResult: { nextStep: 'No action needed.' } };
+    const nextStep = 'We will recheck the stations next month.';
+    expect(buildWebTop({ serviceLine: 'pest', typedReport, termiteReportV2: { source: 'companion', nextStep } }).action).toBe(NO_ACTION);
+    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2: { source: 'primary', nextStep }, reserviceReport: { outcome: 'inspection_only' } }).action).toBe(NO_ACTION);
+    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2: { source: 'primary', nextStep }, reserviceReport: { outcome: 'incomplete' } }).action).toBe(nextStep);
+  });
+
   test('nothing to say is null', () => {
     expect(buildWebTop({ serviceLine: 'pest' })).toBeNull();
     expect(buildWebTop(null)).toBeNull();

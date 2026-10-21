@@ -61,6 +61,16 @@ function lawnWatering(v2) {
   return sentence((Array.isArray(banner.lines) ? banner.lines : []).find((line) => sentence(line)));
 }
 
+// The next step as ServiceReportDocument picks it for "What we recommend": a PRIMARY termite dashboard owns the
+// commitment (station evidence can replace a frozen "No action needed"), unless a re-service visit applied nothing.
+// The document runs this inline on the client, so the same three checks are mirrored here.
+function nextStepText(data) {
+  const termite = data.termiteReportV2;
+  const outcome = data.reserviceReport?.outcome;
+  const primary = Boolean(termite) && termite.source !== 'companion' && !['inspection_only', 'customer_declined'].includes(outcome);
+  return primary ? (termite.nextStep || data.typedReport?.todaysResult?.nextStep) : data.typedReport?.todaysResult?.nextStep;
+}
+
 /**
  * The one action. Lawn: the watering line the page already recommends, so it is worded one way (a neutral "no special
  * watering" line is not an action). Other lines: the report's own next step.
@@ -70,7 +80,7 @@ function actionLine(data) {
     const water = treated(data) ? lawnWatering(data.reportV2) : null;
     return water || (data.reportV2?.snapshot?.noActionNeeded === true ? NO_ACTION : null);
   }
-  const step = sentence(data.typedReport?.todaysResult?.nextStep);
+  const step = sentence(nextStepText(data));
   if (!step) return null;
   return /^no (further )?action\b/i.test(step) ? NO_ACTION : step;
 }
