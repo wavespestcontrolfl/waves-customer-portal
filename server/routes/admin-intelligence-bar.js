@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -1819,10 +1819,16 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // the SAME id the commit-time recheck passes as its own confirming
       // actor in the common case (propose then immediately confirm), so
       // technician_notice reads the same at both points.
-      const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
+      const { computeCancelAppointmentImpact, cancelWithEffectsRefusal } = require('../services/appointment-cancel-impact');
+      // GATE_IB_CANCEL_WITH_EFFECTS: the card also carries the invoice, credit and linked-visit effects and the
+      // customer text, and Confirm replays the Dispatch cancel. notify_customer (default true) is the card's choice.
+      const withEffects = ibCancelWithEffectsLive();
       let impact;
       try {
-        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
+        impact = await computeCancelAppointmentImpact(params.appointment_id, {
+          actorId: getAdminActorId(req),
+          ...(withEffects ? { withEffects: true, notifyCustomer: params.notify_customer !== false } : {}),
+        });
       } catch (err) {
         logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
         return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
@@ -1848,8 +1854,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
       // commit-side refusal (tools.js) rather than a second copy.
       if ((impact.card_cancel_refusals || []).length) {
+        if (withEffects) return { failed: true, modelResult: cancelWithEffectsRefusal(impact) };
         return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' } };
       }
+      if (withEffects) params.notify_customer = params.notify_customer !== false;
       params._frozen_cancellation_impact = impact;
       preview = { ...preview, cancellation: impact };
     }
@@ -4535,8 +4543,10 @@ async function commitPendingAction(req, { id, contractHash }) {
     // A gate-on row that DOES carry the pin falls through to the normal
     // claim/dispatch path below; tools.js cancelAppointment re-verifies the
     // pin against a fresh impact read and refuses on drift.
+    // A card proposed with effects (GATE_IB_CANCEL_WITH_EFFECTS) also needs that gate still on.
     if (action.tool_name === 'cancel_appointment'
-      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
+      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact
+        || (action.params._frozen_cancellation_impact.with_effects === true && !ibCancelWithEffectsLive()))) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_with_effects_unsupported' };
       await PendingActions.recordResult(action.id, result);
       return reply(409, result);

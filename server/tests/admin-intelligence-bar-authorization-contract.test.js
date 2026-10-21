@@ -82,6 +82,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
 }));
 jest.mock('../services/appointment-cancel-impact', () => ({
   computeCancelAppointmentImpact: (...args) => mockComputeCancelImpact(...args),
+  cancelWithEffectsRefusal: (...args) => jest.requireActual('../services/appointment-cancel-impact').cancelWithEffectsRefusal(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -490,6 +491,167 @@ describe('W0B cancel_appointment card-confirm (GATE_IB_CANCEL_APPOINTMENT)', () 
       const body = await res.json();
       expect(res.status).toBe(409);
       expect(body.error).toMatch(/can't cancel this visit from here yet/);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * GATE_IB_CANCEL_WITH_EFFECTS (owner decision 2026-10-12): with both gates live the proposal computes the impact
+ * WITH effects, cards an invoice / credit / linked visit with the customer text and the "cancel without a text"
+ * choice, and refuses a fee due, a refund or charge case, and the make-up / grouped / follow-up visits with their own
+ * codes. Gate off, the refusal above stands. (The commit is tools.js cancelWithEffects; its own suite is
+ * intelligence-bar-cancel-with-effects.test.js.)
+ */
+describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', () => {
+  const APPOINTMENT_ID = 'appt-synthetic-1';
+  const EFFECTS_IMPACT = {
+    appointment: { id: APPOINTMENT_ID, status: 'confirmed', scheduled_date: '2026-10-05', service_type: 'pest_control', customer_name: 'Synthia Tester' },
+    fee: { applies: false, amount: null, unresolved: false, rail: 'none', blocked_by_invoice: false },
+    invoices: [{ id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 20, deposit_credit: 0, payment_intent: true }],
+    inspection_credit_reversal: [{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }],
+    card_cancel_refusals: [],
+    customer_notice: 'none',
+    technician_notice: 'none',
+    with_effects: true,
+    notify_customer: true,
+    customer_text: { would_send: true, body: 'Hi Synthia, your visit on Monday is cancelled.', reason: null },
+    linked_invoices: [
+      { id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: 120 },
+      { id: 'inv-0', invoice_number: 'INV-0999', status: 'void', total: 10 },
+    ],
+    linked_visits: [{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }],
+  };
+  const labels = (stored) => stored.contract.effects.map((e) => e.label);
+  const propose = async (input) => {
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: APPOINTMENT_ID, ...input } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    let toolResult;
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      const second = mockMessagesCreate.mock.calls[1]?.[0].messages;
+      toolResult = second ? JSON.parse(second[second.length - 1].content[0].content) : null;
+    });
+    return toolResult;
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_IB_CANCEL_APPOINTMENT = 'true';
+    process.env.GATE_IB_CANCEL_WITH_EFFECTS = 'true';
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'cancel_appointment', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+  afterEach(() => { delete process.env.GATE_IB_CANCEL_APPOINTMENT; delete process.env.GATE_IB_CANCEL_WITH_EFFECTS; });
+
+  test('an invoice + credit + linked visit is carded: every effect and the customer text are on the card', async () => {
+    mockComputeCancelImpact.mockResolvedValue(EFFECTS_IMPACT);
+    await propose({ reason: 'rain' });
+    expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID, { actorId: 'admin-1', withEffects: true, notifyCustomer: true });
+    expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+    const stored = mockCreatePendingAction.mock.calls[0][0];
+    expect(stored.params.notify_customer).toBe(true);
+    expect(stored.params._frozen_cancellation_impact).toEqual(EFFECTS_IMPACT);
+    expect(stored.contract.pinned_cancellation).toEqual(EFFECTS_IMPACT);
+    const l = labels(stored);
+    expect(l).toContain('Runs the Dispatch cancel for this one visit only (not the series)');
+    expect(l.some((x) => /Void invoice INV-1001 \(sent, \$120\.00\); \$20\.00 account credit restored.*open card payment attempt is cancelled first \(no charge, no refund\)/.test(x))).toBe(true);
+    expect(l).toContain('Invoice INV-0999 (void) stays as it is — nothing to void');
+    expect(l.some((x) => /\$75\.00 inspection credit this booking earned is taken back/.test(x))).toBe(true);
+    expect(l).toContain('Also cancels the linked follow-up visit (pest_control) on 2026-11-02, with no text for it');
+    expect(l).toContain('The customer is texted this cancellation notice if they can receive texts: "Hi Synthia, your visit on Monday is cancelled."');
+    expect(l).toContain('To cancel without a text, ask for "cancel without a text" and a new card is shown');
+    // The old "pinned set only" promise is false for a replay and must not be on this card.
+    expect(l.some((x) => /Only the invoices listed above are voided/.test(x))).toBe(false);
+    expect(stored.contract.notifies_customer).toBe(true);
+    expect(stored.contract.irreversible).toBe(true);
+  });
+
+  test('"cancel without a text" -> notify_customer false: the card says no text, and the choice is pinned', async () => {
+    const silent = { ...EFFECTS_IMPACT, notify_customer: false, customer_text: { would_send: false, body: null, reason: 'cancelled_without_text' } };
+    mockComputeCancelImpact.mockResolvedValue(silent);
+    await propose({ reason: 'rain', notify_customer: false });
+    expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID, { actorId: 'admin-1', withEffects: true, notifyCustomer: false });
+    const stored = mockCreatePendingAction.mock.calls[0][0];
+    expect(stored.params.notify_customer).toBe(false);
+    const l = labels(stored);
+    expect(l).toContain('No cancellation text goes to the customer (cancelled without a text, as asked)');
+    expect(l.some((x) => /customer is texted/.test(x))).toBe(false);
+    expect(stored.contract.notifies_customer).toBe(false);
+  });
+
+  test('a fee due is refused with cancel_fee_due_unsupported, nothing minted', async () => {
+    mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, card_cancel_refusals: ['card_fee_agreement'], fee: { applies: true, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: false } });
+    const result = await propose({ reason: 'x' });
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(result.code).toBe('cancel_fee_due_unsupported');
+    expect(result.error).toMatch(/can't cancel a visit with a fee due yet; the Dispatch screen handles the fee/);
+  });
+
+  test('a paid invoice (money held) is refused by_owner_rule: refunds and card charges stay closed', async () => {
+    mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, card_cancel_refusals: ['invoice_holds_money'] });
+    const result = await propose({ reason: 'x' });
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(result.code).toBe('by_owner_rule');
+  });
+
+  test('a series cancel is never offered: the card is always this visit only', async () => {
+    mockComputeCancelImpact.mockResolvedValue(EFFECTS_IMPACT);
+    await propose({ reason: 'x', scope: 'series' });
+    const stored = mockCreatePendingAction.mock.calls[0][0];
+    expect(labels(stored)).toContain('Runs the Dispatch cancel for this one visit only (not the series)');
+    const { cancelWithEffectsRefusal } = jest.requireActual('../services/appointment-cancel-impact');
+    expect(cancelWithEffectsRefusal(EFFECTS_IMPACT)).toBeNull();
+  });
+
+  test('only GATE_IB_CANCEL_WITH_EFFECTS without GATE_IB_CANCEL_APPOINTMENT is still the old refusal', async () => {
+    delete process.env.GATE_IB_CANCEL_APPOINTMENT;
+    const result = await propose({ reason: 'x' });
+    expect(mockComputeCancelImpact).not.toHaveBeenCalled();
+    expect(result.code).toBe('cancel_with_effects_unsupported');
+  });
+
+  test('GATE_IB_CANCEL_WITH_EFFECTS off: an invoice refuses exactly as before', async () => {
+    delete process.env.GATE_IB_CANCEL_WITH_EFFECTS;
+    mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, with_effects: undefined, card_cancel_refusals: ['invoice_linked'] });
+    const result = await propose({ reason: 'x' });
+    expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID, { actorId: 'admin-1' });
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(result.error).toBe(CARD_CANCEL_REFUSED_MESSAGE_MOCK);
+  });
+
+  test('/confirm-action dispatches a with-effects pin while the gate is on', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'cancel_appointment', params: { appointment_id: APPOINTMENT_ID, notify_customer: true, _frozen_cancellation_impact: EFFECTS_IMPACT } },
+    });
+    mockExecuteTool.mockResolvedValue({ success: true, appointment_id: APPOINTMENT_ID });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
+      expect(mockExecuteTool.mock.calls[0][1].notify_customer).toBe(true);
+    });
+  });
+
+  test('/confirm-action refuses a with-effects pin once the effects gate is off, nothing executed', async () => {
+    delete process.env.GATE_IB_CANCEL_WITH_EFFECTS;
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'cancel_appointment', params: { appointment_id: APPOINTMENT_ID, notify_customer: true, _frozen_cancellation_impact: EFFECTS_IMPACT } },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('cancel_with_effects_unsupported');
       expect(mockExecuteTool).not.toHaveBeenCalled();
     });
   });

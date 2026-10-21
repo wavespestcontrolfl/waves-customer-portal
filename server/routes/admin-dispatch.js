@@ -2558,7 +2558,8 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put('/:serviceId/status', async (req, res, next) => {
+router.put('/:serviceId/status', serviceStatusHandler);
+async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
     // Same closed target allow-list as admin-schedule's PUT /:id/status
@@ -3061,6 +3062,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
+        // Set only by cancelServiceFromBar (never an HTTP field): the Intelligence Bar cancel card re-checks the
+        // effects it showed while this row lock is held, so nothing it did not show can be cancelled or voided.
+        if (typeof req.ibBeforeCancelCommit === 'function') await req.ibBeforeCancelCommit(trx);
         if (toStatus === 'no_show' && lockedRow) noShowOccurrence = { id: svc.id, ...lockedRow };
         // The same guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
@@ -3472,7 +3476,31 @@ router.put('/:serviceId/status', async (req, res, next) => {
         : {}),
     });
   } catch (err) { next(err); }
-});
+}
+
+// The Intelligence Bar's cancel of a visit with an invoice, credit or linked visit (GATE_IB_CANCEL_WITH_EFFECTS, owner
+// decision 2026-10-12) runs the SAME handler as PUT /:serviceId/status, without an HTTP request (the sendInvoiceFromBar
+// pattern in admin-invoices.js): the handler gets the only request fields it reads and a capture response, and the
+// promise resolves the reply it would send, { status, json }. The body is the carded one and nothing else: status
+// 'cancelled', scope 'this_only', the operator's reason and notifyCustomer as the card showed it. No waiveCardHoldFee
+// and no coordinates. `beforeCommit(trx)` runs inside the handler's cancel transaction right after it locks the visit.
+function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      params: { serviceId },
+      body: { status: 'cancelled', scope: 'this_only', notifyCustomer: notifyCustomer !== false, ...(notes ? { notes } : {}) },
+      techRole: 'admin',
+      technicianId: actor?.technicianId || null,
+      ibBeforeCancelCommit: beforeCommit,
+    };
+    Promise.resolve(serviceStatusHandler(req, res, reject)).catch(reject);
+  });
+}
 
 // GET /api/admin/dispatch/:serviceId/complete-preview
 //
@@ -7384,6 +7412,7 @@ module.exports = router;
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.mergeCardHoldPreviews = mergeCardHoldPreviews;
+module.exports.cancelServiceFromBar = cancelServiceFromBar;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;

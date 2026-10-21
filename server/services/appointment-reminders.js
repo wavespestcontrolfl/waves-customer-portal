@@ -4489,6 +4489,32 @@ const AppointmentReminders = {
   },
 
   /**
+   * Read-only preview of the text handleCancellation (below) sends when its
+   * sendNotification is on: the same reminder row, customer, day/date and
+   * 'appointment_cancelled' template, rendered with no claim, no send and no
+   * audit row (the Intelligence Bar cancel card shows it before Confirm).
+   * `would_send` says a text is composed; whether it reaches the customer still
+   * depends on their contact settings at send time (opt-out, landline, hours).
+   * A weighted template variant can change the exact wording, so the preview
+   * renders the base row. Returns { would_send, body, reason }.
+   */
+  async previewCancellationText(scheduledServiceId) {
+    const record = await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).first();
+    if (!record) return { would_send: false, body: null, reason: 'no_reminder_record' };
+    const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+    if (!customer) return { would_send: false, body: null, reason: 'customer_not_found' };
+    const apptTime = new Date(record.appointment_time);
+    const body = await smsTemplatesRouter.getTemplate('appointment_cancelled', {
+      first_name: customer.first_name,
+      service_type: smsServiceLabelStored(record.service_type),
+      day: formatDay(apptTime),
+      date: formatDate(apptTime),
+    }, {}, { audit: false, noVariants: true });
+    if (!body) return { would_send: false, body: null, reason: 'template_unavailable' };
+    return { would_send: true, body, reason: null };
+  },
+
+  /**
    * Handle appointment cancellation — mark cancelled and notify customer.
    */
   async handleCancellation(scheduledServiceId, options = {}) {

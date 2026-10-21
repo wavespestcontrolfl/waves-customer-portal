@@ -369,12 +369,13 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason (the bar can\'t cancel a visit with an invoice, credit or linked visit yet) and do not send the operator to another screen; never say a visit was cancelled until the card is confirmed.',
+    description: 'Cancel ONE appointment (this visit only, never the series) through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. A BARE visit qualifies: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit. When the cancel-with-effects switch is on, a visit with an unpaid invoice, an inspection credit or a linked follow-up visit also qualifies: the card lists each invoice voided or kept, each credit restored and each linked visit cancelled, plus the cancellation text the customer would get. The customer is texted by default; set notify_customer false ONLY when the operator asks to cancel without a text. A visit with a fee due, a paid invoice, a prepayment or a saved card stays out of reach (refunds and card charges are closed to the bar). When the tool refuses, relay the reason and do not send the operator to another screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
         appointment_id: { type: 'string' },
         reason: { type: 'string' },
+        notify_customer: { type: 'boolean', description: 'Text the customer the cancellation notice. Default true. Set false ONLY when the operator asks to cancel without a text.' },
       },
       required: ['appointment_id'],
     },
@@ -4350,6 +4351,84 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // group/follow-up side effect for. Anything else cancels from Dispatch.
 const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so the bar can\'t cancel this visit from here yet (a visit with an invoice, credit or linked visit). Nothing was changed.';
 
+// Confirm of a cancel card proposed with effects (GATE_IB_CANCEL_WITH_EFFECTS, owner decision 2026-10-12): the visit
+// is cancelled by the Dispatch screen's own handler (admin-dispatch.js cancelServiceFromBar), not by a copy of it, so
+// the invoice void, credit restore, linked-visit cascade, customer text and tracker follow the Dispatch cancel exactly.
+// The carded body is all it sends: this visit only (scope this_only), the operator's reason, and notifyCustomer as the
+// card showed it. The effects are recomputed twice and must match the card: here before the handler runs, and again
+// inside the handler's own cancel transaction right after it locks the visit (nothing new can be minted against a
+// locked visit), so a visit that changed since the card returns preview_changed and nothing is cancelled.
+async function cancelWithEffects(input, actionContext, appt) {
+  const { appointment_id, reason } = input;
+  const frozen = input._frozen_cancellation_impact;
+  const { ibCancelWithEffectsLive } = require('../../config/feature-gates');
+  if (!ibCancelWithEffectsLive()) {
+    return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
+  }
+  if (actionContext.isAdmin !== true) {
+    return { error: 'Admin access required for this action', code: 'permission_denied' };
+  }
+  const { computeCancelAppointmentImpact, cancelImpactsMatch, cancelWithEffectsRefusal } = require('../appointment-cancel-impact');
+  const changed = { error: 'The cancellation effects (invoices, credit, linked visits, customer text or fee) changed since this card was shown — nothing was changed. Ask again for a fresh preview.', preview_changed: true };
+  const recompute = () => computeCancelAppointmentImpact(appointment_id, {
+    actorId: actionContext.technicianId || null, withEffects: true, notifyCustomer: frozen.notify_customer,
+  });
+  let fresh;
+  try {
+    fresh = await recompute();
+  } catch (err) {
+    logger.warn(`[intelligence-bar] cancel impact unavailable for ${appointment_id}: ${err.message}`);
+    return { error: 'The cancellation effects could not be verified right now — nothing was changed. Try again in a moment.' };
+  }
+  if (!cancelImpactsMatch(fresh, frozen)) return changed;
+  const refusal = cancelWithEffectsRefusal(fresh);
+  if (refusal) return refusal;
+
+  const { cancelServiceFromBar } = require('../../routes/admin-dispatch');
+  let replay;
+  try {
+    replay = await cancelServiceFromBar({
+      serviceId: appointment_id,
+      notifyCustomer: frozen.notify_customer,
+      notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+      actor: { technicianId: actionContext.technicianId || null },
+      beforeCommit: async () => {
+        const inLock = await recompute();
+        if (!cancelImpactsMatch(inLock, frozen) || cancelWithEffectsRefusal(inLock)) {
+          throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed' });
+        }
+      },
+    });
+  } catch (err) {
+    logger.error(`[intelligence-bar] Dispatch cancel replay failed for ${appointment_id}: ${err.message}`);
+    return { error: 'The Dispatch cancel failed before finishing — check the visit before trying again.' };
+  }
+  return cancelReplayResult(replay, { appointment_id, appt, frozen, changed });
+}
+
+// The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
+// the customer and says honestly whether the cancellation text went out.
+async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed }) {
+  if (status >= 400 || json.success !== true) {
+    if (json.code === 'preview_changed') return changed;
+    return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 ? { preview_changed: true } : {}) };
+  }
+  const customer = await db('customers').where('id', appt.customer_id).first();
+  logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);
+  const textSent = frozen.notify_customer === true && json.notificationSent === true;
+  const textFailed = frozen.notify_customer === true && json.notificationSent === false;
+  return {
+    success: true,
+    appointment_id,
+    customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
+    date: appt.scheduled_date,
+    service_type: appt.service_type,
+    ran_dispatch_cancel: true,
+    customer_text_sent: textSent,
+    ...(textFailed ? { warning: `The visit is cancelled, but the customer text did not go out: ${json.notificationError || 'no reason given'}.` } : {}),
+  };
+}
+
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
 
@@ -4452,6 +4531,11 @@ async function cancelAppointment(input, actionContext = {}) {
   }
   if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
     return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
+  }
+
+  // A card proposed WITH effects (GATE_IB_CANCEL_WITH_EFFECTS) commits by replaying the Dispatch cancel handler.
+  if (input._frozen_cancellation_impact?.with_effects) {
+    return cancelWithEffects(input, actionContext, appt);
   }
 
   // Exact-effect confirm (W0B / PR A of the cancel-pinned-effects lane): a

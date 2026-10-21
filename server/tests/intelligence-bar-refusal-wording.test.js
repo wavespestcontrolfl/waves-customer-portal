@@ -178,7 +178,7 @@ describe('refusal wording: rewritten refusals carry a stable snake_case code', (
   test.each([
     ['schedule-tools.js', "code: 'package_visit_two_linked'", 3],
     ['tools.js', "code: 'package_visit_two_linked'", 1],
-    ['tools.js', "code: 'cancel_with_effects_unsupported'", 2],
+    ['tools.js', "code: 'cancel_with_effects_unsupported'", 3],
     ['tools.js', "code: 'collective_move_unsupported'", 1],
     ['routes/admin-intelligence-bar.js', "code: 'collective_move_unsupported'", 1],
     ['tools.js', 'booking.code', 4],

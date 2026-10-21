@@ -4596,6 +4596,10 @@ const gates = {
   // reader is ibCancelAppointmentLive() below, same discountStackingLive()
   // convention, so a flip needs no redeploy.
   ibCancelAppointment: process.env.GATE_IB_CANCEL_APPOINTMENT === 'true',
+  // Intelligence Bar cancel of a visit WITH an invoice, credit or linked visit (owner decision 2026-10-12): Confirm
+  // replays the Dispatch cancel handler. Ships DARK; also needs GATE_IB_CANCEL_APPOINTMENT. For logGateStatus only;
+  // the canonical call-time reader is ibCancelWithEffectsLive() below.
+  ibCancelWithEffects: process.env.GATE_IB_CANCEL_WITH_EFFECTS === 'true',
   // Admin customer Activity timeline (read-only). For logGateStatus only; the
   // route reads customerActivityTimelineLive() at call time.
   customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
@@ -5669,6 +5673,15 @@ function ibCancelAppointmentLive() {
   return process.env.GATE_IB_CANCEL_APPOINTMENT === 'true';
 }
 
+// GATE_IB_CANCEL_WITH_EFFECTS read at CALL time — strict `=== 'true'`, dark by default, and live only while
+// GATE_IB_CANCEL_APPOINTMENT is also on. On: the bar cancels a visit that has an invoice, an inspection credit or a
+// linked follow-up visit by replaying the Dispatch cancel handler (admin-dispatch.js cancelServiceFromBar). Off: the
+// bar refuses those visits exactly as before.
+function ibCancelWithEffectsLive() {
+  return ibCancelAppointmentLive()
+    && process.env.GATE_IB_CANCEL_WITH_EFFECTS === 'true';
+}
+
 // GATE_CUSTOMER_ACTIVITY_TIMELINE read at CALL time — strict `=== 'true'`, dark
 // by default. The canonical reader for GET /api/admin/customers/:id/activity
 // (routes/admin-customers.js); the admin panel hides itself on the route's
@@ -6496,7 +6509,7 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.pestRidesLawnAtAcceptLive = pestRidesLawnAtAcceptLive;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;

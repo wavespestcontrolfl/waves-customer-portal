@@ -78,6 +78,10 @@ jest.mock('../services/inspection-credit', () => ({
   previewInspectionCreditReversalForBooking: (...a) => mockCreditPreview(...a),
   anyInspectionCreditOfferForVisit: (...a) => mockAnyCreditOffer(...a),
 }));
+const mockTextPreview = jest.fn();
+jest.mock('../services/appointment-reminders', () => ({
+  previewCancellationText: (...a) => mockTextPreview(...a),
+}));
 const mockNoticeVerdict = jest.fn();
 jest.mock('../services/job-status', () => ({
   previewCancellationNoticeVerdict: (...a) => mockNoticeVerdict(...a),
@@ -86,6 +90,7 @@ jest.mock('../services/job-status', () => ({
 const {
   computeCancelAppointmentImpact,
   cancelImpactsMatch,
+  cancelWithEffectsRefusal,
 } = require('../services/appointment-cancel-impact');
 
 beforeEach(() => {
@@ -103,6 +108,7 @@ beforeEach(() => {
   mockUnresolvedAfterVoid.mockResolvedValue(false);
   mockCreditPreview.mockResolvedValue(null);
   mockNoticeVerdict.mockResolvedValue('none');
+  mockTextPreview.mockResolvedValue({ would_send: true, body: 'Hi Synthia, your visit is cancelled.', reason: null });
   // Bare by default: no invoice and no inspection-credit offer at all
   // (owner ruling 2026-09-28, "bare visits only"). Both are query-builder
   // shaped (a real `.first('id')` call), matching how
@@ -738,6 +744,146 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels bare vi
     mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-1' }) });
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual(['inspection_credit']);
+  });
+});
+
+// GATE_IB_CANCEL_WITH_EFFECTS (owner decision 2026-10-12): with `withEffects` the invoice, credit and linked-visit
+// refusals are no longer blockers; the card lists them, and the customer text is previewed. A fee due, money the bar
+// never refunds or charges, and the make-up / grouped / follow-up cases keep refusing.
+describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+  const invoiceBuilder = (rows) => ({
+    first: async () => (rows.length ? { id: rows[0].id } : null),
+    orderBy: () => ({ select: async () => rows }),
+  });
+  const SENT_INVOICE = { id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: '120.00' };
+  beforeEach(() => { mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([])); });
+  const run = (opts = {}) => computeCancelAppointmentImpact('svc-synthetic-1', { withEffects: true, ...opts });
+
+  test('gate off (no withEffects): an invoice still refuses and the impact has no effects block', async () => {
+    noCard();
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['invoice_linked']);
+    expect(impact.with_effects).toBeUndefined();
+    expect(impact.linked_invoices).toBeUndefined();
+    expect(mockTextPreview).not.toHaveBeenCalled();
+  });
+
+  test('an unpaid invoice with credit applied is carded, not refused, and listed with the text preview', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([{ id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 20, deposit_credit: 0, payment_intent: false }]);
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual([]);
+    expect(impact.with_effects).toBe(true);
+    expect(impact.notify_customer).toBe(true);
+    expect(impact.invoices).toHaveLength(1);
+    expect(impact.linked_invoices).toEqual([{ id: 'inv-1', invoice_number: 'INV-1001', status: 'sent', total: 120 }]);
+    expect(impact.customer_text).toEqual({ would_send: true, body: 'Hi Synthia, your visit is cancelled.', reason: null });
+    // The Dispatch handler owns the text, so the shared notice hook is not a second text.
+    expect(impact.customer_notice).toBe('none');
+    expect(cancelWithEffectsRefusal(impact)).toBeNull();
+  });
+
+  test('an invoice with a card payment attempt or a deposit credit is carded too', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([
+      { id: 'inv-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 25, payment_intent: false },
+      { id: 'inv-2', status: 'viewed', total: 20, credit_applied: 0, deposit_credit: 0, payment_intent: true },
+    ]);
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
+    expect((await run()).card_cancel_refusals).toEqual([]);
+  });
+
+  test('an invoice already void or refunded is listed as kept and does not block', async () => {
+    noCard();
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([{ id: 'inv-9', invoice_number: 'INV-9', status: 'void', total: '10.00' }]));
+    const impact = await run();
+    expect(impact.invoices).toEqual([]);
+    expect(impact.linked_invoices).toHaveLength(1);
+    expect(impact.card_cancel_refusals).toEqual([]);
+  });
+
+  test('a redeemed inspection credit is carded: the reversal rides inspection_credit_reversal', async () => {
+    noCard();
+    mockCreditPreview.mockResolvedValue([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
+    mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-1' }) });
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual([]);
+    expect(impact.inspection_credit_reversal).toEqual([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
+  });
+
+  test('a linked follow-up visit is carded with its date and service', async () => {
+    noCard();
+    mockLinkedFollowUps = [{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([]));
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual([]);
+    expect(impact.linked_visits).toEqual([{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }]);
+  });
+
+  test('a linked follow-up that has an invoice of its own is refused (linked_followup_billed)', async () => {
+    noCard();
+    mockLinkedFollowUps = [{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+    mockAnyInvoiceLinked.mockImplementation((_conn, id) => invoiceBuilder(id === 'svc-visit-2' ? [{ id: 'inv-child' }] : []));
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual(['linked_followup_billed']);
+    expect(cancelWithEffectsRefusal(impact).code).toBe('cancel_with_effects_unsupported');
+  });
+
+  test('a fee due is refused with cancel_fee_due_unsupported and the fee-due wording', async () => {
+    mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: true, feeAmount: 49, rule: { code: 'inside_window' } });
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement']);
+    const refusal = cancelWithEffectsRefusal(impact);
+    expect(refusal.code).toBe('cancel_fee_due_unsupported');
+    expect(refusal.error).toMatch(/can't cancel a visit with a fee due yet; the Dispatch screen handles the fee/);
+  });
+
+  test.each([
+    ['a saved card with no fee due', () => { mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } }); }],
+    ['prepaid coverage', () => { noCard(); mockCoveredReason.mockReturnValueOnce('already prepaid'); }],
+    ['a paid invoice (money held after the void)', () => { noCard(); mockUnresolvedAfterVoid.mockResolvedValue(true); mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([{ id: 'inv-p', status: 'paid', total: '80.00' }])); }],
+  ])('%s is never refunded or charged by the bar: refused by_owner_rule', async (_label, arrange) => {
+    arrange();
+    const impact = await run();
+    expect(impact.card_cancel_refusals.length).toBeGreaterThan(0);
+    const refusal = cancelWithEffectsRefusal(impact);
+    expect(refusal.code).toBe('by_owner_rule');
+    expect(refusal.error).toMatch(/refunds and card charges stay closed to the bar by the owner's rule/);
+  });
+
+  test.each([
+    ['a plan make-up visit', () => { mockMayReseed.mockReturnValueOnce(true); }],
+    ['a grouped visit', () => { mockAppointmentRow = { ...mockAppointmentRow, visit_id: 'visit-grp-1' }; }],
+    ['a follow-up child', () => { mockAppointmentRow = { ...mockAppointmentRow, followup_source_service_id: 'svc-source-1' }; }],
+  ])('%s still refuses with cancel_with_effects_unsupported', async (_label, arrange) => {
+    noCard();
+    arrange();
+    const impact = await run();
+    expect(impact.card_cancel_refusals.length).toBe(1);
+    expect(cancelWithEffectsRefusal(impact).code).toBe('cancel_with_effects_unsupported');
+  });
+
+  test('notifyCustomer false: no text is composed or previewed, and the choice is pinned in the impact', async () => {
+    noCard();
+    const impact = await run({ notifyCustomer: false });
+    expect(mockTextPreview).not.toHaveBeenCalled();
+    expect(impact.notify_customer).toBe(false);
+    expect(impact.customer_text).toEqual({ would_send: false, body: null, reason: 'cancelled_without_text' });
+    expect(cancelImpactsMatch(impact, await run({ notifyCustomer: true }))).toBe(false);
+  });
+
+  test('a changed invoice between card and confirm is drift', async () => {
+    noCard();
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
+    const before = await run();
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([{ ...SENT_INVOICE, total: '130.00' }]));
+    expect(cancelImpactsMatch(before, await run())).toBe(false);
   });
 });
 
