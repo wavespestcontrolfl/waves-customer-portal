@@ -13530,6 +13530,10 @@ const InvoiceService = {
             continue;
           }
 
+          // The combined-payment lock protects only the PaymentIntent cancel and the void: release it before the
+          // post-commit cleanup below (stopping follow-ups opens its own transaction on the same customer lock).
+          await releaseCombinedLock(combinedLock);
+          combinedLock = null;
           voided.push(result.invoice.id);
           logger.info(
             `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,

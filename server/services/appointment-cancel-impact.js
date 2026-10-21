@@ -442,10 +442,11 @@ const EFFECTS_ALLOWED_REFUSALS = new Set([
 // follow-through failed), any estimate-level deposit or annual prepay, and money on a linked visit.
 const EFFECTS_MONEY_BLOCKERS = new Set([
   'estimate_deposit', 'inspection_credit_redeemed', 'estimate_money', 'linked_followup_money', 'combined_payment',
+  'invoice_downstream_effects',
 ]);
 
 const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
-const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
+const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
 const CANCEL_COMBINED_PAYMENT_MESSAGE = "A combined card payment on this visit's invoice also covers other visits, and combined payments stay with the office by the owner's rule, so the bar can't cancel it; cancel it from Dispatch. Nothing was changed.";
 const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit with its own invoice, so the bar can't cancel this visit from here yet. Nothing was changed.";
 
@@ -476,6 +477,27 @@ async function estimateMoneyReason(conn, row) {
   return null;
 }
 
+// Voiding an invoice has downstream billing effects a card listing only "invoice voided" cannot disclose: a rodent
+// setup-fee line or claim is restored to the series (or re-billed on a replacement invoice), an annual-prepay term's
+// invoice resyncs the term, and a membership-dues invoice releases its month's coverage. Any such invoice refuses the
+// card; only a plain visit invoice is carded.
+async function invoiceDownstreamReason(conn, invoiceRows) {
+  const open = (invoiceRows || []).filter((inv) => !['void', 'refunded', 'canceled', 'cancelled'].includes(String(inv.status)));
+  if (!open.length) return null;
+  const InvoiceService = require('./invoice');
+  const setupLine = /^Bait Station Setup — one-time setup fee$/;
+  for (const inv of open) {
+    let lines = inv.line_items;
+    if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    if (InvoiceService.membershipDuesStampMonth(lines)) return 'membership_dues';
+    if ((Array.isArray(lines) ? lines : []).some((li) => setupLine.test(String(li?.description || '').trim()))) return 'setup_fee_line';
+  }
+  const ids = open.map((inv) => inv.id);
+  if (await conn('setup_fee_claims').whereIn('invoice_id', ids).first('id')) return 'setup_fee_claim';
+  if (await conn('annual_prepay_terms').whereIn('prepay_invoice_id', ids).first('id')) return 'annual_prepay_invoice';
+  return null;
+}
+
 // The SAME money-rail checks the parent gets, on every linked visit the cancel takes along (the Dispatch cascade
 // cancels a child without running a child money follow-through): a prepayment or coverage, an estimate deposit or
 // annual prepay, a card request or hold, an inspection-credit offer, or an invoice of any kind. Any one refuses the card.
@@ -499,9 +521,10 @@ async function linkedChildMoneyReason(conn, followUps) {
 async function loadLinkedEffects(scheduledServiceId, actorId = null, conn = db) {
   const InvoiceService = require('./invoice');
   const [invoiceRows, followUps] = await Promise.all([
-    InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('id', 'invoice_number', 'status', 'total'),
+    InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('id', 'invoice_number', 'status', 'total', 'line_items'),
     linkedFollowUpRows(db, scheduledServiceId),
   ]);
+  const invoiceDownstream = await invoiceDownstreamReason(conn, invoiceRows || []);
   const followUpMoney = await linkedChildMoneyReason(conn, followUps);
   // Cancelling a child also runs its own tech cancel notice (transitionJobStatus -> notifyVisitCancelled): the
   // child's assigned technician is pinned with the same rule technician_notice uses for the parent.
@@ -528,6 +551,7 @@ async function loadLinkedEffects(scheduledServiceId, actorId = null, conn = db) 
       }))
       .sort((a, b) => String(a.id).localeCompare(String(b.id))),
     followUpMoney,
+    invoiceDownstream,
   };
 }
 
@@ -542,6 +566,7 @@ async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, a
   if (creditReversal) blockers.push('inspection_credit_redeemed');
   if (await estimateMoneyReason(conn, row)) blockers.push('estimate_money');
   if (linked.followUpMoney) blockers.push('linked_followup_money');
+  if (linked.invoiceDownstream) blockers.push('invoice_downstream_effects');
   if (invoices.some((inv) => inv.combined_payment)) blockers.push('combined_payment');
   return {
     blocking: [...new Set(blockers)].sort(),

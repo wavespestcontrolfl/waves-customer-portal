@@ -677,6 +677,9 @@ async function transitionJobStatus({
           });
         }
       } catch (claimErr) {
+        // The card-approved text needs its pending_approved marker: without it a crash would leave an unmarked row the
+        // late-claim sweep could text with the live template. Abort the cancellation instead of committing without it.
+        if (cancelNoticeApproved) throw claimErr;
         // The transition still commits; the post-commit worker attempts a
         // LATE claim so the obligation isn't lost (codex r20).
         cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;

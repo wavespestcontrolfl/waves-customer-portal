@@ -17,13 +17,13 @@ let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] 
 let mockOpenOverdueAlerts = 0;
 let mockLinkedFollowUps = [];
 let mockTechnicians = [];
-let mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null };
+let mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null, setup_fee_claims: null };
 jest.mock('../models/db', () => {
   const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
   const railQb = (table) => ({ where: (w) => ({ select: async () => mockCardRailRows[table].filter((r) => !r.scheduled_service_id || r.scheduled_service_id === w?.scheduled_service_id) }) });
   const alertsQb = { whereIn: () => alertsQb, where: () => alertsQb, whereNull: () => alertsQb, count: async () => [{ count: String(mockOpenOverdueAlerts) }] };
   const techniciansQb = { whereIn: () => techniciansQb, select: async () => mockTechnicians };
-  const estimateQb = (table) => ({ where: () => ({ first: async () => mockEstimateRows[table] }) });
+  const estimateQb = (table) => ({ where: () => ({ first: async () => mockEstimateRows[table] }), whereIn: () => ({ first: async () => mockEstimateRows[table] }) });
   const db = jest.fn((table) => (table in mockEstimateRows ? estimateQb(table) : table === 'technicians' ? techniciansQb : table === 'customers' ? customersQb : table === 'dispatch_alerts' ? alertsQb : (table in mockCardRailRows) ? railQb(table) : {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
@@ -74,6 +74,7 @@ const mockInvoicePreview = jest.fn();
 const mockUnresolvedAfterVoid = jest.fn();
 const mockAnyInvoiceLinked = jest.fn();
 jest.mock('../services/invoice', () => ({
+  membershipDuesStampMonth: (lines) => (Array.isArray(lines) ? lines.find((li) => li && li.membership_dues_month)?.membership_dues_month || null : null),
   previewInvoiceVoidForCancelledService: (...a) => mockInvoicePreview(...a),
   previewUnresolvedInvoiceAfterCancelVoid: (...a) => mockUnresolvedAfterVoid(...a),
   anyInvoiceLinkedToVisit: (...a) => mockAnyInvoiceLinked(...a),
@@ -108,7 +109,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLinkedFollowUps = [];
   mockTechnicians = [];
-  mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null };
+  mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null, setup_fee_claims: null };
   mockAppointmentRow = {
     id: 'svc-synthetic-1',
     status: 'confirmed',
@@ -846,6 +847,32 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect(refusal.error).toMatch(/cancel it from Dispatch/);
   });
 
+  describe('invoices with downstream billing effects are refused (invoice_downstream_effects, by_owner_rule)', () => {
+    const owed = (extra = {}) => invoiceBuilder([{ ...SENT_INVOICE, ...extra }]);
+    test.each([
+      ['a rodent setup-fee line', () => mockAnyInvoiceLinked.mockReturnValue(owed({ line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 150 }] }))],
+      ['a membership-dues stamp', () => mockAnyInvoiceLinked.mockReturnValue(owed({ line_items: [{ description: 'Dues', membership_dues_month: '2026-11' }] }))],
+      ['a setup-fee claim on the invoice', () => { mockAnyInvoiceLinked.mockReturnValue(owed()); mockEstimateRows = { ...mockEstimateRows, setup_fee_claims: { id: 'claim-1' } }; }],
+      ['an annual-prepay term backed by the invoice', () => { mockAnyInvoiceLinked.mockReturnValue(owed()); mockEstimateRows = { ...mockEstimateRows, annual_prepay_terms: { id: 'term-1' } }; }],
+    ])('%s', async (_label, arrange) => {
+      noCard();
+      arrange();
+      const impact = await run();
+      expect(impact.card_cancel_refusals).toEqual(['invoice_downstream_effects']);
+      const refusal = cancelWithEffectsRefusal(impact);
+      expect(refusal.code).toBe('by_owner_rule');
+      expect(refusal.error).toMatch(/setup-fee, annual-prepay or membership-dues effects/);
+    });
+
+    test('a plain visit invoice, and an already-void one with a setup line, are carded', async () => {
+      noCard();
+      mockAnyInvoiceLinked.mockReturnValue(owed());
+      expect((await run()).card_cancel_refusals).toEqual([]);
+      mockAnyInvoiceLinked.mockReturnValue(owed({ status: 'void', line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 150 }] }));
+      expect((await run()).card_cancel_refusals).toEqual([]);
+    });
+  });
+
   test('an invoice already void or refunded is listed as kept and does not block', async () => {
     noCard();
     mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([{ id: 'inv-9', invoice_number: 'INV-9', status: 'void', total: '10.00' }]));
@@ -880,7 +907,7 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     ])('%s refuses the card (estimate_money)', async (_label, rows) => {
       noCard();
       mockAppointmentRow = { ...mockAppointmentRow, source_estimate_id: 'est-1' };
-      mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null, ...rows };
+      mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null, setup_fee_claims: null, ...rows };
       const impact = await run();
       expect(impact.card_cancel_refusals).toEqual(['estimate_money']);
       expect(cancelWithEffectsRefusal(impact).code).toBe('by_owner_rule');

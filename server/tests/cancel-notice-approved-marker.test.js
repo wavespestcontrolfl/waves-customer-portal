@@ -17,7 +17,13 @@ describe('pending_approved is minted only for the approved send and read only by
   test('job-status mints it only for notifyCustomer "caller" with cancelNoticeApproved, and writes no outbox for it', () => {
     expect(jobStatus).toContain("(notifyCustomer === 'caller' ? (cancelNoticeApproved ? 'pending_approved' : 'pending_notify') : 'pending')");
     expect(jobStatus).toContain("if (notifyCustomer === 'caller' && !cancelNoticeApproved) {");
-    expect(jobStatus.match(/pending_approved/g).length).toBe(2);
+    // The state is minted in exactly one place (the claim's targetState); every other mention is a comment.
+    const codeLines = jobStatus.split('\n').filter((line) => !line.trim().startsWith('//') && line.includes("'pending_approved'"));
+    expect(codeLines).toHaveLength(1);
+  });
+
+  test('the approved marker is mandatory: a failed claim aborts the cancellation instead of committing without it', () => {
+    expect(jobStatus).toMatch(/\} catch \(claimErr\) \{\s*\n(?:\s*\/\/.*\n)*\s*if \(cancelNoticeApproved\) throw claimErr;/);
   });
 
   test('the Dispatch handler passes cancelNoticeApproved only for the bar\'s approved text', () => {

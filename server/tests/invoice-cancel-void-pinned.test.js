@@ -70,7 +70,8 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   syncTermForInvoicePayment: jest.fn(async () => {}),
   acquireTermiteGateAtEntry: jest.fn(async () => {}),
 }));
-jest.mock('../services/invoice-followups', () => ({ stopSequence: jest.fn(async () => {}) }));
+const mockStopSequence = jest.fn(async () => {});
+jest.mock('../services/invoice-followups', () => ({ stopSequence: (...a) => mockStopSequence(...a) }));
 jest.mock('../services/stripe', () => ({ retrievePaymentIntent: jest.fn(), cancelPaymentIntent: jest.fn() }));
 
 const InvoiceService = require('../services/invoice');
@@ -276,6 +277,26 @@ describe('combined payments', () => {
 // The pinned sweep serializes with combined setup: the sibling check, the Stripe cancel and the stamp clear all run
 // under the same per-customer pay.combined.customer advisory lock the combined session setup takes.
 describe('pinned sweep takes the combined-payment lock', () => {
+  test('the lock is released BEFORE the post-commit follow-up stop (which takes the same customer lock itself)', async () => {
+    const stripe = require('../services/stripe');
+    const db = require('../models/db');
+    mockInvoiceRows = [{ ...INV_A, customer_id: 'cust-1', stripe_payment_intent_id: 'pi_test' }];
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    const order = [];
+    mockStopSequence.mockImplementation(async () => { order.push('stop-followups'); });
+    const origTransaction = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation(async (cb) => {
+      const out = await origTransaction(cb);
+      if (!cb) out.commit = jest.fn(async () => { order.push('release-lock'); });
+      return out;
+    });
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    db.transaction.mockImplementation(origTransaction);
+    expect(order).toEqual(['release-lock', 'stop-followups']);
+    mockStopSequence.mockImplementation(async () => {});
+  });
+
   const stripe = require('../services/stripe');
   const db = require('../models/db');
   const lockCalls = () => db.raw.mock.calls.filter((c) => String(c[0]).includes('pg_advisory_xact_lock') && c[1]?.[0] === 'pay.combined.customer');
