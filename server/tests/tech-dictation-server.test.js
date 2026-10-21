@@ -339,11 +339,11 @@ describe('server dictation endpoint', () => {
       });
     });
 
-    test('gate on: a spoken amount becomes dollars and cents, with the change listed', async () => {
+    test('gate on: a spoken amount is suggested as dollars and cents; the heard text is never rewritten', async () => {
       process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
       await withServer(async (baseUrl) => {
         const body = await say(baseUrl, 'Charge sixty-one thirty-three a month');
-        expect(body.text).toBe('Charge $61.33 a month');
+        expect(body.text).toBe('Charge sixty-one thirty-three a month');
         expect(body.money.changes).toEqual([expect.objectContaining({ from: 'sixty-one thirty-three', to: '$61.33' })]);
         expect(body.money.ambiguous).toEqual([]);
       });

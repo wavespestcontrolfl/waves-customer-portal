@@ -27,8 +27,9 @@
  * GATE_DICTATION_CUSTOMER_NAMES adds customer names to the word list and their surnames to the
  * transcriber's keyword hints (services/dictation-word-list.js buildDictationHints); off = as above.
  *
- * GATE_DICTATION_MONEY_NORMALIZE rewrites dictated dollar amounts in the answer (utils/spoken-money.js) and
- * adds `money: { changes, ambiguous }` beside `text`; off = `{ text }` only.
+ * GATE_DICTATION_MONEY_NORMALIZE reads dictated dollar amounts (utils/spoken-money.js) and adds
+ * `money: { changes, ambiguous }` beside `text`. The text itself is returned exactly as heard: a parser can
+ * misread a phrase, so it only suggests (changes) and flags (ambiguous), it never rewrites. Off = `{ text }`.
  *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
@@ -137,15 +138,15 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
     } catch (err) { return next(err); }
   });
 
-// GATE_DICTATION_MONEY_NORMALIZE: "sixty-one thirty-three" -> $61.33 where a money cue is next to it; an
-// amount that could be $61.33 or $6,133 is flagged, not guessed. Off = { text } as before.
+// GATE_DICTATION_MONEY_NORMALIZE: suggests "$61.33" for "sixty-one thirty-three" where a money cue is next to
+// it, and flags an amount that could be $61.33 or $6,133. The heard text is never rewritten. Off = { text }.
 function dictationAnswer(text) {
   if (featureGates.dictationMoneyNormalizeLive() !== true) return { text };
   const money = normalizeSpokenMoney(text);
   if (money.changes.length || money.ambiguous.length) {
     logger.info(`[server-dictation] money changes=${money.changes.length} ambiguous=${money.ambiguous.length}`);
   }
-  return { text: money.text, money: { changes: money.changes, ambiguous: money.ambiguous } };
+  return { text, money: { changes: money.changes, ambiguous: money.ambiguous } };
 }
 
 module.exports = router;
