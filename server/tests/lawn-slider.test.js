@@ -10,7 +10,7 @@ jest.mock('../services/lawn-assessment-history', () => ({
 }));
 
 const history = require('../services/lawn-assessment-history');
-const { buildLawnSlider, lastVisitShots, lastVisitShotsForService } = require('../services/service-report/lawn-slider');
+const { buildLawnSlider, lastVisitShots, lastVisitShotsForService, SLIDER_SHOTS } = require('../services/service-report/lawn-slider');
 
 // A knex stub: photo rows per assessment id; assessment rows by id; scheduled_services by id.
 function knexStub({ photos = {}, assessments = {}, visits = {} } = {}) {
@@ -45,7 +45,7 @@ describe('buildLawnSlider', () => {
     ...over,
   });
 
-  test('pairs by shot key: front pairs; close-up, side and an unmatched back never do', async () => {
+  test('pairs by shot key: front pairs; close-up, side and back never do', async () => {
     history.historyForAssessment.mockResolvedValue(scoped());
     const out = await buildLawnSlider({ assessmentId: 'cur', knex, photoUrl: signer });
     expect(out).toEqual({
@@ -58,14 +58,17 @@ describe('buildLawnSlider', () => {
     });
   });
 
-  test('both sides with a back shot give two pairs in shot-list order', async () => {
+  test('back never pairs, even with a back photo on both visits: the compact "Back or side" button also stores zone back, so a side photo could meet a back photo', async () => {
     history.historyForAssessment.mockResolvedValue(scoped());
     const both = knexStub({
       assessments: { cur: { id: 'cur' } },
       photos: { prev: [photo('back', 'p'), photo('front', 'p')], cur: [photo('back', 'c'), photo('front', 'c')] },
     });
     const out = await buildLawnSlider({ assessmentId: 'cur', knex: both, photoUrl: signer });
-    expect(out.pairs.map((p) => p.key)).toEqual(['front', 'back']);
+    expect(out.pairs.map((p) => p.key)).toEqual(['front']);
+    const backOnly = knexStub({ assessments: { cur: { id: 'cur' } }, photos: { prev: [photo('back', 'p')], cur: [photo('back', 'c')] } });
+    expect(await buildLawnSlider({ assessmentId: 'cur', knex: backOnly, photoUrl: signer })).toBeNull();
+    expect(SLIDER_SHOTS).toEqual(['front']);
   });
 
   test('no earlier visit at this property: no slider (the history module is what says "same property")', async () => {
@@ -95,15 +98,15 @@ describe('buildLawnSlider', () => {
 describe('lastVisitShots (technician guide)', () => {
   const knex = knexStub({ photos: { prev: [photo('front', 'p'), photo('back', 'p'), photo('hot_edge', 'p')] } });
 
-  test('returns the previous visit front and back photo with its date; detail shots are not offered', async () => {
+  test('returns only the previous visit front photo with its date; back and detail shots are not offered', async () => {
     history.historyBeforeVisit.mockResolvedValue({ previous: { id: 'prev', visit_date: '2026-09-20' } });
     const out = await lastVisitShots({ customerId: 'c1', scheduledService: { id: 's1' }, throughVisitDate: '2026-10-21', knex, photoUrl: signer });
-    expect(Object.keys(out)).toEqual(['front', 'back']);
+    expect(Object.keys(out)).toEqual(['front']);
     expect(out.front).toEqual({ url: 'https://signed.test/k/front-p', date: '2026-09-20' });
     expect(history.historyBeforeVisit).toHaveBeenCalledWith({ customerId: 'c1', scheduledService: { id: 's1' }, throughVisitDate: '2026-10-21' }, knex);
   });
 
-  test('no previous visit, or none with a front or back photo: null', async () => {
+  test('no previous visit, or none with a front photo: null', async () => {
     history.historyBeforeVisit.mockResolvedValue({ previous: null });
     expect(await lastVisitShots({ customerId: 'c1', scheduledService: { id: 's1' }, throughVisitDate: '2026-10-21', knex, photoUrl: signer })).toBeNull();
     history.historyBeforeVisit.mockResolvedValue({ previous: { id: 'empty', visit_date: '2026-09-20' } });

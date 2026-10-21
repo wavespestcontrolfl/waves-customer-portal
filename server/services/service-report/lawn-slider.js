@@ -7,15 +7,18 @@
 //     module every lawn history read goes through: property scope, move reset,
 //     confirmed visits only; an unresolvable property gives no previous visit,
 //     so nothing pairs);
-//   - the same SHOT KEY on both visits, and only a key whose spot is the same
-//     every visit (shared/lawn-photo-shots.json `recheckPairable`: front and
-//     back; side is left out because it does not record which side it shows);
+//   - the same SHOT KEY on both visits, and only FRONT. Back is left out on
+//     purpose: the compact Fast Complete "Back or side" button stores zone 'back'
+//     for either a back or a side photo, and no stored field (zone, photo_type,
+//     photoVocabulary, labelKey) tells that capture from a full shot-list back
+//     overview, so a side photo could pair with a back photo. Add 'back' here
+//     only when capture records which button took the photo;
 //   - both photos must exist, be customer visible and sign to a URL.
 // Nothing here writes, sends or calls a model.
 const shotList = require('../lawn-photo-shots');
 const history = require('../lawn-assessment-history');
 
-const SLIDER_SHOTS = shotList.RECHECK_PAIRABLE_SHOT_ZONES;
+const SLIDER_SHOTS = Object.freeze(['front']);
 
 // First photo of each slider shot on one assessment: best photo first.
 async function photosByShot(knex, assessmentId) {
@@ -76,8 +79,8 @@ async function buildLawnSlider({ assessmentId, knex, photoUrl }) {
 }
 
 /**
- * The technician's "same angle" guide: last visit's photo for each slider shot,
- * for the visit being photographed now. { front: { url, date }, back: {...} } or null.
+ * The technician's "same angle" guide: last visit's front photo,
+ * for the visit being photographed now. { front: { url, date } } or null.
  * The previous visit is the one before THIS visit's scheduled day at the same
  * property; this visit's own attempts never count.
  */
