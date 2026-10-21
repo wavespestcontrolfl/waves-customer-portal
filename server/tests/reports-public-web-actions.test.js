@@ -753,6 +753,31 @@ describe('the finding tile tap rechecks its gates', () => {
     expect(txTouched).not.toContain('estimates');
   });
 
+  test('the actions gate turns off between the preflight and the write: the in-transaction recheck refuses with 409', async () => {
+    jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
+    const txWrites = [];
+    const trx = (table) => {
+      const q = {
+        where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
+        first: async () => {
+          // The variable flips once the write transaction has the customer lock.
+          if (table === 'customers') gates.reportWebActionsLive.mockReturnValue(false);
+          return table === 'customers' || table === 'service_records' ? { id: 'x' } : undefined;
+        },
+        update: async () => { txWrites.push(`update:${table}`); return 1; },
+        insert: (row) => { txWrites.push(`insert:${table}`); return { returning: async () => [{ id: 'req-1', ...row }] }; },
+      };
+      return q;
+    };
+    trx.raw = async () => {};
+    db.transaction = async (callback) => callback(trx);
+    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
+    await withServer(async (baseUrl) => {
+      expect((await tap(baseUrl, matching)).status).toBe(409);
+    });
+    expect(txWrites).toEqual([]);
+  });
+
   test('the finding still stands at the recheck: the write goes ahead (control for the refusal above)', async () => {
     jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
     const txWrites = [];

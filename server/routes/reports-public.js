@@ -1465,7 +1465,10 @@ function webTileWriteOptions(service, token, metadata) {
   return {
     revalidate: async (trx) => {
       await trx('service_records').where({ id: service.id }).forUpdate().first('id');
-      if ((await webTileStillStands(token, metadata)) !== true) {
+      // Gates are re-read live at the commit boundary: a flip after the preflight refuses the write too.
+      const webActions = require('../services/service-report/web-actions');
+      if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))
+        || (await webTileStillStands(token, metadata)) !== true) {
         throw Object.assign(new Error('web tile no longer stands'), { clickEstimateDrift: true });
       }
     },
