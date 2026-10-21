@@ -202,6 +202,8 @@ async function ringMissedCallIfUnanswered(callSid) {
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
+        // GATE_MISSED_CALL_ALERT_DETAIL: line, call length, next visit; {} with the gate off.
+        ...(await require('./missed-call-alert-detail').detailPayload(row)),
       }, {
         // Re-read right before the push (same supersession pattern as the
         // SMS bell): a recording that landed while the badge was computing
