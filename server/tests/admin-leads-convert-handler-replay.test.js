@@ -120,3 +120,77 @@ test('a convert sends no text and writes nothing itself (the only write is the o
   // The db stub throws on any insert / update / delete: reaching here means the handler wrote nothing except through markConverted.
   expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
 });
+
+// ── the card's pin on the win's own UPDATE (Codex P1 on the first push) ────────────────────────
+// A stand-in for markConverted's claim: it applies onlyIfIdentity to a fake query builder and answers
+// whether a row in its current state would be updated.
+function claimOf(row) {
+  const conds = [];
+  const calls = [];
+  const builder = (list, mode) => new Proxy({}, {
+    get(_t, prop) {
+      if (prop === 'where') return (a, b) => {
+        calls.push(['where', typeof a === 'function' ? 'fn' : a]);
+        if (typeof a === 'function') {
+          const group = [];
+          a(builder(group, 'group'));
+          list.push((r) => group.length === 0 || (group[0](r) || group.slice(1).some((c) => c.or && c(r))));
+        } else list.push((r) => String(r[a]) === String(b));
+        return builder(list, mode);
+      };
+      if (prop === 'whereNull') return (k) => { calls.push(['whereNull', k]); list.push((r) => r[k] == null); return builder(list, mode); };
+      if (prop === 'whereNot') return (k, v) => { if (mode === 'top') calls.push(['whereNot', k]); list.push((r) => r[k] !== v); return builder(list, mode); };
+      if (prop === 'orWhereRaw') return (_sql, [iso]) => { const c = (r) => new Date(r.updated_at).getTime() === new Date(iso).getTime(); c.or = true; list.push(c); return builder(list, mode); };
+      if (prop === 'whereRaw') return (_sql, [iso]) => { calls.push(['whereRaw', 'updated_at']); list.push((r) => new Date(r.updated_at).getTime() === new Date(iso).getTime()); return builder(list, mode); };
+      return undefined;
+    },
+  });
+  return { q: builder(conds, 'top'), calls, wins: () => conds.every((c) => c(row)) };
+}
+const convertsRow = (row) => async (_id, opts) => { const claim = claimOf(row); opts.onlyIfIdentity(claim.q); return claim.wins(); };
+const EXPECTED = { status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null };
+const FULL_LEAD = () => ({ id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null, converted_at: null, customer_id: null });
+
+test('the page path is unchanged: its claim carries only the handled rule, with or without a changed lead', async () => {
+  const claim = claimOf(FULL_LEAD());
+  leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return true; });
+  expect((await viaPage(BODY)).status).toBe(200);
+  // One grouped where (not handled, or the very close the page saw) and nothing else.
+  expect(claim.calls).toEqual([['where', 'fn']]);
+  // A lead edited, converted and linked elsewhere since the page loaded still converts from the page, as before.
+  tables.leads = { ...FULL_LEAD(), updated_at: new Date('2099-01-01T12:09:00Z'), converted_at: new Date(), customer_id: 'other' };
+  leadAttribution.markConverted.mockImplementationOnce(convertsRow(tables.leads));
+  expect((await viaPage(BODY)).status).toBe(200);
+});
+
+test('the bar adds the card\u2019s version to the same UPDATE and converts when nothing changed', async () => {
+  const claim = claimOf(FULL_LEAD());
+  leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return claim.wins(); });
+  const res = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
+  expect(res.status).toBe(200);
+  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id']]);
+});
+
+test.each([
+  ['edited', { updated_at: new Date('2099-01-01T12:05:00Z') }],
+  ['converted by someone else', { converted_at: new Date('2099-01-01T12:00:01Z') }],
+  ['moved to another status', { status: 'estimate_sent' }],
+  ['linked to a customer', { customer_id: 'other-customer' }],
+])('a lead %s between the card check and the write answers 409 and writes nothing', async (_name, change) => {
+  // The handler's own pre-read still sees the lead as the card did; the change lands before the UPDATE.
+  const row = { ...FULL_LEAD(), ...change };
+  leadAttribution.markConverted.mockImplementationOnce(convertsRow(row));
+  const res = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
+  expect(res.status).toBe(409);
+  expect(res.json.error).toMatch(/changed since the page loaded/);
+  // The same change does not stop the page (no expectation): unchanged behavior.
+  leadAttribution.markConverted.mockImplementationOnce(convertsRow(row));
+  expect((await viaPage(BODY)).status).toBe(200);
+});
+
+test('a card for a lead that had a customer link pins that link', async () => {
+  const row = { ...FULL_LEAD(), customer_id: 'linked-1' };
+  leadAttribution.markConverted.mockImplementation(convertsRow(row));
+  expect((await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: { ...EXPECTED, customerId: 'linked-1' } })).status).toBe(200);
+  expect((await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED })).status).toBe(409);
+});

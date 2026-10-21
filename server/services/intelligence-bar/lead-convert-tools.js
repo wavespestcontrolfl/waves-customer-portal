@@ -252,6 +252,7 @@ async function buildPlan(input) {
     sends_to_customer: false,
     _version: versionOf({ lead, customer, others, estimate, funnel, body }),
     _body: body,
+    _expected: { status: lead.status, updatedAt: msOf(lead.updated_at), customerId: lead.customer_id || null },
     note: 'PREVIEW ONLY \u2014 nothing was changed. Confirm converts exactly this; if anything changed it refuses.',
   };
 }
@@ -270,7 +271,7 @@ async function verifiedPlan(input, pinned) {
 async function commitConvert(input) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_lead_convert_version);
   if (refused) return refused;
-  const { status, json } = await require('../../routes/admin-leads').convertLeadFromBar({ leadId: plan.lead_id, body: plan._body });
+  const { status, json } = await require('../../routes/admin-leads').convertLeadFromBar({ leadId: plan.lead_id, body: plan._body, expected: plan._expected });
   const base = { lead_id: plan.lead_id, lead_name: plan.lead_name, customer_id: plan.customer_id, customer_name: plan.customer_name };
   if (status !== 200) {
     // 409: the page's own "this lead changed since the page loaded" answer; 404: the lead or customer is gone.

@@ -235,6 +235,8 @@ describe('the confirmed run', () => {
     expect(Leads.convertLeadFromBar).toHaveBeenCalledWith({
       leadId: LEAD,
       body: { customer_id: CUST, monthly_value: 49, waveguard_tier: 'Gold', seen_status: 'contacted', seen_updated_at: '2099-01-01T12:00:00.123Z' },
+      // The lead version the card showed: the handler's own UPDATE must still match it.
+      expected: { status: 'contacted', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), customerId: null },
     });
     expect(res).toMatchObject({ success: true, status: 'won', sent_to_customer: false, lead_id: LEAD, customer_id: CUST });
     expect(res.note).toMatch(/Nothing was sent to anyone/);

@@ -1292,6 +1292,19 @@ router.post('/:id/activity', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The card's pin as extra predicates on the win's own UPDATE: the lead is still unconverted, in the
+// status and at the edit time the card showed, with the customer link it showed.
+function withExpectedLead(identity, expected) {
+  if (!expected) return identity;
+  return (q) => {
+    identity(q);
+    q.whereNull('converted_at').where('status', expected.status)
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
+    if (expected.customerId) q.where('customer_id', expected.customerId);
+    else q.whereNull('customer_id');
+  };
+}
+
 // POST /api/admin/leads/:id/convert — convert to customer
 // Named so the Intelligence Bar's convert_lead card (convertLeadFromBar, below) runs this very handler.
 const leadConvertHandler = async (req, res, next) => {
@@ -1321,8 +1334,10 @@ const leadConvertHandler = async (req, res, next) => {
       waveguardTier: waveguard_tier,
       // Only 'handled' is excluded, unless it is the very close the page showed (any
       // other status converts exactly as before): the claim's where() takes a callback,
-      // re-asserting it in the win's own UPDATE.
-      onlyIfIdentity: unlessHandledSince(seen, req.body.seen_updated_at),
+      // re-asserting it in the win's own UPDATE. The Intelligence Bar's card adds the exact
+      // lead version it showed (req.ibExpectedLead, set only by convertLeadFromBar; the page
+      // never sets it, so the page's claim is unchanged).
+      onlyIfIdentity: withExpectedLead(unlessHandledSince(seen, req.body.seen_updated_at), req.ibExpectedLead),
     });
     if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();
@@ -2415,14 +2430,16 @@ module.exports = router;
 // the reply it would send, { status, json }. An error passed to next() rejects.
 // `body` is exactly what the Leads page sends: customer_id, the value fields and the
 // seen_status / seen_updated_at pair the card showed.
-function convertLeadFromBar({ leadId, body }) {
+// `expected` ({ status, updatedAt, customerId }) is the lead version the card showed: the win's UPDATE
+// must still match it, else the handler answers its 409 (the bar's preview_changed).
+function convertLeadFromBar({ leadId, body, expected = null }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
       status(code) { this.statusCode = code; return this; },
       json(json) { resolve({ status: this.statusCode, json }); return this; },
     };
-    Promise.resolve(leadConvertHandler({ params: { id: leadId }, body: { ...body } }, res, reject)).catch(reject);
+    Promise.resolve(leadConvertHandler({ params: { id: leadId }, body: { ...body }, ibExpectedLead: expected }, res, reject)).catch(reject);
   });
 }
 module.exports.convertLeadFromBar = convertLeadFromBar;
