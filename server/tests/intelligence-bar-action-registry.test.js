@@ -355,6 +355,9 @@ const SCOPE_SNAPSHOT = {
     'send_invoice',
     // record_payment carries invoice_id (or invoice_number, bound like send_invoice's).
     'record_payment',
+    // propose_admin_edit carries customer_id for a customer or visit scoped edit (the tool binds it to the record in the endpoint);
+    // a broad edit (template, timesheet) carries none and touches no customer record.
+    'propose_admin_edit',
     // convert_lead carries lead_id + customer_id (validateRecordTarget binds both to the task customer).
     'convert_lead',
     'void_invoice',

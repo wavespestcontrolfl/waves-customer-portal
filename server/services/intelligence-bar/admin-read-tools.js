@@ -413,6 +413,6 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
 }
 
 module.exports = {
-  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding,
+  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
 };

@@ -133,6 +133,9 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
 // record_payment: its card lines come from its own preview (record-payment-tools.js cardLines). Money, not a charge.
 CURATED_PREVIEW_TOOL_NAMES.add('record_payment');
+// propose_admin_edit (owner ruling 2026-10-12): its card lines come from its own
+// preview (admin-write-tools.js cardLines), never the generic dump.
+CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 // convert_lead: its card lines come from its own preview (lead-convert-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
@@ -203,6 +206,7 @@ const ACTION_LABELS = {
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
   record_payment: 'Record a payment received outside the portal (never charges a card)',
+  propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
   block_sender: 'Block a sender',
@@ -846,6 +850,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'send_invoice' && preview?.preview === true) {
     // Lines flagged `more` (every invoice line past the first few) ride in full under "Show more".
     for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
+  // propose_admin_edit: the edit, each field's before and after, and what it does not do.
+  if (toolName === 'propose_admin_edit' && preview?.preview === true) {
+    for (const line of require('./admin-write-tools').cardLines(preview)) {
       if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
       else push(line.kind, line.text);
     }
