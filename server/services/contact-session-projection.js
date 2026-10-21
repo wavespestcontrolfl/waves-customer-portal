@@ -99,6 +99,29 @@ async function contactRecordScope(req) {
   return { customerId, enabled: true, multi: rows.length > 1, scoped: true, closed: false, property };
 }
 
+// The scope a session's record reads resolve under: a contact's, above; a
+// holder's saved-property selection (GATE_APP_PROPERTY_SCOPE) otherwise —
+// the one decision every scoped route (schedule, tracking) makes.
+function sessionRecordScope(req) {
+  return req.contactSession ? contactRecordScope(req) : require('./account-properties').resolveSessionScope(req);
+}
+
+// The address a contact's identity payloads (/auth/me, /auth/properties, the
+// login response) name: the house the contact's record reads are scoped to
+// (codex #6363 r20 P2) — the active primary, or the active row standing in
+// for a retired primary — never the customer row's address when that row's
+// saved primary has been retired. A profile that never had a saved-property
+// row keeps its one address; one whose rows were all retired has no house
+// to name.
+function contactAddress(customer, scope) {
+  if (scope && scope.property) {
+    const p = scope.property;
+    return { line1: p.address_line1 ?? null, line2: p.address_line2 ?? null, city: p.city ?? null, state: p.state ?? null, zip: p.zip ?? null };
+  }
+  if (scope && scope.closed) return { line1: null, line2: null, city: null, state: null, zip: null };
+  return { line1: customer.address_line1, line2: customer.address_line2, city: customer.city, state: customer.state, zip: customer.zip };
+}
+
 // What a contact's payloads say about the property scope: the contact app
 // has no picker and /auth/me reports the scope off, so every scoped read
 // echoes the same — never the resolved primary's id, which the holder
@@ -197,6 +220,8 @@ function contactNextPayload(payload) {
 module.exports = {
   contactSessionReportsWithheld,
   contactRecordScope,
+  sessionRecordScope,
+  contactAddress,
   scopeContactRecords,
   CONTACT_PROPERTY_SCOPE_ECHO,
   withholdReportArtifacts,

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+const { applyPropertyPredicate, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -16,8 +16,7 @@ const { computeStopsAhead } = require('../services/stops-ahead');
 // holder's primary property's visits only (whatever GATE_APP_PROPERTY_SCOPE
 // says — codex #6363 r16 security P1), and the scope echo the contact app
 // expects.
-const { withoutTrackBearers, contactRecordScope, CONTACT_PROPERTY_SCOPE_ECHO } = require('../services/contact-session-projection');
-const sessionScope = (req) => (req.contactSession ? contactRecordScope(req) : resolveSessionScope(req));
+const { withoutTrackBearers, sessionRecordScope: sessionScope, CONTACT_PROPERTY_SCOPE_ECHO } = require('../services/contact-session-projection');
 const scopeEcho = (req, scope) => (req.contactSession ? CONTACT_PROPERTY_SCOPE_ECHO : resolvedScopePayload(scope));
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 

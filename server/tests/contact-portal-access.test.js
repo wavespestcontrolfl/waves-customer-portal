@@ -385,6 +385,26 @@ describe('contact session — route allow-list', () => {
     expect(res.body).toEqual({ ok: true, contact: null, id: 'cust-holder' });
   });
 
+  test('a contact\'s identity payloads name the house their reads are scoped to — the active row standing in for a retired saved primary, never the row\'s retired address (codex r20 P2)', async () => {
+    tables.customer_properties = [
+      { id: 'prop-old', customer_id: 'cust-holder', active: false, is_primary: true, address_line1: '1 Gulf Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205', created_at: '2025-01-01' },
+      { id: 'prop-oak', customer_id: 'cust-holder', active: true, is_primary: false, address_line1: '99 Oak St', address_line2: 'Unit B', city: 'Venice', state: 'FL', zip: '34293', created_at: '2026-01-01' },
+    ];
+    const oak = { line1: '99 Oak St', line2: 'Unit B', city: 'Venice', state: 'FL', zip: '34293' };
+    const res = await login(CONTACT_PHONE);
+    expect(res.body.properties[0].address).toEqual(oak);
+    const me = await call('GET', '/api/auth/me', bearerOf(res.body.token));
+    expect(me.body.address).toEqual(oak);
+    const props = await call('GET', '/api/auth/properties', bearerOf(res.body.token));
+    expect(props.body.properties[0].address).toEqual(oak);
+    expect(JSON.stringify([res.body, me.body, props.body])).not.toMatch(/Gulf Dr|34205/);
+    // Every saved row retired: no house is named.
+    tables.customer_properties[1].active = false;
+    expect((await call('GET', '/api/auth/me', bearerOf(res.body.token))).body.address).toEqual({ line1: null, line2: null, city: null, state: null, zip: null });
+    // The holder's own /me keeps the row's address.
+    expect((await call('GET', '/api/auth/me', bearerOf((await login(HOLDER_PHONE)).body.token))).body.address.line1).toBe('1 Gulf Dr');
+  });
+
   test('is exact on paths (a sibling route is not admitted by prefix)', () => {
     const { contactSessionRoute } = auth._test;
     expect(contactSessionRoute({ method: 'GET', baseUrl: '/api/schedule', path: '/' })).toBe(true);

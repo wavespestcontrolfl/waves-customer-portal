@@ -188,12 +188,14 @@ function accountIdForCustomer(customer) {
   return customer?.account_id || customer?.id || null;
 }
 
-// A contact session's property entry: the row's label and address only — no
-// holder name, no rate, no plan tier (the switcher labels by profileLabel /
-// address).
-function contactPropertyPayload(customer) {
+// A contact session's property entry: the row's label and the address of the
+// house the contact's reads are scoped to (contact-session-projection
+// contactAddress) — no holder name, no rate, no plan tier (the switcher
+// labels by profileLabel / address).
+async function contactPropertyPayload(customer, contact) {
+  const { contactRecordScope, contactAddress } = require('../services/contact-session-projection');
   const { firstName, lastName, monthlyRate, tier, ...entry } = propertyPayload(customer);
-  return entry;
+  return { ...entry, address: contactAddress(customer, await contactRecordScope({ contactSession: contact, customerId: customer.id })) };
 }
 
 function propertyPayload(customer) {
@@ -475,7 +477,7 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
       customer: authCustomerPayload(customer, contact),
       actor: actorPayload(contact),
       // A contact session lists only the row it belongs to (no switcher).
-      properties: contact ? [contactPropertyPayload(customer)] : await accountPropertiesForCustomer(customer),
+      properties: contact ? [await contactPropertyPayload(customer, contact)] : await accountPropertiesForCustomer(customer),
     });
   } catch (err) {
     next(err);
@@ -560,21 +562,18 @@ router.get('/me', authenticate, async (req, res, next) => {
   // choices live on /notifications/contact-preferences).
   if (req.contactSession) {
     const contact = req.contactSession;
+    const { contactRecordScope, contactAddress, CONTACT_PROPERTY_SCOPE_ECHO } = require('../services/contact-session-projection');
     return res.json({
       ...authCustomerPayload(customer, contact),
-      address: {
-        line1: customer.address_line1,
-        line2: customer.address_line2,
-        city: customer.city,
-        state: customer.state,
-        zip: customer.zip,
-      },
+      // The house the contact's reads are scoped to, not the row's address
+      // (a retired saved primary — codex #6363 r20 P2).
+      address: contactAddress(customer, await contactRecordScope(req)),
       memberSince: customer.member_since,
       cancelled: false,
       cancelledAt: null,
       actor: actorPayload(contact),
       notificationPrefs: null,
-      propertyScope: require('../services/contact-session-projection').CONTACT_PROPERTY_SCOPE_ECHO,
+      propertyScope: CONTACT_PROPERTY_SCOPE_ECHO,
     });
   }
   const [prefs, annualPrepay, creditLedger] = await Promise.all([
@@ -690,7 +689,7 @@ router.get('/properties', authenticate, async (req, res, next) => {
     // profiles, no saved-property list (a switch mints credentials the
     // contact may not hold).
     if (req.contactSession) {
-      return res.json({ properties: [contactPropertyPayload(req.customer)] });
+      return res.json({ properties: [await contactPropertyPayload(req.customer, req.contactSession)] });
     }
     // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
     // customer-wide, /auth/me reports the scope disabled) — it keeps the

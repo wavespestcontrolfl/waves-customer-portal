@@ -381,6 +381,50 @@ async function contactEmailDeclines(customerId, email, { dbh = db } = {}) {
   return false;
 }
 
+// The review candidates page (admin-reviews.js) mirrors the sender's email
+// verdict (review-request.js sendOutreachTouch: contactDeclinesChannel on the
+// email identity) across its 200 rows at once (codex #6363 r20 P2): per
+// customer, the phone keys whose contact turned their email off. Gate off or
+// a missing table → empty; any other read error throws — the page fails
+// rather than offering a cadence the sender refuses.
+async function contactEmailOffPhoneKeys(customerIds = [], { dbh = db } = {}) {
+  const byCustomer = new Map();
+  if (!contactPrefsLive() || !customerIds.length) return byCustomer;
+  let found;
+  try {
+    found = await dbh(TABLE).whereIn('customer_id', customerIds).where({ email_enabled: false }).select('customer_id', 'phone_key');
+  } catch (err) {
+    if (err && err.code === '42P01') {
+      logger.warn('[contact-prefs] table missing — no per-contact choices');
+      return byCustomer;
+    }
+    throw err;
+  }
+  for (const row of found || []) {
+    const key = String(row.customer_id);
+    if (!byCustomer.has(key)) byCustomer.set(key, new Set());
+    byCustomer.get(key).add(String(row.phone_key));
+  }
+  return byCustomer;
+}
+
+// The contact's email master switch as a query predicate (codex #6363 r20
+// P2): the inline review email's dispatch claim (review-request.js
+// _claimInlineEmailDispatch) is the last fence before the provider and
+// re-applies every consent it read earlier as of that write — a contact who
+// turns their email off while the template resolves is not emailed. Adds
+// nothing with the gate off or for a recipient with no phone (the holder's
+// own address never carries a contact row).
+function whereContactEmailAllowed(query, customerIdColumn, contact) {
+  const key = phoneKey(contact && contact.phone);
+  if (!contactPrefsLive() || !key) return query;
+  return query.whereNotExists(function contactEmailConsent() {
+    this.select(db.raw('1')).from(TABLE)
+      .whereRaw(`${TABLE}.customer_id = ${customerIdColumn}`)
+      .where({ [`${TABLE}.phone_key`]: key, [`${TABLE}.email_enabled`]: false });
+  });
+}
+
 // Dispatch-time recheck for a DEFERRED email (an automation step, a queued
 // template run) whose address was resolved when it was enqueued: when that
 // address is the slot-1 contact's and the contact has since turned their
@@ -491,6 +535,8 @@ module.exports = {
   contactDeclinesChannel,
   contactPhoneDeclinesText,
   contactEmailDeclines,
+  contactEmailOffPhoneKeys,
+  whereContactEmailAllowed,
   rerouteForContactEmailOptOut,
   pruneContactNotificationPrefs,
   upsertContactNotificationPrefs,

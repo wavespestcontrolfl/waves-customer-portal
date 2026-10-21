@@ -359,6 +359,44 @@ describe('contactEmailDeclines (single-recipient emails addressed to the estimat
   });
 });
 
+describe('contactEmailOffPhoneKeys / whereContactEmailAllowed (review candidates + the inline email dispatch claim, codex r20)', () => {
+  test('the batch read groups the email-off phone keys by customer; gate off or a missing table reads empty; another read error throws', async () => {
+    rows = [
+      { customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false },
+      { customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false },
+      { customer_id: 'cust-2', phone_key: '9415550404', email_enabled: false },
+      { customer_id: 'cust-3', phone_key: '9415550505', email_enabled: true },
+    ];
+    const byCustomer = await ContactPrefs.contactEmailOffPhoneKeys(['cust-1', 'cust-2', 'cust-3']);
+    expect([...byCustomer.keys()]).toEqual(['cust-1', 'cust-2']);
+    expect([...byCustomer.get('cust-1')]).toEqual(['9415550202', '9415550303']);
+    expect((await ContactPrefs.contactEmailOffPhoneKeys([])).size).toBe(0);
+    failWith = Object.assign(new Error('missing'), { code: '42P01' });
+    expect((await ContactPrefs.contactEmailOffPhoneKeys(['cust-1'])).size).toBe(0);
+    failWith = new Error('timeout');
+    await expect(ContactPrefs.contactEmailOffPhoneKeys(['cust-1'])).rejects.toThrow('timeout');
+    failWith = null;
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect((await ContactPrefs.contactEmailOffPhoneKeys(['cust-1'])).size).toBe(0);
+  });
+
+  test('the predicate excludes a row whose contact has email off as of the write; nothing is added with the gate off or for a recipient with no phone', () => {
+    db.raw = (sql) => sql;
+    const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub), where: jest.fn(() => sub) };
+    const query = { whereNotExists: jest.fn(function (fn) { fn.call(sub); return this; }) };
+    expect(ContactPrefs.whereContactEmailAllowed(query, 'review_requests.customer_id', SAM)).toBe(query);
+    expect(query.whereNotExists.mock.calls[0][0].name).toBe('contactEmailConsent');
+    expect(sub.from).toHaveBeenCalledWith('service_contact_notification_prefs');
+    expect(sub.whereRaw).toHaveBeenCalledWith('service_contact_notification_prefs.customer_id = review_requests.customer_id');
+    expect(sub.where).toHaveBeenCalledWith({ 'service_contact_notification_prefs.phone_key': '9415550202', 'service_contact_notification_prefs.email_enabled': false });
+    query.whereNotExists.mockClear();
+    expect(ContactPrefs.whereContactEmailAllowed(query, 'review_requests.customer_id', { email: 'x@example.com' })).toBe(query);
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(ContactPrefs.whereContactEmailAllowed(query, 'review_requests.customer_id', SAM)).toBe(query);
+    expect(query.whereNotExists).not.toHaveBeenCalled();
+  });
+});
+
 describe('pruneContactNotificationPrefs (holder contact save)', () => {
   test('deletes the rows of phones no longer in a slot and keeps the survivors', async () => {
     rows = [

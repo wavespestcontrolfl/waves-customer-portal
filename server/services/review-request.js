@@ -3017,14 +3017,15 @@ const ReviewService = {
    * cleared, or a failed write, returns false and the library aborts the
    * provider call (r9/r10 P2). True = this attempt owns the dispatch.
    */
-  async _claimInlineEmailDispatch(requestId) {
+  async _claimInlineEmailDispatch(requestId, { contact = null } = {}) {
     let cleared;
     try {
       // The final pre-provider claim re-applies the terminal predicates
       // (the customer may have answered, been stopped, reviewed or been
       // removed since the recipient check) so it fails closed (pre-push
       // Codex P1 on bd85be714).
-      cleared = await db("review_requests")
+      const { whereContactEmailAllowed } = require("./contact-notification-prefs");
+      cleared = await whereContactEmailAllowed(db("review_requests"), "review_requests.customer_id", contact)
         .where({ id: requestId })
         .whereNotNull("email_leg_owed_at")
         .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
@@ -3043,7 +3044,9 @@ const ReviewService = {
         // still be emailed — this claim is the last fence before the
         // provider. Same predicate as _inlineEmailRecipient (a prefs row
         // must exist; review_request / email_enabled not false) so the two
-        // never disagree (GH Codex #3856 r23 P1).
+        // never disagree (GH Codex #3856 r23 P1) — and the contact's OWN
+        // email switch the recipient read applied, as of this write too
+        // (whereContactEmailAllowed above; codex #6363 r20 P2).
         .whereExists(function emailConsent() {
           this.select(db.raw("1")).from("notification_prefs")
             .whereRaw("notification_prefs.customer_id = review_requests.customer_id")
@@ -3121,7 +3124,7 @@ const ReviewService = {
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
         onQueued: async () => {
-          dispatched = await this._claimInlineEmailDispatch(request.id);
+          dispatched = await this._claimInlineEmailDispatch(request.id, { contact });
           return dispatched;
         },
       });

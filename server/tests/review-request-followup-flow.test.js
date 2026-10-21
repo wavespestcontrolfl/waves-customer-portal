@@ -14,6 +14,7 @@ jest.mock('../services/customer-contact', () => ({
   getServiceContact: jest.fn(),
   getServiceContactSmsRecipient: jest.fn(),
   firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
+  isServiceContactRole: jest.requireActual('../services/customer-contact').isServiceContactRole,
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -1266,6 +1267,34 @@ describe('review request follow-up flow', () => {
       expect(call.payload.review_url).toContain('tok-1');
       // No second write: nothing after the provider call is left to lose.
       expect(rrUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('the dispatch claim re-applies the contact\'s OWN email switch as of the write (contact login; codex #6363 r20 P2) — nothing with the gate off', async () => {
+      process.env.GATE_CONTACT_LOGIN = 'true';
+      try {
+        wire({ prefs: { review_request: true, email_enabled: true } });
+        getServiceContact.mockReturnValue({ email: 'megan@example.com', name: 'Megan Example', phone: '+19415550202', role: 'service_contact' });
+        // The recipient read's own-switch check: no row → allowed.
+        const wired = db.getMockImplementation();
+        db.mockImplementation((table) => (table === 'service_contact_notification_prefs' ? chain({ select: jest.fn().mockResolvedValue([]) }) : wired(table)));
+        EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
+        expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+        const rrQ = db.mock.results.map((r) => r.value).find((v) => v && v.whereNotExists && v.whereNotExists.mock.calls.length);
+        const fence = rrQ.whereNotExists.mock.calls.map(([fn]) => fn).find((fn) => fn.name === 'contactEmailConsent');
+        const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub), where: jest.fn(() => sub) };
+        fence.call(sub);
+        expect(sub.from).toHaveBeenCalledWith('service_contact_notification_prefs');
+        expect(sub.whereRaw).toHaveBeenCalledWith('service_contact_notification_prefs.customer_id = review_requests.customer_id');
+        expect(sub.where).toHaveBeenCalledWith({ 'service_contact_notification_prefs.phone_key': '9415550202', 'service_contact_notification_prefs.email_enabled': false });
+      } finally {
+        delete process.env.GATE_CONTACT_LOGIN;
+      }
+      db.mockClear();
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-2' }); return { sent: true }; });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      const rrQ = db.mock.results.map((r) => r.value).find((v) => v && v.whereExists && v.whereExists.mock.calls.length);
+      expect(rrQ.whereNotExists).not.toHaveBeenCalled();
     });
 
     test('a failed pre-dispatch owed clear aborts the provider call — retryable, leg still owed (r9 P2)', async () => {

@@ -138,6 +138,26 @@ describe('pure projections', () => {
     expect(scopeRecordsToProperty).not.toHaveBeenCalled();
   });
 
+  test('sessionRecordScope: a contact resolves its own scope, a holder the saved-property resolver; contactAddress names the scoped house, not a retired primary (codex r20 P2)', async () => {
+    wireTables({});
+    expect(await projection.sessionRecordScope({ customerId: 'cust-1', contactSession: OCCUPANT })).toEqual(PRIMARY_SCOPE);
+    expect(resolveSessionScope).not.toHaveBeenCalled();
+    resolveSessionScope.mockResolvedValueOnce({ marker: 'holder' });
+    expect(await projection.sessionRecordScope({ customerId: 'cust-1' })).toEqual({ marker: 'holder' });
+
+    const customer = { address_line1: '1 Gulf Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+    const oak = { id: 'prop-2', is_primary: false, address_line1: '99 Oak St', address_line2: 'Unit B', city: 'Venice', state: 'FL', zip: '34293' };
+    // The active row standing in for a retired primary is the house named.
+    expect(projection.contactAddress(customer, { ...PRIMARY_SCOPE, property: oak }))
+      .toEqual({ line1: '99 Oak St', line2: 'Unit B', city: 'Venice', state: 'FL', zip: '34293' });
+    // Every row retired: no house to name — never the row's retired address.
+    expect(projection.contactAddress(customer, { ...PRIMARY_SCOPE, scoped: true, closed: true, property: null }))
+      .toEqual({ line1: null, line2: null, city: null, state: null, zip: null });
+    // Never had a saved-property row: the profile's one address.
+    expect(projection.contactAddress(customer, { ...PRIMARY_SCOPE, scoped: false, closed: false, property: null }))
+      .toEqual({ line1: '1 Gulf Dr', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' });
+  });
+
   test('contactSafeReportLinks: the public /report and /api/reports bearers go, the authed PDF route stays; a project completion offers no report', () => {
     const row = { id: 'svc-1', notes: 'kept', reportUrl: '/report/t', reportPdfUrl: '/api/reports/t', reportToken: 't', reportAvailable: true, projectReportPortalAttached: false };
     expect(projection.contactSafeReportLinks(row)).toEqual({ ...row, reportUrl: null, reportPdfUrl: '/api/documents/service-report/svc-1', reportToken: null });

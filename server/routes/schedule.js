@@ -36,7 +36,7 @@ const { hasCancellableWork } = require('../services/cancellation-eligibility');
 // Contact session (GATE_CONTACT_LOGIN): a contact is view-only, so its
 // schedule payloads carry no action bearer (reschedule / calendar tokens,
 // the re-service page, the overlay handoff).
-const { contactSchedulePayload, contactNextPayload, contactRecordScope } = require('../services/contact-session-projection');
+const { contactSchedulePayload, contactNextPayload, sessionRecordScope } = require('../services/contact-session-projection');
 const {
   accountPropertyIds,
   accountSavedProperties,
@@ -146,7 +146,7 @@ router.get('/', async (req, res, next) => {
     // plan-coverage read (allProperties), which must see every house. A
     // contact's scope is the holder's primary property whatever the gate
     // (codex #6363 r16 security P1).
-    const scope = allProperties ? null : await (req.contactSession ? contactRecordScope(req) : resolveSessionScope(req));
+    const scope = allProperties ? null : await sessionRecordScope(req);
     const upcomingQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(upcomingQuery, scope);
@@ -837,7 +837,7 @@ router.get('/next', async (req, res, next) => {
     // Same allProperties escape hatch as GET / (plan-coverage evidence).
     // Never for a contact session — see GET / (codex #6363 r14 P2).
     const allProperties = !req.contactSession && ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
-    const scope = allProperties ? null : await (req.contactSession ? contactRecordScope(req) : resolveSessionScope(req));
+    const scope = allProperties ? null : await sessionRecordScope(req);
     const nextQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(nextQuery, scope);
