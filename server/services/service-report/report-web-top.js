@@ -43,19 +43,24 @@ async function loadPropertyHistory(data) {
   return history && history.scope && history.scope.propertyId && history.current && history.rows.length ? history : null;
 }
 
-// One point per day (two assessments on a day keep the later one, as the report's own strip does), oldest first.
+// One point per DAY (the full visit date: two assessments on a day keep the later one, but the same month and day in two
+// years are two points), oldest first. The label stays short ("Oct 20"); when two points share a label across years,
+// both carry the year ("Oct 20 '25").
 function strip(rows) {
   const { calculateLawnOverallScore } = require('../../../shared/lawn-scores.cjs');
   const { monthLabel } = require('./lawn-report-v2');
-  const out = [];
+  const points = [];
   rows.forEach((row) => {
     const value = finiteScore(calculateLawnOverallScore(row));
+    const date = dateOnlyString(row.visit_date);
     const label = monthLabel(row.visit_date);
-    if (value == null || !label) return;
-    if (out.length && out[out.length - 1].label === label) out[out.length - 1] = { label, value };
-    else out.push({ label, value });
+    if (value == null || !label || !/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return;
+    if (points.length && points[points.length - 1].date === date) points[points.length - 1] = { date, label, value };
+    else points.push({ date, label, value });
   });
-  return out.slice(-TREND_POINTS);
+  const last = points.slice(-TREND_POINTS);
+  const shared = new Set(last.filter((p, i) => last.findIndex((q) => q.label === p.label) !== i).map((p) => p.label));
+  return last.map((p) => ({ label: shared.has(p.label) ? `${p.label} '${p.date.slice(2, 4)}` : p.label, value: p.value }));
 }
 
 // The score at the assessment just before this one (the nearest earlier scored row), or null on a first visit.

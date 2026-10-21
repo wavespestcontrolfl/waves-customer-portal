@@ -282,7 +282,10 @@ export function buildReentryBullets(data) {
 
 export const NOTHING_NEEDED = 'Nothing needed from you today.';
 const WAVES_OWNED = /^(we will|we['\u2019]ll|waves will)\b/i;
-const NO_ACTION = /^no (further )?action\b/i;
+// Every placeholder for "nothing to do": "No action...", "No further action", "No follow-up needed", "Nothing needed",
+// "None needed". Case, surrounding spaces and edge punctuation are ignored.
+const NO_TASK = /^(no (further |additional |other )?(action|follow-?up)|nothing (further )?(is )?(needed|required|necessary)|none (is )?(needed|required|necessary))\b/;
+const isNoTask = (line) => NO_TASK.test(String(line || '').toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '').replace(/\s+/g, ' '));
 
 /**
  * "Do this": the first customer-owned line, from an explicit list of customer-owned sources only, in the document's
@@ -301,7 +304,7 @@ export function doThisLine(data) {
   }
   const found = buildRecordFindings(data).map((finding) => finding.recommendation);
   const mine = unique([...lines, ...found]).filter((line) => !WAVES_OWNED.test(line));
-  return mine.find((line) => !NO_ACTION.test(line)) || NOTHING_NEEDED;
+  return mine.find((line) => !isNoTask(line)) || NOTHING_NEEDED;
 }
 
 /** "Hold off": the first bullet of the document's re-entry section, or null when the document shows none. */

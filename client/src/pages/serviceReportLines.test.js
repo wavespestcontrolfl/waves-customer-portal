@@ -74,6 +74,26 @@ describe('doThisLine: the first customer-owned recommendation', () => {
   });
 });
 
+describe('doThisLine: every "nothing to do" placeholder is no task', () => {
+  it.each([
+    'No action needed.', 'no action is needed at this time', 'No further action', 'No additional action required.', 'No follow-up needed',
+    'No followup needed.', 'Nothing needed', 'nothing further is needed!', 'None needed', '  None required.  ', '\u2014 No follow-up needed \u2014',
+  ])('"%s" reads as nothing needed', (line) => {
+    expect(doThisLine({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: line } } })).toBe(NOTHING_NEEDED);
+  });
+
+  it('a frozen "No follow-up needed" chip followed by a real chip: the real chip wins', () => {
+    const data = { serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'No action needed.' }, nextStepChips: ['No follow-up needed', 'Seal the door sweep'] } };
+    expect(buildRecommendations(data)).toEqual(['No action needed.', 'No follow-up needed', 'Seal the door sweep']);
+    expect(doThisLine(data)).toBe('Seal the door sweep');
+  });
+
+  it('a real task that merely contains these words is still a task', () => {
+    expect(doThisLine({ serviceLine: 'pest', recommendations: ['Notify us if there is no action on the bait.'] })).toBe('Notify us if there is no action on the bait.');
+    expect(doThisLine({ serviceLine: 'pest', recommendations: ['Nothing should be stored against the wall.'] })).toBe('Nothing should be stored against the wall.');
+  });
+});
+
 describe('doThisLine: only customer-owned sources', () => {
   it('snapshot.wavesNext (what Waves will do) is never "Do this", though the document lists it under What we recommend', () => {
     const data = { serviceLine: 'tree_shrub', reportV2: { snapshot: { wavesNext: 'Recheck the affected foliage next visit.' } } };

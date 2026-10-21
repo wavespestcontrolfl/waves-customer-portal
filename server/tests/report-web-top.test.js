@@ -65,6 +65,15 @@ describe('buildWebTop', () => {
     expect(out.trend.map((p) => p.value)).toEqual([60, 72]);
   });
 
+  test('the strip dedupes by the full date: the same month and day in two years are two points, labelled with the year', () => {
+    const rows = [row('a0', '2025-10-20', 60), row('a1', '2026-03-05', 66), row('a2', '2026-10-20', 72)];
+    const out = buildWebTop(lawn(), null, historyOf(rows));
+    expect(out.trend).toEqual([{ label: "Oct 20 '25", value: 60 }, { label: 'Mar 5', value: 66 }, { label: "Oct 20 '26", value: 72 }]);
+    // two assessments on the same full date still collapse to the later one, with the short label
+    const sameDay = buildWebTop(lawn(), null, historyOf([row('b0', '2026-09-01', 60), row('b1', '2026-10-20', 65), row('b2', '2026-10-20', 72)]));
+    expect(sameDay.trend).toEqual([{ label: 'Sep 1', value: 60 }, { label: 'Oct 20', value: 72 }]);
+  });
+
   test('unscored rows are skipped when looking for the previous score', () => {
     const rows = [row('a0', '2026-08-01', 58), { ...row('a1', '2026-09-01', null), overall_score: null, turf_density: null, weed_suppression: null, color_health: null, stress_damage: null }, row('a2', '2026-10-20', 72)];
     expect(buildWebTop(lawn(), null, historyOf(rows)).score.previous).toBe(58);
