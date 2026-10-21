@@ -49,6 +49,69 @@ const CONTACT_PREF_COLUMNS = [
   'consent_attested_at',
 ];
 
+// The API spelling of a contact's choices (portal /contact-preferences and
+// the Customer 360 admin read-out share it): purpose columns ↔ camelCase
+// keys, channel columns ↔ camelCase keys.
+const CONTACT_PREF_KEY_BY_COLUMN = {
+  appointment_confirmation: 'appointmentConfirmation',
+  service_reminder_72h: 'serviceReminder72h',
+  service_reminder_24h: 'serviceReminder24h',
+  tech_en_route: 'techEnRoute',
+  tech_arrived: 'techArrived',
+  service_completed: 'serviceCompleted',
+};
+const CONTACT_CHANNEL_KEY_BY_COLUMN = {
+  appointment_confirmation_channel: 'appointmentConfirmationChannel',
+  service_reminder_72h_channel: 'serviceReminder72hChannel',
+  service_reminder_24h_channel: 'serviceReminder24hChannel',
+  en_route_channel: 'enRouteChannel',
+  tech_arrived_channel: 'techArrivedChannel',
+  service_complete_channel: 'serviceCompleteChannel',
+};
+const CONTACT_CHANNEL_VALUES = ['sms', 'email', 'both'];
+
+// Effective choices: the contact's row overlaid on the account's
+// notification_prefs row. A purpose the holder turned off account-wide reads
+// off AND is flagged in accountOff (locked — choices only narrow). NULL
+// channel = 'both' (whatever the account sends).
+function effectiveContactPreferences(accountRow, ownRow, { emailAvailable = true } = {}) {
+  const account = accountRow || {};
+  const own = ownRow || {};
+  const preferences = {};
+  const accountOff = {};
+  for (const [col, key] of Object.entries(CONTACT_PREF_KEY_BY_COLUMN)) {
+    const holderOff = account[col] === false;
+    accountOff[key] = holderOff;
+    preferences[key] = !holderOff && own[col] !== false;
+  }
+  for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) {
+    const chosen = CONTACT_CHANNEL_VALUES.includes(own[col]) ? own[col] : 'both';
+    // An email-only choice with no address on file (the holder removed it)
+    // is nothing — the save clears it; a row from before that reads as the
+    // default rather than as an option the card no longer offers (codex r6).
+    // So does a text-only report choice from before the contact report text
+    // was switched off — the senders read it the same way (codex r10,
+    // effectiveChannelChoice).
+    const unavailable = (chosen === 'email' && !emailAvailable)
+      || (col === 'service_complete_channel' && chosen === 'sms' && !reportTextLive());
+    preferences[key] = unavailable ? 'both' : chosen;
+  }
+  preferences.smsEnabled = own.sms_enabled !== false;
+  preferences.emailEnabled = own.email_enabled !== false;
+  return { preferences, accountOff };
+}
+
+// API body (camelCase) → row patch (columns). Unknown keys are ignored here;
+// the routes validate the body first.
+function contactPrefPatchFromBody(updates = {}) {
+  const patch = {};
+  for (const [col, key] of Object.entries(CONTACT_PREF_KEY_BY_COLUMN)) if (updates[key] !== undefined) patch[col] = updates[key];
+  for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) if (updates[key] !== undefined) patch[col] = updates[key];
+  if (updates.smsEnabled !== undefined) patch.sms_enabled = updates.smsEnabled;
+  if (updates.emailEnabled !== undefined) patch.email_enabled = updates.emailEnabled;
+  return patch;
+}
+
 // The appointment EMAIL's event types (appointment-email.js sendTemplate) →
 // the purpose column they belong to. Cancellation / no-show carry no
 // per-purpose opt-out, for the holder or a contact.
@@ -351,6 +414,11 @@ module.exports = {
   CONTACT_PREF_TOGGLES,
   CHANNEL_COLUMN_FOR,
   CONTACT_PREF_COLUMNS,
+  CONTACT_PREF_KEY_BY_COLUMN,
+  CONTACT_CHANNEL_KEY_BY_COLUMN,
+  CONTACT_CHANNEL_VALUES,
+  effectiveContactPreferences,
+  contactPrefPatchFromBody,
   contactPrefsLive,
   columnForEmailEvent,
   contactAllows,

@@ -705,23 +705,9 @@ const PREF_COLUMN_TO_KEY = Object.fromEntries(Object.entries(PREF_KEY_TO_COLUMN)
 // back on — choices only narrow). Only a contact session reaches these; the
 // holder manages contacts through /property-preferences.
 // =========================================================================
-const CONTACT_PREF_KEY_BY_COLUMN = {
-  appointment_confirmation: 'appointmentConfirmation',
-  service_reminder_72h: 'serviceReminder72h',
-  service_reminder_24h: 'serviceReminder24h',
-  tech_en_route: 'techEnRoute',
-  tech_arrived: 'techArrived',
-  service_completed: 'serviceCompleted',
-};
-const CONTACT_CHANNEL_KEY_BY_COLUMN = {
-  appointment_confirmation_channel: 'appointmentConfirmationChannel',
-  service_reminder_72h_channel: 'serviceReminder72hChannel',
-  service_reminder_24h_channel: 'serviceReminder24hChannel',
-  en_route_channel: 'enRouteChannel',
-  tech_arrived_channel: 'techArrivedChannel',
-  service_complete_channel: 'serviceCompleteChannel',
-};
-const CONTACT_CHANNEL_VALUES = ['sms', 'email', 'both'];
+const {
+  CONTACT_PREF_KEY_BY_COLUMN, CONTACT_CHANNEL_KEY_BY_COLUMN, CONTACT_CHANNEL_VALUES,
+} = require('../services/contact-notification-prefs');
 
 async function contactPreferencePayload(req) {
   const ContactPrefs = require('../services/contact-notification-prefs');
@@ -731,28 +717,7 @@ async function contactPreferencePayload(req) {
     ContactPrefs.getContactPrefRow(req.customerId, contact.phone),
     db('recipient_optin').where({ customer_id: req.customerId, phone_key: contact.phoneKey }).first('status').catch(() => null),
   ]);
-  const account = accountRow || {};
-  const preferences = {};
-  const accountOff = {};
-  for (const [col, key] of Object.entries(CONTACT_PREF_KEY_BY_COLUMN)) {
-    const holderOff = account[col] === false;
-    accountOff[key] = holderOff;
-    preferences[key] = !holderOff && own?.[col] !== false;
-  }
-  for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) {
-    const chosen = CONTACT_CHANNEL_VALUES.includes(own?.[col]) ? own[col] : 'both';
-    // An email-only choice with no address on file (the holder removed it)
-    // is nothing — the save clears it; a row from before that reads as the
-    // default rather than as an option the card no longer offers (codex r6).
-    // So does a text-only report choice from before the contact report text
-    // was switched off — the senders read it the same way (codex r10,
-    // contact-notification-prefs.js effectiveChannelChoice).
-    const unavailable = (chosen === 'email' && !contact.email)
-      || (col === 'service_complete_channel' && chosen === 'sms' && !contactReportTextsOn());
-    preferences[key] = unavailable ? 'both' : chosen;
-  }
-  preferences.smsEnabled = own?.sms_enabled !== false;
-  preferences.emailEnabled = own?.email_enabled !== false;
+  const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable: !!contact.email });
   // The report rule (customer-contact.js slotWithheldFromReports) decides
   // whether this contact ever gets the visit's findings; the card says so
   // instead of offering a report toggle that would never fire.
@@ -795,18 +760,14 @@ router.put('/contact-preferences', async (req, res, next) => {
       consentAttested: Joi.boolean(),
     }).min(1);
     const updates = await schema.validateAsync(req.body || {});
-    const patch = {};
-    for (const [col, key] of Object.entries(CONTACT_PREF_KEY_BY_COLUMN)) if (updates[key] !== undefined) patch[col] = updates[key];
-    for (const [col, key] of Object.entries(CONTACT_CHANNEL_KEY_BY_COLUMN)) if (updates[key] !== undefined) patch[col] = updates[key];
-    if (updates.smsEnabled !== undefined) patch.sms_enabled = updates.smsEnabled;
-    if (updates.emailEnabled !== undefined) patch.email_enabled = updates.emailEnabled;
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    const patch = ContactPrefs.contactPrefPatchFromBody(updates);
     // An email choice needs an address on file for this contact — otherwise
-    // "email only" silently means nothing arrives.
-    if (!contact.email) {
-      for (const col of Object.keys(CONTACT_CHANNEL_KEY_BY_COLUMN)) {
-        if (patch[col] === 'email') return res.status(400).json({ error: 'Add an email address with the account holder before choosing email delivery.' });
-      }
-    }
+    // "email only" silently means nothing arrives. Decided against the slot
+    // as it stands under the row lock below (codex r11 P2), not the
+    // session's snapshot: a holder who removed the address since must not
+    // have an email-only choice restored right behind their save.
+    const asksEmailOnly = Object.keys(CONTACT_CHANNEL_KEY_BY_COLUMN).some((col) => patch[col] === 'email');
     // Text-only delivery of the service report needs the contact report text
     // (GATE_CONTACT_REPORT_TEXT) to exist — otherwise "text" would only hold
     // the email, and no report would reach them (codex #6363 r9 P2).
@@ -818,7 +779,6 @@ router.put('/contact-preferences', async (req, res, next) => {
     // Only a save that OPENS a text path (a purpose that will now text this
     // contact) needs the attestation; email-only choices and purposes the
     // holder turned off never do.
-    const ContactPrefs = require('../services/contact-notification-prefs');
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
     const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
@@ -841,7 +801,9 @@ router.put('/contact-preferences', async (req, res, next) => {
       // not have the pruned row (and its attestation) recreated here, nor
       // the old phone's pending ask confirmed (codex #6363 r3 P2).
       const live = await trx('customers').where({ id: req.customerId }).forUpdate().first();
-      if (!require('../services/customer-contact').findServiceContactSlotByPhoneKey(live, contact.phoneKey)) return 'removed';
+      const liveSlot = require('../services/customer-contact').findServiceContactSlotByPhoneKey(live, contact.phoneKey);
+      if (!liveSlot) return 'removed';
+      if (asksEmailOnly && !liveSlot.email) return 'email_unavailable';
       // The consent decision reads its inputs under the same lock (codex r4
       // P2): a holder enabling a purpose between an unlocked read and this
       // write must not let a text path open without the attestation.
@@ -869,6 +831,9 @@ router.put('/contact-preferences', async (req, res, next) => {
     });
     if (outcome === 'removed') {
       return res.status(401).json({ error: 'This number is no longer a contact on this account.', code: 'CONTACT_REMOVED' });
+    }
+    if (outcome === 'email_unavailable') {
+      return res.status(400).json({ error: 'Add an email address with the account holder before choosing email delivery.', code: 'EMAIL_UNAVAILABLE' });
     }
     if (outcome === 'consent_required') {
       return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });

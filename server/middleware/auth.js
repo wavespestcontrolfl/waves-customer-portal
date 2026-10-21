@@ -371,6 +371,17 @@ async function contactRotationRefusal(trx, customer, decoded, options) {
   return null;
 }
 
+// The customers row a rotation validates against. A CONTACT family's
+// rotation takes that row's lock FIRST — the order the holder's contact save
+// takes (the row, then the refresh families it revokes): an unlocked read
+// here followed by the refresh-row lock, against an editor holding the row
+// and waiting on that token, would deadlock one of them (codex #6363 r11
+// P2). Holder rotations keep the plain read.
+function rotationCustomerRead(trx, decoded) {
+  const query = trx('customers').where({ id: decoded.customerId }).whereNull('deleted_at');
+  return (decoded.contactKey ? query.forUpdate() : query).first();
+}
+
 /**
  * Atomically consume a refresh token and replace it inside the same family.
  * Reusing any consumed token revokes every descendant in that family.
@@ -396,10 +407,7 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // A cancelled customer's saved session keeps refreshing under the C4
     // read-only allowance (sessionCustomerAdmitted); every other inactive
     // row is rejected exactly as before.
-    const customer = await trx('customers')
-      .where({ id: decoded.customerId })
-      .whereNull('deleted_at')
-      .first();
+    const customer = await rotationCustomerRead(trx, decoded);
     if (!sessionCustomerAdmitted(customer)) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
 
     const accountId = decoded.accountId || accountIdForCustomer(customer);

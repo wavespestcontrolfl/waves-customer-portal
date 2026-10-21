@@ -80,6 +80,17 @@ describe('contactAllows (pure)', () => {
     delete process.env.GATE_CONTACT_REPORT_TEXT;
   });
 
+  test('effectiveContactPreferences overlays the contact\'s row on the account\'s: holder-off reads off and locked; unavailable channel choices read as the default', () => {
+    const own = { tech_en_route: false, en_route_channel: 'sms', tech_arrived_channel: 'email', service_complete_channel: 'sms', sms_enabled: false };
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences({ service_reminder_72h: false }, own, { emailAvailable: false });
+    expect(preferences).toMatchObject({ serviceReminder72h: false, techEnRoute: false, appointmentConfirmation: true, enRouteChannel: 'sms', techArrivedChannel: 'both', serviceCompleteChannel: 'both', smsEnabled: false, emailEnabled: true });
+    expect(accountOff).toMatchObject({ serviceReminder72h: true, techEnRoute: false });
+    expect(ContactPrefs.effectiveContactPreferences(null, null).preferences.enRouteChannel).toBe('both');
+    expect(ContactPrefs.contactPrefPatchFromBody({ techEnRoute: false, enRouteChannel: 'email', smsEnabled: true, unknown: 1 }))
+      .toEqual({ tech_en_route: false, en_route_channel: 'email', sms_enabled: true });
+  });
+
   test('the appointment email event types map to their purpose column; no-show and cancellation to none', () => {
     expect(ContactPrefs.columnForEmailEvent('appointment.confirmation')).toBe('appointment_confirmation');
     expect(ContactPrefs.columnForEmailEvent('appointment.reminder_72h')).toBe('service_reminder_72h');

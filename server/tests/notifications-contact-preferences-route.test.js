@@ -258,6 +258,15 @@ describe('PUT /contact-preferences', () => {
     expect(tables.service_contact_notification_prefs[0].service_complete_channel).toBe('sms');
   });
 
+  test('email-only delivery is decided against the slot under the row lock: an address the holder removed since the token was issued refuses it (codex r11)', async () => {
+    // The session still carries sam@example.com; the holder cleared it.
+    tables.customers[0].service_contact_email = null;
+    const res = await put({ enRouteChannel: 'email' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('EMAIL_UNAVAILABLE');
+    expect(tables.service_contact_notification_prefs).toEqual([]);
+  });
+
   test('email-only delivery needs an address on file for this contact', async () => {
     mockSession.current.contactSession = TERRY;
     const res = await put({ enRouteChannel: 'email' });
