@@ -358,7 +358,7 @@ function returnNote(item, state, depth = 0) {
   let hiddenKeys = 0;
   for (const [rawKey, entry] of Object.entries(item)) {
     // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
-    const scrubbedKey = scrubNote(rawKey).text;
+    const scrubbedKey = scrubNote(redactString(rawKey, state)).text;
     const key = scrubbedKey === rawKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
     if (key !== rawKey) state.noteSecrets += 1;
     if (entry !== null && entry !== undefined && isCredentialField(rawKey, entry)) {

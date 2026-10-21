@@ -235,6 +235,13 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
     expect(Object.values(result.data.notes)).toContain('old integration');
   });
 
+  test('a private link used as a key is replaced too (pre-push audit)', async () => {
+    const key = 'https://portal.wavespestcontrol.com/l/abc234def5';
+    const result = await read(ENTRY, { id: 1, notes: { [key]: 'reference' } });
+    expect(JSON.stringify(result)).not.toContain('abc234def5');
+    expect(Object.values(result.data.notes)).toContain('reference');
+  });
+
   test('a note longer than the scan limit keeps the cut marker even after link redaction shrinks it', async () => {
     const longUrl = `https://example-private.test/doc?token=${'a'.repeat(SCAN_LIMIT + 1000)}`;
     const result = await read(ENTRY, { id: 1, notes: `${longUrl} then the real instructions` });
