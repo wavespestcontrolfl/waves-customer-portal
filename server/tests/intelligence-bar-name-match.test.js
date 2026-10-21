@@ -627,7 +627,7 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
       expect(candidateReads()).toBe(3);
     });
 
-    test('context reads cover only the survivors, and are skipped for fewer than two', async () => {
+    test('context reads cover only the survivors; a sole survivor still gets them (context lowers the floor)', async () => {
       mockBook();
       await executeTool('query_customers', { search: 'richard dump' });
       const visit = db.__queries.find((q) => q.sql.includes('from "scheduled_services"'));
@@ -644,7 +644,9 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
         return [{ id: 'only', first_name: 'Richard', last_name: 'Stompf' }];
       };
       await executeTool('query_customers', { search: 'richard stompf' });
-      expect(db.__queries.some((q) => /from "(scheduled_services|sms_log|call_log)"/.test(q.sql))).toBe(false);
+      const reads = db.__queries.filter((q) => /from "(scheduled_services|sms_log|call_log)"/.test(q.sql));
+      expect(reads.length).toBeGreaterThan(0);
+      for (const q of reads) expect(q.bindings).not.toContain('other');
     });
   });
 });

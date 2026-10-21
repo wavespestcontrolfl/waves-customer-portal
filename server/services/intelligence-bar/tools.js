@@ -626,11 +626,14 @@ async function withApproximateCustomers(result, unsearched, { search, limit, off
 }
 
 // Name columns of every customer the main query's filters and scope allow.
-function nameCandidates(unsearched) {
+function nameCandidates(unsearched, cap = APPROXIMATE_CANDIDATE_CAP) {
   return unsearched.clone().clearSelect().clearOrder()
     .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
-    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+    .orderBy('customers.id').limit(cap);
 }
+// The shared index holds the whole live book (four short columns a row), so a
+// filtered search can reach any customer; scoring stays capped per request.
+const NAME_INDEX_BOOK_CAP = 200000;
 
 // Customer rows (main query columns) in ranked order. v2 rows carry `match`.
 async function rankedCustomerRows(unsearched, ranked, v2) {
@@ -658,8 +661,9 @@ const NAME_MATCH_CONTEXT_DAYS = 7;
 const NAME_MATCH_LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 async function nameMatchContext(pageCustomerId, candidateIds) {
   const context = { onScreenCustomerId: pageCustomerId || null, visitTodayIds: new Set(), recentContactIds: new Set() };
-  // Fewer than two candidates have nothing to rank against: skip the reads.
-  if (candidateIds.length < 2) return context;
+  // Context also lowers the floor (0.75 -> 0.65), so even a sole survivor
+  // needs it; only an empty list skips the reads.
+  if (!candidateIds.length) return context;
   try {
     const now = new Date();
     const since = new Date(now.getTime() - NAME_MATCH_CONTEXT_DAYS * 86400000);
@@ -690,7 +694,7 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
 function scopedNameIndex(unsearched, scoped) {
   if (scoped) return Promise.resolve(nameCandidates(unsearched)).then(buildNameIndex);
   const book = db('customers').whereNull('customers.deleted_at');
-  return cachedNameIndex('customers:live', () => nameCandidates(book));
+  return cachedNameIndex('customers:live', () => nameCandidates(book, NAME_INDEX_BOOK_CAP));
 }
 
 // Keep only the survivors the main query (its filters and customer scope)
