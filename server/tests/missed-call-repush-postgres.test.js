@@ -136,9 +136,25 @@ jest.setTimeout(30000);
 
   test('two sweeps racing on one fresh bell send exactly once', async () => {
     await bell(45);
+    // Barrier: both contenders reach the push service (so both read the bell as
+    // a candidate) before either claim lands. Only the claim winner may hand off.
+    let arrived = 0;
+    let handoffs = 0;
+    let release;
+    const bothArrived = new Promise((resolve) => { release = resolve; });
+    PushService.sendToAdminUsers.mockImplementation(async (ids, build, opts) => {
+      arrived += 1;
+      if (arrived === 2) release();
+      await bothArrived;
+      if (!(await opts.beforeDispatch())) return { sent: 0, superseded: true };
+      handoffs += 1;
+      ids.forEach((id) => build(id));
+      return { sent: ids.length, subscriptions: ids.length };
+    });
     const results = await Promise.all([run(), run()]);
+    expect(arrived).toBe(2);
+    expect(handoffs).toBe(1);
     expect(results.reduce((a, b) => a + b, 0)).toBe(1);
-    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
   });
 
   test('not before 30 minutes', async () => {
@@ -238,6 +254,27 @@ jest.setTimeout(30000);
     expect(await sweepMissedCallRepush({ now: NOW, hours: HOURS, clock: () => at })).toBe(0);
     expect((await stored(row)).metadata.repushed_at).toBeTruthy();
     expect((await stored(row)).metadata.repush_sent).toBe(0);
+  });
+
+  test('the handoff rereads the closed-day list: a closure landing after the claim stops the device', async () => {
+    const row = await bell(45);
+    PushService.sendToAdminUsers.mockImplementationOnce(async (ids, build, opts) => {
+      expect(await opts.beforeDispatch()).toBe(true);
+      await database('schedule_blackout_dates').insert({ date: '2026-10-20' });
+      return (await opts.beforeHandoff()) ? { sent: 1 } : { sent: 0, superseded: true };
+    });
+    expect(await run()).toBe(0);
+    expect((await stored(row)).metadata.repush_sent).toBe(0);
+    // An unreadable list at the handoff also stops it.
+    await database('schedule_blackout_dates').del();
+    const second = await bell(46);
+    PushService.sendToAdminUsers.mockImplementationOnce(async (ids, build, opts) => {
+      expect(await opts.beforeDispatch()).toBe(true);
+      jest.spyOn(blackoutDates, 'getBlackoutDates').mockRejectedValue(new Error('blackout read failed'));
+      return (await opts.beforeHandoff()) ? { sent: 1 } : { sent: 0, superseded: true };
+    });
+    expect(await run()).toBe(0);
+    expect((await stored(second)).metadata.repush_sent).toBe(0);
   });
 
   test('a closed day in the blackout list holds it back; an unreadable list counts as closed', async () => {

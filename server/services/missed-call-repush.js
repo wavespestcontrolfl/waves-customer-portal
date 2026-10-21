@@ -110,7 +110,9 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
     return claimed;
   };
   // Before every device: still open, and still office hours.
-  const beforeHandoff = async () => officeOpenAt(hours, clock()) && (await stillOpen());
+  // canRepushNow re-reads the closed-day list strictly, so a closure that lands
+  // mid-fan-out (or an unreadable list) stops the remaining devices too.
+  const beforeHandoff = async () => (await canRepushNow(hours, clock)) && (await stillOpen());
   let stats = null;
   try {
     stats = await PushService.sendToAdminUsers(
