@@ -202,6 +202,16 @@ describe('the preview', () => {
     expect((await preview()).effects.map((e) => e.text).join('\n')).not.toMatch(/is cancelled with Stripe/);
   });
 
+  test('a visit date read from Postgres as a Date shows the full day and pins the year', async () => {
+    state.scheduled_services[0].scheduled_date = new Date('2099-01-01T00:00:00.000Z');
+    const card = await preview();
+    expect(card.effects.map((e) => e.text).join('\n')).toMatch(/linked visit \(2099-01-01, completed\)/);
+    // The same month and day in another year is a different visit date: drift.
+    state.scheduled_services[0].scheduled_date = new Date('2105-01-01T00:00:00.000Z');
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
+    expect(Invoices.voidInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
   test('an open payer statement is named; a missing visit is said', async () => {
     state.invoices[0].payer_statement_id = 'stmt-1';
     state.payer_statements = [{ id: 'stmt-1', status: 'open' }];

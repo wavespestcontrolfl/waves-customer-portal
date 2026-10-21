@@ -212,7 +212,8 @@ async function linkedVisit(invoice) {
   if (!visitId) return null;
   const visit = await db('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date', 'window_start', 'window_end');
   return visit ? {
-    id: visit.id, status: visit.status || null, date: visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null,
+    id: visit.id, status: visit.status || null, // A pg DATE arrives as a Date at UTC midnight: the repo's calendar-day helper keeps the day (no timezone shift).
+    date: visit.scheduled_date ? require('../../utils/datetime-et').etCalendarDayOf(visit.scheduled_date) : null,
     window: [visit.window_start, visit.window_end].map((v) => (v ? String(v).slice(0, 8) : '')).join('-'),
   } : null;
 }
