@@ -195,6 +195,27 @@ describe('GET /schedule and /schedule/next for a contact session', () => {
       expect(JSON.stringify(body)).not.toContain('tok-1');
     });
   });
+
+  test('a contact asking for allProperties=1 gets the ordinary contact projection, never the coverage payload (codex r14)', async () => {
+    mockSession.contact = OCCUPANT;
+    let calls = 0;
+    db.mockImplementation(() => { calls += 1; return calls === 1 ? chain([row]) : chain([customerRow]); });
+    await withServer(async (get) => {
+      const { status, body } = await get('/schedule?allProperties=1');
+      expect(status).toBe(200);
+      expect(body.coverageOnly).toBeUndefined();
+      expect(body.upcoming[0]).toMatchObject({ id: 'svc-1', rescheduleUrl: null });
+      expect(body.reservice).toBeNull();
+      expect(JSON.stringify(body)).not.toMatch(/tok-1|rt-1/);
+    });
+    db.mockImplementation(() => chain([row]));
+    await withServer(async (get) => {
+      const { body } = await get('/schedule/next?allProperties=1');
+      expect(body.next).toMatchObject({ id: 'svc-1', rescheduleUrl: null });
+      expect(body.propertyScope).toBeDefined();
+      expect(JSON.stringify(body)).not.toContain('tok-1');
+    });
+  });
 });
 
 describe('GET /services for a contact session', () => {

@@ -289,7 +289,13 @@ async function revokeContactRefreshFamilies(dbh, customerId, reason = 'account_i
 
 async function revokeRemovedContactRefreshSessions(trx, customerId, keepPhones = []) {
   const { phoneKeyOf } = require('../services/customer-contact');
-  const keep = [...new Set(keepPhones.map(phoneKeyOf).filter(Boolean))];
+  // A number the HOLDER now owns (customers.phone) is no contact's, whatever
+  // slot still lists it — contactSessionFor refuses it — so its family ends
+  // here too; otherwise a later change of the holder's number would revive
+  // the kept family without a new OTP (codex #6363 r14 P2).
+  const holder = await trx('customers').where({ id: customerId }).first('phone');
+  const holderKey = phoneKeyOf(holder?.phone);
+  const keep = [...new Set(keepPhones.map(phoneKeyOf).filter((k) => k && k !== holderKey))];
   const now = new Date();
   const q = trx(REFRESH_TABLE).where({ customer_id: customerId }).whereNotNull('contact_key').whereNull('revoked_at');
   if (keep.length) q.whereNotIn('contact_key', keep);

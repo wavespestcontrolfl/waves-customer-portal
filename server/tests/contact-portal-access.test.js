@@ -464,6 +464,21 @@ describe('contact session — lifecycle', () => {
     expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: holder.body.refreshToken })).status).toBe(200);
   });
 
+  test('a number the holder claims as their own ends its contact family even when a slot still lists it (codex r14)', async () => {
+    const contact = await login(CONTACT_PHONE);
+    const tenant = await login(TENANT_PHONE);
+    // The holder's primary phone becomes the contact's number; the slot keeps it.
+    tables.customers[0].phone = CONTACT_PHONE;
+    await auth.revokeRemovedContactRefreshSessions((table) => builder(table), 'cust-holder', [CONTACT_PHONE, TENANT_PHONE]);
+    const byKey = (key) => tables.customer_refresh_tokens.filter((r) => r.contact_key === key);
+    expect(byKey('9415550202').every((r) => r.revoked_at && r.revoke_reason === 'contact_removed')).toBe(true);
+    expect(byKey('9415550303').every((r) => !r.revoked_at)).toBe(true);
+    // The holder's number moving away again does not revive the family.
+    tables.customers[0].phone = HOLDER_PHONE;
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: contact.body.refreshToken })).status).toBe(401);
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: tenant.body.refreshToken })).status).toBe(200);
+  });
+
   test('deactivating the account (revokeContactRefreshFamilies) ends every contact family on the row and no holder family', async () => {
     await login(CONTACT_PHONE);
     await login(TENANT_PHONE);

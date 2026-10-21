@@ -130,7 +130,12 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { days, allProperties } = value;
+    const { days } = value;
+    // A CONTACT session (GATE_CONTACT_LOGIN) never takes the allProperties
+    // escape hatch: that plan-coverage payload returns before the contact
+    // projection below and carries the holder's plan and cancellable-work
+    // facts (codex #6363 r14 P2). The flag reads as unset for a contact.
+    const allProperties = value.allProperties && !req.contactSession;
     // ET calendar day, matching the etDateString() lower bound below — a UTC
     // cutoff rolls the window an ET-evening early (scheduled_date is a DATE).
     const cutoffDate = etDateString(addETDays(new Date(), days));
@@ -828,7 +833,8 @@ async function appPrepPhotosField(svc, customerActive) {
 router.get('/next', async (req, res, next) => {
   try {
     // Same allProperties escape hatch as GET / (plan-coverage evidence).
-    const allProperties = ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
+    // Never for a contact session — see GET / (codex #6363 r14 P2).
+    const allProperties = !req.contactSession && ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
     const scope = allProperties ? null : await resolveSessionScope(req);
     const nextQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
