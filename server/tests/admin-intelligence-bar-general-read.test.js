@@ -459,3 +459,23 @@ describe('the taint follows the conversation (thread record)', () => {
     expect(append.mock.calls[0][0].assistantText).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
   });
 });
+
+describe('GATE_DICTATION_MONEY_NORMALIZE keeps the dictated amount with the saved task', () => {
+  const Tasks = require('../services/intelligence-bar/tasks');
+  const DICTATED = [{ heard: '6133', candidates: ['$61.33', '$6,133'] }];
+  const savedRequest = () => Tasks.begin.mock.calls.at(-1)[0].request;
+  afterEach(() => { delete process.env.GATE_DICTATION_MONEY_NORMALIZE; });
+
+  test('gate on: a customer pick or a resume rebuilds the request with it', async () => {
+    process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+    scriptModel([]);
+    await withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'charge 6133 a month', context: 'customers', dictation_money: DICTATED }));
+    expect(savedRequest().dictation_money).toEqual(DICTATED);
+  });
+
+  test('gate off: the saved request is exactly as before', async () => {
+    scriptModel([]);
+    await withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'charge 6133 a month', context: 'customers', dictation_money: DICTATED }));
+    expect(savedRequest()).not.toHaveProperty('dictation_money');
+  });
+});

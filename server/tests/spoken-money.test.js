@@ -64,6 +64,9 @@ const REWRITES = [
   ['charge for gate code sixty one thirty three', SAME],
   ['the lockbox code is 61 33, price is separate', SAME],
   ['door code sixty-one thirty-three, total forty dollars', 'door code sixty-one thirty-three, total $40'],
+  ['discount one hundred%', SAME],
+  ['discount a hundred % off the price', SAME],
+  ['price 6133%', SAME],
   // cents are not dollars
   ['charge one hundred fifty five cents', SAME],
   ['charge 61 33 cents', SAME],

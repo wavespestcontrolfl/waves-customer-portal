@@ -3476,7 +3476,9 @@ async function runQuery(req, res, next) {
       const taskRequest = { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
         conversationHistory: conversationHistory.slice(-10),
         thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
-        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
+        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+        // kept with the saved task so a customer pick or a resume still asks about the dictated amount
+        ...(dictationMoneyNormalizeLive() && Array.isArray(req.body.dictation_money) ? { dictation_money: req.body.dictation_money.slice(0, 3) } : {}) };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
         ...taskRequestsFor(req, taskRequest),
