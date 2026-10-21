@@ -399,9 +399,15 @@ async function loadPage(pageData, prompt) {
   return page;
 }
 
-function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort, nameHint) {
+function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort, nameHint, onScreenPick = null) {
   if (!complete || cohort) return { target: null, targets: [], ambiguous: true };
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
+  // GATE_IB_TARGET_RULES_V2: the owner is viewing one of several same-name customers
+  // and typed that name: the validated on-screen customer is the target, no choices
+  // (Codex #6369 r13). Not a pick when the viewed customer is not among the matches.
+  if (onScreenPick && candidates.some(candidate => candidate.customer_id === onScreenPick.customer_id)) {
+    return { target: onScreenPick, targets: [onScreenPick], ambiguous: false };
+  }
   if (candidates.length > 1) return { target: null, targets: [], ambiguous: true };
   const pageReference = PAGE_REFERENCE_RE.test(targetClause(prompt));
   const target = !nameHint && pageReference ? viewedCustomer : null;
@@ -673,7 +679,7 @@ async function candidatesStage(r) {
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
-  r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint);
+  r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, scope ? r.page.customer : null);
   return null;
 }
 

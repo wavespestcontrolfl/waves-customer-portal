@@ -170,58 +170,72 @@ function customerNamedOrOnScreen(toolName, input, preview, grounding) {
 // `preview` is the mutation-free preview the proposal just ran (two-step
 // tools); the decision reads it where the input alone cannot tell a single
 // record from a group. `grounding` is targetGrounding(taskContext).
+// The decision is a pipeline of named stages; every stage must agree (Codex #6369 r13).
+//   scope:    the tool is an owner-direct tool and the call carries no address text.
+//             A change to any part of a street address always keeps its card, so the
+//             operator sees the exact address before it is saved (#6297).
+//   tool:     the tool's own single-record / field rules (DIRECT_TOOL_RULES below).
+//   grounding: the customer was named in this message or is on screen (rule 1).
 function directEditAllowed(toolName, input = {}, preview = null, grounding = null) {
-  return directEditAllowedBase(toolName, input, preview) && customerNamedOrOnScreen(toolName, input, preview, grounding);
+  const call = { toolName, input, preview, grounding };
+  return DIRECT_EDIT_STAGES.every(stage => stage(call));
 }
 
-function directEditAllowedBase(toolName, input = {}, preview = null) {
-  // A change to any part of a street address always keeps its card, so the
-  // operator sees the exact address before it is saved (#6297).
-  if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
-  // assign_technician takes a list of stops; one stop is an internal edit,
-  // several is a bulk change and keeps its card (pre-push P1). A lone stop
-  // that belongs to a grouped visit is not single-record either: the
-  // assignment aligns or detaches its siblings (Codex r2), which the card
-  // discloses — so the verified preview must show exactly one ungrouped stop.
-  if (toolName === 'assign_technician') {
-    if (!Array.isArray(input?.service_ids) || input.service_ids.length !== 1) return false;
-    const stops = preview?.stops;
-    if (!Array.isArray(stops) || stops.length !== 1 || stops[0]?.grouped_visit_id) return false;
-    // The executor resolves technician_name by partial match; direct only
-    // when the name the model passed IS the resolved technician's full name
-    // (Codex r5), so "Adam" with two Adams on the roster keeps the card.
-    return Boolean(preview.would_assign_to_id) && sameName(input.technician_name, preview.would_assign_to);
-  }
-  // The lead tools give lead_id precedence over lead_name; a name beside an
-  // id is never checked against it (Codex r5), so direct needs the id alone.
-  if (toolName === 'update_lead_contact' || toolName === 'update_lead_status') {
-    return Boolean(input?.lead_id) && !input.lead_name;
-  }
-  // A property label is customer-visible copy (the portal's property
-  // selector renders it verbatim), so a labelled update keeps the card
-  // (Codex r6); relationship and occupancy edits stay direct.
-  if (toolName === 'update_customer_property') {
-    return !String(input?.label ?? '').trim();
-  }
-  // reschedule_appointment on a grouped visit detaches the service or
-  // recomputes the parent visit window (the card discloses it; Codex r4), so
-  // the pinned appointment the proposal verified must carry no visit_id.
-  if (toolName === 'reschedule_appointment') {
-    const pin = preview?.pinned_appointment;
-    return Boolean(pin && typeof pin === 'object' && !pin.visit_id);
-  }
-  if (toolName === 'update_customer') {
-    const updates = input?.updates;
-    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
-    const keys = Object.keys(updates);
-    if (!keys.length || !keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key))) return false;
-    // `notes` replaces crm_notes: direct only over empty notes, read by the
-    // proposal (preview.notes_replaced); without that read, the card.
-    if (keys.includes('notes') && (!preview?.notes_replaced || preview.notes_replaced.before)) return false;
-    return true;
-  }
-  return true;
+const directScopeStage = ({ toolName, input }) => OWNER_DIRECT_TOOL_NAMES.has(toolName) && !changesAddress(toolName, input);
+const directToolStage = ({ toolName, input, preview }) => (DIRECT_TOOL_RULES.get(toolName) || (() => true))(input, preview);
+const directGroundingStage = ({ toolName, input, preview, grounding }) => customerNamedOrOnScreen(toolName, input, preview, grounding);
+
+// assign_technician takes a list of stops; one stop is an internal edit, several is a
+// bulk change and keeps its card (pre-push P1). A lone stop that belongs to a grouped
+// visit is not single-record either: the assignment aligns or detaches its siblings
+// (Codex r2), which the card discloses, so the verified preview must show exactly one
+// ungrouped stop. The executor resolves technician_name by partial match; direct only
+// when the name the model passed IS the resolved technician's full name (Codex r5),
+// so "Adam" with two Adams on the roster keeps the card.
+function assignTechnicianRule(input, preview) {
+  if (!Array.isArray(input?.service_ids) || input.service_ids.length !== 1) return false;
+  const stops = preview?.stops;
+  if (!Array.isArray(stops) || stops.length !== 1 || stops[0]?.grouped_visit_id) return false;
+  return Boolean(preview.would_assign_to_id) && sameName(input.technician_name, preview.would_assign_to);
 }
+
+// The lead tools give lead_id precedence over lead_name; a name beside an id is never
+// checked against it (Codex r5), so direct needs the id alone.
+const leadEditRule = input => Boolean(input?.lead_id) && !input.lead_name;
+
+// A property label is customer-visible copy (the portal's property selector renders it
+// verbatim), so a labelled update keeps the card (Codex r6); relationship and occupancy
+// edits stay direct.
+const propertyEditRule = input => !String(input?.label ?? '').trim();
+
+// reschedule_appointment on a grouped visit detaches the service or recomputes the
+// parent visit window (the card discloses it; Codex r4), so the pinned appointment the
+// proposal verified must carry no visit_id.
+function rescheduleRule(input, preview) {
+  const pin = preview?.pinned_appointment;
+  return Boolean(pin && typeof pin === 'object' && !pin.visit_id);
+}
+
+function customerUpdateRule(input, preview) {
+  const updates = input?.updates;
+  if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
+  const keys = Object.keys(updates);
+  if (!keys.length || !keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key))) return false;
+  // `notes` replaces crm_notes: direct only over empty notes, read by the proposal
+  // (preview.notes_replaced); without that read, the card.
+  return !(keys.includes('notes') && (!preview?.notes_replaced || preview.notes_replaced.before));
+}
+
+const DIRECT_TOOL_RULES = new Map([
+  ['assign_technician', assignTechnicianRule],
+  ['update_lead_contact', leadEditRule],
+  ['update_lead_status', leadEditRule],
+  ['update_customer_property', propertyEditRule],
+  ['reschedule_appointment', rescheduleRule],
+  ['update_customer', customerUpdateRule],
+]);
+
+const DIRECT_EDIT_STAGES = [directScopeStage, directToolStage, directGroundingStage];
 
 // UNTRUSTED READS. Text inside a read result can be typed by anyone (a
 // customer name a public quote visitor entered) and can read like an

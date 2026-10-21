@@ -196,7 +196,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       let limit = Infinity;
       const filters = [];
       const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
-      const q = { whereNull: () => q, whereIn: () => q, groupBy: () => q, select: () => q,
+      const q = { whereNull: () => q, whereIn: (column, values) => { if (column === 'id' && Array.isArray(values)) filters.push(row => values.includes(row.id)); return q; }, groupBy: () => q, select: () => q,
         // A contact lookup narrows the rows the way the SQL would; every other query sees all rows.
         where: (fn) => { if (typeof fn === 'function') fn.call(q); else if (fn?.id) filters.push(row => row.id === fn.id); return q; },
         whereRaw: (sql, bindings) => {
@@ -476,6 +476,32 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // Gate off: the whole prompt is read, as today.
     delete process.env[ON];
     expect(Context.targetClause(`${'a'.repeat(5000)} tail`)).toContain('tail');
+  });
+
+  test('gate on: the owner viewing one of several same-name customers and typing that name targets the viewed one, no choices (Codex #6369 r13)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(2);
+    const unrelated = { ...sameName(1)[0], id: id(200), first_name: 'Lee', last_name: 'Other', phone: '9415559001', city: 'Nokomis', hiddenFromName: true };
+    customers.push(unrelated);
+    const withPage = (customer_id, scope = true) => Context.resolve({ prompt: "update Pat Example's phone", pageData: { customer_id }, selectedTarget: null, ownerDirectScope: scope });
+    const second = await withPage(id(101));
+    expect(second.error).toBeUndefined();
+    expect(second.target.customer_id).toBe(id(101));
+    expect(second.targets.map(t => t.customer_id)).toEqual([id(101)]);
+    expect(second.ambiguous).toBe(false);
+    expect(Context.ownerDirectContext(second).sameNameNote).toBeUndefined();
+    const grounding = OwnerDirect.targetGrounding(Context.ownerDirectContext(second));
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
+    // A viewed customer who is not among the matches changes nothing: the choices flow stays.
+    const third = await withPage(id(200));
+    expect(third.target).toBeNull();
+    expect(third.ambiguous).toBe(true);
+    expect(Context.ownerDirectContext(third).sameNameNote).toMatch(/2 customers share the name/);
+    // Other admins (no owner-direct scope) keep today's behavior.
+    const other = await withPage(id(101), false);
+    expect(other.target).toBeNull();
+    expect(other.ambiguous).toBe(true);
   });
 
   test('gate on: a city disambiguates only in explicit syntax right after the name (Codex #6369 r10)', async () => {
