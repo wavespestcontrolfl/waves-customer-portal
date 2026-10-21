@@ -1630,7 +1630,8 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
           </div>
         )}
 
-        {(tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
+        {/* GATE_REPORT_WEB_PEOPLE: the web view shows the traced map as its own card at the top (WebPeopleCards). */}
+        {!(web && tracedMapUrl && data.webPeople?.treatedMap === true) && (tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
           <div className="doc-keep" {...gc}>
             <SectionHeader>Where we treated</SectionHeader>
             <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 10, overflow: 'hidden' }}>
