@@ -192,7 +192,7 @@ describe('gate on, platform off', () => {
     expect(category).toBe('agents');
     expect(title).toBe('System — check why the AI model is not answering');
     expect(why).toMatch(/1 failure recorded/);
-    expect(opts).toEqual(expect.objectContaining({ dedupeKey: 'ib:model-failure', dedupeWindowMs: 3600000, link: '/admin/agents' }));
+    expect(opts).toEqual(expect.objectContaining({ dedupeKey: 'ib:model-failure:admin', dedupeWindowMs: 3600000, dedupeOpenOnly: true, link: '/admin/agents' }));
     expect(opts.detail).toContain('anthropic_400');
     expect(opts.metadata).toEqual(expect.objectContaining({ code: 'anthropic_400', severity: 'needs-you', who: 'person' }));
   });
@@ -377,7 +377,7 @@ describe('the standing bell closes when the model answers again', () => {
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     try {
       await expect(ModelFailure.closeFailureBellOnRecovery()).resolves.toBe(2);
-      expect(chain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['ib:model-failure']);
+      expect(chain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['ib:model-failure:admin']);
       expect(mockMarkAdminDone).toHaveBeenCalledWith([11, 12], expect.objectContaining({ by: 'ib-model-recovered' }));
       // Inside a minute this process does not ask again; after a minute it does
       // (another replica may have rung), and it finds the row with no rows left.
@@ -417,18 +417,35 @@ describe('round 2 fixes (#6368)', () => {
       expect(history[3].role).toBe('assistant');
       expect(history[3].content).toContain('The AI model did not answer this request');
       // The client drops its thread: the failed exchange is not in it.
-      expect(body.threadsEnabled).toBe(false);
+      // No thread id (the palette drops its thread); availability is reported as it is.
       expect(body.threadId).toBeUndefined();
+      expect(typeof body.threadsEnabled).toBe('boolean');
     });
   });
 
   test('a middle round that succeeds does not close the bell; only a finished answer does', async () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
     const callSite = src.indexOf('.catch(err => { throw ModelFailure.tagModelCallError(err); });');
-    const close = src.indexOf('ModelFailure.closeFailureBellOnRecovery()');
+    const close = src.indexOf('ModelFailure.closeFailureBellOnRecovery({ lane:');
     expect(callSite).toBeGreaterThan(0);
     expect(close).toBeGreaterThan(callSite);
     // The close sits after the loop, beside the final send, not next to the model call.
     expect(src.slice(callSite, close)).toMatch(/const payload = \{/);
+  });
+});
+
+describe('round 3 fixes (#6368)', () => {
+  test('lanes are separate: a technician recovery does not close the admin bell', async () => {
+    const db = require('../models/db');
+    const select = jest.fn(async () => []);
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select };
+    db.mockImplementation(() => chain);
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    try {
+      await ModelFailure.closeFailureBellOnRecovery({ lane: 'tech', now: Date.now() + 10 * 60000 });
+      expect(chain.whereRaw).toHaveBeenLastCalledWith("metadata->>'dedupeKey' = ?", ['ib:model-failure:tech']);
+    } finally {
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
   });
 });

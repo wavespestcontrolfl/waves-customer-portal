@@ -4228,7 +4228,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     // The request finished on a model answer: a standing "model not answering"
     // bell is cleared here, never after a middle round a later round may still fail.
-    if (ibModelFailureNoticeLive()) ModelFailure.closeFailureBellOnRecovery().catch(() => {});
+    if (ibModelFailureNoticeLive()) ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin' }).catch(() => {});
     if (activeTask) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
         state: payload.taskState, response: payload, messages: currentMessages,
@@ -4261,7 +4261,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 async function answerModelFailure(req, res, { err, activeTask, pendingProposals = [], failureTurn = null }) {
   try {
     const actorId = getAdminActorId(req);
-    const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId });
+    const lane = req.techRole !== 'admin' || req.body?.context === 'tech' ? 'tech' : 'admin';
+    const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId, lane });
     logger.error(`[intelligence-bar] Query failed, model call (code=${handled.code})`);
     const priorHistory = Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-8) : [];
     const payload = {
@@ -4276,7 +4277,9 @@ async function answerModelFailure(req, res, { err, activeTask, pendingProposals 
       // The failed exchange is not appended to a server thread, so the client
       // drops its thread: the next ask starts without one and the no-thread
       // follow-up guards apply (fails closed), never a stale thread id.
-      threadsEnabled: false,
+      // Report the real availability (as the append-failure path does); with no
+      // threadId the palette drops its current thread, and History stays.
+      threadsEnabled: IbThreads.threadsEnabled() && lane === 'admin' && req.body?.context !== 'agent_estimate',
       threadId: undefined,
       threadSeq: undefined,
       toolCalls: [],

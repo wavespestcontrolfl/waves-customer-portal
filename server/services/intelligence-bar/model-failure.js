@@ -159,7 +159,11 @@ async function recordFailureGap(code) {
  * error code is machine text, so it rides in `detail`, not the headline or why.
  * Admin-only; never a customer message.
  */
-async function ringFailureBell({ code, gap }) {
+// One standing bell per model lane: the admin and technician bars can run
+// different models, so one lane's recovery must not close the other's alert.
+const laneKey = (lane) => `${BELL_DEDUPE_KEY}:${lane === 'tech' ? 'tech' : 'admin'}`;
+
+async function ringFailureBell({ code, gap, lane }) {
   try {
     const { raiseAdminAlert } = require('../admin-alert-compose');
     const failures = gap?.occurrences
@@ -171,16 +175,18 @@ async function ringFailureBell({ code, gap }) {
       why: failures,
       severity: 'needs-you',
       link: BELL_LINK,
-      subject: { type: 'check', id: 'ib-model-failure' },
+      subject: { type: 'check', id: `ib-model-failure-${lane === 'tech' ? 'tech' : 'admin'}` },
       doneWhen: 'model_answers',
       who: 'person',
     }, {
       detail: `The Intelligence Bar model call failed with error ${code}. A spending limit, an expired key or a provider outage can cause this. `
         + `${gap?.id ? `Gap row ${gap.id} counts every failure with this code. ` : ''}This alert rings at most once an hour.`,
       bell: true,
-      dedupeKey: BELL_DEDUPE_KEY,
+      dedupeKey: laneKey(lane),
       dedupeWindowMs: BELL_WINDOW_MS,
-      metadata: { source: 'ib-model-failure', code, ...(gap?.id ? { gapId: gap.id } : {}) },
+      // A row a recovery marked done does not hide a new outage in the same hour.
+      dedupeOpenOnly: true,
+      metadata: { source: 'ib-model-failure', lane: lane === 'tech' ? 'tech' : 'admin', code, ...(gap?.id ? { gapId: gap.id } : {}) },
     });
     return Boolean(result) && !result.suppressed;
   } catch (err) {
@@ -193,13 +199,13 @@ async function ringFailureBell({ code, gap }) {
  * Everything the route needs after a model call failed. Never throws.
  * Returns { answer, taskState, code } (taskState null without a saved task).
  */
-async function handleModelFailure({ err, activeTask, actorId }) {
+async function handleModelFailure({ err, activeTask, actorId, lane = 'admin' }) {
   const code = modelFailureCode(err);
   const receipts = activeTask ? await readReceipts(activeTask.id, actorId) : [];
   const status = classifyReceipts(receipts);
   const gap = await recordFailureGap(code);
-  await ringFailureBell({ code, gap });
-  bellMayBeOpen = true;
+  await ringFailureBell({ code, gap, lane });
+  laneState(lane).mayBeOpen = true;
   return {
     code,
     answer: buildAnswer({ code, status }),
@@ -213,16 +219,21 @@ async function handleModelFailure({ err, activeTask, actorId }) {
 // shared by every replica, so this checks it directly: right away after this
 // process saw a failure, otherwise at most once a minute per process.
 const RECOVERY_CHECK_MS = 60 * 1000;
-let bellMayBeOpen = true;
-let lastRecoveryCheckAt = 0;
-async function closeFailureBellOnRecovery({ now = Date.now() } = {}) {
-  if (!bellMayBeOpen && now - lastRecoveryCheckAt < RECOVERY_CHECK_MS) return 0;
-  bellMayBeOpen = false;
-  lastRecoveryCheckAt = now;
+const lanes = new Map();
+function laneState(lane) {
+  const key = lane === 'tech' ? 'tech' : 'admin';
+  if (!lanes.has(key)) lanes.set(key, { mayBeOpen: true, lastCheckAt: 0 });
+  return lanes.get(key);
+}
+async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin' } = {}) {
+  const state = laneState(lane);
+  if (!state.mayBeOpen && now - state.lastCheckAt < RECOVERY_CHECK_MS) return 0;
+  state.mayBeOpen = false;
+  state.lastCheckAt = now;
   try {
     const db = require('../../models/db');
     const rows = await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-      .whereRaw("metadata->>'dedupeKey' = ?", [BELL_DEDUPE_KEY]).select('id');
+      .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)]).select('id');
     if (!rows.length) return 0;
     const NotificationService = require('../notification-service');
     return await NotificationService.markAdminDone(rows.map((r) => r.id), {
@@ -230,7 +241,7 @@ async function closeFailureBellOnRecovery({ now = Date.now() } = {}) {
       resolution: 'The AI model answered again.',
     });
   } catch (err) {
-    bellMayBeOpen = true;
+    state.mayBeOpen = true;
     logger.warn(`[intelligence-bar] model failure bell not closed (code=${err?.code || err?.name || 'error'})`);
     return 0;
   }
