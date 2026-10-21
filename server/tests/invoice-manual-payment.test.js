@@ -535,7 +535,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `projects` / `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, projects = [], termLinked = false, hasTermTable = true } = {}) {
+  function settle({ pre = card(), locked = card(), onRelease = null, projects = [], termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
     const calls = { update: null, updateArgs: null, paymentsInsert: null, projectsLocked: false };
     const answer = (table, row) => {
       if (table === 'projects') {
@@ -550,7 +550,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
     db.mockImplementation((table) => {
       if (table === 'invoices') return recorder({ first: { ...pre } });
       if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
-      if (table === 'scheduled_services') return recorder({ first: { id: 'sv-other', status: 'scheduled' } });
+      if (table === 'scheduled_services') return recorder({ first: visit });
+      if (table === 'time_entries') return recorder({ first: timer });
       if (table === 'activity_log') return recorder();
       if (table === 'notification_prefs') return recorder({ first: null });
       throw new Error(`unexpected table ${table}`);
@@ -566,7 +567,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
           return r;
         }
         if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
-        if (table === 'scheduled_services') return recorder({ first: { id: 'sv-other', status: 'scheduled' } });
+        if (table === 'scheduled_services') return recorder({ first: visit });
+        if (table === 'time_entries') return recorder({ first: timer });
         if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -626,6 +628,25 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       settle();
       db.mockImplementation((table) => { if (table === 'receipt_delivery_jobs') throw new Error('no look expected'); return base(table); });
       await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ receiptRequested: false })) })).resolves.toBeTruthy();
+    });
+
+    test('a job timer started on the carded visit after the card (the visit row untouched) refuses with drift and records nothing; no running timer records', async () => {
+      const VISIT_EDITED = new Date('2099-01-01T09:00:00.000Z');
+      const visit = { id: 'sv-other', status: 'scheduled', service_type: 'Pest Control', scheduled_date: new Date('2099-01-01T00:00:00Z'), updated_at: VISIT_EDITED };
+      const closeout = { visitId: 'sv-other', serviceType: 'Pest Control', date: '2099-01-01', updatedAtMs: VISIT_EDITED.getTime() };
+      const fenceFor = () => settlementFenceFor(pin({ columns: { ...COLUMNS, scheduled_service_id: 'sv-other' }, closeout, closeoutTarget: 'sv-other' }));
+      const linked = card({ scheduled_service_id: 'sv-other' });
+      const running = settle({ pre: linked, locked: linked, visit, timer: { id: 'te-1' } });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fenceFor() }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toBe('A technician started the visit timer since this card; try again after the visit — nothing was recorded');
+      expect(running.paymentsInsert).toBeNull();
+      const clear = settle({ pre: linked, locked: linked, visit, timer: null });
+      jest.spyOn(require('../services/invoice-issued-closeout'), 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
+      jest.spyOn(require('../services/invoice-issued-closeout'), 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fenceFor() });
+      expect(clear.paymentsInsert).toHaveBeenCalledTimes(1);
+      jest.restoreAllMocks();
     });
 
     test('a card shown on another ET day refuses with drift and records nothing (the payment is never dated differently than approved)', async () => {

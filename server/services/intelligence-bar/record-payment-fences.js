@@ -14,7 +14,8 @@
  *           is compared too; under the lock it cannot be (the combined-session release rewrites it), which is safe because the
  *           settlement builds the invoice notes from the locked row and the paid UPDATE writes no other unpinned column;
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
- *           been edited since (edit time, scheduled date, service type) or is gone;
+ *           been edited since (edit time, scheduled date, service type) or is gone, or a technician started its job timer since (the
+ *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen);
  *         - a receipt was asked for and an automatic receipt job is already queued, waiting to retry or running for the invoice;
  *         - a project's report is held for this payment ('held' / 'releasing'): paying would release it to the customer, which
  *           the card cannot disclose. Under the lock the project rows are locked FOR UPDATE;
@@ -40,6 +41,7 @@ const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown �
 const DATE_TEXT = 'The day changed after the confirmation card was shown, so the payment would be recorded as of a different day — nothing was recorded';
 const VISIT_TEXT = 'The linked visit changed after the confirmation card was shown — nothing was recorded';
 const QUEUED_RECEIPT_TEXT = 'A receipt for this invoice is already queued; record the payment without a receipt here, or send it from the Invoices page — nothing was recorded';
+const TIMER_TEXT = 'A technician started the visit timer since this card; try again after the visit — nothing was recorded';
 const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 const CONTACT_CHANGED = 'receipt not sent: contact changed';
@@ -100,6 +102,9 @@ function settlementFenceFor(pin) {
     // The ledger row and the invoice note are stamped with the ET day the settlement runs on: never a different day than the card's.
     if (pin.paymentDate !== etDateString()) throw drift(DATE_TEXT);
     if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
+    // A job timer started after the card leaves no mark on the visit row, yet the closeout leaves a visit with a running timer open: the
+    // promised closeout would silently not happen. The closeout's own predicate, on the same handle.
+    if (pin.closeout && await require('../invoice-issued-closeout').visitJobTimerRunning(database, pin.closeout.visitId)) throw drift(TIMER_TEXT);
     if (await heldReportExists(database, pin.invoiceId, { lock: Boolean(locked) })) throw drift(HELD_REPORT_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
     if (pin.receiptRequested && await receiptJobExists(database, pin.invoiceId)) throw drift(QUEUED_RECEIPT_TEXT);

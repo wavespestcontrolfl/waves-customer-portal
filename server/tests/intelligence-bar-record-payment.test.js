@@ -16,14 +16,14 @@ jest.mock('../routes/admin-invoices', () => ({ recordPaymentFromBar: jest.fn(), 
 jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn() }));
 jest.mock('../services/invoice-prepay', () => ({ resolveInvoiceTermId: jest.fn() }));
-jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn() }));
+jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(), visitJobTimerRunning: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
 const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const { resolveInvoiceTermId } = require('../services/invoice-prepay');
-const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
+const { issuedCloseoutTarget, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
 const { etDateString } = require('../utils/datetime-et');
 const tools = require('../services/intelligence-bar/record-payment-tools');
 const { executeRecordPaymentTool, RECORD_PAYMENT_TOOLS, cardLines } = tools;
@@ -479,6 +479,28 @@ describe('confirm', () => {
       }
       state.scheduled_services.length = 0;
       await expect(fence(db)).rejects.toMatchObject({ drift: true });
+      delete db.schema;
+    });
+
+    test('a job timer started on the carded visit after the card refuses with the timer wording; the fence asks the closeout\'s own predicate about the carded visit', async () => {
+      issuedCloseoutTarget.mockResolvedValue(closeout);
+      state.scheduled_services.push(visitRow());
+      const fence = await fenceOf();
+      await expect(fence(db)).resolves.toBe(true);
+      expect(visitJobTimerRunning).toHaveBeenLastCalledWith(db, 'visit-77');
+      visitJobTimerRunning.mockResolvedValueOnce(true);
+      await expect(fence(db, { ...state.invoices[0] })).rejects.toMatchObject({ statusCode: 409, drift: true, message: 'A technician started the visit timer since this card; try again after the visit — nothing was recorded' });
+      delete db.schema;
+    });
+
+    test('a card with no closeout visit never asks about a timer', async () => {
+      db.schema = { hasTable: jest.fn(async () => false) };
+      visitJobTimerRunning.mockClear();
+      const card = await preview();
+      await confirm(card);
+      const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
+      await expect(settlementFence(db)).resolves.toBe(true);
+      expect(visitJobTimerRunning).not.toHaveBeenCalled();
       delete db.schema;
     });
 
