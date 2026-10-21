@@ -16,6 +16,7 @@ const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } 
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
+  treeShrubBedBasisSqFt,
 } = require('./property-calculator');
 const {
   resolveTreeShrubDensityMultiplier,
@@ -2628,10 +2629,19 @@ function estimateTreeShrubBedAreaFromLot(property = {}) {
   let pct = density.basePct;
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
 
-  const rawBedArea = Math.max(0, Math.round(lotSqFt * pct));
+  // Open-area basis (owner audit 2026-10-21): lot − footprint − hardscape
+  // when the property carries them (the calculatePropertyProfile shape);
+  // a bare { lotSqFt } caller still prices on the gross lot. See
+  // property-calculator.js#treeShrubBedBasisSqFt.
+  const basisSqFt = treeShrubBedBasisSqFt(
+    lotSqFt,
+    property.footprint ?? property.footprintSqFt,
+    property.hardscape,
+  );
+  const rawBedArea = Math.max(0, Math.round(basisSqFt * pct));
   // Owner ruling 2026-08-10: never clamped — the pricer routes large areas
   // (>= BED_AREA_REVIEW_SQFT) to manual review instead.
-  return { bedArea: rawBedArea, rawBedArea };
+  return { bedArea: rawBedArea, rawBedArea, basisSqFt };
 }
 
 // Quote-time T&S knob reader: a finite number inside [min, max], else null.
@@ -3988,7 +3998,10 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     const treeDensity = normalizeTreeShrubEnum(
       property.treeDensity || property.features?.trees || property.features?.treeDensity, ''
     );
-    const densityCount = TREE_SHRUB.treeDensityCounts?.[treeDensity];
+    // Commercial keeps its own backstop counts (COMMERCIAL_TREE_SHRUB): the
+    // 2026-10-21 residential audit lowered TREE_SHRUB.treeDensityCounts and
+    // did not reprice the commercial ornamental program.
+    const densityCount = (COMMERCIAL_TREE_SHRUB.treeDensityCounts || TREE_SHRUB.treeDensityCounts)?.[treeDensity];
     treeCount = (densityCount !== undefined && densityCount > 0) ? densityCount : 0;
   }
   treeCount = Math.max(0, Number(treeCount) || 0);

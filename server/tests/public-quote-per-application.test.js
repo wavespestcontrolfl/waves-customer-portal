@@ -225,7 +225,7 @@ describe('treeShrub count mapping — omitted count must reach the engine as ABS
     });
     const line = (estimate.lineItems || []).find((l) => /tree/i.test(l.service || l.label || ''));
     expect(line).toBeTruthy();
-    expect(JSON.stringify(estimate.warnings || line.warnings || [])).toMatch(/estimated 6 trees/i);
+    expect(JSON.stringify(estimate.warnings || line.warnings || [])).toMatch(/estimated 4 trees/i);
   });
 
   test('explicit treeCount: 0 suppresses the fallback (why the mapping must omit the key)', () => {

@@ -310,11 +310,35 @@ function computeTurfArea(input, fallback = {}) {
   };
 }
 
-function estimateBedArea(lotSqFt, shrubDensity = 'moderate', complexity = 'standard', options = {}) {
+// Tree & Shrub lot-based bed BASIS (owner audit 2026-10-21): landscape beds
+// sit in the OPEN part of the parcel, but the density percentage used to be
+// taken on the GROSS lot, so beds were billed under the house, the driveway
+// and the pool cage — a 10,000 sq ft lot with a 2,500 sq ft home, drive and
+// cage priced 1,800 sq ft of moderate beds where roughly 1,100 exist. The
+// basis is lot − building footprint − hardscape (estimateHardscape already
+// carries the pool / cage additions): the same subtraction the turf and
+// mosquito areas make. A non-positive result (footprint + hardscape swallow
+// the lot: bad or unit-scoped data) falls back to the gross lot so a real
+// property never prices zero beds. Shared by calculatePropertyProfile and
+// service-pricing.js#estimateTreeShrubBedAreaFromLot so the two paths agree.
+function treeShrubBedBasisSqFt(lotSqFt, footprint, hardscape) {
+  const lot = Number(lotSqFt) || 0;
+  if (lot <= 0) return 0;
+  const fp = Number(footprint);
+  const hs = Number(hardscape);
+  const open = lot
+    - (Number.isFinite(fp) && fp > 0 ? fp : 0)
+    - (Number.isFinite(hs) && hs > 0 ? hs : 0);
+  return open > 0 ? Math.round(open) : lot;
+}
+
+// basisSqFt is the OPEN-area basis from treeShrubBedBasisSqFt (callers pass
+// it in; a raw lot still works for callers with no footprint/hardscape).
+function estimateBedArea(basisSqFt, shrubDensity = 'moderate', complexity = 'standard', options = {}) {
   const density = BED_DENSITY[shrubDensity] || BED_DENSITY.moderate;
   let pct = density.basePct;
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
-  const raw = Math.round(lotSqFt * pct);
+  const raw = Math.round(basisSqFt * pct);
   // Owner ruling 2026-08-10: never clamped — large estimates price IN FULL
   // and the pricer routes them to review (bed_area_at_or_above_8000).
   return raw;
@@ -601,7 +625,7 @@ function calculatePropertyProfile(input) {
     bedAreaPricingConfidence = 'medium';
   } else if (toPositiveNumber(input.lotSqFt) > 0) {
     bedArea = estimateBedArea(
-      input.lotSqFt,
+      treeShrubBedBasisSqFt(input.lotSqFt, footprint, hardscape),
       features.shrubs,
       features.complexity
     );
@@ -713,7 +737,7 @@ function calculatePropertyProfile(input) {
 module.exports = {
   calculateFootprint, estimateHardscape, calculateComplexityScore,
   estimateLawnSqFt, computeTurfArea, toNonNegativeNumber,
-  estimateBedArea, calculatePerimeter,
+  estimateBedArea, treeShrubBedBasisSqFt, calculatePerimeter,
   getLotCategory, getMosquitoTreatableCategory, deriveMosquitoLotCategoryFromArea,
   // The engine's own presence rule (NO/NONE/FALSE/N/0/UNKNOWN are negative,
   // anything else present). Exported so a consumer replaying stored engine

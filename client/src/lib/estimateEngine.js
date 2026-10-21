@@ -2554,7 +2554,14 @@ export function calculateEstimate(inputs) {
       // NEVER clamped — the old 8,000 clamp priced a typed 14,000 as 8,000
       // (~43% low). Large areas price in full and carry the review marker.
       if (landscapeComplexity === 'COMPLEX' || landscapeComplexity === 'MODERATE') bp += 0.05;
-      eb = Math.round(lotSqFt * bp);
+      // Server parity (owner audit 2026-10-21, property-calculator.js
+      // treeShrubBedBasisSqFt): the percentage runs on the OPEN parcel —
+      // lot − building footprint − hardscape (pool/cage included) — not the
+      // gross lot, which billed beds under the house, drive and cage. A
+      // non-positive open area falls back to the gross lot.
+      const tsOpenArea = lotSqFt - footprint - estimateHardscape();
+      const tsBedBasis = tsOpenArea > 0 ? Math.round(tsOpenArea) : lotSqFt;
+      eb = Math.round(tsBedBasis * bp);
       fieldVerify.push('bed area');
       inferredRawBedArea = eb;
     }
@@ -2569,11 +2576,12 @@ export function calculateEstimate(inputs) {
     }
     // Tree count mirrors server v4.6 semantics: an explicit count (including
     // 0) is authoritative; only a MISSING count falls back to a treeDensity
-    // estimate (heavy 10 / moderate 6 / light 3 / none 0 — constants.js
-    // TREE_SHRUB.treeDensityCounts).
+    // estimate (heavy 6 / moderate 4 / light 2 / none 0 — constants.js
+    // TREE_SHRUB.treeDensityCounts; owner audit 2026-10-21 lowered from
+    // 10/6/3 so shade canopy is not billed as sprayed ornamentals).
     let et;
     if (_treeCount === '' || _treeCount === null || _treeCount === undefined) {
-      et = treeDensity === 'HEAVY' ? 10 : treeDensity === 'MODERATE' ? 6 : treeDensity === 'LIGHT' ? 3 : 0;
+      et = treeDensity === 'HEAVY' ? 6 : treeDensity === 'MODERATE' ? 4 : treeDensity === 'LIGHT' ? 2 : 0;
       if (et > 0) fieldVerify.push('tree count');
     } else {
       et = treeCount;

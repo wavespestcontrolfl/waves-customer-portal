@@ -693,7 +693,13 @@ const TREE_SHRUB = {
     lightFactor: 0.75,
     enhancedFactor: 1.25,
   },
-  treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
+  // Trees priced when NO count was given, from the aerial treeDensity enum.
+  // Owner audit 2026-10-21: lowered from 3/6/10 — the aerial density read
+  // describes woody plants generally (mature oaks, pines, canopy), but the
+  // program only treats ORNAMENTAL trees; the old counts billed shade trees
+  // as sprayed plants (1.5 min/visit + $4/yr each). A stated count always
+  // wins; this is only the no-count backstop.
+  treeDensityCounts: { none: 0, light: 2, moderate: 4, heavy: 6 },
   // Shrub-density multiplier on the MEASURED-bed terms (per-sqft material +
   // the bedArea-derived labor minutes). Until v4.7, shrub density only
   // shaped the lot-based bed ESTIMATE and died the moment a real bed area
@@ -759,6 +765,10 @@ const COMMERCIAL_LAWN = {
   taxCategory: 'lawn_spraying_or_treatment',
 };
 const COMMERCIAL_TREE_SHRUB = {
+  // No-count tree backstop from the aerial treeDensity enum. Commercial keeps
+  // the original 3/6/10 (the 2026-10-21 residential audit lowered
+  // TREE_SHRUB.treeDensityCounts to 2/4/6 and did not reprice commercial).
+  treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
   programVisits: 6,           // ornamental fert (2) + shrub insect (2) + bed weed control trips
   materialFixedAnnual: 40,    // base commercial ornamental program material/yr
   materialPerSqFtAnnual: 0.12, // $/bed sqft/yr — premium ornamental fert + Snapshot/Ranger Pro bed weed control
