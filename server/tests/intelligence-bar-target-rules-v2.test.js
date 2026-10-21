@@ -327,10 +327,16 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // The phone or the email is someone else's: unresolved, so neither account is named.
     expect((await ask('update Pat Example 941-777-0000 notes')).typedCustomerIds).toEqual([]);
     expect((await ask('update Pat Example other@example.test notes')).typedCustomerIds).toEqual([]);
-    const owner = Context.ownerDirectContext(await ask('update Pat Example 941-777-0000 notes'));
+    const conflicted = await ask('update Pat Example 941-777-0000 notes');
+    expect(conflicted.identityConflict).toBe(true);
+    const owner = Context.ownerDirectContext(conflicted);
+    // Neither account runs without a card: the name-resolved target is not trusted either (Codex #6369 r2 audit).
     for (const customer_id of [id(100), id(400)]) {
-      expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(customer_id === id(100));
+      expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
     }
+    // The customer on screen still counts.
+    const onScreen = OwnerDirect.targetGrounding({ ...owner, page: { ids: { customer_id: id(100) } } });
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, onScreen)).toBe(true);
   });
 
   test('gate on: a long "Full Name, City" button becomes "First L., City", unique, under 40 characters, and the reply resolves back (Codex r1 P2)', async () => {

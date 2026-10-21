@@ -479,7 +479,7 @@ async function typedCustomerIds(prompt, namedResult) {
   // with the name when the typed name names that owner (Codex #6369 r2).
   const agreesWithName = (id) => nameMatched.has(id)
     || (namedResult.complete === false && namesTargetCustomer(normalizeName(withoutContacts(targetClause(prompt))), contactOwners.get(id) || {}));
-  if (nameMatched.size && [...contactIds].some(id => !agreesWithName(id))) return [];
+  if (nameMatched.size && [...contactIds].some(id => !agreesWithName(id))) return Object.assign([], { identityConflict: true });
   for (const id of contactIds) ids.add(id);
   for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];
@@ -540,7 +540,10 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   }
   // Whom this message names (GATE_IB_TARGET_RULES_V2): carried on the context so
   // an owner-direct edit can tell a named customer from one the model found.
-  const typed = v2 ? { typedCustomerIds: await typedCustomerIds(prompt, namedResult) } : {};
+  // identityConflict: the typed name and a typed phone or email point at
+  // different customers; owner-direct then trusts no name-resolved target.
+  const typedIds = v2 ? await typedCustomerIds(prompt, namedResult) : null;
+  const typed = v2 ? { typedCustomerIds: [...typedIds], ...(typedIds.identityConflict ? { identityConflict: true } : {}) } : {};
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
   const cohort = setQuantified(prompt) || namedResult.multiple;

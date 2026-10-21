@@ -124,7 +124,11 @@ const CUSTOMER_ID_EDIT_TOOLS = new Set(['update_customer', 'update_customer_prop
 function targetGrounding(taskContext) {
   if (!ibTargetRulesV2Live()) return null;
   const ids = new Set();
+  // Conflicting name and contact evidence (Codex #6369): a target resolved from
+  // the typed name is not trusted; an operator pick and the page still are.
+  const conflict = taskContext?.identityConflict === true;
   const addTarget = (target) => {
+    if (conflict && target?.provenance === 'current_request_lookup') return;
     if (target?.customer_id) ids.add(String(target.customer_id).toLowerCase());
   };
   for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) addTarget(target);
