@@ -116,7 +116,7 @@ async function staffCanViewSuppressed(req) {
 // token-keyed 5/min action limiter as /events and enforces suppression
 // itself, post-limiter — without the bypass, this param gate's DB read runs
 // on every over-limit request and defeats the limiter's purpose.
-const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|referral-link|pest-pressure\/client-rating)$/i;
+const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|referral-link|pest-pressure\/client-rating|photo-check)$/i;
 router.param('token', async (req, res, next, token) => {
   try {
     if (!FULL_TOKEN_RE.test(String(token || ''))) return next();
@@ -209,8 +209,17 @@ const PDF_RULE = '#E7E2D7';
 // exempt: report-interaction event posts, and recap-video playback (Safari/iOS issues
 // many byte-range sub-requests when the customer scrubs the MP4, which would otherwise
 // trip the 20/min limit). Both still require a valid 32-hex token.
+// POST /:token/photo-check exists only while its gates are live (GATE_REPORT_WEB_ACTIONS beside the
+// simple web report, and GATE_CUSTOMER_PHOTO_ID). Read at call time.
+function webPhotoCheckLive() {
+  const gates = require('../config/feature-gates');
+  return webActionsLive(gates) && gates.isEnabled('customerPhotoId') === true;
+}
+
 function isReportLimiterExempt(req) {
   const path = req.path || '';
+  // A dark route answers 404 before any limiter, so a probe never sees a revealing 429.
+  if (req.method === 'POST' && /^\/[a-f0-9]{32}\/photo-check$/i.test(path) && !webPhotoCheckLive()) return true;
   if (req.method === 'POST' && /^\/[a-f0-9]{32}\/events$/i.test(path)) return true;
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/recap\/video\/?$/i.test(path)) return true;
   return false;
@@ -2038,8 +2047,7 @@ router.post('/:token/ask', async (req, res, next) => {
 const WEB_PHOTO_MAX_BYTES = 750 * 1024;
 async function resolveWebPhotoCustomer(req, res, next) {
   try {
-    const gates = require('../config/feature-gates');
-    if (!FULL_TOKEN_RE.test(req.params.token || '') || !webActionsLive(gates) || !gates.isEnabled('customerPhotoId')) {
+    if (!FULL_TOKEN_RE.test(req.params.token || '') || !webPhotoCheckLive()) {
       return res.status(404).json({ error: 'Report not found' });
     }
     const service = await db('service_records as sr')

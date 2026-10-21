@@ -19,11 +19,16 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 // Finding text -> the service family that treats it. Ordered: the first kind
 // that matches a finding wins for that finding. Matching reads the finding's
 // title and detail only to classify; the text itself is never shown.
+const SPECIALTY_PEST_RE = /\b(rodents?|mice|mouse|rats?|bed ?bugs?|termites?|mosquito(es)?|fleas?|ticks?|wasps?|hornets?|yellow ?jackets?|bees?|fire ants?|carpenter ants?|mites?|wildlife|squirrels?|raccoons?|opossums?|snakes?|bats?|palm)\b/i;
+
 const FINDING_KINDS = [
   { kind: 'weeds', family: 'lawn_care', sentence: 'We saw weeds on this visit.', re: /\b(weeds?|crabgrass|dollarweed|sedges?|spurge|beggarweed|torpedograss|kyllinga)\b/i },
   { kind: 'turf', family: 'lawn_care', sentence: 'We saw lawn damage on this visit.', re: /\b(chinch|sod webworms?|armyworms?|grubs?|brown patch|take-?all|dollar spot|gray leaf spot|fungus|fungal|bare spots?|dead patches?|thinning turf)\b/i },
   { kind: 'shrubs', family: 'tree_shrub', sentence: 'We saw plant pests on this visit.', re: /\b(whiteflies|whitefly|aphids?|mealybugs?|sooty mold|lace ?bugs?|spider mites?|(armored|soft) scale|scale insects?)\b/i },
-  { kind: 'pests', family: 'pest_control', sentence: 'We saw pest activity on this visit.', re: /\b(ants?|roach(es)?|cockroaches?|spiders?|fleas?|ticks?|wasps?|hornets?|silverfish|earwigs?|rodents?|mice|rats?|bed ?bugs?)\b/i },
+  // General household pests only: the offered program is recurring pest control (pest-quarterly). Specialty
+  // problems (rodents, bed bugs, termites, mosquitoes, fleas, ticks, stinging insects, wildlife) are separate
+  // programs the offer does not cover, so a finding that names one never makes this tile.
+  { kind: 'pests', family: 'pest_control', sentence: 'We saw pest activity on this visit.', re: /\b(ants?|roach(es)?|cockroaches?|spiders?|silverfish|earwigs?)\b/i, veto: SPECIALTY_PEST_RE },
 ];
 
 // "No ants seen" is not a finding. Titles that deny the pest never classify.
@@ -49,7 +54,7 @@ function recordedFindingTexts(data) {
 // The finding kinds this visit recorded, in FINDING_KINDS order, no repeats.
 function findingKinds(data) {
   const texts = recordedFindingTexts(data);
-  return FINDING_KINDS.filter((entry) => texts.some((text) => entry.re.test(text)));
+  return FINDING_KINDS.filter((entry) => texts.some((text) => entry.re.test(text) && !(entry.veto && entry.veto.test(text))));
 }
 
 // Payload for the finding tile, or null. `buildCrossSell` is injected so the

@@ -152,6 +152,26 @@ describe('web-actions: finding tile', () => {
     await expect(run({ findings: [WEED_FINDING] }, null)).resolves.toBeNull();
   });
 
+  test.each([
+    'Rodent droppings in the garage',
+    'Bed bugs in the guest room',
+    'Termite damage at the lanai',
+    'Mosquito breeding in the bird bath',
+    'Fleas in the dog run',
+    'Wasp nest under the eave',
+    'Spider mites on the hibiscus',
+    'Carpenter ants in the fascia',
+    'Ants near the rat traps',
+  ])('a specialty-pest finding never makes a pest tile: %s', async (title) => {
+    const finding = { category: 'pest_activity', title, detail: 'seen near the entry' };
+    await expect(run({ findings: [finding] }, offer({ serviceKey: 'pest_control', label: 'Pest Control' }))).resolves.toBeNull();
+  });
+
+  test('a general household pest finding still makes the pest tile', async () => {
+    const tile = await run({ findings: [{ category: 'pest_activity', title: 'Ghost ants at the kitchen window', detail: 'trail' }] }, offer({ serviceKey: 'pest_control', label: 'Pest Control' }));
+    expect(tile.sentence).toBe('We saw pest activity on this visit.');
+  });
+
   test('a technician-reviewed photo finding counts; with two kinds the one matching the offer wins', async () => {
     const data = { findings: [{ category: 'pest_activity', title: 'Ants at the lanai', detail: 'trail' }], reportV2: { photoFindings: [{ label: 'Crabgrass in the front bed' }] } };
     const tile = await run(data, offer());
