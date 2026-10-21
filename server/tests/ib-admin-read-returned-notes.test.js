@@ -182,3 +182,20 @@ describe('GATE_IB_READ_NOTES off: today\'s withholding, byte for byte', () => {
     expect(JSON.stringify(result)).not.toContain('1234');
   });
 });
+
+describe('any-scheme link passwords (Codex #6375 security P2)', () => {
+  const { scrubNote } = require('../utils/note-secret-scrubber');
+  test.each([
+    ['postgresql://admin:hunter22@db.example.test/prod', 'hunter22'],
+    ['redis://:pw123@cache.example.test:6379', 'pw123'],
+    ['ftp://user:secretpw@ftp.example.test/file', 'secretpw'],
+    ['smb://office:Winter2026@files.example.test/share', 'Winter2026'],
+  ])('%s loses its password', (link, secret) => {
+    const { text } = scrubNote(`backup is at ${link} ok`);
+    expect(text).not.toContain(secret);
+    expect(text).toContain('[removed]@');
+  });
+  test('ordinary text with colons and at-signs is left alone', () => {
+    expect(scrubNote('mailto:pat@example.test at 10:30, gate 1234').text).toBe('mailto:pat@example.test at 10:30, gate 1234');
+  });
+});

@@ -47,6 +47,9 @@ const PREFIXED_RES = [
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi;
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;
+// user:password@ in a link of ANY scheme (postgresql://, redis://, ftp://,
+// smb://, ...); the http(s) links above also go through scrubUrl (Codex #6375).
+const ANY_SCHEME_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s\/@:"'<>]*:[^\s\/@"'<>]+@/gi;
 const URL_USERINFO_RE = /^(https?:\/\/[^\s/:@?#]*:)[^\s/@?#]+@/i;
 const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=([^&#\s"'<>\\]*)/g;
 // Credential names that are not credential words as a field name but are as a
@@ -77,6 +80,7 @@ function scrubNoteText(input) {
   const swap = () => { removed += 1; return REMOVED; };
   let text = String(input).slice(0, SCAN_LIMIT);
   text = text.replace(PEM_RE, swap);
+  text = text.replace(ANY_SCHEME_USERINFO_RE, (match, scheme) => { removed += 1; return `${scheme}${REMOVED}@`; });
   text = text.replace(URL_RE, (url) => {
     const clean = scrubUrl(url);
     if (clean !== url) removed += 1;
