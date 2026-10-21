@@ -53,7 +53,7 @@ const MONEY_WORD = new RegExp(
 );
 
 // A number that names a record, not an amount.
-const IDENTIFIER_BEFORE = /(?:\b(?:invoice|inv|ticket|order|account|acct|confirmation|job|number|no|unit|apt|apartment|suite|ste|lot|room|route|zip)\b\.?|#)\s*(?:number|no\.?|#)?\s*(?:is|was|of)?\s*#?\s*$/i;
+const IDENTIFIER_BEFORE = /(?:\b(?:invoice|inv|ticket|order|account|acct|confirmation|job|number|no|unit|apt|apartment|suite|ste|lot|room|route|zip|code|pin|passcode|combo|combination|gate|lockbox|keypad|door|point)\b\.?|#)\s*(?:number|no\.?|#)?\s*(?:is|was|of)?\s*#?\s*$/i;
 const UNIT_AFTER = /^\s*(?:cents?|oz|ounces?|fl|gal|gals|gallons?|lbs?|pounds?|sq\.?\s*ft|square\s+(?:feet|foot)|sf|feet|foot|ft|inch(?:es)?|acres?|minutes?|mins?|hours?|hrs?|seconds?|days?|weeks?|years?|months?\s+(?:ago|old)|percent|%|x\b|bags?|units?|stops?|ml|liters?|litres?|pints?|quarts?|miles?|mi\b|mph|degrees?|psi|ppm|bait\s+stations?|stations?|traps?|points?|pieces?|people|customers?|houses?|homes?|doors?|windows?|rooms?)\b/i;
 const STREET_AFTER = /^\s+(?:[A-Za-z'.]+\s+){0,2}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
 const CLOCK_AFTER = /^\s*(?:a\.?\s?m\b|p\.?\s?m\b|o'?clock|in\s+the\s+(?:morning|afternoon|evening)|tomorrow|today|tonight)/i;

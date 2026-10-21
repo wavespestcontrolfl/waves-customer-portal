@@ -58,6 +58,12 @@ const REWRITES = [
   ['price list from 20 26', SAME],
   ['total as of October twenty first', SAME],
   ['charge twenty twenty-six dollars', 'charge $20.26'],
+  // spoken decimals and access codes
+  ['charge sixty one point thirty three dollars', SAME],
+  ['charge 61 point 33 dollars', SAME],
+  ['charge for gate code sixty one thirty three', SAME],
+  ['the lockbox code is 61 33, price is separate', SAME],
+  ['door code sixty-one thirty-three, total forty dollars', 'door code sixty-one thirty-three, total $40'],
   // cents are not dollars
   ['charge one hundred fifty five cents', SAME],
   ['charge 61 33 cents', SAME],
