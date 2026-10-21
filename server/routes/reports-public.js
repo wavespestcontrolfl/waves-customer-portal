@@ -116,7 +116,7 @@ async function staffCanViewSuppressed(req) {
 // token-keyed 5/min action limiter as /events and enforces suppression
 // itself, post-limiter — without the bypass, this param gate's DB read runs
 // on every over-limit request and defeats the limiter's purpose.
-const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|referral-link|pest-pressure\/client-rating|photo-check)$/i;
+const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|referral-link|pest-pressure\/client-rating|photo-check)\/?$/i;
 router.param('token', async (req, res, next, token) => {
   try {
     if (!FULL_TOKEN_RE.test(String(token || ''))) return next();
@@ -219,7 +219,7 @@ function webPhotoCheckLive() {
 function isReportLimiterExempt(req) {
   const path = req.path || '';
   // A dark route answers 404 before any limiter, so a probe never sees a revealing 429.
-  if (req.method === 'POST' && /^\/[a-f0-9]{32}\/photo-check$/i.test(path) && !webPhotoCheckLive()) return true;
+  if (req.method === 'POST' && /^\/[a-f0-9]{32}\/photo-check\/?$/i.test(path) && !webPhotoCheckLive()) return true;
   if (req.method === 'POST' && /^\/[a-f0-9]{32}\/events$/i.test(path)) return true;
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/recap\/video\/?$/i.test(path)) return true;
   return false;

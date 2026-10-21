@@ -51,7 +51,7 @@ async function withFreshServer(fn) {
   }
 }
 
-const post = (base) => fetch(`${base}/reports/${TOKEN}/photo-check`, {
+const post = (base, suffix = '') => fetch(`${base}/reports/${TOKEN}/photo-check${suffix}`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
 });
 
@@ -65,6 +65,15 @@ describe('photo-check against the real report limiter', () => {
     await withFreshServer(async (base) => {
       const statuses = [];
       for (let i = 0; i < 30; i += 1) statuses.push((await post(base)).status);
+      expect(new Set(statuses)).toEqual(new Set([404]));
+    });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('dark: the trailing-slash path is guarded too (Express matches it)', async () => {
+    await withFreshServer(async (base) => {
+      const statuses = [];
+      for (let i = 0; i < 30; i += 1) statuses.push((await post(base, '/')).status);
       expect(new Set(statuses)).toEqual(new Set([404]));
     });
     expect(db).not.toHaveBeenCalled();
