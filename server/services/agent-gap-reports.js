@@ -72,8 +72,9 @@ const CAPABILITY_GAP_CODES = new Set([
   'termite_annual_requires_prepay', 'booked_from_estimate', 'recurring_unnamed', 'side_effect', 'side_effect_outside_plan',
   // Billing-type changes the card cannot confirm yet.
   'annual_prepay_lane', 'bill_to_payer', 'billing_visits_payer_owned', 'billing_visits_priced', 'too_many_visits',
-  // Visit, invoice and closeout cases.
-  'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
+  // Billing-type, visit, invoice and closeout cases.
+  'billing_mode_clear', 'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
+  'needs_invoices_page', 'invoice_copy_too_long',
 ]);
 const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',

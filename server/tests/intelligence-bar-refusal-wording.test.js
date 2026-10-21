@@ -359,10 +359,13 @@ describe('every code main recorded is classified once (pre-push audit on Codex #
     'termite_annual_requires_prepay', 'booked_from_estimate', 'recurring_unnamed', 'side_effect', 'side_effect_outside_plan',
     'annual_prepay_lane', 'bill_to_payer', 'billing_visits_payer_owned', 'billing_visits_priced', 'too_many_visits',
     'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
+    'billing_mode_clear', 'needs_invoices_page', 'invoice_copy_too_long', 'invoice_channel_unsupported', 'booking_with_credit_unsupported',
   ])('%s stays a gap', (code) => { expect(recordableRefusalCode(decline(code))).toBe(code); });
   test.each([
     'billing_visits_held', 'billing_completion_pending', 'live_annual_prepay_term', 'property_not_linked', 'per_application_unresolved',
     'dues_retry_armed', 'invoice_send_queued', 'invoice_channel', 'invoice_no_channel', 'verifier_reject', 'prefs_unavailable',
     'post_commit', 'address_conflict', 'already_accepted', 'invalid_target', 'invalid_value', 'no_change', 'payer_owned',
+    'charge_in_progress', 'collection_hold', 'held_for_reconciliation', 'release_failed', 'returned_to_queue', 'nothing_due',
+    'awaiting_signature', 'signature_expired', 'visit_terminal', 'prefs_unreadable',
   ])('%s is the bar working as built', (code) => { expect(recordableRefusalCode(decline(code))).toBeNull(); });
 });
