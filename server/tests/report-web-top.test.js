@@ -19,59 +19,62 @@ const lawn = (over = {}) => ({
   ...over,
 });
 
+// Property-scoped history rows (what lawn-assessment-history historyForAssessment returns), oldest first, current last.
+const row = (id, date, score) => ({ id, visit_date: date, overall_score: score, turf_density: score, weed_suppression: score, color_health: score, stress_damage: score });
+const historyOf = (rows, currentIndex = rows.length - 1) => ({ scope: { propertyId: 'p1' }, rows, current: rows[currentIndex] });
+
 describe('buildWebTop', () => {
-  test('lawn: score with the assessment before, and the last 6 scores', () => {
-    const out = buildWebTop(lawn());
-    expect(out.score).toEqual({ value: 72, previous: 72 });
+  test('lawn: score with the assessment before, and the last 6 scores, from the property history', () => {
+    const rows = [55, 61, 66, 70, 71, 73, 72].map((score, i) => row(`a${i}`, `2026-0${i + 3}-01`, score));
+    const out = buildWebTop(lawn(), null, historyOf(rows));
+    expect(out.score).toEqual({ value: 72, previous: 73 });
     expect(out.trend).toHaveLength(6);
-    expect(out.trend[5]).toEqual({ label: 'Oct 20', value: 72 });
+    expect(out.trend[5].value).toBe(72);
     // the page picks "Do this" and "Hold off" from the document's own lists: the payload carries neither
     expect('action' in out).toBe(false);
     expect('hold' in out).toBe(false);
   });
 
-  test('lawn: a first visit has a score and no previous score and no strip', () => {
-    const data = lawn();
-    data.reportV2.trends = {};
-    const out = buildWebTop(data);
+  test('a first visit has a score, previous null and no strip', () => {
+    const out = buildWebTop(lawn(), null, historyOf([row('a0', '2026-10-20', 72)]));
     expect(out.score).toEqual({ value: 72, previous: null });
     expect('trend' in out).toBe(false);
   });
 
-  test('lawn: the seasonal note rides with a strip only', () => {
+  test('property scope not proven (no history): the score alone, no previous key, no strip, no seasonal note', () => {
     const data = lawn();
     data.reportV2.trends.seasonalNote = 'Winter scores run lower.';
-    expect(buildWebTop(data).trendNote).toBe('Winter scores run lower.');
-    data.reportV2.trends.overall = [{ label: 'Oct 20', value: 72 }];
-    expect('trendNote' in buildWebTop(data)).toBe(false);
+    const out = buildWebTop(data, null, null);
+    expect(out.score).toEqual({ value: 72 });
+    expect('previous' in out.score).toBe(false);
+    expect('trend' in out).toBe(false);
+    expect('trendNote' in out).toBe(false);
   });
 
-  test('lawn: a score outside 0 to 100 is not shown', () => {
+  test('the seasonal note rides with a strip only', () => {
+    const data = lawn();
+    data.reportV2.trends.seasonalNote = 'Winter scores run lower.';
+    const rows = [row('a0', '2026-09-01', 60), row('a1', '2026-10-20', 72)];
+    expect(buildWebTop(data, null, historyOf(rows)).trendNote).toBe('Winter scores run lower.');
+    expect('trendNote' in buildWebTop(data, null, historyOf([rows[1]]))).toBe(false);
+  });
+
+  test('two assessments on one day: the previous score is the one just before, the strip keeps the later point', () => {
+    const rows = [row('a0', '2026-09-01', 60), row('a1', '2026-10-20', 65), row('a2', '2026-10-20', 72)];
+    const out = buildWebTop(lawn(), null, historyOf(rows));
+    expect(out.score).toEqual({ value: 72, previous: 65 });
+    expect(out.trend.map((p) => p.value)).toEqual([60, 72]);
+  });
+
+  test('unscored rows are skipped when looking for the previous score', () => {
+    const rows = [row('a0', '2026-08-01', 58), { ...row('a1', '2026-09-01', null), overall_score: null, turf_density: null, weed_suppression: null, color_health: null, stress_damage: null }, row('a2', '2026-10-20', 72)];
+    expect(buildWebTop(lawn(), null, historyOf(rows)).score.previous).toBe(58);
+  });
+
+  test('a score outside 0 to 100 is not shown', () => {
     const data = lawn();
     data.reportV2.snapshot.overallScore = 140;
-    expect(buildWebTop(data)).toBeNull();
-  });
-
-  test('lawn score: the previous score is the assessment just before this one, even when two share a date', () => {
-    const data = lawn();
-    // two assessments on Oct 20 collapse to one point in the V2 strip; the raw rows keep both
-    data.reportV2.trends.overall = [{ label: 'Sep 1', value: 60 }, { label: 'Oct 20', value: 72 }];
-    data.reportV2.snapshot.overallScore = 72;
-    data.lawnAssessment = { trend: [{ date: '2026-09-01', overallScore: 60 }, { date: '2026-10-20', overallScore: 65 }, { date: '2026-10-20', overallScore: 72 }] };
-    expect(buildWebTop(data).score).toEqual({ value: 72, previous: 65 });
-    // the strip stays the date-collapsed series
-    expect(buildWebTop(data).trend).toHaveLength(2);
-  });
-
-  test('lawn score: "starting score" only when no earlier scored assessment exists; unscored rows are skipped', () => {
-    const data = lawn();
-    data.lawnAssessment = { trend: [{ overallScore: 72 }] };
-    expect(buildWebTop(data).score.previous).toBeNull();
-    data.lawnAssessment = { trend: [{ overallScore: 58 }, { overallScore: null }, { overallScore: 72 }] };
-    expect(buildWebTop(data).score.previous).toBe(58);
-    // no raw rows in the payload: the strip's second-last point is the fallback
-    delete data.lawnAssessment;
-    expect(buildWebTop(data).score.previous).toBe(72);
+    expect(buildWebTop(data, null, historyOf([row('a0', '2026-10-20', 72)]))).toBeNull();
   });
 
   test('a non-lawn report has no score: nothing to say is null', () => {
@@ -185,8 +188,25 @@ describe('attachWebTop (the /data route\u2019s one call)', () => {
   beforeEach(() => { fetchMrmsDailyRain.mockReset(); fetchMrmsDailyRain.mockResolvedValue(null); });
 
   test('gate on beside simple web: webTop is set, an empty object when nothing to say', async () => {
-    expect((await attachWebTop(data(), {}, { simpleWeb: true, gates: on })).webTop.score).toEqual({ value: 72, previous: 72 });
+    expect((await attachWebTop(data(), {}, { simpleWeb: true, gates: on, loadHistory: async () => null })).webTop.score).toEqual({ value: 72 });
     expect((await attachWebTop({ serviceLine: 'pest' }, {}, { simpleWeb: true, gates: on })).webTop).toEqual({});
+  });
+
+  test('a moved customer: the payload trends span two lawns, the property history holds one; only the property history is used', async () => {
+    const payload = lawn();
+    // customer-wide trends (GATE_LAWN_PROPERTY_HISTORY off) include an earlier visit at the OLD address
+    payload.reportV2.trends.overall = [{ label: 'Jun 1', value: 90 }, { label: 'Oct 20', value: 72 }];
+    payload.lawnAssessment = { assessmentId: 'a-new', trend: [{ overallScore: 90 }, { overallScore: 72 }] };
+    const proven = historyOf([row('a-new', '2026-10-20', 72)]);
+    const first = await attachWebTop(payload, {}, { simpleWeb: true, gates: on, loadHistory: async () => proven });
+    expect(first.webTop.score).toEqual({ value: 72, previous: null });
+    expect('trend' in first.webTop).toBe(false);
+    // scope not proven: the score alone
+    const unproven = await attachWebTop(lawn({ lawnAssessment: { assessmentId: 'a-new', trend: [{ overallScore: 90 }, { overallScore: 72 }] } }), {}, { simpleWeb: true, gates: on, loadHistory: async () => null });
+    expect(unproven.webTop.score).toEqual({ value: 72 });
+    // an unreadable history is unproven too
+    const failed = await attachWebTop(lawn(), {}, { simpleWeb: true, gates: on, loadHistory: async () => { throw new Error('db down'); } });
+    expect(failed.webTop.score).toEqual({ value: 72 });
   });
 
   test.each([

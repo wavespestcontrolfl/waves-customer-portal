@@ -287,13 +287,13 @@ describe('GET /reports/:token/data first screen (GATE_REPORT_WEB_TOP)', () => {
     });
   });
 
-  test('gate on, simple web on: webTop carries the score and the strip (no action or hold: the page picks those)', async () => {
+  test('gate on, simple web on: webTop carries the score alone while the property scope is unproven (no previous, no strip; no action or hold either)', async () => {
     gates.reportWebTopLive.mockReturnValue(true);
     mockDb();
     await withServer(async (baseUrl) => {
       const { body } = await getData(baseUrl);
-      expect(body.webTop.score).toEqual({ value: 74, previous: 70 });
-      expect(body.webTop.trend).toHaveLength(2);
+      expect(body.webTop.score).toEqual({ value: 74 });
+      expect('trend' in body.webTop).toBe(false);
       expect('hold' in body.webTop).toBe(false);
       expect('action' in body.webTop).toBe(false);
       expect('rain' in body.webTop).toBe(false);

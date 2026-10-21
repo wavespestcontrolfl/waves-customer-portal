@@ -33,33 +33,63 @@ const sentence = (value, max = 160) => {
   return text && text.length <= max ? text : null;
 };
 
-// The score at the assessment just before this one. lawnAssessment.trend has one row per assessment, in order, current
-// last, from the same (property-scoped) history the report builds; the V2 strip collapses assessments that share a date,
-// so two the same day would compare a visit with itself. Falls back to the strip only when the raw rows are absent.
-function previousScore(data, series) {
-  const raw = Array.isArray(data.lawnAssessment?.trend) ? data.lawnAssessment.trend : null;
-  if (!raw) return series.length >= 2 ? series[series.length - 2].value : null;
-  const scored = raw.map((row) => finiteScore(row?.overallScore)).filter((n) => n != null);
-  return scored.length >= 2 ? scored[scored.length - 2] : null;
+// The lawn's score history, resolved through the property-scoped resolver exactly as the program promise does
+// (reports-public.js attachProgramPromise): the lawn_assessments row of this report, then historyForAssessment. Null
+// unless the property scope is PROVEN and the history holds this visit. The payload's own trends are customer-wide
+// while GATE_LAWN_PROPERTY_HISTORY is off, so a customer who moved would see a change against another lawn.
+async function loadPropertyHistory(data) {
+  const id = data.lawnAssessment?.assessmentId;
+  if (data.serviceLine !== 'lawn' || id == null) return null;
+  const db = require('../../models/db');
+  const row = await db('lawn_assessments').where({ id }).first();
+  if (!row) return null;
+  const history = await require('../lawn-assessment-history').historyForAssessment(row, { knex: db });
+  return history && history.scope && history.scope.propertyId && history.current && history.rows.length ? history : null;
 }
 
-/** Lawn only: { score: { value, previous }, trend } from the V2 snapshot and its score history. */
-function lawnScore(data) {
+// One point per day (two assessments on a day keep the later one, as the report's own strip does), oldest first.
+function strip(rows) {
+  const { calculateLawnOverallScore } = require('../../../shared/lawn-scores.cjs');
+  const { monthLabel } = require('./lawn-report-v2');
+  const out = [];
+  rows.forEach((row) => {
+    const value = finiteScore(calculateLawnOverallScore(row));
+    const label = monthLabel(row.visit_date);
+    if (value == null || !label) return;
+    if (out.length && out[out.length - 1].label === label) out[out.length - 1] = { label, value };
+    else out.push({ label, value });
+  });
+  return out.slice(-TREND_POINTS);
+}
+
+// The score at the assessment just before this one (the nearest earlier scored row), or null on a first visit.
+function previousFrom(rows, current) {
+  const { calculateLawnOverallScore } = require('../../../shared/lawn-scores.cjs');
+  const earlier = rows.slice(0, rows.indexOf(current)).map((row) => finiteScore(calculateLawnOverallScore(row))).filter((n) => n != null);
+  return earlier.length ? earlier[earlier.length - 1] : null;
+}
+
+/**
+ * Lawn only. `history` is the property-scoped result of loadPropertyHistory, or null when the property scope cannot be
+ * proven: then only `score.value` goes out (no `previous`, no strip), and the page shows no change line.
+ */
+function lawnScore(data, history) {
   const value = finiteScore(data.reportV2?.snapshot?.overallScore);
   if (data.serviceLine !== 'lawn' || value == null) return null;
-  const series = (Array.isArray(data.reportV2?.trends?.overall) ? data.reportV2.trends.overall : [])
-    .map((point) => ({ label: String(point?.label || ''), value: finiteScore(point?.value) }))
-    .filter((point) => point.label && point.value != null);
-  const out = { score: { value, previous: previousScore(data, series) } };
-  if (series.length >= 2) out.trend = series.slice(-TREND_POINTS);
-  const note = sentence(data.reportV2?.trends?.seasonalNote, 240);
-  if (out.trend && note) out.trendNote = note;
+  if (!history) return { score: { value } };
+  const out = { score: { value, previous: previousFrom(history.rows, history.current) } };
+  const trend = strip(history.rows);
+  if (trend.length >= 2) {
+    out.trend = trend;
+    const note = sentence(data.reportV2?.trends?.seasonalNote, 240);
+    if (note) out.trendNote = note;
+  }
   return out;
 }
 
-function buildWebTop(data, rain = null) {
+function buildWebTop(data, rain = null, history = null) {
   if (!data || typeof data !== 'object') return null;
-  const out = { ...(lawnScore(data) || {}) };
+  const out = { ...(lawnScore(data, history) || {}) };
   if (rain) out.rain = rain;
   return Object.keys(out).length ? out : null;
 }
@@ -136,11 +166,13 @@ async function buildWebTopRain({ service, fetchMrmsDailyRain, now = new Date() }
  * reads as off) and the report is not internal-only, put `webTop` on the payload. An object even when empty: the key is
  * what trims the web page. Best effort: any failure leaves the payload as it was.
  */
-async function attachWebTop(v1Data, service, { simpleWeb, gates } = {}) {
+async function attachWebTop(v1Data, service, { simpleWeb, gates, loadHistory = loadPropertyHistory } = {}) {
   if (simpleWeb !== true || typeof gates?.reportWebTopLive !== 'function' || !gates.reportWebTopLive() || v1Data.internalOnly) return v1Data;
   try {
     const rain = await buildWebTopRain({ service, fetchMrmsDailyRain: require('../mrms-qpe').fetchMrmsDailyRain });
-    v1Data.webTop = buildWebTop(v1Data, rain) || {};
+    // An unreadable history is an unproven one: the score goes out alone.
+    const history = await loadHistory(v1Data).catch(() => null);
+    v1Data.webTop = buildWebTop(v1Data, rain, history) || {};
   } catch (err) {
     logger.warn(`[reports-public] web top skipped: ${err.message}`);
   }

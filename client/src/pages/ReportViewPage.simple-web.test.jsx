@@ -291,6 +291,15 @@ describe('the first screen of the simple web report', () => {
     expect(screen.getByLabelText('Rain at your home').textContent).not.toMatch(/after your visit:/);
   });
 
+  it('property scope not proven (no previous key): the score shows with no change line and no "starting score" claim', async () => {
+    renderReport(payload({ simpleWebReport: true, webTop: { score: { value: 70 } } }));
+    await screen.findByText(/This report is provided for your records/);
+    const card = screen.getByTestId('web-top');
+    expect(card.textContent).toMatch(/Lawn score\s*70\s*out of 100/);
+    expect(card.textContent).not.toMatch(/starting score|since your last visit|Same as your last visit/);
+    expect(card.textContent).not.toMatch(/Your last/);
+  });
+
   it('a first visit has no strip; with no recommendation and no re-entry the card says nothing is needed and shows no hold', async () => {
     renderReport(payload({ simpleWebReport: true, webTop: { score: { value: 70, previous: null } } }));
     await screen.findByText(/This report is provided for your records/);

@@ -37,7 +37,9 @@ function Card({ glass, children, ...rest }) {
 
 // "Up 11 points since your last visit." as a line with an arrow. The words carry the meaning; the arrow is a hint.
 function scoreChange(score) {
-  if (score.previous == null) return { arrow: '', color: DOC.muted, text: 'This is your starting score.' };
+  // No `previous` key: the server could not prove which lawn the history belongs to, so it says nothing about change.
+  if (score.previous === undefined) return null;
+  if (score.previous === null) return { arrow: '', color: DOC.muted, text: 'This is your starting score.' };
   const diff = score.value - score.previous;
   if (diff === 0) return { arrow: '●', color: DOC.muted, text: 'Same as your last visit.' };
   const points = Math.abs(diff) === 1 ? '1 point' : `${Math.abs(diff)} points`;
