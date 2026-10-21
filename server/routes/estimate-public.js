@@ -4957,6 +4957,21 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     : nearWaterPresence === 'no' ? 'No'
     : null;
 
+  // The tile each present service is guaranteed on the card (owner 2026-10-20: a
+  // pest + lawn + tree & shrub + mosquito estimate lost Treatable lawn behind the
+  // property facts). The first label present wins; mosquito's own area, program and
+  // pressure tiles exist only on a mosquito-only estimate, so in a mix its tile is
+  // Near water.
+  const primaryMetricLabels = [
+    hasPest && ['Pool/Lanai'],
+    hasLawn && ['Treatable lawn'],
+    hasMosquito && ['Mosquito treatment area', 'Near water'],
+    hasTreeShrub && ['Ornamental beds'],
+    hasTermiteBait && ['Termite perimeter'],
+  ].filter(Boolean);
+  // One or two services keep today's six tiles exactly (their lists never exceed
+  // it); three or more may show eight, which holds every fact the card can carry.
+  const metricCap = primaryMetricLabels.length >= 3 ? 8 : 6;
   const dedupeMetrics = (items) => {
     const seen = new Set();
     const result = [];
@@ -4966,7 +4981,20 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       seen.add(key);
       result.push(metric);
     }
-    return result.slice(0, 6);
+    if (result.length <= metricCap) return result;
+    // Over the cap: keep each present service's primary tile first, then fill the
+    // remaining slots in today's order, and show them in today's order.
+    const guaranteed = new Set();
+    for (const labels of primaryMetricLabels) {
+      const found = labels.find((label) => result.some((metric) => metric.label === label));
+      if (found) guaranteed.add(found);
+    }
+    const keep = new Set(result.filter((metric) => guaranteed.has(metric.label)));
+    for (const metric of result) {
+      if (keep.size >= metricCap) break;
+      keep.add(metric);
+    }
+    return result.filter((metric) => keep.has(metric)).slice(0, metricCap);
   };
 
   const metrics = dedupeMetrics([
@@ -6286,7 +6314,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // result of its own, so it reads stored evidence only (no second arg).
   const treeShrubPalmCount = treeShrubPalmCountForEstData(estData);
   // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the legacy page (use_v2_view
-  // = false rows, the GrowthBook control) prints the same "about $X a month"
+  // = false rows, the GrowthBook control) prints the same "$X a month"
   // line under each per-application card, the plan summary for two or more
   // services (or a credited one) and the context sentence, from the SAME shared
   // builder as the email, the PDF and the React page. Withheld (null) with the
@@ -6309,7 +6337,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   })();
   const ssrAvgAttrs = `data-monthly-average data-avg-pref-off="${Number(prefMonthlyOff || 0)}"`;
   const ssrAvgLineHtml = (index) => (ssrMonthlyAverage
-    ? `<div class="day-price" ${ssrAvgAttrs}>${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.services[index].monthly))}</div>`
+    ? `<div class="day-price" ${ssrAvgAttrs}>${escapeHtml(monthlyAverageShared.monthlyText(ssrMonthlyAverage.services[index].monthly))}</div>`
     : '');
   // One-time charges beside the plan: a setup / bait-station fee, or an ADDITIVE
   // one-time row (same exclusions as the "billed separately" list: the WaveGuard
@@ -6326,9 +6354,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const ssrAvgContext = `${monthlyAverageShared.CONTEXT_LINE}${ssrAvgOneTime ? ' One-time charges are not in the average.' : ''}`;
   const ssrAvgSummaryHtml = !ssrMonthlyAverage ? '' : (ssrMonthlyAverage.showPlan ? `
       <div ${ssrAvgAttrs} data-mode-only="recurring" style="margin-top:16px;padding:14px 16px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;font-size:16px;color:#1B2C5B;max-width:900px">
-        ${ssrMonthlyAverage.services.map((svc) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(svc.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.aboutMonth(svc.monthly))}</span></div>`).join('')}
+        ${ssrMonthlyAverage.services.map((svc) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(svc.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.monthlyText(svc.monthly))}</span></div>`).join('')}
         ${ssrMonthlyAverage.credit ? `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(ssrMonthlyAverage.credit.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">&minus;${fmtMoney(ssrMonthlyAverage.credit.monthly)} a month</span></div>` : ''}
-        <div data-monthly-average-plan style="display:flex;justify-content:space-between;gap:12px;padding:8px 0 4px;margin-top:4px;border-top:1px solid #1B2C5B;font-weight:700"><span>${escapeHtml(monthlyAverageShared.planLabel(ssrMonthlyAverage))}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.planMonthly))}</span></div>
+        <div data-monthly-average-plan style="display:flex;justify-content:space-between;gap:12px;padding:8px 0 4px;margin-top:4px;border-top:1px solid #1B2C5B;font-weight:700"><span>${escapeHtml(monthlyAverageShared.planLabel(ssrMonthlyAverage))}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.monthlyText(ssrMonthlyAverage.planMonthly))}</span></div>
         <div style="margin-top:8px;font-size:14px;color:#475569;line-height:1.5">${escapeHtml(ssrAvgContext)}</div>
       </div>` : `
       <div class="day-price" ${ssrAvgAttrs} data-mode-only="recurring">${escapeHtml(ssrAvgContext)}</div>`);
@@ -30210,7 +30238,7 @@ async function composeEstimateDataPayload(estimate, {
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
         // GATE_ESTIMATE_MONTHLY_AVERAGE: the inputs the document needs to print
-        // "about $X a month" under each per-application line. Null (key absent)
+        // "$X a month" under each per-application line. Null (key absent)
         // with the gate off, for any plan that is not purely per application, and
         // whenever the lines do not reconcile to the stored monthly total, so the
         // document is byte-identical to today in all of those cases.
@@ -30572,7 +30600,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload(acceptanceTermsScope) } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
-      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "about $X a month"
+      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "$X a month"
       // under its per-application prices (it derives the figures from the
       // selected cadence itself, so only the switch rides here). Absent, not
       // false, with the gate off ⇒ response byte-identical to today.

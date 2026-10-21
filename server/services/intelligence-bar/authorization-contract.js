@@ -133,6 +133,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
 // record_payment: its card lines come from its own preview (record-payment-tools.js cardLines). Money, not a charge.
 CURATED_PREVIEW_TOOL_NAMES.add('record_payment');
+// convert_lead: its card lines come from its own preview (lead-convert-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
 
@@ -201,6 +203,7 @@ const ACTION_LABELS = {
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
   record_payment: 'Record a payment received outside the portal (never charges a card)',
+  convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
@@ -830,6 +833,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // record_payment: the invoice, the money and that no receipt is sent.
   if (toolName === 'record_payment' && preview?.preview === true) {
     for (const line of require('./record-payment-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // convert_lead: the lead, the customer, the matches, every change and that nothing is sent.
+  if (toolName === 'convert_lead' && preview?.preview === true) {
+    for (const line of require('./lead-convert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {

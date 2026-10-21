@@ -117,6 +117,18 @@ describe("useSpeechDictation with server dictation on", () => {
     expect([...opts.body.keys()].sort()).toEqual(["audio", "duration_seconds"]);
   });
 
+  it("hands the server's dictated-amount notes to the caller beside the words", async () => {
+    const money = { changes: [], ambiguous: [{ heard: "6133", candidates: ["$61.33", "$6,133"] }] };
+    stubServer({ clip: yes({ text: "charge 6133 a month", money }) });
+    const onTranscript = vi.fn();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("charge 6133 a month", { money }));
+  });
+
   it("a visit id given for the older upload path is also the visit context", async () => {
     const fetchMock = stubServer();
     const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: SERVICE }));

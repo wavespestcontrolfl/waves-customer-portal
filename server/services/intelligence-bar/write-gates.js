@@ -101,6 +101,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
   'update_lead_contact',
+  // convert_lead (owner ruling 2026-10-12): the Leads page's Convert to Customer handler, run in
+  // process behind a card; links the lead to an existing customer and sends nothing.
+  'convert_lead',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',
 ]);

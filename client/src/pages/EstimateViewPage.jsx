@@ -47,7 +47,7 @@ import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } fr
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
-import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, aboutMonth, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
+import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import { oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
@@ -2371,7 +2371,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 }
 
 // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20, option A): the per-service
-// "about $X a month" lines and the plan average for a multi-service plan, so the
+// "$X a month" lines and the plan average for a multi-service plan, so the
 // customer can see the arithmetic. The per-application prices on the cards stay
 // the prices; this is an average of the year ("$X/mo" as THE price stays
 // banned, and the combined "Plan total" ban below is untouched: nothing here is
@@ -2388,7 +2388,7 @@ export function MonthlyAverageSummary({ model, hasOneTime = false }) {
         {model.services.map((service) => (
           <div key={service.key} style={row}>
             <span>{service.label}</span>
-            <span style={num}>{aboutMonth(service.monthly)}</span>
+            <span style={num}>{monthlyText(service.monthly)}</span>
           </div>
         ))}
         {model.credit ? (
@@ -2399,7 +2399,7 @@ export function MonthlyAverageSummary({ model, hasOneTime = false }) {
         ) : null}
         <div data-monthly-average-plan="" style={{ ...row, fontWeight: 700, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>
           <span>{monthlyAveragePlanLabel(model)}</span>
-          <span style={num}>{aboutMonth(model.planMonthly)}</span>
+          <span style={num}>{monthlyText(model.planMonthly)}</span>
         </div>
       </div>
       <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
@@ -5257,7 +5257,7 @@ export function ServiceSection({
   // a current monthly member whose accept preserves membership billing. Either
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "about $X a month" line for this
+  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "$X a month" line for this
   // service (and the one-time context sentence on a single-service page).
   // Null with the gate off, so the card is unchanged.
   monthlyAverageLine = null,

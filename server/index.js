@@ -222,6 +222,9 @@ app.use((req, res, next) => {
     && require('./config/feature-gates').isEnabled('websiteQuoteBooking')) return websiteEstimateHelmet(req, res, next);
   return strictHelmet(req, res, next);
 });
+// Dark lawn-card photo (GATE_REPORT_WEB_SHARE): generic 404 before cors, the global limiter, the body parsers and
+// the token read, but AFTER helmet so the 404 carries the same security headers (Referrer-Policy, CSP) as any other.
+app.use('/api/reports', reportsPublicRoutes.reportSharePhotoPreGuard);
 
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
