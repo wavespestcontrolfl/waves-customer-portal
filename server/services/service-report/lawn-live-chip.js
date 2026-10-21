@@ -32,6 +32,13 @@ const toMs = (value) => {
   return Number.isFinite(t) ? t : NaN;
 };
 
+/** Is a visit completed at `completedAt` inside the chip's window (completed, and no more than visitWindowDays ago)? */
+function withinChipWindow(completedAt, now) {
+  const fromMs = toMs(completedAt);
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
+  return Number.isFinite(fromMs) && nowMs > fromMs && nowMs - fromMs <= COPY.visitWindowDays * DAY_MS;
+}
+
 function rainLine(hoursAgo) {
   return hoursAgo === 1 ? COPY.rainHoursAgoOne : COPY.rainHoursAgo.replace('{n}', String(hoursAgo));
 }
@@ -156,7 +163,7 @@ async function resolveLiveChip({
     const now = series ? series.now : nowIn;
     const nowMs = now instanceof Date ? now.getTime() : Date.now();
     if ((!series && typeof fetchForecast !== 'function') || !Number.isFinite(fromMs)) return null;
-    if (nowMs <= fromMs || nowMs - fromMs > COPY.visitWindowDays * DAY_MS) return null;
+    if (!withinChipWindow(completedAt, now)) return null;
 
     const forecast = series
       ? await series.read({ latitude, longitude, from: new Date(fromMs) })
@@ -181,4 +188,4 @@ async function resolveLiveChip({
   }
 }
 
-module.exports = { resolveLiveChip, createSharedSeries, sharedCoverageReader, RAIN_HOUR_INCHES };
+module.exports = { resolveLiveChip, createSharedSeries, sharedCoverageReader, withinChipWindow, RAIN_HOUR_INCHES };

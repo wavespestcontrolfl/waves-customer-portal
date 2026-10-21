@@ -80,4 +80,29 @@ describe('one weather read per view', () => {
     })).toBeNull();
     expect(fetchForecast).toHaveBeenCalledTimes(1);
   });
+
+  test('a report older than the chip window keeps the banner\'s own deadline-bounded read (empty cache, no long window)', async () => {
+    // 30 days old: a completion-to-now window would be refused (bad_window past 16 days) and the banner would lose its state
+    const old = new Date('2026-09-21T10:15:00Z');
+    const oldInstruction = {
+      state: 'water_in', lines: ['Water in with about 1/2 inch within 24 hours.'], completedAt: old.toISOString(), waterInBy: '2026-09-22T10:15:00Z',
+    };
+    const shared = createSharedSeries(jest.fn(async () => ({ status: 'unavailable', reason: 'bad_window' })), NOW);
+    const bannerFetch = jest.fn(async ({ from, to }) => {
+      // the banner's own window: completion to its deadline, one day, well inside the reader's horizon
+      expect(Date.parse(to) - Date.parse(from)).toBeLessThanOrEqual(24 * HOUR);
+      return { status: 'ok', precipitationInTotalExact: 0.8 };
+    });
+    jest.resetModules();
+    jest.doMock('../services/service-report/application-conditions', () => ({
+      ...jest.requireActual('../services/service-report/application-conditions'), fetchPropertyForecast: bannerFetch,
+    }));
+    const { waterInRainInstruction: fresh } = require('../services/service-report/report-data');
+    const out = await fresh(oldInstruction, {
+      products: [], service: point(27.9).service, now: NOW, sharedSeries: shared, completionTime: old.toISOString(),
+    });
+    expect(out.state).toBe('water_in_by_rain');
+    expect(bannerFetch).toHaveBeenCalledTimes(1);
+    jest.dontMock('../services/service-report/application-conditions');
+  });
 });

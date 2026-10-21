@@ -3963,9 +3963,15 @@ function applyAfterHoldOverlay(waterContext, instruction) {
 // completion that reaches the water-in amount turns it into "water_in_by_rain" (the rain did the watering in); before
 // that a generic spray-and-rotor figure pair reads as an amount first. Only a REPLAY of a frozen instruction is touched
 // (the completion build, its freeze and its text never see this), and any miss in the rain read leaves it as frozen.
-async function waterInRainInstruction(instruction, { products, service, now = new Date(), sharedSeries = null, completionTime = null }) {
+async function waterInRainInstruction(instruction, { products, service, now = new Date(), sharedSeries: offeredSeries = null, completionTime = null }) {
   if (!lawnWaterInRain.appliesTo(instruction)) return instruction;
   try {
+    // The shared completion-to-now series serves only a chip-eligible visit (completed inside the chip's window). An
+    // older report keeps the banner's own deadline-bounded read: a long window is refused by the forecast reader
+    // (bad_window beyond 16 days) and would cost the banner its rain-covered state.
+    const { withinChipWindow } = require('./lawn-live-chip');
+    const sharedSeries = offeredSeries && withinChipWindow(completionTime, offeredSeries.now) && withinChipWindow(instruction.completedAt, offeredSeries.now)
+      ? offeredSeries : null;
     const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
     const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
     // GATE_REPORT_WEB_LIVE_CHIP: while the chip is live this view makes ONE weather read, shared with the chip (the
