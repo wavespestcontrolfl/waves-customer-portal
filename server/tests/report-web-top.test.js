@@ -145,6 +145,7 @@ describe('buildWebTopRain', () => {
     expect(rain.days).toHaveLength(7);
     expect(rain.days.filter((d) => d.isVisit).map((d) => d.date)).toEqual(['2026-10-10']);
     expect(rain.sinceVisitInches).toBe(0.75);
+    expect(rain.sinceVisitDays).toBe(3);
   });
 
   test('never reads past yesterday: a visit 2 days ago has 1 closed day after it', async () => {
@@ -152,12 +153,14 @@ describe('buildWebTopRain', () => {
     const rain = await buildWebTopRain({ service: { ...service, service_date: '2026-10-18' }, fetchMrmsDailyRain, now });
     expect(fetchMrmsDailyRain.mock.calls[0][0].end).toBe('2026-10-19');
     expect(rain.sinceVisitInches).toBe(0.3);
+    expect(rain.sinceVisitDays).toBe(1);
   });
 
   test('a gap after the visit day leaves the total out, the days stay', async () => {
     const rows = week.map((r) => (r.date === '2026-10-12' ? { ...r, inches: null } : r));
     const rain = await buildWebTopRain({ service, fetchMrmsDailyRain: reader(rows), now });
     expect(rain.sinceVisitInches).toBeNull();
+    expect(rain.sinceVisitDays).toBe(0);
     expect(rain.days.find((d) => d.date === '2026-10-12').inches).toBeNull();
   });
 

@@ -74,6 +74,8 @@ function RainBar({ rain, glass }) {
   const first = measured[0].date;
   const last = measured[measured.length - 1].date;
   const since = rain.sinceVisitInches;
+  const sinceDays = Number(rain.sinceVisitDays) || 0;
+  const window = sinceDays === 1 ? 'the day' : `the ${sinceDays} days`;
   const visitDate = days.find((d) => d.isVisit)?.date;
   const afterVisit = Boolean(visitDate) && days.some((d) => d.date > visitDate);
   const summary = days.map((d) => `${dayName(d.date)} ${d.inches == null ? 'no reading' : `${inches(d.inches)} inch`}${d.isVisit ? ', day of your visit' : ''}`).join('; ');
@@ -91,7 +93,7 @@ function RainBar({ rain, glass }) {
           </div>
         ))}
       </div>
-      {since != null ? <p style={body}>{since > 0 ? `In the 3 days after your visit: ${inches(since)} in of rain.` : 'In the 3 days after your visit: no measurable rain.'}</p> : null}
+      {since != null && sinceDays > 0 ? <p style={body}>{since > 0 ? `In ${window} after your visit: ${inches(since)} in of rain.` : `In ${window} after your visit: no measurable rain.`}</p> : null}
       <p style={{ fontSize: 14, lineHeight: 1.45, color: MUTED, margin: '6px 0 0', fontStyle: 'italic' }}>Based on NOAA radar and rain-gauge data — local totals may vary.</p>
     </Card>
   );

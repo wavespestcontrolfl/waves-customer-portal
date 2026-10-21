@@ -260,15 +260,27 @@ describe('the first screen of the simple web report', () => {
     expect(rain.textContent).toMatch(/Measured at your home, Oct 9 to Oct 11\./);
     expect(rain.textContent).toMatch(/Visit/);
     expect(within(rain).getByRole('img').getAttribute('aria-label')).toMatch(/Sat 0.2 inch, day of your visit.*Mon no reading/);
-    expect(rain.textContent).not.toMatch(/In the 3 days after your visit:/);
+    expect(rain.textContent).not.toMatch(/after your visit:/);
   });
 
-  it('a total since the visit prints when every later day is measured', async () => {
+  it('the total names the real number of days it covers; none, no sentence', async () => {
     const t = webTop();
-    t.rain = { days: t.rain.days.slice(0, 3), sinceVisitInches: 0.5 };
+    t.rain = { days: t.rain.days.slice(0, 3), sinceVisitInches: 0.5, sinceVisitDays: 2 };
     renderReport(payload({ simpleWebReport: true, webTop: t }));
     await screen.findByText(/This report is provided for your records/);
-    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/In the 3 days after your visit: 0\.5 in of rain\./);
+    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/In the 2 days after your visit: 0\.5 in of rain\./);
+    cleanup();
+    const one = webTop();
+    one.rain = { days: one.rain.days.slice(0, 3), sinceVisitInches: 0, sinceVisitDays: 1 };
+    renderReport(payload({ simpleWebReport: true, webTop: one }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/In the day after your visit: no measurable rain\./);
+    cleanup();
+    const none = webTop();
+    none.rain = { days: none.rain.days.slice(0, 3), sinceVisitInches: null, sinceVisitDays: 0 };
+    renderReport(payload({ simpleWebReport: true, webTop: none }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByLabelText('Rain at your home').textContent).not.toMatch(/after your visit:/);
   });
 
   it('a first visit has no strip; a pest card has no score', async () => {

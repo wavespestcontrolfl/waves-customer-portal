@@ -151,7 +151,7 @@ const roundInches = (value) => (value == null || value === '' || !Number.isFinit
 /**
  * Closed-day radar rain (MRMS, gauge corrected) at the home for the days around the visit. `days` keeps a null for a
  * day the radar has not filled in yet. Null = no honest figure: no coordinates, no visit day, the visit is today, the
- * radar is unreachable or fewer than 2 days are measured. `sinceVisitInches` is the total for the days after the visit
+ * radar is unreachable or fewer than 2 days are measured. `sinceVisitInches` is the total for the days after the visit (`sinceVisitDays` of them)
  * day, or null unless every one of them is measured.
  */
 async function buildWebTopRain({ service, fetchMrmsDailyRain, now = new Date() } = {}) {
@@ -162,9 +162,13 @@ async function buildWebTopRain({ service, fetchMrmsDailyRain, now = new Date() }
     .map((d) => ({ date: d.date, inches: roundInches(d.inches), isVisit: d.date === win.visit }));
   if (days.filter((d) => d.inches != null).length < 2) return null;
   const after = days.filter((d) => d.date > win.visit);
-  const sinceVisitInches = after.length && after.every((d) => d.inches != null)
-    ? roundInches(after.reduce((sum, d) => sum + d.inches, 0)) : null;
-  return { days, sinceVisitInches };
+  const whole = after.length > 0 && after.every((d) => d.inches != null);
+  return {
+    days,
+    sinceVisitInches: whole ? roundInches(after.reduce((sum, d) => sum + d.inches, 0)) : null,
+    // How many closed, measured days after the visit the total covers (the window never passes yesterday).
+    sinceVisitDays: whole ? after.length : 0,
+  };
 }
 
 module.exports = { buildWebTop, buildWebTopRain, NO_ACTION, _test: { rainCache } };
