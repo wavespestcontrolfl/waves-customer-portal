@@ -160,6 +160,15 @@ jest.setTimeout(120000);
       expect(on.body.approximateCount).toBe(on.body.customers.length - exactOn.length);
     });
 
+    test('a page that cuts the exact matches short adds no suggestions (Codex r3)', async () => {
+      process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true';
+      const { body } = await get('/admin/customers?search=Orlan&limit=1');
+      expect(body.total).toBeGreaterThan(1);
+      expect(body.customers).toHaveLength(1);
+      expect(body.customers.every((row) => !row.approximate)).toBe(true);
+      expect(body.approximateCount).toBe(0);
+    });
+
     test('three or more exact rows: no sound-alike pass', async () => {
       const { body } = await get('/admin/customers?search=Quillon');
       expect(body.total).toBe(4);

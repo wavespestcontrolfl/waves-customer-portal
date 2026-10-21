@@ -10469,7 +10469,8 @@ router.get('/list', async (req, res, next) => {
     // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
     const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive();
     let approximateServices = [];
-    if (customerSearchFuzzy && page === 1 && shouldSearchSoundAlike(search, total, exactServices)) {
+    // All exact rows on this page, so no exact match also comes back as a suggestion (Codex r3).
+    if (customerSearchFuzzy && page === 1 && exactServices.length >= total && shouldSearchSoundAlike(search, total, exactServices)) {
       const ranked = await findSoundAlikeCustomers(db, search, {
         scopeQuery: db('customers').whereNull('customers.deleted_at').whereIn(
           'customers.id',

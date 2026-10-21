@@ -2491,7 +2491,9 @@ async function appendApproximateCustomers({ page, search, totalCount, exactRows,
   const enabled = require('../config/feature-gates').customerSearchFuzzyLive();
   if (!enabled || !search) return { rows: mappedRows, extra: {} };
   let approximate = [];
-  if (page === 1 && shouldSearchSoundAlike(search, totalCount, exactRows)) {
+  // Every exact match must be on this page, so none can come back as a suggestion here and
+  // as an exact row on a later page (Codex r3; a small page limit would split them).
+  if (page === 1 && exactRows.length >= totalCount && shouldSearchSoundAlike(search, totalCount, exactRows)) {
     const scopeQuery = unsearched();
     const ranked = await findSoundAlikeCustomers(db, search, { scopeQuery, exactIds: exactRows.map((row) => row.id) });
     if (ranked.length) {
