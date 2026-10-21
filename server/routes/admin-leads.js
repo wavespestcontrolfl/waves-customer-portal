@@ -1293,7 +1293,8 @@ router.post('/:id/activity', async (req, res, next) => {
 });
 
 // POST /api/admin/leads/:id/convert — convert to customer
-router.post('/:id/convert', async (req, res, next) => {
+// Named so the Intelligence Bar's convert_lead card (convertLeadFromBar, below) runs this very handler.
+const leadConvertHandler = async (req, res, next) => {
   try {
     const { customer_id, monthly_value, initial_service_value, waveguard_tier } = req.body;
     const customerId = typeof customer_id === 'string' ? customer_id.trim() : customer_id;
@@ -1327,7 +1328,8 @@ router.post('/:id/convert', async (req, res, next) => {
     const updatedLead = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updatedLead });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/convert', leadConvertHandler);
 
 // POST /api/admin/leads/:id/lost — mark lost
 router.post('/:id/lost', async (req, res, next) => {
@@ -2406,3 +2408,21 @@ router.post('/agent/test', async (req, res, next) => {
 });
 
 module.exports = router;
+
+// The Intelligence Bar's convert_lead (owner ruling 2026-10-12) runs the SAME handler as
+// POST /:id/convert, with no HTTP request (the send_invoice adapter pattern): the handler
+// gets the only request fields it reads and a capture response, and the promise resolves
+// the reply it would send, { status, json }. An error passed to next() rejects.
+// `body` is exactly what the Leads page sends: customer_id, the value fields and the
+// seen_status / seen_updated_at pair the card showed.
+function convertLeadFromBar({ leadId, body }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    Promise.resolve(leadConvertHandler({ params: { id: leadId }, body: { ...body } }, res, reject)).catch(reject);
+  });
+}
+module.exports.convertLeadFromBar = convertLeadFromBar;

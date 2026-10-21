@@ -933,6 +933,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // convert_lead: the card names the lead, the customer and the figures; the lines ride the contract.
+  convert_lead: (params, preview) => (preview?.preview === true && preview.tool === 'convert_lead'
+    ? { lead: preview.lead_name, customer: preview.customer_name, phone_email_match: preview.matched_on, sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -972,6 +976,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // convert_lead binds the lead, the customer and the request body the card showed.
+  convert_lead: '_verified_lead_convert_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.

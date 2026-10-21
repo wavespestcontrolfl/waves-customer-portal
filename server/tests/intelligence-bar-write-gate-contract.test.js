@@ -81,6 +81,7 @@ beforeAll(() => {
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
+  process.env.GATE_IB_LEAD_CONVERT = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
@@ -89,6 +90,7 @@ afterAll(() => {
   delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
+  delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -176,6 +178,7 @@ const WRITE_TWO_STEP = [
   'accept_estimate',
   'send_invoice',
   'update_lead_contact',
+  'convert_lead',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -732,6 +735,16 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+    }],
+    // convert_lead's preview reads the lead, the customer, the contact matches, the lead's estimate and its funnel
+    // row; it may not write without confirmed (intelligence-bar-lead-convert.test.js covers the card itself).
+    ['lead-convert-tools', 'executeLeadConvertTool', 'convert_lead', {
+      lead_id: '00000000-0000-0000-0000-00000000d001', customer_id: '00000000-0000-0000-0000-00000000d002',
+    }, {
+      leads: [{ id: '00000000-0000-0000-0000-00000000d001', first_name: 'Convert', last_name: 'Fixture', phone: '+19415550177', status: 'contacted', updated_at: '2026-10-01T00:00:00Z', estimate_id: null }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000d002', first_name: 'Convert', last_name: 'Fixture', phone: '9415550177' }],
+      estimates: [],
+      ad_service_attribution: [],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
