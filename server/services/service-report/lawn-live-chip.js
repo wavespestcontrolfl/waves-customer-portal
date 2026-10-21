@@ -38,20 +38,23 @@ function rainLine(hoursAgo) {
 }
 
 /**
- * What the forecast's past-hour rows say about the time since the visit: the last rainy whole hour (or null), whether
- * any whole hour was read, and the exact total (null when any needed hour is missing). Hour rows are stamped at the END
- * of their hour: row S holds the rain of S-1h..S, so a row whose hour began before the visit ended is left out.
+ * What the forecast's past-hour rows say about the time since the visit. Hour rows are stamped at the END of their hour:
+ * row S holds the rain of S-1h..S. The window runs from the hour that CONTAINS the completion (its stamp is the first
+ * hour boundary after it, so 10:15 reads the 11:00 row) through the last CLOSED hour (the stamp at or before now; the
+ * hour in progress is unknown). Returns the last rainy row in that window (or null) and `dry`: true only when every row
+ * of the window is present with a reading and none is rainy, so a gap or a partly read window never reads as dry.
+ * A window with no closed hour yet is never dry.
  */
 function rainSince(forecast, fromMs, nowMs) {
-  const rows = (Array.isArray(forecast && forecast.hourly) ? forecast.hourly : [])
-    .map((r) => ({ ms: toMs(r.at), inches: r.precipitation_in }))
-    .filter((r) => Number.isFinite(r.ms) && r.ms - HOUR_MS >= fromMs && r.ms <= nowMs);
-  const rainy = rows.filter((r) => typeof r.inches === 'number' && r.inches >= RAIN_HOUR_INCHES);
-  const total = forecast && forecast.precipitationInTotalExact;
+  const firstStamp = Math.floor(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS;
+  const lastStamp = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  const byStamp = new Map((Array.isArray(forecast && forecast.hourly) ? forecast.hourly : []).map((r) => [toMs(r.at), r.precipitation_in]));
+  const readings = [];
+  for (let stamp = firstStamp; stamp <= lastStamp; stamp += HOUR_MS) readings.push({ ms: stamp, inches: byStamp.get(stamp) });
+  const rainy = readings.filter((r) => typeof r.inches === 'number' && r.inches >= RAIN_HOUR_INCHES);
   return {
     last: rainy.length ? rainy[rainy.length - 1] : null,
-    hasRows: rows.length > 0,
-    total: typeof total === 'number' && Number.isFinite(total) ? total : null,
+    dry: readings.length > 0 && readings.every((r) => typeof r.inches === 'number' && r.inches < RAIN_HOUR_INCHES),
   };
 }
 
@@ -87,10 +90,10 @@ async function resolveLiveChip({
     if (nowMs <= fromMs || nowMs - fromMs > COPY.visitWindowDays * DAY_MS) return null;
 
     const forecast = await fetchForecast({
-      latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs), exactTotal: true,
+      latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs),
     });
     if (!forecast || forecast.status !== 'ok') return null;
-    const { last, hasRows, total } = rainSince(forecast, fromMs, nowMs);
+    const { last, dry } = rainSince(forecast, fromMs, nowMs);
 
     const hoursAgo = last ? Math.floor((nowMs - last.ms) / HOUR_MS) : null;
     if (hoursAgo !== null && hoursAgo <= COPY.recentHours) return { state: 'recent_rain', text: rainLine(hoursAgo) };
@@ -99,11 +102,8 @@ async function resolveLiveChip({
       return { state: 'watered_in', text: COPY.wateredIn };
     }
 
-    // "No rain" needs a complete read: at least one whole hour, every hour present (the exact total is null when
-    // any needed hour is missing, so a gap never reads as dry), none rainy.
-    return !last && hasRows && total !== null && total < RAIN_HOUR_INCHES
-      ? { state: 'no_rain', text: COPY.noRain }
-      : null;
+    // "No rain" needs every hour from the completion hour through the last closed hour, read and dry.
+    return dry ? { state: 'no_rain', text: COPY.noRain } : null;
   } catch {
     return null;
   }

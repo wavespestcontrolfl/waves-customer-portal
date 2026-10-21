@@ -12,14 +12,13 @@ const COMPLETED = '2026-10-21T10:15:00Z';
 function forecastWith(rainStamps = {}, { from = COMPLETED, now = NOW, missing = null } = {}) {
   const hourly = [];
   const fromMs = Date.parse(from);
-  for (let s = Math.ceil(fromMs / HOUR) * HOUR + HOUR; s <= now.getTime(); s += HOUR) {
+  // the first row is the hour that CONTAINS the completion (10:15 -> the 11:00 row)
+  for (let s = Math.floor(fromMs / HOUR) * HOUR + HOUR; s <= now.getTime(); s += HOUR) {
     if (missing === s) continue;
     hourly.push({ at: new Date(s).toISOString(), precipitation_in: rainStamps[new Date(s).toISOString()] || 0 });
   }
-  const complete = hourly.length > 0 && missing === null;
-  return {
-    status: 'ok', hourly, precipitationInTotalExact: complete ? hourly.reduce((a, r) => a + r.precipitation_in, 0) : null,
-  };
+  // the water-in coverage reader asks for the unrounded total of the same rows
+  return { status: 'ok', hourly, precipitationInTotalExact: missing === null ? hourly.reduce((a, r) => a + r.precipitation_in, 0) : null };
 }
 const run = (forecast, extra = {}) => resolveLiveChip({
   completedAt: COMPLETED, instruction: null, products: [], latitude: 27.1, longitude: -82.4, now: NOW, fetchForecast: async () => forecast, ...extra,
@@ -39,6 +38,22 @@ describe('live lawn status chip', () => {
 
   test('a full dry read since the visit: "No rain since your treatment."', async () => {
     expect(await run(forecastWith())).toEqual({ state: 'no_rain', text: COPY.noRain });
+  });
+
+  test('boundary hours: the completion hour counts, the hour in progress is not read', async () => {
+    // completed 10:15: the 11:00 row (10:00-11:00) is the completion hour. Rain in it is not "no rain".
+    expect(await run(forecastWith({ '2026-10-21T11:00:00.000Z': 0.1 }))).toBeNull();
+    // that row missing: unknown, never dry
+    expect(await run(forecastWith({}, { missing: Date.parse('2026-10-21T11:00:00Z') }))).toBeNull();
+    // now 11:20: the completion hour is the only closed hour; dry = no rain, rainy = hidden
+    const early = new Date('2026-10-21T11:20:00Z');
+    expect(await run(forecastWith({}, { now: early }), { now: early })).toEqual({ state: 'no_rain', text: COPY.noRain });
+    expect(await run(forecastWith({ '2026-10-21T11:00:00.000Z': 0.1 }, { now: early }), { now: early })).toEqual({ state: 'recent_rain', text: 'Rain fell within the last hour. Wait until the lawn is dry.' });
+    // a completion exactly on the hour does not need the row before it (10:00 stamp = 09:00-10:00, before the visit)
+    const onHour = { completedAt: '2026-10-21T10:00:00Z' };
+    const rows = forecastWith({}, { from: '2026-10-21T10:00:00Z' });
+    expect(rows.hourly[0].at).toBe('2026-10-21T11:00:00.000Z');
+    expect(await run(rows, onHour)).toEqual({ state: 'no_rain', text: COPY.noRain });
   });
 
   test('a missing hour is unknown, never dry', async () => {
