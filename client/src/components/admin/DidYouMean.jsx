@@ -5,6 +5,8 @@
 // divider before the first approximate row, so a sound-alike is never read as
 // an exact hit. Pickers that do not use it show the rows as ordinary ones.
 
+import { Fragment } from 'react';
+
 export function isApproximateRow(row) {
   return Boolean(row && row.approximate === true);
 }
@@ -41,4 +43,16 @@ export default function DidYouMean({ className = '', style }) {
       Did you mean
     </div>
   );
+}
+
+// Renders a picker's rows with the divider before the first approximate row:
+// `renderWithDidYouMean(rows, (row, at) => <button key=... />)` replaces
+// `rows.map((row, at) => <button key=... />)`. Exact rows keep their order.
+export function renderWithDidYouMean(rows, renderRow, dividerProps = {}) {
+  return (rows || []).map((row, at) => (
+    <Fragment key={row?.id ?? at}>
+      {isApproximateRow(row) && !isApproximateRow(rows[at - 1]) && <DidYouMean {...dividerProps} />}
+      {renderRow(row, at)}
+    </Fragment>
+  ));
 }
