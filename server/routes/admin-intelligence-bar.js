@@ -933,7 +933,7 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
-  // record_payment: the card names the invoice, the customer, the money and whether a receipt goes out; the lines ride the contract.
+  // record_payment: the card names the invoice, the customer, the money and that no receipt is sent; the lines ride the contract.
   record_payment: (params, preview) => (preview?.preview === true && preview.tool === 'record_payment'
     ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, method: preview.method, receipt: preview.receipt }
     : null),
@@ -980,7 +980,7 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
-  // record_payment binds the invoice state, the amount due, the method and the receipt reach the card showed.
+  // record_payment binds the invoice state, the amount due and the method the card showed.
   record_payment: '_verified_record_payment_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',

@@ -26,16 +26,17 @@
  * quietly when GATE_INVOICE_ISSUED_CLOSES_VISIT is on; writes an activity row; and nudges the held-report release sweep.
  * An invoice a project's held report waits on (WDO payment hold) is REFUSED, because paying releases that report to the customer
  * (email, copies, text): code payment_releases_report_unsupported. Nothing else the settlement does contacts the customer at once
- * (checked: billing-pause clear, payment-plan completion, reminder stop and the payment-failed bell close send nothing). Its receipt is the screen's
- * "Send receipt" switch: this card sends a receipt ONLY when the operator asked for one (send_receipt),
- * on the channels the screen would use (email and/or text, from the invoice's own recipients).
+ * (checked: billing-pause clear, payment-plan completion, reminder stop and the payment-failed bell close send nothing). The screen's
+ * "Send receipt" switch is NOT offered: this card always sends the handler sendReceipt=false and sends the customer nothing. A receipt
+ * is a separate act with its own card and its own queue rules: resend_receipt after recording, or the Invoices page. (Scope cut after
+ * the receipt-queue review rounds on #6380: take-over after a guarded claim, uncertain provider outcomes.)
  *
  * Always a confirm card (write-gates.js two-step), admin only, never owner-direct (an external_action),
  * platform path only, dark behind GATE_IB_RECORD_PAYMENT (which needs GATE_IB_PLATFORM).
  *
  *   unconfirmed -> a PREVIEW: nothing is written. Its `_version` pins what the card showed (the invoice's
- *                  status, edit time, amounts and links, the method / reference / note, the receipt
- *                  recipients, the visit the closeout would complete, the exact request body).
+ *                  status, edit time, amounts and links, the method / reference / note, the
+ *                  visit the closeout would complete, the exact request body).
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the
  *                  handler with exactly the carded body. The bar also hands the handler the amount due
  *                  and a settlement fence built from the invoice the card showed (record-payment-fences.js); the settlement enforces them
@@ -46,11 +47,9 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
-const { maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { VALID_PAYMENT_METHODS } = require('../invoice-manual-payment');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus } = require('../invoice-helpers');
-const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
-const { settlementFenceFor, receiptGuardFor, pinnedColumnsOf } = require('./record-payment-fences');
+const { settlementFenceFor, pinnedColumnsOf } = require('./record-payment-fences');
 const { etDateString } = require('../../utils/datetime-et');
 
 function recordPaymentLive() {
@@ -64,9 +63,9 @@ const CARD_WORDS = /(card|stripe|visa|master|amex|discover|credit|debit|apple|go
 const RECORD_PAYMENT_TOOLS = [
   {
     name: 'record_payment',
-    description: `Record a payment the office ALREADY RECEIVED outside the portal (cash, a check, Zelle, Venmo, PayPal or another manual payment) against ONE existing open invoice: the Invoices page "Record payment". It marks the invoice paid; it never charges a card, creates a Stripe payment, refunds or voids anything. The first call returns a PREVIEW and writes nothing: the invoice, the customer, the balance due, the method and reference, whether a receipt goes out, and every change. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
-The Invoices page records the WHOLE balance due, as of today. So amount must equal the balance due on the invoice: a larger amount (overpayment) and a smaller one (a partial payment) are refused with the balance, and a payment date other than today is refused. Effects: the invoice becomes paid with the method and reference, a payment row is added, the invoice's reminders stop, an open pay-page card session on the invoice is cancelled, and a linked visit may be completed or a review ask enrolled (the card lists what applies). The customer is sent nothing unless send_receipt is true; then the card names who gets the receipt by email and/or text.
-Pass amount in dollars, method (cash, check, zelle, venmo, paypal or other), and reference when there is one (check number, confirmation number). send_receipt only when the operator asked for a receipt. Takes invoice_id OR invoice_number, exactly one.
+    description: `Record a payment the office ALREADY RECEIVED outside the portal (cash, a check, Zelle, Venmo, PayPal or another manual payment) against ONE existing open invoice: the Invoices page "Record payment". It marks the invoice paid; it never charges a card, creates a Stripe payment, refunds or voids anything. The first call returns a PREVIEW and writes nothing: the invoice, the customer, the balance due, the method and reference, that no receipt is sent, and every change. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
+The Invoices page records the WHOLE balance due, as of today. So amount must equal the balance due on the invoice: a larger amount (overpayment) and a smaller one (a partial payment) are refused with the balance, and a payment date other than today is refused. Effects: the invoice becomes paid with the method and reference, a payment row is added, the invoice's reminders stop, an open pay-page card session on the invoice is cancelled, and a linked visit may be completed or a review ask enrolled (the card lists what applies). The customer is sent nothing: this tool does not send receipts. To send one afterwards, use resend_receipt or the Invoices page.
+Pass amount in dollars, method (cash, check, zelle, venmo, paypal or other), and reference when there is one (check number, confirmation number). send_receipt is not accepted: it is refused as capability_unimplemented. Takes invoice_id OR invoice_number, exactly one.
 Refused: a paid, prepaid, void, refunded or canceled invoice, one billed to a payer or a payer's statement, an annual-plan invoice, an invoice with nothing due, an invoice a held report (payment-held WDO report) waits on, because paying releases that report to the customer, a card payment (the bar does not take cards), a refund or negative amount, an amount that is not the balance due, a date other than today.
 Use for: "record a payment", "customer paid cash", "mark paid by check", "she paid by check number 1042", "got a Zelle for this invoice", "log a Venmo payment", "mark this invoice paid".`,
     input_schema: {
@@ -79,7 +78,6 @@ Use for: "record a payment", "customer paid cash", "mark paid by check", "she pa
         reference: { type: 'string', description: `Check number, Zelle / Venmo / PayPal confirmation number, money order number (up to ${REFERENCE_LIMIT} characters)` },
         note: { type: 'string', description: `Optional office note added to the invoice's notes (up to ${NOTE_LIMIT} characters)` },
         payment_date: { type: 'string', description: 'YYYY-MM-DD, only if the operator gave one. Only today (ET) is accepted; the Invoices page records the payment as of now.' },
-        send_receipt: { type: 'boolean', description: 'true only when the operator asked for a receipt to be sent to the customer now. Default false: nothing is sent.' },
       },
       required: ['amount', 'method'],
     },
@@ -145,14 +143,17 @@ function readDate(raw) {
   return {};
 }
 
-// What the operator typed, checked before any read. Returns { method, reference, note, amountCents, sendReceipt }
+// What the operator typed, checked before any read. Returns { method, reference, note, amountCents }
 // or the refusal.
 function readInput(input) {
-  if (input?.send_receipt !== undefined && typeof input.send_receipt !== 'boolean') return refusal('send_receipt must be true or false', 'invalid_target');
+  // No receipt option: refused outright, not ignored, so a model that asks for one is told the way forward.
+  if (input?.send_receipt !== undefined && input.send_receipt !== null && input.send_receipt !== false) {
+    return refusal('record_payment does not send receipts; after recording, use resend_receipt or the Invoices page', 'capability_unimplemented');
+  }
   const parts = [readAmount(input?.amount), readMethod(input?.method), readTexts(input), readDate(input?.payment_date)];
   const failed = parts.find((part) => part.error);
   if (failed) return failed;
-  return { ...Object.assign({}, ...parts), sendReceipt: input?.send_receipt === true };
+  return Object.assign({}, ...parts);
 }
 
 // The refusals the card makes before it shows anything, in the handler's own words where the handler has them.
@@ -218,40 +219,6 @@ async function heldReportRefusal(invoice) {
   }
 }
 
-// Who a receipt would reach, resolved exactly as the Invoices page does (GET /:id/recipients): email to the
-// invoice's email recipient, text to its SMS recipient; the channels follow what exists.
-// The channels (via) are the page's; the DESTINATIONS the card names and pins are the senders' own: the email the receipt email
-// sender resolves (resolveReceiptEmailRecipient, the manual send's resolver) and the customer's phone the receipt text uses.
-// The settlement hands those to the senders' provider-boundary check, so a changed destination skips the send.
-async function receiptReach(invoice) {
-  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
-  if (!who) return null;
-  const pageEmail = who.emailRecipient?.email || '';
-  const pagePhone = who.smsRecipient?.phone || '';
-  const via = pageEmail && pagePhone ? 'both' : pageEmail ? 'email' : pagePhone ? 'sms' : null;
-  const resolved = await require('../invoice-email').resolveReceiptEmailRecipient({ ...invoice }, {});
-  const customer = await db('customers').where({ id: invoice.customer_id }).first('phone');
-  const email = resolved.ok && resolved.recipient?.email ? String(resolved.recipient.email).trim().toLowerCase() : '';
-  const phone = String(customer?.phone || '').replace(/\D/g, '').slice(-10);
-  return { email, phone, via, payerBilled: who.payerBilled === true };
-}
-
-// The receipt the operator asked for, or { reach: null } when none: who it reaches, or the refusal.
-async function receiptPlan(invoice, sendReceipt) {
-  if (!sendReceipt) return { reach: null };
-  // An automatic receipt job already owns this invoice's receipt: the card's send never claims it (the settlement's fence and the
-  // receipt claim refuse it too), so the receipt is refused here, before anything is shown.
-  if (await db('receipt_delivery_jobs').where({ invoice_id: invoice.id }).whereIn('status', ['queued', 'retry_scheduled', 'running']).first('id')) {
-    return refusal('A receipt for this invoice is already queued; record the payment without a receipt here, or send it from the Invoices page.', 'receipt_already_queued', { invoice_id: invoice.id });
-  }
-  const reach = await receiptReach(invoice);
-  const legs = !reach ? [] : [reach.via !== 'sms' && reach.email, reach.via !== 'email' && reach.phone].filter(Boolean);
-  if (!reach || reach.payerBilled || !reach.via || !legs.length) {
-    return refusal('A receipt cannot be sent: the customer has no email or phone on file. Record the payment without a receipt (send_receipt false).', 'no_receipt_contact', { invoice_id: invoice.id });
-  }
-  return { reach };
-}
-
 // The visit the paid closeout would complete (null = none); a probe that cannot read refuses (fail closed).
 async function closeoutProbe(invoice) {
   try {
@@ -261,18 +228,17 @@ async function closeoutProbe(invoice) {
   }
 }
 
-// The exact body the Invoices page sends.
-function requestBody({ method, reference, note, sendReceipt, via }) {
+// The body the Invoices page sends with its Send receipt switch off: sendReceipt is always false (the shim forces it too).
+function requestBody({ method, reference, note }) {
   return {
     method,
     ...(reference ? { reference } : {}),
     ...(note ? { note } : {}),
-    sendReceipt,
-    ...(sendReceipt ? { via } : {}),
+    sendReceipt: false,
   };
 }
 
-function planEffects({ invoice, dueCents, method, reference, note, sendReceipt, reach, closeout }) {
+function planEffects({ invoice, dueCents, method, reference, note, closeout }) {
   const effects = [
     { kind: 'billing', text: `Invoice ${invoice.invoice_number} (${invoice.status}) → paid, ${money(dueCents)} by ${method}${reference ? `, reference ${reference}` : ''}, as of today. A payment row for ${money(dueCents)} is added to the ledger and any active payment plan on the invoice is completed.` },
     { kind: 'billing', text: 'No card is charged, no Stripe payment is created, and nothing is refunded or voided. This records money already received.' },
@@ -291,9 +257,7 @@ function planEffects({ invoice, dueCents, method, reference, note, sendReceipt, 
   if (invoice.service_record_id || invoice.visit_completion_packet_id) {
     effects.push({ kind: 'operational', text: 'This invoice came from a completed visit: the customer may be enrolled in the review-request follow-up under the standing review rules (no review text goes out from this step itself).' });
   }
-  effects.push(sendReceipt
-    ? { kind: 'comms', text: `A receipt is sent now: ${[reach.via !== 'sms' && reach.email && `email to ${maskEmail(reach.email)}`, reach.via !== 'email' && reach.phone && `text to ${maskPhone(reach.phone)}`].filter(Boolean).join(' and ')}. A leg is skipped if the customer opted out of receipts or their receipt settings say so, or if the address or phone changed since this card.` }
-    : { kind: 'comms', text: 'Nothing is sent to the customer: no receipt, text or email.' });
+  effects.push({ kind: 'comms', text: 'No receipt is sent. To send one, ask the bar to resend the receipt after recording, or use the Invoices page.' });
   return effects;
 }
 
@@ -303,7 +267,7 @@ const closeoutPin = (closeout) => (closeout
   ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true }
   : null);
 
-function versionOf({ invoice, dueCents, input, reach, closeout, paymentDate, body }) {
+function versionOf({ invoice, dueCents, input, closeout, paymentDate, body }) {
   return {
     invoice_id: invoice.id,
     status: invoice.status,
@@ -319,7 +283,6 @@ function versionOf({ invoice, dueCents, input, reach, closeout, paymentDate, bod
     method: input.method,
     reference: input.reference,
     note: input.note,
-    receipt: input.sendReceipt ? digest([reach.email, reach.phone, reach.via]) : null,
     closeout_visit: closeout?.visitId || null,
     // The visit's own facts (edit time, scheduled date, service type): a visit edited after the card is drift.
     closeout_facts: closeout ? digest(closeoutPin(closeout)) : null,
@@ -339,17 +302,14 @@ async function buildPlan(input) {
   if (refused) return refused;
   const held = await heldReportRefusal(invoice);
   if (held) return held;
-  const receipt = await receiptPlan(invoice, read.sendReceipt);
-  if (receipt.error) return receipt;
-  const { reach } = receipt;
   const probe = await closeoutProbe(invoice);
   if (probe.error) return probe.error;
   const { closeout } = probe;
   // One ET day for the whole card: shown, pinned, and re-asserted by the settlement's fence.
   const paymentDate = etDateString();
   const customer = await db('customers').where({ id: invoice.customer_id }).first('first_name', 'last_name', 'company_name');
-  const body = requestBody({ method: read.method, reference: read.reference, note: read.note, sendReceipt: read.sendReceipt, via: reach?.via });
-  const effects = planEffects({ invoice, dueCents, method: read.method, reference: read.reference, note: read.note, sendReceipt: read.sendReceipt, reach, closeout });
+  const body = requestBody({ method: read.method, reference: read.reference, note: read.note });
+  const effects = planEffects({ invoice, dueCents, method: read.method, reference: read.reference, note: read.note, closeout });
   return {
     preview: true,
     tool: 'record_payment',
@@ -365,19 +325,15 @@ async function buildPlan(input) {
     office_note: read.note || null,
     payment_date: paymentDate,
     effects,
-    receipt: read.sendReceipt
-      ? `Receipt sent now by ${reach.via === 'both' ? 'email and text' : reach.via === 'email' ? 'email' : 'text'}`
-      : 'No receipt is sent',
-    sends_to_customer: read.sendReceipt,
-    receipt_channels: read.sendReceipt ? (reach.via === 'both' ? 'email and text' : reach.via === 'email' ? 'email' : 'text') : null,
-    _version: versionOf({ invoice, dueCents, input: read, reach, closeout, paymentDate, body }),
+    receipt: 'No receipt is sent',
+    sends_to_customer: false,
+    _version: versionOf({ invoice, dueCents, input: read, closeout, paymentDate, body }),
     _body: body,
     // What the settlement is handed (never shown): the amount due, the fence it runs before the Stripe retirement and again under
-    // the invoice lock (record-payment-fences.js), and the receipt's destination check. Functions: not part of any pin or display.
+    // the invoice lock (record-payment-fences.js). Functions: not part of any pin or display.
     _approved: {
       expectedAmountCents: dueCents,
-      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none', paymentDate, closeout: closeoutPin(closeout), receiptRequested: read.sendReceipt }),
-      ...(read.sendReceipt ? { receiptGuard: receiptGuardFor({ email: emailDigest(reach.email), phone: phoneDigest(reach.phone) }) } : {}),
+      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none', paymentDate, closeout: closeoutPin(closeout) }),
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',
   };
@@ -402,13 +358,6 @@ async function actorOf(actionContext) {
   return { technicianId, name: tech?.name || null, email: tech?.email || null };
 }
 
-function receiptReport(plan, receipt) {
-  if (!plan.sends_to_customer) return { requested: false };
-  const leg = (r) => (r === null || r === undefined ? 'not_requested' : r.ok ? 'sent' : 'not_sent');
-  if (receipt?.queued) return { requested: true, queued: true };
-  return { requested: true, email: leg(receipt?.email), text: leg(receipt?.sms) };
-}
-
 async function commitRecord(input, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_record_payment_version);
   if (refused) return refused;
@@ -426,15 +375,10 @@ async function commitRecord(input, actionContext) {
     return { ...base, outcome_unknown: true, code: 'record_unverified',
       error: 'The Invoices page answered, but the invoice does not read as paid. Check the invoice before trying again.' };
   }
-  const receipt = receiptReport(plan, json.receipt);
-  const sent = receipt.requested && (receipt.email === 'sent' || receipt.text === 'sent');
   logger.info(`[intelligence-bar:record-payment] recorded ${plan.method} payment on invoice ${plan.invoice_id}`);
   return {
-    ...base, success: true, status: 'paid', method: plan.method, amount: plan.balance_due, receipt, sent_to_customer: Boolean(sent),
-    note: `${plan.invoice_number} is marked paid (${money(plan.balance_due * 100)} by ${plan.method}).${plan.sends_to_customer
-      ? (receipt.queued ? ' A receipt for this invoice had been queued since the card: it goes out on its own, and this card did not send one.'
-        : sent ? ' The receipt was sent.' : ' The receipt was not sent; resend it from the invoice if the customer needs one.')
-      : ' Nothing was sent to the customer.'}`,
+    ...base, success: true, status: 'paid', method: plan.method, amount: plan.balance_due, sent_to_customer: false,
+    note: `${plan.invoice_number} is marked paid (${money(plan.balance_due * 100)} by ${plan.method}). No receipt was sent. To send one, ask the bar to resend the receipt, or use the Invoices page.`,
   };
 }
 

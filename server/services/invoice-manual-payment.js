@@ -19,11 +19,6 @@
  * credit), nothing is written and a 409 says so, so the ledger can never
  * record a different sum than the money that arrived.
  *
- * receiptGuard (optional, the Intelligence Bar record_payment card only): { check, relabel }. `check` is handed to the inline receipt
- * email and text as their provider-boundary check (beforeProviderHandoff on sendReceiptEmail / InvoiceService.sendReceipt) and returns
- * true only for a destination the card showed; `relabel({ emailResult, smsResult })` words a leg it refused; `claimOptions` ({ refuseQueuedJob })
- * keeps the card's send from ever claiming an automatic receipt job already queued for the invoice. The Invoices page sends none.
- *
  * The card also supplies a settlementFence (below), carrying `closeoutTarget` (the visit id its card said the payment's closeout would
  * complete, or 'none'): written as a pin inside the settlement transaction and handed to the closeout as its approved target, so a visit
  * that became closable after the card is left open, on the first run and on every retry. It throws its own 409 refusals (`drift: true`); the fence is handed the LOCKED
@@ -124,7 +119,6 @@ async function recordManualPayment(id, {
   sendReceipt = true,
   via = 'both',
   expectedAmountCents = null,
-  receiptGuard,
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
@@ -508,7 +502,7 @@ async function recordManualPayment(id, {
     const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
     // The payment is already recorded: a claim failure only skips the
     // receipt (reported back), never fails the payment.
-    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !updatedInvoice.receipt_sent_at, ...receiptGuard?.claimOptions })
+    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !updatedInvoice.receipt_sent_at })
       .catch((err) => ({ error: err.message }));
     if (claim.inFlight && !claim.byOperator) {
       // A queued job for this invoice is delivering the receipt right now.
@@ -523,18 +517,16 @@ async function recordManualPayment(id, {
       emailResult = { ok: false, error: `receipt claim failed: ${claim.error}` };
     }
     const canSend = !claim.inFlight && !claim.alreadySent && !claim.error;
-    // The card's provider-boundary check for the sends below (none for the page).
-    const handoffArgs = receiptGuard ? [{ beforeProviderHandoff: receiptGuard.check }] : [];
     const emailLeg = via === 'email' || via === 'both';
     const smsLeg = via === 'sms' || via === 'both';
     if (canSend) {
       try {
         if (emailLeg) {
-          emailResult = await sendReceiptEmail(id, ...handoffArgs).catch((err) => ({ ok: false, error: err.message }));
+          emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
           if (emailResult?.ok) await recordOperatorReceiptDelivered(claim, 'email');
         }
         const r = smsLeg
-          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true, ...handoffArgs[0] })
+          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true })
             .catch((err) => ({ sent: false, reason: err.message }))
           : null;
         if (r) smsResult = r.sent ? { ok: true } : { ok: false, error: r.reason || r.code || 'not-sent' };
@@ -545,7 +537,6 @@ async function recordManualPayment(id, {
       } finally {
         await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult });
       }
-      if (receiptGuard) ({ emailResult, smsResult } = receiptGuard.relabel({ emailResult, smsResult }));
     }
     if (emailResult?.ok || smsResult?.ok) {
       await db('activity_log').insert({

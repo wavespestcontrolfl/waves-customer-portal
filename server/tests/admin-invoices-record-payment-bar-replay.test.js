@@ -51,7 +51,7 @@ async function viaPage(body) {
   }
 }
 
-const APPROVED = { expectedAmountCents: 11700, settlementFence: jest.fn(), receiptGuard: { check: jest.fn(), relabel: jest.fn() } };
+const APPROVED = { expectedAmountCents: 11700, settlementFence: jest.fn() };
 const viaBar = (body = BODY, approvedPayment = APPROVED) => router.recordPaymentFromBar({
   invoiceId: INV, body, actor: { technicianId: 'admin-1', name: 'Ava Admin', email: 'ava@example.test' }, approvedPayment,
 });
@@ -76,15 +76,13 @@ describe('the page path is unchanged', () => {
     expect(Object.keys(args)).not.toContain('expectedInvoiceVersion');
     expect(Object.keys(args)).not.toContain('requireSelfPay');
     expect(Object.keys(args)).not.toContain('settlementFence');
-    expect(Object.keys(args)).not.toContain('receiptGuard');
   });
 
   test('a card pin sent in the HTTP body is ignored: only the bar shim can set it', async () => {
-    await viaPage({ ...BODY, ibApprovedPayment: APPROVED, expectedAmountCents: 1, settlementFence: 'x', receiptGuard: 'x', requireSelfPay: true });
+    await viaPage({ ...BODY, ibApprovedPayment: APPROVED, expectedAmountCents: 1, settlementFence: 'x', requireSelfPay: true });
     const [, args] = recordManualPayment.mock.calls[0];
     expect(args).not.toHaveProperty('expectedAmountCents');
     expect(args).not.toHaveProperty('settlementFence');
-    expect(args).not.toHaveProperty('receiptGuard');
     expect(args).not.toHaveProperty('requireSelfPay');
   });
 
@@ -113,6 +111,15 @@ describe('the bar shim runs the same handler', () => {
     expect(barCall[1]).toEqual({ ...pageCall[1], ...APPROVED, requireSelfPay: true });
     // The recorder is the staff member's name, as the page path reads it from the login.
     expect(barCall[1].recordedBy).toBe('Ava Admin');
+  });
+
+  test('the shim always passes sendReceipt=false and no via to the handler, whatever body it is given: the bar never sends a receipt from here', async () => {
+    await viaBar({ method: 'check', reference: '1042', sendReceipt: true, via: 'both' });
+    const [, args] = recordManualPayment.mock.calls[0];
+    expect(args).toMatchObject({ method: 'check', reference: '1042', sendReceipt: false });
+    expect(args.via).toBe('both'); // the handler's own default for a send it will not make
+    await viaBar({ method: 'check' });
+    expect(recordManualPayment.mock.calls[1][1].sendReceipt).toBe(false);
   });
 
   test('a card pin refusal answers 409 with the PREVIEW_CHANGED code; any other 409 carries none', async () => {

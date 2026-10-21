@@ -466,11 +466,7 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // the drain's recovery of a crashed operator send) delivered the receipt in
 // between, and this send is refused ({ alreadySent: true }). A caller that
 // saw it already stamped is a deliberate resend and is never refused here.
-// refuseQueuedJob (the Intelligence Bar's record_payment card): an automatic receipt job already queued for the invoice is never
-// claimed. The call answers { inFlight: true, byOperator: false, queuedJob: true } and leaves the row exactly as it was, so the
-// card's send can never hold (and a crash or stale recovery can never re-queue) a job under the card's approval: the job
-// delivers on its own, and the caller reports it as queued. A row the claim creates itself is unaffected.
-async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false, refuseQueuedJob = false } = {}) {
+async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } = {}) {
   // A stale row is settled first by the same rules as the drain's recovery
   // (closed on its own recorded email, removed when a claim created it,
   // otherwise requeued), so what is left running is genuinely in flight. A
@@ -519,7 +515,6 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false, re
       // delivers only the legs that operator chose, so it is no promise that
       // this caller's receipt goes out.
       if (job.status === 'running') return { inFlight: true, byOperator: String(job.locked_by || '').startsWith('operator:') };
-      if (refuseQueuedJob && QUEUED_STATUSES.includes(job.status)) return { inFlight: true, byOperator: false, queuedJob: true };
       if (await stampedSinceRead() || await summaryTextStarted()) return { alreadySent: true };
       // A completed or failed job sends nothing more: no claim to hold.
       if (!QUEUED_STATUSES.includes(job.status)) return { id: null };

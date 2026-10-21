@@ -525,43 +525,6 @@ postgres('operator receipt claim on PostgreSQL', () => {
     });
   });
 
-  describe('refuseQueuedJob — the Intelligence Bar record_payment card never claims an automatic receipt job (Codex r5)', () => {
-    test.each(['queued', 'retry_scheduled'])('a %s job is answered as queued and left exactly as it was: the drain still owns it and stale recovery has nothing to requeue', async (status) => {
-      const invoiceId = await seedJob({ status, source: 'stripe_webhook' });
-      const before = await job(invoiceId);
-      expect(await claimReceiptJobForOperatorSend(invoiceId, { refuseQueuedJob: true })).toEqual({ inFlight: true, byOperator: false, queuedJob: true });
-      const after = await job(invoiceId);
-      expect(after).toMatchObject({ status, source: 'stripe_webhook', locked_by: null, locked_at: null });
-      expect(after.updated_at).toEqual(before.updated_at);
-      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).toContain(invoiceId);
-    });
-
-    test('without the option the same queued job is claimed as before (the Invoices page)', async () => {
-      const invoiceId = await seedJob({ status: 'queued' });
-      const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      expect(claim).toMatchObject({ id: expect.any(String), prior: { status: 'queued' } });
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
-    });
-
-    test('a finished job holds no claim, as always; an invoice with no job gets the claim\'s own row', async () => {
-      const done = await seedJob({ status: 'completed' });
-      expect(await claimReceiptJobForOperatorSend(done, { refuseQueuedJob: true })).toEqual({ id: null });
-      const fresh = randomUUID();
-      const claim = await claimReceiptJobForOperatorSend(fresh, { refuseQueuedJob: true });
-      expect(claim).toMatchObject({ id: expect.any(String), prior: null });
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
-    });
-
-    test('a claim-created row the process never released is DELETED by stale recovery, never requeued or sent', async () => {
-      const invoiceId = randomUUID();
-      const claim = await claimReceiptJobForOperatorSend(invoiceId, { refuseQueuedJob: true });
-      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_at: new Date(Date.now() - 60 * 60 * 1000) });
-      await recoverStaleLocks({ invoiceId });
-      expect(await job(invoiceId)).toBeUndefined();
-      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
-    });
-  });
-
   describe('holdForReconciliation — an unknown provider outcome never goes back to the drain', () => {
     test('a queued job the operator claimed is parked as failed, not re-queued; the drain and a new claim leave it alone', async () => {
       const invoiceId = await seedJob({ status: 'retry_scheduled' });

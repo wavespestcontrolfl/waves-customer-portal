@@ -827,7 +827,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'accept_estimate' && Array.isArray(preview?.card_lines)) {
     for (const l of preview.card_lines) push(l.kind, l.label, l.before !== undefined ? { before: l.before, after: l.after } : {});
   }
-  // record_payment: the invoice, the money and whether a receipt goes out.
+  // record_payment: the invoice, the money and that no receipt is sent.
   if (toolName === 'record_payment' && preview?.preview === true) {
     for (const line of require('./record-payment-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
@@ -1066,8 +1066,6 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The membership-started email (and an autosent termite agreement), only
       // when the preview found they will go out; each rides its own comms line.
       || (toolName === 'accept_estimate' && preview?.notifies_customer === true)
-      // A receipt, only when the operator asked for one (the preview says so).
-      || (toolName === 'record_payment' && preview?.sends_to_customer === true)
       || tierUpgradeEmail
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
@@ -1078,7 +1076,6 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
-    if (toolName === 'record_payment') contactLabel = `A receipt will be attempted by ${preview?.receipt_channels || 'email or text'} (sent unless the customer opted out of receipts, their receipt settings say otherwise, or a changed address or phone skips it; see the Message lines)`;
     if (toolName === 'accept_estimate') contactLabel = 'Customer will be emailed (see the Message lines)';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3

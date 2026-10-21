@@ -13,14 +13,12 @@ jest.mock('../services/invoice-manual-payment', () => ({
   VALID_PAYMENT_METHODS: ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'],
 }));
 jest.mock('../routes/admin-invoices', () => ({ recordPaymentFromBar: jest.fn(), getInvoiceDeliveryRecipients: jest.fn() }));
-jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn() }));
 jest.mock('../services/invoice-prepay', () => ({ resolveInvoiceTermId: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(), visitJobTimerRunning: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
-const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const { resolveInvoiceTermId } = require('../services/invoice-prepay');
 const { issuedCloseoutTarget, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
@@ -92,10 +90,6 @@ beforeEach(() => {
   rowIsSelfPayDue.mockResolvedValue(true);
   resolveInvoiceTermId.mockResolvedValue(null);
   issuedCloseoutTarget.mockResolvedValue(null);
-  resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Robin@Example.test' } });
-  Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({
-    payerBilled: false, emailRecipient: { email: 'robin@example.test' }, smsRecipient: { phone: '+19415550142' },
-  });
   Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { id: INV, status: 'paid' }, receipt: null } });
 });
 afterEach(() => envGate(false));
@@ -176,7 +170,7 @@ describe('the preview', () => {
     const text = card.effects.map((e) => e.text).join('\n');
     expect(text).toMatch(/→ paid, \$117\.00 by check, reference 1042/);
     expect(text).toMatch(/No card is charged, no Stripe payment is created, and nothing is refunded or voided/);
-    expect(text).toMatch(/Nothing is sent to the customer/);
+    expect(text).toMatch(/No receipt is sent\. To send one, ask the bar to resend the receipt after recording, or use the Invoices page\./);
     expect(text).toMatch(/check left at the office/);
     expect(text).toMatch(/reminder sequence stops/);
     expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
@@ -194,88 +188,23 @@ describe('the preview', () => {
     expect(await preview({ amount: 117 })).toMatchObject({ code: 'amount_exceeds_balance' });
   });
 
-  test('a receipt is named, with masked recipients and the channels the page would use; it is a customer message', async () => {
-    const card = await preview({ send_receipt: true });
-    expect(card).toMatchObject({ sends_to_customer: true, receipt: 'Receipt sent now by email and text' });
-    expect(card._body).toEqual({ method: 'check', reference: '1042', sendReceipt: true, via: 'both' });
-    const comms = card.effects.find((e) => e.kind === 'comms').text;
-    expect(comms).toMatch(/email to r\*\*\*@example\.test and text to \*\*\*0142/);
-    expect(comms).not.toMatch(/robin@example\.test|9415550142/);
-    const contract = buildContract({ toolName: 'record_payment', params: { ...BASE, send_receipt: true }, preview: card, summary: 'x' });
-    expect(contract.notifies_customer).toBe(true);
-    expect(contract.irreversible).toBe(true);
+  test('the receipt option is gone: send_receipt true is refused as capability_unimplemented with the way forward, before any read', async () => {
+    for (const send_receipt of [true, 'yes', 1]) {
+      const res = await preview({ send_receipt });
+      expect(res).toMatchObject({ code: 'capability_unimplemented' });
+      expect(res.error).toBe('record_payment does not send receipts; after recording, use resend_receipt or the Invoices page');
+    }
+    const card = await preview();
+    expect(await confirm(card, { send_receipt: true })).toMatchObject({ code: 'capability_unimplemented' });
+    expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
+    expect(Invoices.getInvoiceDeliveryRecipients).not.toHaveBeenCalled();
   });
 
-  test('email only or text only follows what the invoice has', async () => {
-    Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ payerBilled: false, emailRecipient: { email: 'robin@example.test' }, smsRecipient: null });
-    expect((await preview({ send_receipt: true }))._body.via).toBe('email');
-    Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ payerBilled: false, emailRecipient: null, smsRecipient: { phone: '+19415550142' } });
-    expect((await preview({ send_receipt: true }))._body.via).toBe('sms');
-  });
-
-  test('the card names and pins the senders’ own destinations, not the page’s: a page email the sender does not resolve is not promised', async () => {
-    resolveReceiptEmailRecipient.mockResolvedValue({ ok: false, error: 'No receipt recipient email' });
-    const card = await preview({ send_receipt: true });
-    const comms = card.effects.find((e) => e.kind === 'comms').text;
-    expect(comms).toMatch(/text to \*\*\*0142/);
-    expect(comms).not.toMatch(/email to/);
-    state.customers[0].phone = null;
-    expect(await preview({ send_receipt: true })).toMatchObject({ code: 'no_receipt_contact' });
-  });
-
-  describe('an automatic receipt job already owns the invoice\'s receipt (Codex r5: closed structurally, never claimed under the card)', () => {
-    test.each(['queued', 'retry_scheduled', 'running'])('a %s job refuses the receipt at the preview, naming the way forward', async (status) => {
-      state.receipt_delivery_jobs = [{ invoice_id: INV, status }];
-      const res = await preview({ send_receipt: true });
-      expect(res).toMatchObject({ code: 'receipt_already_queued' });
-      expect(res.error).toBe('A receipt for this invoice is already queued; record the payment without a receipt here, or send it from the Invoices page.');
-      expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
-    });
-
-    test('the same payment without a receipt is fine, and a finished or other invoice\'s job does not block', async () => {
-      state.receipt_delivery_jobs = [{ invoice_id: INV, status: 'queued' }];
-      expect(await preview()).toMatchObject({ preview: true, sends_to_customer: false });
-      state.receipt_delivery_jobs = [{ invoice_id: INV, status: 'completed' }, { invoice_id: INV, status: 'failed' }, { invoice_id: 'other', status: 'queued' }];
-      expect(await preview({ send_receipt: true })).toMatchObject({ preview: true, sends_to_customer: true });
-    });
-
-    test('Confirm refuses when a job was queued after the card, and the settlement fence refuses one that appears by the lock', async () => {
-      db.schema = { hasTable: jest.fn(async () => false) };
-      const card = await preview({ send_receipt: true });
-      state.receipt_delivery_jobs = [{ invoice_id: INV, status: 'queued' }];
-      expect(await confirm(card, { send_receipt: true })).toMatchObject({ code: 'receipt_already_queued', preview_changed: true });
-      state.receipt_delivery_jobs = [];
-      await confirm(card, { send_receipt: true });
-      const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
-      await expect(settlementFence(db)).resolves.toBe(true);
-      state.receipt_delivery_jobs = [{ invoice_id: INV, status: 'retry_scheduled' }];
-      await expect(settlementFence(db)).rejects.toMatchObject({ statusCode: 409, drift: true, message: expect.stringMatching(/receipt for this invoice is already queued/) });
-      delete db.schema;
-    });
-
-    test('a card without a receipt does not look at the queue in its fence', async () => {
-      db.schema = { hasTable: jest.fn(async () => false) };
-      const card = await preview();
-      await confirm(card);
-      const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
-      state.receipt_delivery_jobs = [{ invoice_id: INV, status: 'queued' }];
-      await expect(settlementFence(db)).resolves.toBe(true);
-      delete db.schema;
-    });
-
-    test('a receipt the queue reports as queued after the settlement is reported as such, not as sent by the card', async () => {
-      const card = await preview({ send_receipt: true });
-      Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, receipt: { queued: true } } });
-      const res = await confirm(card, { send_receipt: true });
-      expect(res).toMatchObject({ success: true, sent_to_customer: false, receipt: { requested: true, queued: true } });
-      expect(res.note).toMatch(/goes out on its own, and this card did not send one/);
-    });
-  });
-
-  test('a receipt with nobody to send it to is refused; without send_receipt the same invoice is fine', async () => {
-    Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ payerBilled: false, emailRecipient: null, smsRecipient: null });
-    expect(await preview({ send_receipt: true })).toMatchObject({ code: 'no_receipt_contact' });
-    expect(await preview()).toMatchObject({ preview: true, sends_to_customer: false });
+  test('send_receipt false (or absent) is the only accepted form, and the card says no receipt is sent and how to send one', async () => {
+    const card = await preview({ send_receipt: false });
+    expect(card).toMatchObject({ preview: true, sends_to_customer: false, receipt: 'No receipt is sent' });
+    expect(card._body).toEqual({ method: 'check', reference: '1042', sendReceipt: false });
+    expect(card.effects.find((e) => e.kind === 'comms').text).toBe('No receipt is sent. To send one, ask the bar to resend the receipt after recording, or use the Invoices page.');
   });
 
   test('the card without a receipt is not a customer message', async () => {
@@ -306,7 +235,7 @@ describe('the preview', () => {
   });
 
   test('the model-visible preview never carries a raw phone or email', async () => {
-    const json = JSON.stringify(await preview({ send_receipt: true }));
+    const json = JSON.stringify(await preview());
     expect(json).not.toMatch(/robin@example\.test|9415550142|\+1941/);
   });
 });
@@ -403,26 +332,19 @@ describe('refusals', () => {
 });
 
 describe('confirm', () => {
-  test('replays the page handler once with exactly the carded body and the pins', async () => {
-    const card = await preview({ note: 'n', send_receipt: true });
-    const res = await confirm(card, { note: 'n', send_receipt: true });
-    expect(res).toMatchObject({ success: true, status: 'paid', invoice_number: 'WPC-2099-0001', method: 'check', amount: 117 });
+  test('replays the page handler once with exactly the carded body and the pins; sendReceipt false reaches the handler and nothing is sent', async () => {
+    const card = await preview({ note: 'n' });
+    const res = await confirm(card, { note: 'n' });
+    expect(res).toMatchObject({ success: true, status: 'paid', invoice_number: 'WPC-2099-0001', method: 'check', amount: 117, sent_to_customer: false });
+    expect(res.note).toMatch(/No receipt was sent\. To send one, ask the bar to resend the receipt, or use the Invoices page\./);
+    expect(res.receipt).toBeUndefined();
     expect(Invoices.recordPaymentFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.recordPaymentFromBar).toHaveBeenCalledWith({
       invoiceId: INV,
-      body: { method: 'check', reference: '1042', note: 'n', sendReceipt: true, via: 'both' },
+      body: { method: 'check', reference: '1042', note: 'n', sendReceipt: false },
       actor: { technicianId: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' },
-      approvedPayment: { expectedAmountCents: 11700, settlementFence: expect.any(Function), receiptGuard: { check: expect.any(Function), relabel: expect.any(Function), claimOptions: { refuseQueuedJob: true } } },
+      approvedPayment: { expectedAmountCents: 11700, settlementFence: expect.any(Function) },
     });
-    // The receipt guard it hands over allows exactly the destinations the card showed.
-    const { receiptGuard } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
-    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test', optedOut: false })).toBe(true);
-    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test', optedOut: true })).toBe(false);
-    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test', optedOut: null })).toBe(false);
-    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test' })).toBe(false);
-    expect(await receiptGuard.check({ channel: 'sms', to: '+19415550142' })).toBe(true);
-    expect(await receiptGuard.check({ channel: 'email', to: 'other@example.test', optedOut: false })).toBe(false);
-    expect(await receiptGuard.check({ channel: 'app', to: null })).toBe(false);
   });
 
   test('the settlement fence it hands over is pinned to the invoice the card showed', async () => {
@@ -551,25 +473,6 @@ describe('confirm', () => {
     });
   });
 
-  test('the card’s customer label says a receipt is attempted by its channels, not that one will be sent', async () => {
-    const card = await preview({ send_receipt: true });
-    const contract = buildContract({ toolName: 'record_payment', params: { ...BASE, send_receipt: true }, preview: card, summary: 'x' });
-    expect(JSON.stringify(contract)).toMatch(/A receipt will be attempted by email and text/);
-    expect(JSON.stringify(contract)).not.toMatch(/will be sent a receipt/);
-  });
-
-  test('without a receipt the result says nothing was sent; with one it reports each leg from the handler’s own answer', async () => {
-    const card = await preview();
-    expect(await confirm(card)).toMatchObject({ success: true, sent_to_customer: false, receipt: { requested: false }, note: expect.stringMatching(/Nothing was sent to the customer/) });
-    const withReceipt = await preview({ send_receipt: true });
-    Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, receipt: { email: { ok: true }, sms: { ok: false, error: 'opted out' } } } });
-    expect(await confirm(withReceipt, { send_receipt: true })).toMatchObject({
-      success: true, sent_to_customer: true, receipt: { requested: true, email: 'sent', text: 'not_sent' },
-    });
-    Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, receipt: { email: { ok: false }, sms: { ok: false } } } });
-    expect(await confirm(withReceipt, { send_receipt: true })).toMatchObject({ success: true, sent_to_customer: false, note: expect.stringMatching(/receipt was not sent/) });
-  });
-
   test.each([
     ['the invoice edited after the card', (s) => { s.invoices[0].updated_at = new Date('2099-01-01T12:05:00Z'); }],
     ['the invoice paid after the card', (s) => { s.invoices[0].status = 'paid'; }],
@@ -587,13 +490,7 @@ describe('confirm', () => {
     expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
   });
 
-  test('drift in the receipt recipients or the closeout visit refuses', async () => {
-    const card = await preview({ send_receipt: true });
-    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'other@example.test' } });
-    expect(await confirm(card, { send_receipt: true })).toMatchObject({ preview_changed: true });
-    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Robin@Example.test' } });
-    state.customers[0].phone = '(941) 555-0999';
-    expect(await confirm(card, { send_receipt: true })).toMatchObject({ preview_changed: true });
+  test('drift in the closeout visit refuses', async () => {
     const plain = await preview();
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'v1', serviceType: 'Pest', date: '2099-01-01', resuming: false });
     expect(await confirm(plain)).toMatchObject({ preview_changed: true });
@@ -604,7 +501,6 @@ describe('confirm', () => {
     const card = await preview();
     expect(await confirm(card, { method: 'cash' })).toMatchObject({ preview_changed: true });
     expect(await confirm(card, { reference: '9999' })).toMatchObject({ preview_changed: true });
-    expect(await confirm(card, { send_receipt: true })).toMatchObject({ preview_changed: true });
     expect(Invoices.recordPaymentFromBar).not.toHaveBeenCalled();
   });
 
@@ -649,7 +545,7 @@ describe('confirm', () => {
 describe('what the tool can never do', () => {
   test('it has no way to name a card, a refund or a void: no such parameter and no call into those paths', () => {
     const props = Object.keys(RECORD_PAYMENT_TOOLS[0].input_schema.properties);
-    expect(props).toEqual(['invoice_id', 'invoice_number', 'amount', 'method', 'reference', 'note', 'payment_date', 'send_receipt']);
+    expect(props).toEqual(['invoice_id', 'invoice_number', 'amount', 'method', 'reference', 'note', 'payment_date']);
     expect(RECORD_PAYMENT_TOOLS[0].input_schema.properties.method.enum).toEqual(['cash', 'check', 'zelle', 'venmo', 'paypal', 'other']);
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/record-payment-tools.js'), 'utf8');
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

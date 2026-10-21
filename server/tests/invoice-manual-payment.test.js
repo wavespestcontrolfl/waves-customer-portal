@@ -525,9 +525,8 @@ describe('recordManualPayment — settlement', () => {
 });
 
 
-describe('recordManualPayment — what the Intelligence Bar card adds (settlementFence from record-payment-fences.js, receiptGuard)', () => {
-  const { settlementFenceFor, receiptGuardFor } = require('../services/intelligence-bar/record-payment-fences');
-  const { emailDigest, phoneDigest } = require('../services/receipt-destination-digest');
+describe('recordManualPayment — what the Intelligence Bar card adds (settlementFence from record-payment-fences.js)', () => {
+  const { settlementFenceFor } = require('../services/intelligence-bar/record-payment-fences');
   const SEEN = new Date('2099-01-01T12:00:00.123Z');
   const COLUMNS = { customer_id: 'cust-1', scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
   const pin = (over = {}) => ({ invoiceId: 'inv-1', status: 'sent', updatedAtMs: SEEN.getTime(), columns: COLUMNS, paymentDate: require('../utils/datetime-et').etDateString(), closeout: null, ...over });
@@ -615,19 +614,6 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(err).toMatchObject({ statusCode: 409, drift: true });
       expect(calls.update).not.toHaveBeenCalled();
       expect(calls.paymentsInsert).toBeNull();
-    });
-
-    test('a receipt asked for while an automatic receipt job is queued refuses with drift and records nothing; no receipt asked, no look', async () => {
-      const calls = settle();
-      const base = db.getMockImplementation();
-      db.mockImplementation((table) => (table === 'receipt_delivery_jobs' ? recorder({ first: { id: 'job-1' } }) : base(table)));
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ receiptRequested: true })) }));
-      expect(err).toMatchObject({ statusCode: 409, drift: true });
-      expect(err.message).toMatch(/already queued/);
-      expect(calls.paymentsInsert).toBeNull();
-      settle();
-      db.mockImplementation((table) => { if (table === 'receipt_delivery_jobs') throw new Error('no look expected'); return base(table); });
-      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ receiptRequested: false })) })).resolves.toBeTruthy();
     });
 
     test('a job timer started on the carded visit after the card (the visit row untouched) refuses with drift and records nothing; no running timer records', async () => {
@@ -732,108 +718,6 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       const none = settle({ pre: card(), locked: card() });
       await recordManualPayment('inv-1', { method: 'cash', sendReceipt: false });
       expect(none.updateArgs.notes).toBeNull();
-    });
-  });
-
-  describe('receiptGuard: the receipt sends hand the senders a provider-boundary check', () => {
-    const guard = () => receiptGuardFor({ email: emailDigest('pat@example.test'), phone: phoneDigest('(941) 555-0100') });
-    // Senders that call the check with the destination they are about to use, as the real ones do.
-    function senders({ emailTo, smsTo, optedOut = false }) {
-      sendReceiptEmail.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'email', to: emailTo, amount: '117.00', optedOut })) === true ? { ok: true } : { ok: false, error: 'Receipt email handoff aborted by the caller' }));
-      InvoiceService.sendReceipt.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'sms', to: smsTo, amount: '117.00' })) === true ? { sent: true } : { sent: false, reason: 'receipt handoff aborted by the caller' }));
-    }
-    afterEach(() => {
-      sendReceiptEmail.mockReset().mockResolvedValue({ ok: true });
-      InvoiceService.sendReceipt.mockReset().mockResolvedValue({ sent: true });
-    });
-
-    test('the approved destinations send (case and formatting do not matter)', async () => {
-      settle();
-      senders({ emailTo: 'Pat@Example.test ', smsTo: '+19415550100' });
-      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-      expect(out.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
-    });
-
-    test('a changed email or phone skips that leg and reports "receipt not sent: contact changed"', async () => {
-      settle();
-      senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550199' });
-      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-      expect(out.invoice).toBeTruthy();
-      expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt not sent: contact changed' }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
-      settle();
-      senders({ emailTo: 'pat@example.test', smsTo: '+19415550199' });
-      const half = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-      expect(half.receipt).toEqual({ email: { ok: true }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
-    });
-
-    test.each([
-      ['opted out', true, 'receipt not sent: the customer opted out of receipts'],
-      ['unreadable settings (null fails closed)', null, 'receipt not sent: the customer\'s receipt settings could not be read'],
-    ])('the email to an approved address still needs the receipt opt-out to read false: %s skips it with its own reason; the text is unaffected', async (_name, optedOut, error) => {
-      settle();
-      senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut });
-      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-      expect(out.receipt).toEqual({ email: { ok: false, error }, sms: { ok: true } });
-    });
-
-    test('a clear opt-out (false) sends the email; a changed address wins over the opt-out wording', async () => {
-      settle();
-      senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut: false });
-      expect((await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() })).receipt.email).toEqual({ ok: true });
-      settle();
-      senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550100', optedOut: true });
-      expect((await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() })).receipt.email).toEqual({ ok: false, error: 'receipt not sent: contact changed' });
-    });
-
-    test('the text leg: an opt-out is the messaging pipeline\'s own PURPOSE_OPTED_OUT answer (receipt_texts_opted_out), reported as the leg\'s reason, not relabelled', async () => {
-      settle();
-      senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
-      InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'receipt_texts_opted_out' });
-      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-      expect(out.receipt.sms).toEqual({ ok: false, error: 'receipt_texts_opted_out' });
-    });
-
-    describe('the card\'s receipt claim never takes an automatic receipt job already queued (Codex r5)', () => {
-      const claimArgs = () => ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mock.calls.at(-1)[1];
-
-      test('the guard asks the claim to refuse a queued job; the page path asks nothing of the kind', async () => {
-        settle();
-        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
-        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(claimArgs()).toEqual({ sawUnsent: true, refuseQueuedJob: true });
-        settle();
-        await recordManualPayment('inv-1', { method: 'check' });
-        expect(claimArgs()).toEqual({ sawUnsent: true });
-      });
-
-      test('a queued job (the claim answers it as queued, untouched): nothing is sent by the card, the receipt reads as queued, the payment stays recorded', async () => {
-        settle();
-        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
-        ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ inFlight: true, byOperator: false, queuedJob: true });
-        const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(out.invoice).toBeTruthy();
-        expect(out.receipt).toEqual({ queued: true });
-        expect(sendReceiptEmail).not.toHaveBeenCalled();
-        expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
-        expect(ReceiptDeliveryQueue.releaseOperatorReceiptClaim).not.toHaveBeenCalled();
-      });
-    });
-
-    test('an App leg, or a destination the card did not show, is never approved', async () => {
-      const check = async (facts, approved) => receiptGuardFor(approved).check(facts);
-      const approved = { email: emailDigest('pat@example.test'), phone: phoneDigest('9415550100') };
-      expect(await check({ channel: 'push', to: null }, approved)).toBe(false);
-      expect(await check({ channel: 'email', to: 'pat@example.test', optedOut: false }, approved)).toBe(true);
-      expect(await check({ channel: 'app', to: null }, approved)).toBe(false);
-      expect(await check({ channel: 'email', to: 'pat@example.test' }, { email: null, phone: null })).toBe(false);
-      expect(await check({ channel: 'sms', to: '9415550100' }, { email: null, phone: null })).toBe(false);
-    });
-
-    test('without a receiptGuard the senders are called exactly as before (no check passed)', async () => {
-      settle();
-      await recordManualPayment('inv-1', { method: 'check' });
-      expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1');
-      expect(InvoiceService.sendReceipt.mock.calls[0][1]).not.toHaveProperty('beforeProviderHandoff');
     });
   });
 
