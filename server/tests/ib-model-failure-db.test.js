@@ -16,7 +16,7 @@ postgres('model failure notice against PostgreSQL', () => {
   const error = () => Object.assign(new Error('400 usage limit'), { status: 400 });
   let taskId;
 
-  const bells = () => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [ModelFailure.BELL_DEDUPE_KEY]);
+  const bells = () => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`${ModelFailure.BELL_DEDUPE_KEY}:admin`]);
   const gapRows = () => db('agent_gap_reports').where({ source: ModelFailure.GAP_SOURCE });
 
   async function clean() {
@@ -70,7 +70,7 @@ postgres('model failure notice against PostgreSQL', () => {
 
   test('a failure after the hour window rings again', async () => {
     await ModelFailure.handleModelFailure({ err: error(), activeTask: null, actorId: ACTOR });
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [ModelFailure.BELL_DEDUPE_KEY]).update({ created_at: new Date(Date.now() - 61 * 60 * 1000) });
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`${ModelFailure.BELL_DEDUPE_KEY}:admin`]).update({ created_at: new Date(Date.now() - 61 * 60 * 1000) });
     await ModelFailure.handleModelFailure({ err: error(), activeTask: null, actorId: ACTOR });
     expect(await bells()).toHaveLength(2);
   });
