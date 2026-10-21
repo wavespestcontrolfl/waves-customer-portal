@@ -83,6 +83,7 @@ Use for: "fix the closeout for this visit", "finish what's missing on the job we
 ];
 
 // Where each open fact gets fixed when this command will not touch it.
+const OUTAGE_REMEDY = 'Lookup outage — status is unverified, not missing; re-check before acting.';
 const MANUAL_REMEDY = {
   completion: 'Completion is not finished, and the bar can\'t finish it from here; every other fact waits on it.',
   application: 'Application log is field evidence — only the technician can record it; it is never generated.',
@@ -509,7 +510,7 @@ function manualItems(facts, steps, skipped) {
   for (const [name, f] of Object.entries(facts)) {
     if (!f || planned.has(name)) continue;
     if (f.state === 'unknown') {
-      manual.push({ fact: name, state: f.state, reason: f.reason, fix: 'Lookup outage — status is unverified, not missing; re-check before acting.', blockedNow: true });
+      manual.push({ fact: name, state: f.state, reason: f.reason, fix: OUTAGE_REMEDY, blockedNow: true });
       continue;
     }
     if (!['pending', 'failed'].includes(f.state) || skippedFacts.has(name)) continue;
@@ -539,8 +540,15 @@ function manualCapabilityGaps(manual) {
 async function planCloseoutRepair(status, { knex = db } = {}) {
   const facts = status.facts || {};
   if (facts.completion?.state !== 'done') {
+    // An unreadable completion is an outage, not a missing capability: it is
+    // blockedNow with the outage wording, like every other unknown fact (Codex #6371 r14).
+    const unknown = facts.completion?.state === 'unknown';
     const manual = facts.completion
-      ? [{ fact: 'completion', state: facts.completion.state, reason: facts.completion.reason, fix: MANUAL_REMEDY.completion }]
+      ? [{
+        fact: 'completion', state: facts.completion.state, reason: facts.completion.reason,
+        fix: unknown ? OUTAGE_REMEDY : MANUAL_REMEDY.completion,
+        ...(unknown ? { blockedNow: true } : {}),
+      }]
       : [];
     return { steps: [], manual, skipped: [] };
   }
