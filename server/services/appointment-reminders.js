@@ -4585,6 +4585,11 @@ const AppointmentReminders = {
     };
     try {
       const sendNotification = options.sendNotification !== false;
+      // The card-approved send owns a 'pending_approved' claim (job-status.js): no sweep adopts that state, so it is
+      // listed here ONLY for the approved send itself, which adopts, stamps and finalizes it.
+      const approvedSend = Boolean(options.approvedNotice);
+      const claimStates = approvedSend ? ['pending', 'pending_notify', 'pending_approved'] : ['pending', 'pending_notify'];
+      const claimStatesWithSent = [...claimStates, 'sent'];
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -4647,7 +4652,7 @@ const AppointmentReminders = {
       if (claimToken) {
         noticeToken = claimToken;
         claimed = await db('appointment_reminders')
-          .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+          .where({ id: record.id }).whereIn('cancellation_notice_state', claimStates)
           .where('cancellation_notice_at', claimToken)
           .update({ updated_at: new Date() });
       } else if (!sendNotification) {
@@ -4711,16 +4716,29 @@ const AppointmentReminders = {
                 })
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               })
+              .orWhere(function approvedMarker() {
+                // The card-approved send adopts the 'pending_approved' marker the cancel transaction minted for it
+                // (only that send: no sweep lists this state).
+                if (approvedSend) this.where('cancellation_notice_state', 'pending_approved');
+                else this.whereRaw('false');
+              })
               .orWhere(function staleLease() {
                 // Stale SINGLETON leases only (codex r18): a stale shared
                 // (series) group is the sweep's — it recovers with the
                 // combined copy, not a per-visit text.
-                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                this.whereIn('cancellation_notice_state', claimStates)
                   .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               });
           })
-          .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: db.raw("CASE WHEN cancellation_notice_state = 'pending_notify' THEN 'pending_notify' ELSE 'pending' END"), updated_at: noticeToken });
+          .update({
+            cancellation_notice_at: noticeToken,
+            // An approved send keeps its marker state until it finalizes: 'pending' would hand a crashed send to the sweep.
+            cancellation_notice_state: approvedSend
+              ? 'pending_approved'
+              : db.raw("CASE WHEN cancellation_notice_state = 'pending_notify' THEN 'pending_notify' ELSE 'pending' END"),
+            updated_at: noticeToken,
+          });
       }
 
       if (!sendNotification) {
@@ -4730,7 +4748,7 @@ const AppointmentReminders = {
           // restoration whose marker clear was swallowed must not receive
           // a terminal marker that blocks its next real cancellation.
           await db('appointment_reminders')
-            .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+            .where({ id: record.id }).whereIn('cancellation_notice_state', claimStates)
             .where('cancellation_notice_at', noticeToken)
             .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
             .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
@@ -4805,7 +4823,7 @@ const AppointmentReminders = {
       };
       if (await acceptedCancellationAudit() || await groupAccepted()) {
         await db('appointment_reminders')
-          .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+          .where({ id: record.id }).whereIn('cancellation_notice_state', claimStates)
           .where('cancellation_notice_at', noticeToken)
           .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
         // The customer DID get the text (prior attempt, provider-accepted)
@@ -4892,7 +4910,7 @@ const AppointmentReminders = {
             .where({ id: record.id })
             // Includes the pre-dispatch 'sent' stamp under OUR token so a
             // definite provider failure reverts it (codex r21).
-            .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
+            .whereIn('cancellation_notice_state', claimStatesWithSent)
             .where('cancellation_notice_at', noticeToken)
             // Still-cancelled (codex r40): a restoration committing after
             // the handoff stamp (with its marker clear swallowed) must
@@ -4939,7 +4957,7 @@ const AppointmentReminders = {
                 .where({ id: record.id })
                 // Includes our own pre-dispatch 'sent' stamp so contact
                 // fanout continues (codex r23).
-                .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
+                .whereIn('cancellation_notice_state', claimStatesWithSent)
                 .where('cancellation_notice_at', noticeToken)
                 .first('id');
               if (!own) return { ok: false, code: 'notice_claim_lost', reason: 'cancellation-notice lease was reclaimed' };
@@ -4961,7 +4979,7 @@ const AppointmentReminders = {
               // claim mid-flight (codex r22).
               const stamped = await db('appointment_reminders')
                 .where({ id: record.id })
-                .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
+                .whereIn('cancellation_notice_state', claimStatesWithSent)
                 .where('cancellation_notice_at', noticeToken)
                 // Still-cancelled guard IN the stamp itself (codex r33):
                 // a restoration whose marker-clear failed (job-status

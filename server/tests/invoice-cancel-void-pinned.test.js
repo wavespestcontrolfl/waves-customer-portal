@@ -46,7 +46,17 @@ jest.mock('../models/db', () => {
     return chain;
   };
   const db = jest.fn((t) => makeChain(t));
-  db.transaction = jest.fn(async (cb) => cb(db));
+  // db.transaction(cb) runs the callback; db.transaction() (no callback) hands back a manual transaction - the pinned
+  // sweep's combined-payment lock - whose queries and advisory-lock raw() are recorded like any other.
+  db.transaction = jest.fn(async (cb) => {
+    if (cb) return cb(db);
+    const lockTrx = (t) => makeChain(t);
+    lockTrx.raw = db.raw;
+    lockTrx.commit = jest.fn(async () => {});
+    lockTrx.rollback = jest.fn(async () => {});
+    db.__lockTrx = lockTrx;
+    return lockTrx;
+  });
   db.fn = { now: () => 'NOW' };
   db.raw = jest.fn((x) => x);
   return db;
@@ -260,5 +270,58 @@ describe('combined payments', () => {
     stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
     await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
     expect(stripe.retrievePaymentIntent).toHaveBeenCalled();
+  });
+});
+
+// The pinned sweep serializes with combined setup: the sibling check, the Stripe cancel and the stamp clear all run
+// under the same per-customer pay.combined.customer advisory lock the combined session setup takes.
+describe('pinned sweep takes the combined-payment lock', () => {
+  const stripe = require('../services/stripe');
+  const db = require('../models/db');
+  const lockCalls = () => db.raw.mock.calls.filter((c) => String(c[0]).includes('pg_advisory_xact_lock') && c[1]?.[0] === 'pay.combined.customer');
+
+  beforeEach(() => { db.raw.mockClear(); stripe.retrievePaymentIntent.mockReset(); stripe.cancelPaymentIntent.mockReset(); });
+
+  test('the lock for the invoice\'s customer is taken BEFORE the Stripe cancel and released after the candidate settles', async () => {
+    mockInvoiceRows = [{ ...INV_A, customer_id: 'cust-1', stripe_payment_intent_id: 'pi_test' }];
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    const order = [];
+    db.raw.mockImplementation((sql, bindings) => { if (bindings?.[0] === 'pay.combined.customer') order.push(`lock:${bindings[1]}`); return sql; });
+    stripe.cancelPaymentIntent.mockImplementation(async () => { order.push('stripe-cancel'); });
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect([...voided]).toEqual(['inv-a']);
+    expect(order).toEqual(['lock:cust-1', 'stripe-cancel']);
+    expect(db.__lockTrx.commit).toHaveBeenCalledTimes(1);
+    db.raw.mockImplementation((x) => x);
+  });
+
+  test('a pinned invoice with no PaymentIntent takes no lock and opens no extra transaction', async () => {
+    mockInvoiceRows = [INV_B];
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    db.raw.mockClear();
+    db.__lockTrx = undefined;
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect(lockCalls()).toHaveLength(0);
+    expect(db.__lockTrx).toBeUndefined();
+  });
+
+  test('a sibling found under the lock refuses the cancel, and the lock is still released', async () => {
+    mockInvoiceRows = [{ ...INV_A, customer_id: 'cust-1', stripe_payment_intent_id: 'pi_test' }];
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    mockInvoiceRows = [...mockInvoiceRows, { ...INV_B, id: 'inv-sibling', stripe_payment_intent_id: 'pi_test', scheduled_service_id: 'svc-other' }];
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect([...voided]).toEqual([]);
+    expect(lockCalls()).toHaveLength(1);
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.__lockTrx.commit).toHaveBeenCalledTimes(1);
+  });
+
+  test('Dispatch\'s unpinned sweep takes no combined-payment lock', async () => {
+    mockInvoiceRows = [{ ...INV_A, customer_id: 'cust-1', stripe_payment_intent_id: 'pi_test' }];
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
+    expect(lockCalls()).toHaveLength(0);
   });
 });

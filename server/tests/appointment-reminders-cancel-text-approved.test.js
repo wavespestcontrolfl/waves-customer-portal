@@ -172,3 +172,43 @@ describe('a failed approved send is not retried by the sweep', () => {
     expect(noticeStates()).not.toContain('suppressed');
   });
 });
+
+// The cancel transaction mints the approved send's claim as 'pending_approved' (job-status.js). No sweep lists that
+// state, so a crash or a transient database failure before the approved send finalizes can never let the sweep text
+// the live template to the current recipients. The approved send adopts the marker and finalizes it itself.
+describe('the approved send owns a pending_approved marker', () => {
+  const stateOf = (patch) => (patch && typeof patch.cancellation_notice_state === 'string' ? patch.cancellation_notice_state : undefined);
+  const approved = async () => {
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    return preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body }));
+  };
+
+  test('the approved send adopts the marker, keeps it (never plain pending), and finalizes it as sent', async () => {
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { outcome, approvedNotice: await approved() });
+    const claim = mockState.updates.find((p) => p.cancellation_notice_at && 'cancellation_notice_state' in p);
+    expect(claim.cancellation_notice_state).toBe('pending_approved');
+    const states = mockState.updates.map(stateOf).filter(Boolean);
+    expect(states).not.toContain('pending');
+    expect(states).not.toContain('pending_notify');
+    expect(states[states.length - 1]).toBe('sent');
+    expect(outcome.notificationSent).toBe(true);
+  });
+
+  test('an unapproved (Dispatch) send is unchanged: it still claims with the CASE that yields pending / pending_notify', async () => {
+    await AppointmentReminders.handleCancellation('svc-1', { outcome: {} });
+    const claim = mockState.updates.find((p) => p.cancellation_notice_at && 'cancellation_notice_state' in p);
+    expect(typeof claim.cancellation_notice_state).toBe('object');
+    expect(JSON.stringify(claim.cancellation_notice_state)).toContain('pending_notify');
+    expect(mockState.updates.map(stateOf)).not.toContain('pending_approved');
+  });
+
+  test('a failed approved send ends terminal suppressed, never back in a state the sweep adopts', async () => {
+    mockSendCustomerMessage.mockRejectedValue(new Error('provider timeout'));
+    await AppointmentReminders.handleCancellation('svc-1', { outcome: {}, approvedNotice: await approved() });
+    const states = mockState.updates.map(stateOf).filter(Boolean);
+    expect(states[states.length - 1]).toBe('suppressed');
+    expect(states.slice(1)).not.toContain('pending');
+    expect(states.slice(1)).not.toContain('pending_notify');
+  });
+});

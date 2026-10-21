@@ -335,6 +335,10 @@ async function transitionJobStatus({
   // 'caller': the caller runs the invoice void and inspection-credit reversal itself, on the effects it was shown
   // (the Intelligence Bar cancel card's pinned follow-through), so this writer's unpinned seam stands down.
   moneySeam,
+  // The Intelligence Bar cancel card approved the customer text (opt-in, with notifyCustomer 'caller'): the durable
+  // claim is minted 'pending_approved', a state NO sweep adopts, so a crash before the approved send finalizes it
+  // can never let the sweep text the live template to the current recipients (the receipt says it was not confirmed).
+  cancelNoticeApproved = false,
   // A caller transitioning a BATCH of rows passes one Set and refreshes the
   // affected routes once after its loop (dispatch-assignment.js
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
@@ -636,7 +640,7 @@ async function transitionJobStatus({
             // suppress intent finalizes terminally here.
             let targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')
               ? 'suppressed'
-              : (notifyCustomer === 'caller' ? 'pending_notify' : 'pending');
+              : (notifyCustomer === 'caller' ? (cancelNoticeApproved ? 'pending_approved' : 'pending_notify') : 'pending');
             // Merged-slot survivor (codex r12): when the status-sync
             // trigger promoted a sibling for the SAME customer/slot, the
             // customer still has a live visit at that time — a
@@ -682,7 +686,8 @@ async function transitionJobStatus({
         // late-claim mints pending_notify instead of evidence-gated
         // plain pending when it finds it. Own savepoint: its failure
         // must never roll back the transition.
-        if (notifyCustomer === 'caller') {
+        // An approved text never gets the outbox: its late claim would mint a live-template 'pending_notify'.
+        if (notifyCustomer === 'caller' && !cancelNoticeApproved) {
           try {
             // Key stays under email_key's varchar(60): 'cn-ci-' + UUID =
             // 42 chars (codex r8). The VALUE is the shared claim token so

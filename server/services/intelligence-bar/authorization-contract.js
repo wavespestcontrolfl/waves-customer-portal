@@ -746,7 +746,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       for (const visit of c.linked_visits || []) {
         push('operational', `Also cancels the linked follow-up visit${visit.service_type ? ` (${visit.service_type})` : ''}${visit.scheduled_date ? ` on ${visit.scheduled_date}` : ''}, with no text for it`);
         if (visit.technician_notice === 'may_notify') {
-          push('comms', `Tech ${visit.technician_name || 'assigned to it'} will get a cancel notice for ${visit.scheduled_date || 'that day'} ${visit.service_type || 'visit'} (tech home card + push)`);
+          push('comms', `Tech ${visit.technician_name || 'assigned to it'} may be notified of the cancellation for ${visit.scheduled_date || 'that day'} ${visit.service_type || 'visit'} (tech home card + push)`);
         }
       }
     }

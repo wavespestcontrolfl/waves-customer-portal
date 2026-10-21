@@ -5342,6 +5342,20 @@ async function paymentIntentSharedWithOtherInvoice(conn, paymentIntentId, invoic
   return Boolean(other);
 }
 
+// The pinned sweep's combined-payment guard: opens a transaction, takes the per-customer pay.combined.customer
+// advisory lock the combined setup takes (same key), then checks for a sibling invoice on the same PaymentIntent.
+// Only a pinned candidate that carries a PaymentIntent is guarded; for any other { lock: null, shared: false }.
+async function lockPinnedPaymentIntent(pinnedById, candidate) {
+  if (!pinnedById || !candidate.stripe_payment_intent_id) return { lock: null, shared: false };
+  const lock = await db.transaction();
+  await require("./pay-combined").lockCombinedCustomers(lock, [String(candidate.customer_id)]);
+  return { lock, shared: await paymentIntentSharedWithOtherInvoice(lock, candidate.stripe_payment_intent_id, candidate.id) };
+}
+
+async function releaseCombinedLock(lock) {
+  if (lock) await lock.commit().catch(() => {});
+}
+
 // { combined_payment: true } when the invoice's PaymentIntent also rides another invoice, else {} (preview entry key).
 async function combinedPaymentFlag(candidate) {
   if (!candidate.stripe_payment_intent_id) return {};
@@ -13304,6 +13318,10 @@ const InvoiceService = {
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
+        // Pinned path only: the combined-payment lock (see below), held until this candidate is settled; piConn is the
+        // connection the PaymentIntent steps run on (that lock's transaction, else the shared db).
+        let combinedLock = null;
+        let piConn = db;
         try {
           // A card-confirmed cancel never pins an invoice carrying a
           // PaymentIntent (the card refuses that shape), so one attached
@@ -13319,9 +13337,14 @@ const InvoiceService = {
             continue;
           }
           // A pinned (card-confirmed) cancel never cancels a combined payment: the PaymentIntent also covers invoices the
-          // card did not list, and cancelling it clears their stamps. Left open for the office.
-          if (pinnedById && candidate.stripe_payment_intent_id
-            && await paymentIntentSharedWithOtherInvoice(db, candidate.stripe_payment_intent_id, candidate.id)) {
+          // card did not list, and cancelling it clears their stamps. Left open for the office. The sibling check, the
+          // Stripe cancel and the stamp clear all run under the SAME per-customer pay.combined.customer advisory lock
+          // the combined setup takes (same key), so a combined session cannot be stamped between the check and the
+          // cancel. Dispatch's unpinned sweep takes no lock and is unchanged.
+          const held = await lockPinnedPaymentIntent(pinnedById, candidate);
+          combinedLock = held.lock;
+          if (held.lock) piConn = held.lock;
+          if (held.shared) {
             logger.warn(
               `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — its PaymentIntent is a combined payment covering other invoices; needs office review`,
             );
@@ -13384,7 +13407,7 @@ const InvoiceService = {
             // Unbind combined siblings from the canceled PI — REGARDLESS of
             // who canceled it (codex #3427 r17 P2: an already-canceled PI,
             // e.g. via the Stripe dashboard, must not leave stale bindings).
-            await require("./pay-combined").clearPaymentIntentStamps(db, triagedPiId, { keepInvoiceIds: [String(candidate.id)] });
+            await require("./pay-combined").clearPaymentIntentStamps(piConn, triagedPiId, { keepInvoiceIds: [String(candidate.id)] });
           }
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
@@ -13527,6 +13550,8 @@ const InvoiceService = {
           logger.error(
             `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`,
           );
+        } finally {
+          await releaseCombinedLock(combinedLock);
         }
       }
     } catch (e) {

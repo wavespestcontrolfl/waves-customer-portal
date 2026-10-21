@@ -123,6 +123,8 @@ describe('cancelServiceFromBar hands the card\'s approvals to the handler', () =
     const { status, json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR, approvedNotice, linkedChildren });
     expect(status).toBe(200);
     expect(mockHandleCancellation.mock.calls[0][1].approvedNotice).toBe(approvedNotice);
+    // The cancel transaction mints the claim as pending_approved, a state no sweep adopts.
+    expect(mockTransitionJobStatus.mock.calls[0][0].cancelNoticeApproved).toBe(true);
     expect(mockRunFollowThrough.mock.calls[0][0].linkedChildren).toBe(linkedChildren);
     expect(mockRunFollowThrough.mock.calls[0][0].linkedChildReport).toEqual({ skipped: [] });
     expect(json.linkedVisitsSkipped).toEqual([]);
@@ -150,6 +152,7 @@ describe('cancelServiceFromBar hands the card\'s approvals to the handler', () =
   test('with no approvals the handler\'s calls carry none of the opt-in keys (a Dispatch cancel is unchanged)', async () => {
     const { json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR });
     expect(Object.keys(mockHandleCancellation.mock.calls[0][1])).not.toContain('approvedNotice');
+    expect(Object.keys(mockTransitionJobStatus.mock.calls[0][0])).not.toContain('cancelNoticeApproved');
     expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('linkedChildren');
     expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('pinnedEffects');
     expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('moneyReport');

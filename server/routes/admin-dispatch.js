@@ -3150,6 +3150,8 @@ async function serviceStatusHandler(req, res, next) {
           // Set only by cancelServiceFromBar: the pinned follow-through below does the invoice void and credit
           // reversal on the card's effects, so the shared writer's unpinned money seam stands down.
           ...(req.ibApprovedMoney ? { moneySeam: 'caller' } : {}),
+          // The card approved the text: the durable claim is minted in a state no sweep adopts (see job-status.js).
+          ...(req.ibApprovedCancelNotice ? { cancelNoticeApproved: true } : {}),
           // This route runs the OFFICE version of the activation itself
           // (below) — the shared writer must not fire its lazy one too.
           legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,

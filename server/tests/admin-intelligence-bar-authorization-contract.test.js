@@ -574,8 +574,8 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
     expect(l.some((x) => /\$75\.00 inspection credit this booking earned is taken back/.test(x))).toBe(true);
     expect(l).toContain('Also cancels the linked follow-up visit (pest_control) on 2026-11-02, with no text for it');
     // One line for each linked visit whose technician gets a cancel notice; none for an unassigned one.
-    expect(l).toContain('Tech Tess Technician will get a cancel notice for 2026-11-02 pest_control (tech home card + push)');
-    expect(l.filter((x) => /^Tech .* will get a cancel notice/.test(x))).toHaveLength(1);
+    expect(l).toContain('Tech Tess Technician may be notified of the cancellation for 2026-11-02 pest_control (tech home card + push)');
+    expect(l.filter((x) => /^Tech .* may be notified of the cancellation/.test(x))).toHaveLength(1);
     expect(stored.contract.notifies_technician).toBe(true);
     // One line per approved recipient, with the exact text that recipient gets.
     expect(l).toContain('Text to the primary contact ending 0101, if they can receive texts: "Hi Synthia, your visit on Monday is cancelled."');
