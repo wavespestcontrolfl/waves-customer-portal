@@ -22,6 +22,19 @@ const lawn = (over = {}) => ({
 });
 
 describe('doThisLine: the first customer-owned recommendation', () => {
+  it('a cockroach report with no other task: Do this is the dashboard prep the document prints under How you can help', () => {
+    const data = {
+      serviceLine: 'pest',
+      cockroachReportV2: { status: { label: 'Baiting' }, help: { items: [{ text: 'Avoid store-bought sprays while the bait works.' }] } },
+    };
+    expect(doThisLine(data)).toBe('Avoid store-bought sprays while the bait works.');
+  });
+
+  it('a cockroach dashboard without a status label (not shown) adds no task', () => {
+    const data = { serviceLine: 'pest', cockroachReportV2: { help: { items: [{ text: 'Avoid store-bought sprays.' }] } } };
+    expect(doThisLine(data)).toBe('Nothing needed from you today.');
+  });
+
   it('lawn: the aftercare watering line the document prints first', () => {
     expect(buildRecommendations(lawn())[0]).toBe('Water in about ½ inch within 24 hours.');
     expect(doThisLine(lawn())).toBe('Water in about ½ inch within 24 hours.');

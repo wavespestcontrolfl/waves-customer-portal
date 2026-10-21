@@ -303,7 +303,11 @@ export function doThisLine(data) {
     lines = [aftercare.holdTask, ...lines.filter((line) => line !== String(aftercare.watering || '').trim())];
   }
   const found = buildRecordFindings(data).map((finding) => finding.recommendation);
-  const mine = unique([...lines, ...found]).filter((line) => !WAVES_OWNED.test(line));
+  // The cockroach dashboard's "How you can help" prep (e.g. no store-bought sprays during baiting), as the document
+  // prints it: only when the dashboard shows (not suppressed, has a status label).
+  const cockroach = !termiteContext(data).suppress && data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
+  const help = Array.isArray(cockroach?.help?.items) ? cockroach.help.items.map((item) => String(item?.text || '').trim()).filter(Boolean) : [];
+  const mine = unique([...lines, ...found, ...help]).filter((line) => !WAVES_OWNED.test(line));
   return mine.find((line) => !isNoTask(line)) || NOTHING_NEEDED;
 }
 
