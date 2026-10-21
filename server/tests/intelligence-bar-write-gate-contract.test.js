@@ -81,6 +81,7 @@ beforeAll(() => {
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
+  process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
@@ -90,6 +91,7 @@ afterAll(() => {
   delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
+  delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
@@ -105,7 +107,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'multi-card.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'multi-card.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -179,6 +181,7 @@ const WRITE_TWO_STEP = [
   'send_invoice',
   'void_invoice',
   'update_lead_contact',
+  'convert_lead',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -735,6 +738,16 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+    }],
+    // convert_lead's preview reads the lead, the customer, the contact matches, the lead's estimate and its funnel
+    // row; it may not write without confirmed (intelligence-bar-lead-convert.test.js covers the card itself).
+    ['lead-convert-tools', 'executeLeadConvertTool', 'convert_lead', {
+      lead_id: '00000000-0000-0000-0000-00000000d001', customer_id: '00000000-0000-0000-0000-00000000d002',
+    }, {
+      leads: [{ id: '00000000-0000-0000-0000-00000000d001', first_name: 'Convert', last_name: 'Fixture', phone: '+19415550177', status: 'contacted', updated_at: '2026-10-01T00:00:00Z', estimate_id: null }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000d002', first_name: 'Convert', last_name: 'Fixture', phone: '9415550177' }],
+      estimates: [],
+      ad_service_attribution: [],
     }],
     // void_invoice's preview reads the invoice, its payments, plan and links; it may not write without confirmed
     // (intelligence-bar-void-invoice.test.js covers the card itself).

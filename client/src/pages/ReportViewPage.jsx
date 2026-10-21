@@ -14,6 +14,7 @@ import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reen
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
+import WebPromiseCards from '../components/report/WebPromiseCards';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
@@ -10507,6 +10508,8 @@ function SimpleWebReport({ data, token }) {
       ) : null}
       {/* GATE_REPORT_WEB_TOP (owner 2026-10-20): top card, score strip and rain bar; the shell footer keeps its social row and drops its app badges (the header holds the store links). */}
       {data.webTop ? <><style>{WEB_TOP_SHELL_CSS}</style><WebTopCard webTop={data.webTop} glass={glass} /></> : null}
+      {/* GATE_REPORT_WEB_LIVE_CHIP / GATE_REPORT_WEB_PROGRAM: each shows only when the server sent its key. */}
+      <WebPromiseCards data={data} glass={glass} />
       {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
       {data.recap?.ready ? (
         <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>

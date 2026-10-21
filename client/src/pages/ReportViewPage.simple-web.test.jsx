@@ -361,3 +361,28 @@ describe('the first screen of the simple web report', () => {
     }
   });
 });
+
+describe('the simple web report: program line and live chip', () => {
+  it('shows the live chip and the program card only when the payload carries them', async () => {
+    const { container } = renderReport(payload({
+      simpleWebReport: true,
+      glassWeb: true,
+      liveChip: { state: 'no_rain', text: 'No rain since your treatment.' },
+      programPromise: {
+        monthLine: 'Month 4 of 12 in your lawn program.',
+        items: [{ key: 'coverage', label: 'Coverage', state: 'on_track', sentence: 'Coverage is on track at this point in the program.' }],
+      },
+    }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByTestId('report-live-chip')).toHaveTextContent('No rain since your treatment.');
+    expect(screen.getByTestId('report-program-card')).toHaveTextContent('Month 4 of 12 in your lawn program.');
+    expect(container.querySelector('.service-report-document')).not.toBeNull();
+  });
+
+  it('without the keys: neither card renders', async () => {
+    renderReport(payload({ simpleWebReport: true }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.queryByTestId('report-live-chip')).toBeNull();
+    expect(screen.queryByTestId('report-program-card')).toBeNull();
+  });
+});

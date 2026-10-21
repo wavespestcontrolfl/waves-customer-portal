@@ -57,6 +57,9 @@ function duplicateMarkerOf(lead) {
   return (data && data.duplicate_of_lead_id) || null;
 }
 
+// A quote-wizard repeat: the row settleRepeatFunnelRow settles against its root's funnel row when it is won.
+const isRepeatQuoteWizardLead = (lead) => Boolean(duplicateMarkerOf(lead)) && lead.lead_type === 'quote_wizard';
+
 // The estimate a conversion closed, as markConverted persisted it on the
 // won row — the settlement scope a replayed conversion without an estimate
 // of its own must keep (codex #3834 r37 P1).
@@ -120,7 +123,7 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // B (pre-push P1 on 1ea5d47).
 async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCustomerId = null, estimateId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
-  if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
+  if (!isRepeatQuoteWizardLead(repeat)) return null;
   // The customer is the repeat's OWN, as read (and locked below) — the
   // conversion wrote it; a caller's argument is only the fallback for an
   // unlinked row. A stale argument (staff re-assigned the repeat after the
@@ -1275,9 +1278,41 @@ async function findCustomerLinkedLeadsByContact(database, phone, email) {
 // Always guarded to `customer_id IS NULL` so an estimate tied to another
 // customer is never re-homed. Best-effort: a failure here never breaks the
 // conversion. Returns the number of estimates attached.
-async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } = {}) {
+// The estimates that carry THIS lead's id in estimate_data and have no customer yet (the fallback
+// below), prefiltered in SQL by the id substring and confirmed on the parsed value. `loose` counts the
+// prefilter's rows, so a caller can tell when the substring matched an estimate the exact test rejects.
+async function taggedUnownedEstimates(database, leadId) {
+  const tagged = await database('estimates')
+    .whereNull('customer_id')
+    .whereRaw('estimate_data::text LIKE ?', [`%${leadId}%`])
+    .select('id', 'estimate_data', 'status');
+  return { loose: tagged.length, exact: tagged.filter((e) => parseEstimateData(e.estimate_data)?.lead_id === leadId) };
+}
+
+// `approvedEstimateIds` (the Intelligence Bar's convert_lead card, never the Leads page): attach ONLY
+// these ids, still guarded to unowned. The card lists exactly this set and the conversion's claim
+// refuses a changed set, so nothing the card did not show is re-homed.
+async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, approvedEstimateIds = null } = {}) {
   if (!customerId || !lead) return 0;
   try {
+    if (Array.isArray(approvedEstimateIds)) {
+      // Each approved id must still be THIS lead's: its linked estimate, or one still tagged with its id
+      // (an estimate retagged to another lead after the card is not attached).
+      let ids = approvedEstimateIds;
+      if (lead.estimate_id) {
+        ids = ids.filter((id) => String(id) === String(lead.estimate_id));
+      } else if (ids.length) {
+        const rows = await database('estimates').whereIn('id', ids).whereNull('customer_id').select('id', 'estimate_data');
+        ids = rows.filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id).map((e) => e.id);
+      }
+      if (!ids.length) return 0;
+      // The lead tag rides in the UPDATE itself (prefilter by the id substring, as the selector above): an
+      // estimate retagged to another lead between the read and this write is not attached. A linked
+      // estimate is attached by its id alone.
+      const attach = database('estimates').whereIn('id', ids).whereNull('customer_id');
+      if (!lead.estimate_id) attach.whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`]);
+      return await attach.update({ customer_id: customerId, updated_at: new Date() });
+    }
     // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
     if (lead.estimate_id) {
       return await database('estimates')
@@ -1290,13 +1325,7 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } =
     // estimate_data is stored as JSON text, so prefilter with a LIKE on the
     // lead-id substring (a UUID — no LIKE metacharacters) and confirm the exact
     // value in JS. No phone/email matching — precise lead-id only.
-    const tagged = await database('estimates')
-      .whereNull('customer_id')
-      .whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`])
-      .select('id', 'estimate_data');
-    const ids = tagged
-      .filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id)
-      .map((e) => e.id);
+    const ids = (await taggedUnownedEstimates(database, lead.id)).exact.map((e) => e.id);
     if (!ids.length) return 0;
     return await database('estimates')
       .whereIn('id', ids)
@@ -2258,6 +2287,8 @@ async function resolveLinkedLeadWon({ estimateId, customerId, database = db }) {
 }
 
 module.exports = {
+  isRepeatQuoteWizardLead,
+  taggedUnownedEstimates,
   invoiceSentConversionTargets,
   resolveConversionLeads,
   CONVERSION_STRATEGIES,

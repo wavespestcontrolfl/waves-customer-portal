@@ -1292,8 +1292,56 @@ router.post('/:id/activity', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The card's pin as extra predicates on the win's own UPDATE: the lead is still unconverted, in the
+// status and at the edit time the card showed, with the customer link it showed; the carded customer is
+// live and unchanged (the columns the card showed); and the estimates the card listed are exactly the
+// unowned ones this conversion will attach.
+const CUSTOMER_SNAPSHOT_COLUMNS = ['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip'];
+// The lead's contact columns the card showed (a contact or address edit does not always move updated_at).
+const LEAD_SNAPSHOT_COLUMNS = ['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'];
+function whereColumnsMatch(builder, columns, snapshot) {
+  for (const column of columns) builder.whereRaw(`COALESCE(${column}::text, '') = ?`, [String(snapshot?.[column] ?? '')]);
+  return builder;
+}
+// The lead's customer link and linked estimate, as the card showed them (null = none).
+function whereLeadLinks(q, expected) {
+  if (expected.customerId) q.where('customer_id', expected.customerId);
+  else q.whereNull('customer_id');
+  if (expected.estimateLinkId) q.where('estimate_id', expected.estimateLinkId);
+  else q.whereNull('estimate_id');
+}
+// The lead's ad funnel rows are exactly the card's: the same count, and every card row (id|stage|customer) still there.
+function whereFunnelMatches(q, expected) {
+  const keys = expected.funnelKeys || [];
+  q.whereRaw('(SELECT COUNT(*) FROM ad_service_attribution WHERE lead_id = leads.id) = ?', [keys.length]);
+  q.whereRaw("(SELECT COUNT(*) FROM ad_service_attribution a WHERE a.lead_id = leads.id AND a.id::text || '|' || COALESCE(a.funnel_stage, '') || '|' || COALESCE(a.customer_id::text, '') = ANY (?::text[])) = ?", [keys, keys.length]);
+}
+function withExpectedLead(identity, expected, customerId) {
+  if (!expected) return identity;
+  return (q) => {
+    identity(q);
+    q.whereNull('converted_at').where('status', expected.status)
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
+    whereLeadLinks(q, expected);
+    whereColumnsMatch(q, LEAD_SNAPSHOT_COLUMNS, expected.lead);
+    q.whereExists(whereColumnsMatch(db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at'), CUSTOMER_SNAPSHOT_COLUMNS, expected.customer));
+    whereFunnelMatches(q, expected);
+    // The approved estimates are all still unowned, and (lead with no linked estimate) no other unowned
+    // estimate is tagged with this lead.
+    const ids = expected.estimateIds || [];
+    // ...each in the status the card showed.
+    const keys = expected.estimateKeys || [];
+    q.whereRaw("(SELECT COUNT(*) FROM estimates WHERE customer_id IS NULL AND id::text || '|' || COALESCE(status, '') = ANY (?::text[])) = ?", [keys, keys.length]);
+    if (!expected.estimateLinked) {
+      q.whereNotExists(db('estimates').select(db.raw('1')).whereNull('customer_id')
+        .whereRaw('estimate_data::text LIKE ?', [`%${expected.leadId}%`]).whereRaw('id::text <> ALL (?::text[])', [ids]));
+    }
+  };
+}
+
 // POST /api/admin/leads/:id/convert — convert to customer
-router.post('/:id/convert', async (req, res, next) => {
+// Named so the Intelligence Bar's convert_lead card (convertLeadFromBar, below) runs this very handler.
+const leadConvertHandler = async (req, res, next) => {
   try {
     const { customer_id, monthly_value, initial_service_value, waveguard_tier } = req.body;
     const customerId = typeof customer_id === 'string' ? customer_id.trim() : customer_id;
@@ -1304,7 +1352,10 @@ router.post('/:id/convert', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const customer = await db('customers').where('id', customerId).first();
+    // The bar's card also refuses a deleted customer (req.ibExpectedLead is set only by convertLeadFromBar).
+    let customerQuery = db('customers').where('id', customerId);
+    if (req.ibExpectedLead) customerQuery = customerQuery.whereNull('deleted_at');
+    const customer = await customerQuery.first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // Same stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
@@ -1320,14 +1371,18 @@ router.post('/:id/convert', async (req, res, next) => {
       waveguardTier: waveguard_tier,
       // Only 'handled' is excluded, unless it is the very close the page showed (any
       // other status converts exactly as before): the claim's where() takes a callback,
-      // re-asserting it in the win's own UPDATE.
-      onlyIfIdentity: unlessHandledSince(seen, req.body.seen_updated_at),
+      // re-asserting it in the win's own UPDATE. The Intelligence Bar's card adds the exact
+      // lead version it showed (req.ibExpectedLead, set only by convertLeadFromBar; the page
+      // never sets it, so the page's claim is unchanged).
+      onlyIfIdentity: withExpectedLead(unlessHandledSince(seen, req.body.seen_updated_at), req.ibExpectedLead, customerId),
+      ...(req.ibExpectedLead ? { approvedEstimateIds: req.ibExpectedLead.estimateIds } : {}),
     });
     if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updatedLead });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/convert', leadConvertHandler);
 
 // POST /api/admin/leads/:id/lost — mark lost
 router.post('/:id/lost', async (req, res, next) => {
@@ -2406,3 +2461,23 @@ router.post('/agent/test', async (req, res, next) => {
 });
 
 module.exports = router;
+
+// The Intelligence Bar's convert_lead (owner ruling 2026-10-12) runs the SAME handler as
+// POST /:id/convert, with no HTTP request (the send_invoice adapter pattern): the handler
+// gets the only request fields it reads and a capture response, and the promise resolves
+// the reply it would send, { status, json }. An error passed to next() rejects.
+// `body` is exactly what the Leads page sends: customer_id, the value fields and the
+// seen_status / seen_updated_at pair the card showed.
+// `expected` ({ status, updatedAt, customerId }) is the lead version the card showed: the win's UPDATE
+// must still match it, else the handler answers its 409 (the bar's preview_changed).
+function convertLeadFromBar({ leadId, body, expected = null }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    Promise.resolve(leadConvertHandler({ params: { id: leadId }, body: { ...body }, ibExpectedLead: expected }, res, reject)).catch(reject);
+  });
+}
+module.exports.convertLeadFromBar = convertLeadFromBar;

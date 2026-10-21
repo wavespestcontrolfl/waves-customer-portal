@@ -19,6 +19,7 @@ jest.mock('../config', () => ({
   jwt: { secret: 'test-jwt-secret' },
 }));
 jest.mock('../config/feature-gates', () => ({
+  reportWebSliderLive: jest.fn(() => false),
   isEnabled: jest.fn(() => false),
   reportSimpleWebLive: jest.fn(() => false),
   reportGlassWebLive: jest.fn(() => false),

@@ -12,6 +12,7 @@
  *   GATE_SMS_SHARED_PHONE_LINK=true (owner 2026-10-10, "link text": when two or more customer rows share the sender's phone, an inbound text attaches to ONE account instead of being filed as an unknown sender. Only when staff marked exactly one of them customers.sms_primary_for_shared_phone (admin PUT smsPrimaryForSharedPhone); no mark or two marks = left unlinked, no guessing (a guessed link would let one person on a shared phone reply for the other account). Strict opt-in via gateEnvValue, read at call time by server/routes/twilio-webhook.js findSingleCustomerByPhone(); SMS only (the voice webhook is unchanged); dark by default; off = a shared phone is not auto-linked, as before. Links a text to an account; sends nothing.)
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
+ *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_VOID_INVOICE=true (the Intelligence Bar's void_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can void ONE invoice that has collected nothing on a confirm card (never owner-direct), by running the Invoices page's own Void handler (POST /admin/invoices/:id/void) in process. Voids the invoice, stops its reminders, returns applied account credit, cancels an unconfirmed pay-page session; sends nothing. Refuses (by_owner_rule) any invoice with money received or in flight: refunds and card charges stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibVoidInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_MULTI_CARD=true (owner request 2026-10-20: the Intelligence Bar may show up to five separate confirm cards in one answer when each is for a different record and none needs another card's result. Only open edits qualify (contact, address, status, schedule, text and booking cards); a refund, card charge, price, setting, delete or bulk card never joins a set. Each card confirms or cancels on its own and keeps its own pins. Needs GATE_IB_PLATFORM. Read at call time via ibMultiCardLive(), strict 'true', dark by default; off = one card per request, exactly as before.)
  *   GATE_IB_BILLING_MODE_EDIT=true (the Intelligence Bar's update_customer may change one customer's billing type (billing_mode) and per-application fee on its own confirm card, owner ruling D5 2026-10-06; the same billing-type rules as the customer page (services/billing-mode-rules.js), annual prepay and clearing the type refused, never owner-direct, no customer message; read at call time via ibBillingModeEditLive(), strict === 'true', dark by default; off = both fields are refused exactly as before)
@@ -30,6 +31,7 @@
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
  *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
+ *   GATE_IB_MODEL_FAILURE_NOTICE=true (when the Intelligence Bar's AI model call fails (a provider 4xx/5xx, a timeout, an overload such as the monthly spend limit), /query answers 200 with a plain reply (what failed, whether anything was changed, try again in a few minutes), records one 'ib-model' gap row, and rings one admin bell at most once an hour; never a customer message. Owner request 2026-10-20 after the 2026-10-19 limit outage. Read at call time via ibModelFailureNoticeLive(), strict 'true', dark by default; off = the error goes to the error handler, the task is marked outcome_unknown and nothing else is recorded, as before.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
@@ -220,6 +222,9 @@
  *   GATE_REPORT_SIMPLE_WEB=true (simple web service report, owner 2026-10-17: "removing the old service reports, and having the simpler service reports, that we modeled after trugreen and all u need". While live, a customer who opens a service_report_v1 report link (GET /api/reports/:token/data, mode live) gets the work-order document the PDF already prints (client/src/pages/ServiceReportDocument.jsx, modeled on the TruGreen WO / All U Need formats) instead of the long web report. The server builds that payload in mode 'pdf', so it carries the same compliance strips as the PDF (no fixed re-entry figures, no live-only schedule fields or product copy), and adds payload key simpleWebReport. View tracking still runs as a live view, the approved recap video stays (#visit-recap), and a suppressed (internal-only) report is never switched. Project reports (GET /api/reports/project/:token/data) get the same layout from client/src/pages/ProjectReportDocument.jsx (owner 2026-10-17: "skip wdo, and pre treatment, but for everything else the simple layout"): every project type except wdo_inspection and pre_treatment_termite_certificate, which keep their page exactly; the payload gains simpleWebReport the same way, plus performingTechnicianName for the layout's Technician row (who performed the linked visit; technicianName stays the project's creator). Older (non-v1) reports, the PDF, the emails and texts are unchanged; nothing is sent. Customer view, so strict opt-in: exactly 'true', read at call time via reportSimpleWebLive(). Ships DARK; off = byte-identical payload and page. PR 2 deletes the old web report after the owner checks real reports.)
  *   GATE_REPORT_GLASS_WEB=true (glass look for the simple web service report, owner 2026-10-20: "lets still have the look of the glass UI, but in the trugreen style report". While live AND GATE_REPORT_SIMPLE_WEB is live, the /api/reports/:token/data payload of a service_report_v1 record adds `glassWeb: true`, and the web page (client/src/pages/ServiceReportDocument.jsx with the web prop, rendered by SimpleWebReport in ReportViewPage.jsx) dresses the same sections, in the same order with the same words, as glass cards with glass eyebrow headings and a glass Download PDF button over the scene the page already mounts. The PDF (mode=pdf) never takes the glass and stays plain paper, byte-identical, whatever the payload carries. Customer view, so strict opt-in: exactly 'true', read at call time via reportGlassWebLive(). Ships DARK; off = byte-identical payload and page. Nothing is sent.)
  *   GATE_REPORT_WEB_TOP=true (first screen of the simple web service report, owner 2026-10-20 "OK BUILD THEM ALL". While live AND GATE_REPORT_SIMPLE_WEB is live, the /api/reports/:token/data payload of a service_report_v1 record adds `webTop` (lawn score and the score at the last visit, the last six scores, the ONE action, the ONE hold, and measured radar rain at the home for the days around the visit), and the web page (client/src/pages/ServiceReportDocument.jsx with the web prop, rendered by SimpleWebReport in ReportViewPage.jsx) shows a top card, a score strip and a rain bar above the document and cuts the web page: products tap to open, no letterhead, conditions on one line, the app badges once. Every sentence is fixed or already on the report; no price, no product name. The PDF never changes. Customer view, so strict opt-in: exactly 'true', read at call time via reportWebTopLive(). Ships DARK; off = byte-identical payload and page. Nothing is sent.)
+ *   GATE_REPORT_WEB_PROGRAM=true (program line on the simple web service report, owner 2026-10-20 "OK BUILD THEM ALL", idea 9: while live AND GATE_REPORT_SIMPLE_WEB is live, the /api/reports/:token/data payload of a recurring lawn plan visit adds `programPromise` { monthLine, items }, fixed sentences "Month N of 12 in your lawn program." and per category (coverage, color, weeds) "on track" / "ahead" / "behind" against the PROPOSED per-month targets in shared/lawn-program-targets.json (owner approves the values); live web view only, never the PDF; strict 'true', read at call time via reportWebProgramLive(); ships DARK; off = byte-identical payload and page)
+ *   GATE_REPORT_WEB_LIVE_CHIP=true (live "lawn status now" chip on the simple web service report, owner 2026-10-20 "OK BUILD THEM ALL", idea 10: while live AND GATE_REPORT_SIMPLE_WEB is live, the /data payload of a lawn visit completed in the last 7 days adds `liveChip` { state, text }, one fixed sentence from measured rain at the home since the visit (Open-Meteo past hours, the rainfast watch and water-in reader): "Rain fell about N hours ago. Wait until the lawn is dry." / "Rain since your visit has watered the treatment in." / "No rain since your treatment."; built on each request, never frozen, never in the PDF, no coordinates in the payload, hidden when unknown; strict 'true', read at call time via reportWebLiveChipLive(); ships DARK; off = byte-identical payload and page)
+ *   GATE_REPORT_WEB_SLIDER=true (before/after slider on the simple web LAWN report, owner 2026-10-20 "OK BUILD THEM ALL", idea 2b: "last visit's photo vs today's from the same angle, a drag slider". While live AND the view is a live simple-web view (GATE_REPORT_SIMPLE_WEB), the /api/reports/:token/data payload of a lawn service_report_v1 record adds `lawnSlider: { pairs }`, one pair for the front yard when it has a photo on both this visit and the previous visit at the same property (property-scoped lawn history; front only, because the compact lawn sheet's "Back or side" button stores zone back for either), and the web page shows each pair as a drag slider (keyboard and touch work too) in the Service photos area. The technician's lawn photo step rides the same gate: GET /api/admin/lawn-assessment/service/:id adds `lastVisitShots` (last visit's front photo with its date) while GATE_LAWN_SHOT_LIST is also live, and each shot row shows it as a small "last visit" thumbnail with a "Show on photo" overlay so the shots line up. Nothing is sent, nothing is written, no model call. The PDF (mode=pdf), the PDF cache key and every email and text are unchanged. Customer view, so strict opt-in: exactly 'true', read at call time via reportWebSliderLive(). Ships DARK; off = byte-identical payload, page and tech payload.)
  *   GATE_REPORT_CLEANUP_1020=true (service report cleanup, owner 2026-10-20: one clear water-in line beside a water-in product (never "No special watering"), no broadcast spray method on a granular product (stored at completion and corrected on the report label), a follow-up reason that is a whole customer sentence, one fixed trouble-spot sentence beside a Trouble spot photo (payload troubleSpotNote), and the repeated stock lines left out (all-clear card, "keep the program steady", "No corrective findings logged"). While live the /data payload carries reportCleanup:true and the PDF cache key gains :cleanup1020=1. Customer copy, so strict opt-in: exactly 'true', read at call time via reportCleanup1020Live(). Ships DARK; off = byte-identical payload, stored method and PDF key.)
  *   GATE_IRRIGATION_OWNER_RATES=true (one sprinkler head rate table for every reader, owner 2026-10-09 "build it": the owner's table, spray 15 and rotor 40 minutes per quarter inch (1.0 and 0.375 in/hr), replaces the package's UF/IFAS-typical table (spray 1.5, rotor 0.5 in/hr) in the Monday week plan (default-rate minutes per run), the weekly irrigation email (derived weekly inches and its provenance sentence), the schedule-move guard, the lawn report's derived irrigation figure and the portal's "About N inches a week" line, so the lawn report banner and the Monday email stop disagreeing (30 versus 20 minutes on spray for half an inch). The generic "½ to ¾ inch - about N minutes on spray zones, M on rotor zones" sentences in the Monday email and report card are computed from the same table (20 and 60 off, 30 and 80 on). With the gate on the portal line and the email's provenance sentence say "typical head rates" without the University of Florida attribution. A customer's MEASURED rate (typed weekly inches with a runtime) still outranks any table. The packages/irrigation-runtime package never reads the environment: the server picks the table in server/services/irrigation-rates.js and the portal receives the choice as irrigationOwnerRates in GET /api/property/preferences (key present only while the gate is live). Lawn report banner and water card output is unchanged (they already use the owner table). No migration, no template change, sends nothing. Customer copy, so strict opt-in: exactly 'true', read at call time via irrigationOwnerRatesLive() in server/services/irrigation-rates.js. Freeze rule: the gate is read only when a NEW week-plan decision is made; the snapshot records decisionInputs.rateTable ('owner' only, so a gate-off snapshot is unchanged) and replay plus every renderer of a stored plan read that key, a row without it being the package table. The schedule-move guard takes the same table as a required argument: a new decision reads the gate once for guard and decision together, replay passes the stored table. Ships DARK; off = byte-identical emails, week plan, portal response and lawn report)
  *   GATE_TS_TECH_PARAGRAPH=true (tree & shrub report "From your technician" paragraph, owner 2026-10-05, go-ahead; FIXED SENTENCES: the AI picks facts and code writes every word. At completion at most ONE model call (lane ts_tech_paragraph on TEXT_POLICIES.report, only when the technician left a note) extracts up to 3 closed-list { condition, plant } ids from the note; code verifies each against the note (the model's seenToday judgment must be true and its quote must be the technician's exact words naming the condition; plant only when the quote names it) and renders only the sentences in the TS_SENTENCES constant, plus deterministic lines from the products applied, low-confidence and confirmed kept photo findings, and the technician's own Excellent/Good rating; none of the model's text is printed. The watch list, the last visit, the report headline and product ingredients are not inputs; palm-banned terms (Ganoderma, conk, lethal bronzing, fusarium, crown, spear leaf, newest fronds) can never render. The survivor freezes first-writer-wins in structured_notes.treeShrubTechParagraph[assessmentId] as { text, slots } (never regenerated at render; at read time the text must equal render(slots) under the current templates; a failed or slow call freezes the deterministic lines only) and rides reportV2.techParagraph on the web report and the PDF; REQUIRES GATE_TS_TECH_FINDINGS_COPY (the technician's hide / confirm / edit decisions must govern the report the paragraph sits in); tree & shrub only; customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via tsTechParagraphLive(). Ships DARK; off = no model call, byte-identical payload, PDF and PDF cache key)
@@ -270,6 +275,8 @@
  *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
  *   GATE_CALL_PROC_SHUTDOWN_RELEASE=true (at SIGTERM — every production deploy — every call-processing pass this process holds a claim for is stamped metadata.shutdown_interrupted_at; the pass keeps its claim until the kill, so nothing overlaps it. On the replacing pod a stamped claim is reclaimable after 2 quiet heartbeat minutes instead of 10; a stamped pass that still beats is never taken; the claim that takes the row clears the stamp. Strict opt-in, read via isEnabled. Off = today's behavior, byte-identical. Rollback: unset.)
  *   GATE_CALLBACK_SPAM_CLOSES_PARENT=true (an OUTBOUND call with metadata.relatedCallId (the admin Call back action on a voicemail) that lands a spam verdict also settles the parent inbound call: its open/in_progress triage_items whose reason a return call would have answered (the CALLBACK_SPAM_MOOT_CODES allowlist in call-triage-flags.js; other reasons stay open) resolve (resolution_source auto, resolution_rule callback_spam), its open Waves callback commitments are dismissed, review_status syncs to resolved when no card is left, metadata.callback_verdict is stamped. Nothing is sent. Strict opt-in, read via isEnabled. Off = today's behavior. Rollback: unset.)
+ *   GATE_MISSED_CALL_ALERT_DETAIL=true (the missed-call bell and push body also name the line the caller dialed, the call length in seconds and, for a customer on file, the date of their next scheduled visit; admin copy only, nothing is sent to a customer. Strict opt-in, read via isEnabled. Off = today's sentence, byte-identical. Rollback: unset.)
+ *   GATE_MISSED_CALL_REPUSH=true (a customer_missed_call bell still unread and not done 30 minutes after it rang gets ONE more admin push, same tag, renotify, during office hours Mon-Sat 8:00-18:00 ET; no new bell row, stamped metadata.repushed_at so it never repeats. Admin push only. Strict opt-in, read via isEnabled. Off = no sweep work. Rollback: unset.)
  *   GATE_CALL_EXTRACTION_SYSTEM_PROMPT=true (call extraction V2 sends its rules and output contract as a static system part and only the call's own facts and transcript as the user message, so the provider can cache the rules across calls. Same rules, different order and channel: its calls are their own prompt-version cohort (`s`, or `b` with the agent-proposed-slot block). Strict opt-in, read once per call via callExtractionSystemPromptLive(). Off = the one-message prompt, byte-identical. Rollback: unset.)
  *   GATE_CALL_SPELLING_COLLAPSE_TRIGGER=true (call processing: the spelling-preserving second transcription pass and the contact decoder also run when the primary transcript shows what a collapsed spelling leaves behind: a name said twice in a row ("Serov, Serov"), a phrase that announces a spelling with no letters after it ("that's S", "with a C"), or, for the decoder, an extracted last name one or two letters from the stored one. Each match costs one extra transcription pass; the log line "[call-proc] spelling collapse trigger" names which signal fired. Strict opt-in, read at call time via callSpellingCollapseTriggerLive(). Off = the pass runs only on the signals it ran on before, byte-identical. Rollback: unset. See services/contact-dictation.js spellingCollapseSignals.)
  *   GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING=true (owner ruling 2026-10-06: a commercial Waves Assessment that Waves staff book on the call with NO price discussed auto-books, on OUTBOUND callback calls (lead_auto_bridge) as well as inbound, instead of always going to the office. Only the Waves Assessment catalog row (every service view of the call must resolve to it) and only when no price came up at all; any price mentioned goes to the priced path (GATE_CALL_COMMERCIAL_DICTATED_BOOKING), unchanged. The staff commitment and the caller acceptance are grounded word for word in the right speaker's turns (call-reschedule-agreement.js), including the shape where STAFF proposes the day and time, the caller says yes and staff then commits ("How does noon on Thursday sound?" / "Perfect." / "I'll book you for that"), which has its own extraction instruction while this gate is on. On an OUTBOUND recording the speaker labels are LLM-inferred and have swapped, so staff identity is proven independent of the labels: an Agent-labeled turn says "this is <name> with|from|at Waves" and no Caller-labeled turn does; otherwise it holds. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. OUTBOUND calls qualify only as lead callback bridges (call metadata.type lead_auto_bridge) AND only when outbound booking creation itself is on: GATE_CALL_OUTBOUND_BOOKING plus V2 routing in enforce mode (CALL_EXTRACTION_V2_ENABLED=true and CALL_EXTRACTION_V2_DRIVES_ROUTING=true or CALL_TRIAGE_ENFORCE_V2_GATES=true); this gate never authorizes outbound creation by itself, and the routing lane and the creation path read one predicate (outboundAutoBookingEnabled). Only clears commercial_requires_quote and the advisory card still files; the on-the-hour rule, capacity, address validation and unit checks still apply. Strict opt-in, read at call time via callCommercialAssessmentBookingLive(). Off = byte-identical, outbound stays excluded. See services/call-commercial-dictated-booking.js.)
@@ -282,6 +289,7 @@
  *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
  *   GATE_LAWN_REPORT_CLARITY=true (lawn service report, owner ruling 2026-10-08, one gated change left: "Your plan" on a LAWN report lists only the next upcoming lawn visit at the report's property (needs GATE_REPORT_UPCOMING_VISITS; merged or standalone); other service lines are unchanged. The ruling's other half is permanent and ungated since 2026-10-09: a water-in instruction frozen at completion for a customer with NO sprinkler head type or measured rate on file states the AMOUNT and no minutes ("Water in today's treatment with about ½ inch by Fri 8 PM"), and the LIVE banner adds one line inviting the customer to add their sprinkler setup (banner.setupLine, stripped from the PDF, static and text renders). Strict opt-in: exactly 'true' in every environment, read at call time via lawnReportClarityLive(). Ships DARK; off = byte-identical plan card. Sends nothing to a customer.)
  *   GATE_DICTATION_CUSTOMER_NAMES=true (owner 2026-10-20, after a dictated surname was heard as a common word: staff dictation word list (needs GATE_SERVER_DICTATION) adds a "Customers who may be named" section, full names: the customer on screen first, then customers with a visit today or tomorrow (a technician login: only their own stops), customers who texted or called in the last 48 hours and recently updated active customers (admin logins only), and passes their surnames as extra transcriber keyword hints. Products shrink to make room; the prompt stays at 1800 characters. The list is cached 5 minutes per login scope and day. Strict opt-in: exactly 'true' in every environment, read at call time via dictationCustomerNamesLive(). Ships DARK; off = the word list and keyword hints are exactly as before. Sends nothing to a customer.)
+ *   GATE_DICTATION_MONEY_NORMALIZE=true (owner 2026-10-21, after "sixty-one thirty-three" came back as 6133, $60.33 and $61.33: the staff mic's transcript is read for dollar amounts. In a money context only (a $ or a word like price, charge, rate, a month), the server SUGGESTS (never rewrites; the transcript is returned exactly as heard) "$61.33" for "sixty-one thirty-three", "61 33" or "sixty one dollars and thirty three cents" and "$105" for "a hundred and five"; a run-together "$6133" is kept as typed and flagged ambiguous, so the Intelligence Bar asks with answer buttons between $61.33 and $6,133. Phone numbers, street numbers, times, dates, ZIPs, invoice numbers and quantities with units are never touched. Strict opt-in: exactly 'true' in every environment, read at call time via dictationMoneyNormalizeLive(). Ships DARK; off = the transcript is returned as before. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -1979,6 +1987,11 @@ const gates = {
   // hung up at the voicemail greeting). Bell only — no customer comms. Ships
   // dark; the bell stays customers-only until the owner flips it.
   missedCallUnknownCallers: process.env.GATE_MISSED_CALL_UNKNOWN_CALLERS === 'true',
+  // Silence the unknown-caller missed-call bell for a robodialer wave (owner
+  // 2026-10-20 "yes"): a Google Business Profile line, under 30 s, no voicemail,
+  // and 3+ unknown numbers from the same 6-digit block in 14 days. Off = shadow:
+  // the call still rings and is stamped missed_call_spam_wave_shadow. Bell only.
+  missedCallSpamWave: process.env.GATE_MISSED_CALL_SPAM_WAVE === 'true',
   // Admin bell when one number places 3+ inbound calls inside 3 hours
   // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
   repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
@@ -2169,6 +2182,15 @@ const gates = {
   // voicemail's open Needs Review cards and dismisses its open callback
   // promise, so a settled voicemail stops asking for work (2026-10-09 audit).
   callbackSpamClosesParent: process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT === 'true',
+  // Missed-call bell and push say more (owner "ALL" 2026-10-20): the line the
+  // caller dialed, how many seconds they stayed on, and a customer's next
+  // visit date. Admin copy only; nothing reaches a customer. Off = today's
+  // sentence, byte for byte.
+  missedCallAlertDetail: process.env.GATE_MISSED_CALL_ALERT_DETAIL === 'true',
+  // One more push for a missed-call bell nobody has opened (owner "ALL"
+  // 2026-10-20): 30 minutes after it rang, in office hours, once. No new
+  // bell row. Admin push only.
+  missedCallRepush: process.env.GATE_MISSED_CALL_REPUSH === 'true',
   // Call commitments: every processed call records what Waves promised and
   // what the caller agreed to as evidence-linked rows (call_commitments),
   // seeded from the V2 extraction plus one bounded model pass over the
@@ -2985,7 +3007,7 @@ const gates = {
 
   // Monthly AVERAGE beside per-application prices on residential estimates
   // (owner ruling 2026-10-20, "option A"). The per-application price stays the
-  // price; a second, smaller line reads "about $X a month", with the context
+  // price; a second, smaller line reads "$X a month", with the context
   // "Averaged over the year. You pay after each application." Covers the
   // delivery email's Estimated price row (and one sentence ahead of its
   // next-step paragraph), the estimate PDF document and the estimate page.
@@ -4541,6 +4563,15 @@ const gates = {
   // First screen of the simple web service report (owner 2026-10-20). Ships DARK. This entry is for logGateStatus
   // only: the /data route reads GATE_REPORT_WEB_TOP at call time via reportWebTopLive().
   reportWebTop: process.env.GATE_REPORT_WEB_TOP === 'true',
+  // Program line and live status chip on the simple web service report (owner 2026-10-20). Ship DARK. These entries are
+  // for logGateStatus only: the /data route reads GATE_REPORT_WEB_PROGRAM and GATE_REPORT_WEB_LIVE_CHIP at call time via
+  // reportWebProgramLive() and reportWebLiveChipLive().
+  reportWebProgram: process.env.GATE_REPORT_WEB_PROGRAM === 'true',
+  reportWebLiveChip: process.env.GATE_REPORT_WEB_LIVE_CHIP === 'true',
+  // Before/after slider on the simple web lawn report and the tech "same angle" guide (owner 2026-10-20). Ships DARK.
+  // This entry is for logGateStatus only: the /data route and the lawn assessment route read GATE_REPORT_WEB_SLIDER at
+  // call time via reportWebSliderLive().
+  reportWebSlider: process.env.GATE_REPORT_WEB_SLIDER === 'true',
   // Lawn report stage 1 fixes (owner 2026-10-09): five small fixes to one real lawn report (damage finding names the
   // pest, a second "What to expect" line, no irrigation tip beside a schedule on file, the applied card not repeated,
   // no email or phone in the web hero). Ships DARK. This entry is for logGateStatus only: the report build, the
@@ -4994,6 +5025,14 @@ function ibMultiCardLive() {
   return process.env.GATE_IB_MULTI_CARD === 'true' && gateEnvValue('GATE_IB_PLATFORM');
 }
 
+// GATE_IB_LEAD_CONVERT read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence
+// Bar's convert_lead tool (services/intelligence-bar/lead-convert-tools.js):
+// offered and executable only while on. Kill: unset.
+function ibLeadConvertLive() {
+  return process.env.GATE_IB_LEAD_CONVERT === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
 // GATE_IB_VOID_INVOICE read at CALL time — strict `=== 'true'`, dark, and it needs
 // GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence
 // Bar's void_invoice tool (services/intelligence-bar/void-invoice-tools.js):
@@ -5051,6 +5090,13 @@ function ibStaffAutopayOffLive() {
 // read at CALL time. Strict `=== 'true'`, dark in every environment.
 function ibAcceptEstimateLive() {
   return process.env.GATE_IB_ACCEPT_ESTIMATE === 'true';
+}
+
+// GATE_IB_MODEL_FAILURE_NOTICE read at CALL time (routes/admin-intelligence-bar.js), strict `=== 'true'`, dark in every
+// environment. On, a failed Intelligence Bar model call becomes a plain 200 answer, a gap row and one hourly admin bell.
+// Off = the error reaches the error handler, as before.
+function ibModelFailureNoticeLive() {
+  return process.env.GATE_IB_MODEL_FAILURE_NOTICE === 'true';
 }
 
 // GATE_DUPLICATES_SAME_ADDRESS read at REQUEST time — strict `=== 'true'`, dark.
@@ -6349,6 +6395,29 @@ function reportWebTopLive() {
   return process.env.GATE_REPORT_WEB_TOP === 'true';
 }
 
+// GATE_REPORT_WEB_PROGRAM read at CALL time, strict `=== 'true'` (customer view), so an unset variable is the kill
+// switch. The one reader for the program line on the live simple web service report (owner 2026-10-20, idea 9): the
+// /data payload of a recurring lawn plan visit gains `programPromise`. Only meaningful beside GATE_REPORT_SIMPLE_WEB.
+// Off = payload, page and PDF are byte-identical.
+function reportWebProgramLive() {
+  return process.env.GATE_REPORT_WEB_PROGRAM === 'true';
+}
+
+// GATE_REPORT_WEB_LIVE_CHIP read at CALL time, strict `=== 'true'` (customer view), so an unset variable is the kill
+// switch. The one reader for the live "lawn status now" chip on the simple web service report (owner 2026-10-20, idea
+// 10): the /data payload of a lawn visit from the last 7 days gains `liveChip`. Only meaningful beside
+// GATE_REPORT_SIMPLE_WEB. Off = payload, page and PDF are byte-identical.
+function reportWebLiveChipLive() {
+  return process.env.GATE_REPORT_WEB_LIVE_CHIP === 'true';
+}
+
+// GATE_REPORT_WEB_SLIDER read at CALL time, strict `=== 'true'` (customer view), so an unset variable is the kill
+// switch. The one reader for the lawn before/after slider on the simple web report (owner 2026-10-20, idea 2b) and
+// for the technician's "same angle" guide in the lawn photo step. Off = payloads, page and PDF are byte-identical.
+function reportWebSliderLive() {
+  return process.env.GATE_REPORT_WEB_SLIDER === 'true';
+}
+
 // GATE_LAWN_REPORT_STAGE1_FIXES read at CALL time, strict `=== 'true'` (customer copy), so an unset variable
 // is the kill switch. The one reader for the five lawn report stage 1 fixes (the damage finding names the targeted
 // pest, a second "What to expect" line, no irrigation-settings tip beside a schedule on file, the applied card not
@@ -6680,6 +6749,10 @@ module.exports.contactReportTextLive = contactReportTextLive;
 module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
 // GATE_IB_ACCEPT_ESTIMATE reader, on its own line.
 module.exports.ibAcceptEstimateLive = ibAcceptEstimateLive;
+// GATE_IB_LEAD_CONVERT reader, on its own line.
+module.exports.ibLeadConvertLive = ibLeadConvertLive;
+// GATE_IB_MODEL_FAILURE_NOTICE reader, on its own line.
+module.exports.ibModelFailureNoticeLive = ibModelFailureNoticeLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
@@ -6730,6 +6803,12 @@ module.exports.reportSimpleWebLive = reportSimpleWebLive;
 module.exports.reportGlassWebLive = reportGlassWebLive;
 // GATE_REPORT_WEB_TOP reader, on its own line so gate PRs never conflict.
 module.exports.reportWebTopLive = reportWebTopLive;
+// GATE_REPORT_WEB_PROGRAM reader, on its own line so gate PRs never conflict.
+module.exports.reportWebProgramLive = reportWebProgramLive;
+// GATE_REPORT_WEB_LIVE_CHIP reader, on its own line so gate PRs never conflict.
+module.exports.reportWebLiveChipLive = reportWebLiveChipLive;
+// GATE_REPORT_WEB_SLIDER reader, on its own line so gate PRs never conflict.
+module.exports.reportWebSliderLive = reportWebSliderLive;
 // GATE_LAWN_REPORT_STAGE1_FIXES reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportStage1FixesLive = lawnReportStage1FixesLive;
 module.exports.lawnWaterRainLive = lawnWaterRainLive;
@@ -6901,6 +6980,16 @@ function reportCleanup1020Live() {
 // GATE_REPORT_CLEANUP_1020 reader, on its own line so gate PRs never conflict.
 module.exports.reportCleanup1020Live = reportCleanup1020Live;
 
+// GATE_NAME_MATCH_V2 read at CALL time, strict `=== 'true'`, dark in every environment.
+// On, the Intelligence Bar's dictated-name search (query_customers) ranks with the v2 matcher: Double Metaphone and
+// sound-alike tolerances, run-together words ("Mac Donald"), possessives, up to 8 results, a ranking bonus for the
+// customer on screen, with a visit today or tomorrow, or contacted in the last 7 days, and sound-alike alternatives
+// beside a single exact hit. Read only; it sends nothing. Off = today's behavior, byte for byte.
+function nameMatchV2Live() {
+  return process.env.GATE_NAME_MATCH_V2 === 'true';
+}
+// GATE_NAME_MATCH_V2 reader, on its own line so gate PRs never conflict.
+module.exports.nameMatchV2Live = nameMatchV2Live;
 // GATE_DICTATION_CUSTOMER_NAMES read at CALL time, strict `=== 'true'`, dark in every environment. The one reader
 // for the customer-name section of the staff dictation word list (services/dictation-word-list.js) and the
 // surname keyword hints (routes/tech-dictation.js). Off = today's word list byte for byte.
@@ -6909,3 +6998,12 @@ function dictationCustomerNamesLive() {
 }
 // GATE_DICTATION_CUSTOMER_NAMES reader, on its own line so gate PRs never conflict.
 module.exports.dictationCustomerNamesLive = dictationCustomerNamesLive;
+
+// GATE_DICTATION_MONEY_NORMALIZE read at CALL time, strict `=== 'true'`, dark in every environment. The one reader
+// for the dictated-amount rewrite in routes/tech-dictation.js and the Intelligence Bar's ambiguous-amount note
+// (routes/admin-intelligence-bar.js). Off = the transcript and the system prompt are exactly as before.
+function dictationMoneyNormalizeLive() {
+  return process.env.GATE_DICTATION_MONEY_NORMALIZE === 'true';
+}
+// GATE_DICTATION_MONEY_NORMALIZE reader, on its own line so gate PRs never conflict.
+module.exports.dictationMoneyNormalizeLive = dictationMoneyNormalizeLive;
