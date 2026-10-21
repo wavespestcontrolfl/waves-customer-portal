@@ -7816,6 +7816,7 @@ module.exports = {
   resolveLawnAssessmentAndHistory,
   resolveLawnPhotoAssessmentIds,
   loadLinkedLawnAssessment,
+  formatLawnAssessmentScore,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,

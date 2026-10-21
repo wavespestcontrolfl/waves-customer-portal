@@ -64,6 +64,7 @@ import {
 } from "../../lib/customerFormOptions";
 import CustomerHealthGrade from "../../components/admin/CustomerHealthGrade";
 import CustomerHealthFilters from "../../components/admin/CustomerHealthFilters";
+import DidYouMean, { isApproximateRow, splitApproximate } from "../../components/admin/DidYouMean";
 import { Select, Textarea,
   Button,
   Badge,
@@ -1028,6 +1029,7 @@ function customerSortValue(customer, key) {
 function CustomerDirectoryView({
   view,
   totalCustomers,
+  approximateCount,
   workspaceMode,
   isMobile,
   sortBy,
@@ -1066,7 +1068,9 @@ function CustomerDirectoryView({
         )}
         {" "}
         <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
-          {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
+          {approximateCount > 0
+            ? `${totalCustomers} exact · ${approximateCount} suggestion${approximateCount !== 1 ? "s" : ""}`
+            : `${totalCustomers} result${totalCustomers !== 1 ? "s" : ""}`}
         </div>
         {/* Desktop table header */}
         {!workspaceMode && !isMobile && (
@@ -1141,9 +1145,10 @@ function CustomerDirectoryView({
             editor={customerEditor}
           />
         ) : (
-          filteredSorted.map((c) => {
+          filteredSorted.map((c, at) => {
             return (
               <div key={c.id} className="mb-2">
+                {isApproximateRow(c) && !isApproximateRow(filteredSorted[at - 1]) && <DidYouMean className="mb-2" />}
                 {isMobile ? (
                   (() => {
                     const addr = formatCustomerAddress(c.address);
@@ -1866,6 +1871,7 @@ export default function CustomersPageV2() {
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
+  const [approximateCount, setApproximateCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [geocodeReviewRefreshToken, setGeocodeReviewRefreshToken] = useState(0);
   const refreshCustomersAndGeocodeReview = () => {
@@ -2152,12 +2158,15 @@ export default function CustomersPageV2() {
     // page 2, etc. Server caps at 500; any customer base above that
     // will still paginate (Prev/Next controls stay wired below).
     params.set("limit", "500");
+    // Ask for "Did you mean" rows: this page marks them (server gate decides).
+    params.set("suggest", "1");
     adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
         hasLoadedRef.current = true;
         setCustomers(Array.isArray(data) ? data : data.customers || []);
         setTotalCustomers(data.total || 0);
+        setApproximateCount(Number(data.approximateCount) || 0);
         setTotalPages(data.totalPages || 1);
         setLoading(false);
       })
@@ -2167,6 +2176,7 @@ export default function CustomersPageV2() {
         // search/filter state: operators could otherwise open the wrong account.
         setCustomers([]);
         setTotalCustomers(0);
+        setApproximateCount(0);
         setTotalPages(1);
         setError(e);
         setLoading(false);
@@ -2251,9 +2261,12 @@ export default function CustomersPageV2() {
   // Search-name ordering is relevance-ranked before the server applies its
   // limit, so keep that order intact. Local sorting here used to turn an exact
   // match back into ordinary alphabetical order within each returned page.
-  const sorted = search.trim() && NAME_SORT_KEYS.has(sortBy)
-    ? [...customers]
-    : [...customers].sort((a, b) => {
+  // Sound-alike rows ("Did you mean", flagged approximate by the server) keep
+  // their relevance order and always stay after the exact rows.
+  const { exact: exactCustomers, approximate: approximateCustomers } = splitApproximate(customers);
+  const sortedExact = search.trim() && NAME_SORT_KEYS.has(sortBy)
+    ? [...exactCustomers]
+    : [...exactCustomers].sort((a, b) => {
         const aVal = customerSortValue(a, sortBy);
         const bVal = customerSortValue(b, sortBy);
         const direction = sortDir === "asc" ? 1 : -1;
@@ -2261,6 +2274,7 @@ export default function CustomersPageV2() {
         if (aVal > bVal) return direction;
         return 0;
       });
+  const sorted = [...sortedExact, ...approximateCustomers];
 
   const daysSince = (iso) => {
     if (!iso) return null;
@@ -2465,6 +2479,7 @@ export default function CustomersPageV2() {
       <CustomerDirectoryView
         view={view}
         totalCustomers={totalCustomers}
+        approximateCount={approximateCount}
         workspaceMode={workspaceMode}
         isMobile={isMobile}
         sortBy={sortBy}
