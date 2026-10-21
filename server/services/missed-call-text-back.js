@@ -335,6 +335,31 @@ function holdOptions(row, dbi = db) {
   return { callAt: new Date(row.created_at), originCallId: row.id, excludeMessageTypes: [MESSAGE_TYPE], dbi };
 }
 
+// A call that actually reached someone: an outbound call whose customer leg was
+// dialed (bridged_at), or an inbound call that was handled (answered by a
+// person or Sandy, an AI outcome, a recording or voicemail). Unanswered,
+// failed and unbridged calls are not. `outbound` / `inbound` add the caller's
+// own conditions (a phone match) to each branch. Shared with the Intelligence
+// Bar name matcher's recent-contact bonus.
+function whereCompletedCall(query, { outbound, inbound } = {}) {
+  return query.where((q) => q
+    .where((out) => {
+      out.where('direction', 'outbound');
+      if (outbound) outbound(out);
+      out.whereNotNull('bridged_at');
+    })
+    .orWhere((inb) => {
+      inb.where('direction', 'inbound');
+      if (inbound) inbound(inb);
+      inb.where((handled) => handled
+        .whereIn('answered_by', ANSWERED_BY_SOMEONE)
+        .orWhereIn('call_outcome', AI_OUTCOMES)
+        .orWhereNotNull('recording_sid')
+        .orWhereNotNull('recording_url')
+        .orWhereNotNull('voicemail_callback_alerted_at'));
+    }));
+}
+
 // Contact since the missed call — checked before the lease work and again
 // at the provider boundary (owner: "only if nobody has called or texted
 // them by then"). 'contacted' when a customer record knows the number now,
@@ -359,15 +384,10 @@ async function contactState(phone, row, dbi = db) {
     .modify((q) => whereNotSandboxCall(q)) // a Sandy bake-off call is not contact
     .where('created_at', '>=', row.created_at)
     .whereNot('id', row.id)
-    .where((q) => q
-      .where((out) => out.where('direction', 'outbound').whereRaw(...phoneMatches('to_phone')).whereNotNull('bridged_at'))
-      .orWhere((inb) => inb.where('direction', 'inbound').whereRaw(...phoneMatches('from_phone'))
-        .where((handled) => handled
-          .whereIn('answered_by', ANSWERED_BY_SOMEONE)
-          .orWhereIn('call_outcome', AI_OUTCOMES)
-          .orWhereNotNull('recording_sid')
-          .orWhereNotNull('recording_url')
-          .orWhereNotNull('voicemail_callback_alerted_at'))))
+    .modify((q) => whereCompletedCall(q, {
+      outbound: (out) => out.whereRaw(...phoneMatches('to_phone')),
+      inbound: (inb) => inb.whereRaw(...phoneMatches('from_phone')),
+    }))
     .first('id');
   if (laterCall) return 'contacted';
   const bridgePending = await dbi('call_log')
@@ -966,6 +986,7 @@ module.exports = {
   VOICEMAIL_GRACE_MS,
   textBackIfMissed,
   sweepMissedCallTextBacks,
+  whereCompletedCall,
   _private: {
     textBackCoreEligible,
     emptyVoicemailOn,

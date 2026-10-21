@@ -7,7 +7,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import ServiceReportDocument from './ServiceReportDocument';
-import { rateWithBasis, techTextBeyondSummary, isTroubleSpotPhoto } from './serviceReportCleanup';
+import { rateWithBasis, techTextBeyondSummary, isTroubleSpotPhoto, sameSentence } from './serviceReportCleanup';
 
 afterEach(() => cleanup());
 
@@ -125,6 +125,14 @@ describe('photo cards and the trouble-spot line (items 10 and 4)', () => {
     expect(off.style.height).toBe('190px');
   });
 
+  it('lets each card size to its own photo (grid aligns to the start), key on only', () => {
+    render(<ServiceReportDocument data={data({ reportCleanup: true, photos })} token="tok-e2" />);
+    expect(document.querySelector('.doc-photo-grid').style.alignItems).toBe('start');
+    cleanup();
+    render(<ServiceReportDocument data={data({ photos })} token="tok-f2" />);
+    expect(document.querySelector('.doc-photo-grid').style.alignItems).toBe('');
+  });
+
   it('prints the server line once under the photos when a Trouble spot photo exists, key on only', () => {
     render(<ServiceReportDocument data={data({ reportCleanup: true, photos, troubleSpotNote: NOTE })} token="tok-g" />);
     expect(screen.getAllByTestId('doc-trouble-spot-note')).toHaveLength(1);
@@ -139,5 +147,42 @@ describe('photo cards and the trouble-spot line (items 10 and 4)', () => {
     expect(text(data({ reportCleanup: true, photos: [photos[0]], troubleSpotNote: NOTE }), 'tok-j')).not.toContain(NOTE);
     expect(isTroubleSpotPhoto({ caption: 'Trouble spot (front)' })).toBe(true);
     expect(isTroubleSpotPhoto({ caption: 'Front yard' })).toBe(false);
+  });
+});
+
+describe('one pest summary sentence, once under What we found', () => {
+  const SENTENCE = 'We treated your property today and are watching activity levels between visits \u2014 the breakdown below shows what we\u2019re tracking.';
+  const pest = (over = {}) => data({
+    serviceLine: 'pest',
+    typedReport: { todaysResult: { headline: 'Done', body: '' }, findings: [], nextStepChips: [] },
+    reportV2: null,
+    applications: [],
+    pestReportV2: {
+      status: { key: 'protected', label: 'Protected' },
+      statusSummary: SENTENCE,
+      defense: { summary: SENTENCE, items: [{ key: 'a', label: 'Perimeter shield', status: 'active', detail: 'Exterior protection was applied today.' }] },
+      bugFiles: [],
+    },
+    ...over,
+  });
+  const count = (d, token) => text(d, token).split('watching activity levels between visits').length - 1;
+
+  it('prints the sentence once with the key on, twice (as before) with it off', () => {
+    expect(count(pest({ reportCleanup: true }), 'tok-k')).toBe(1);
+    cleanup();
+    expect(count(pest(), 'tok-l')).toBe(2);
+  });
+
+  it('keeps the defense summary when it says something the status line does not', () => {
+    const other = pest({ reportCleanup: true });
+    other.pestReportV2.defense.summary = 'Your perimeter is protected and we are watching the entry.';
+    expect(text(other, 'tok-m')).toContain('we are watching the entry');
+  });
+
+  it('compares sentences without case, quote style or punctuation', () => {
+    expect(sameSentence('We\u2019re tracking it.', 'we\'re  tracking it')).toBe(true);
+    expect(sameSentence('One thing', 'Another thing')).toBe(false);
+    expect(sameSentence('', '')).toBe(false);
+    expect(sameSentence('Text', undefined)).toBe(false);
   });
 });

@@ -2183,7 +2183,7 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
 
   test('the send resolves the average from the row read just before sending, not the stale row it was handed', async () => {
     const spy = jest.spyOn(averageService, 'emailAverageParts').mockImplementation(async (estimate) => ({
-      priceLine: `$94.00 per application · about $${Number(estimate.monthly_total).toFixed(2)} a month`,
+      priceLine: `$94.00 per application · $${Number(estimate.monthly_total).toFixed(2)} a month`,
       note: 'Averaged over the year. You pay after each application.',
     }));
     const stale = structuredClone(row);
@@ -2193,12 +2193,12 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][0].monthly_total).toBe('31.33');
     const sent = email.sendTemplate.mock.calls[email.sendTemplate.mock.calls.length - 1][0];
-    expect(sent.payload.price_summary).toBe('$94.00 per application · about $31.33 a month');
+    expect(sent.payload.price_summary).toBe('$94.00 per application · $31.33 a month');
     expect(sent.payload.next_step_summary).toMatch(/^Averaged over the year\. You pay after each application\. When you are ready/);
   });
   describe('reviewed and scheduled sends keep the reviewed average copy', () => {
     const featureGates = require('../config/feature-gates');
-    const PARTS = { priceLine: '$94.00 per application · about $31.33 a month', note: 'Averaged over the year. You pay after each application.' };
+    const PARTS = { priceLine: '$94.00 per application · $31.33 a month', note: 'Averaged over the year. You pay after each application.' };
     const TEXT = `${PARTS.priceLine}\n${PARTS.note}`;
     let current;
     let gateOn;
@@ -2226,7 +2226,7 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
     });
 
     test('a price edit since the review changes the copy: stale, nothing sent', async () => {
-      current = { ...PARTS, priceLine: '$94.00 per application · about $35.00 a month' };
+      current = { ...PARTS, priceLine: '$94.00 per application · $35.00 a month' };
       await expect(router.sendEstimateNow(structuredClone(row), 'email', {
         callerPreClaimed: false, reviewedMessages: { sms: null, email: { provider: 'sendgrid', monthlyAverage: TEXT } },
       })).rejects.toMatchObject({ statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
@@ -2235,7 +2235,7 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
     });
 
     test('an edit that lands between the early check and the email build fails the email channel stale; nothing reaches the provider', async () => {
-      const edited = { ...PARTS, priceLine: '$94.00 per application · about $35.00 a month' };
+      const edited = { ...PARTS, priceLine: '$94.00 per application · $35.00 a month' };
       // Call 1 is the early (pre-claim) check, call 2 the email build: the price changes in between.
       averageService.emailAverageParts.mockReset();
       averageService.emailAverageParts.mockResolvedValueOnce(PARTS).mockResolvedValue(edited);

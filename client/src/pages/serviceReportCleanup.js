@@ -66,3 +66,13 @@ export function techTextBeyondSummary(techText, summaryParagraphs) {
 
 /** True for a photo the lawn photo set labels "Trouble spot". */
 export const isTroubleSpotPhoto = (photo) => /^\s*trouble spot\b/i.test(String(photo?.caption || photo?.label || ''));
+
+/**
+ * True when two bullets say the same sentence (case, quote style, punctuation and spacing aside).
+ * "What we found" printed one pest summary sentence twice: once as the detail of the protection
+ * status line and again as the defense block's own summary bullet. Both come from one source.
+ */
+export const sameSentence = (a, b) => {
+  const left = plain(a);
+  return left !== '' && left === plain(b);
+};
