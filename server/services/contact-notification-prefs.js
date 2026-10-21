@@ -240,6 +240,20 @@ function declinedEmailsOf(slots, rows, column) {
   return declined;
 }
 
+// The addresses (lower-cased) a contact declined for an appointment EMAIL
+// event, read now: the recipient resolution reads them through
+// declinedEmailSlotRoles below, and the dispatch boundary (appointment-
+// email.js sendTemplate onQueued) reads them again as of the provider
+// handoff (codex #6363 r21 P2) — a decline that lands during the library's
+// own awaits still holds that recipient. Empty with the gate off; throws on
+// an unreadable table (the caller holds).
+async function declinedEmailAddresses(customer, eventType, { dbh = db } = {}) {
+  if (!contactPrefsLive() || !customer) return new Set();
+  const { getServiceContactSlots } = require('./customer-contact');
+  const rows = await loadContactPrefRows(customer.id, { dbh });
+  return declinedEmailsOf(getServiceContactSlots(customer), rows, columnForEmailEvent(eventType));
+}
+
 // The slot roles (service_contact, service_contact_2, …) whose phone declined
 // an appointment EMAIL event (appointment-email.js resolveRecipients), plus
 // every slot sharing a declining slot's address. Empty with the gate off;
@@ -247,11 +261,8 @@ function declinedEmailsOf(slots, rows, column) {
 async function declinedEmailSlotRoles(customer, eventType, { dbh = db } = {}) {
   const declined = new Set();
   if (!contactPrefsLive() || !customer) return declined;
-  const { getServiceContactSlots } = require('./customer-contact');
-  const column = columnForEmailEvent(eventType);
-  const rows = await loadContactPrefRows(customer.id, { dbh });
-  const slots = getServiceContactSlots(customer);
-  const declinedEmails = declinedEmailsOf(slots, rows, column);
+  const slots = require('./customer-contact').getServiceContactSlots(customer);
+  const declinedEmails = await declinedEmailAddresses(customer, eventType, { dbh });
   for (const slot of slots) {
     // A slot with no email of its own is emailed at the HOLDER's address
     // (appointment-email.js resolveRecipients): the contact's email switch
@@ -530,6 +541,7 @@ module.exports = {
   getContactPrefRow,
   filterContactsByOwnPrefs,
   textPathsOpened,
+  declinedEmailAddresses,
   declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
   contactDeclinesChannel,

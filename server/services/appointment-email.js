@@ -399,12 +399,32 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // error holds rather than sends.
         // Street-level address hold boundary re-check (owner ruling 2026-10-01): a promotion that commits
         // during the library's own awaits still holds the send; the predicate fails closed.
+        // The contact's OWN choices as of the handoff too (codex #6363 r21
+        // P2): a decline that lands during those awaits aborts THIS
+        // recipient, as the review email's dispatch claim does; an
+        // unreadable table holds the notice (fail closed, like the
+        // recipient resolution above).
         onQueued: async () => {
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
           if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          let declinedNow;
+          try {
+            declinedNow = await require('./contact-notification-prefs').declinedEmailAddresses(customer, eventType);
+          } catch {
+            abortedBy = 'preferences_unavailable'; return false;
+          }
+          if (declinedNow.has(recipient.email.toLowerCase())) { abortedBy = 'contact_declined'; return false; }
           return true;
         },
       });
+      // One recipient's own decline leaves the others' notices alone: skip
+      // it (no delivery, an attempt row saying why) and carry on.
+      if (result?.aborted && abortedBy === 'contact_declined') {
+        logger.info(`[appointment-email] ${eventType} for ${customer.id}: a contact declined at the dispatch boundary — recipient skipped`);
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: abortedBy, metadata });
+        outcomes.push({ reason: abortedBy });
+        continue;
+      }
       // An onQueued abort is a HELD outcome, not a delivery failure: stop
       // the fan-out (the hold covers the visit) and let the caller defer.
       if (result?.aborted && abortedBy) {

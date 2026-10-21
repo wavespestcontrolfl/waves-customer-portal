@@ -22309,14 +22309,16 @@ const CallRecordingProcessor = {
                   // this from the Step 5 gate, and this is a TEXT TO A
                   // CUSTOMER. Re-check immediately before it (codex P1).
                   if (!(await claimStillOwned())) return false;
-                  // A confirmation redirected to the calling CONTACT's own
-                  // number (not the account's phone) follows that contact's
-                  // own choices (contact login, GATE_CONTACT_LOGIN): texts or
-                  // appointment updates off holds it, exactly as the fan-out
-                  // below is narrowed (codex #6363 r9 P2). Fail closed.
-                  const contactDeclined = String(smsRecipient || '').replace(/\D/g, '').slice(-10) !== String(smsPhone || '').replace(/\D/g, '').slice(-10)
-                    && (await require('./contact-notification-prefs')
-                      .filterContactsByOwnPrefs([{ phone: smsRecipient, role: 'service_contact' }], customerId, 'appointment_confirmation', { channel: 'sms' })).length === 0;
+                  // A confirmation addressed to one of the account's on-location
+                  // CONTACTS' numbers follows that contact's own choices (contact
+                  // login, GATE_CONTACT_LOGIN): texts or appointment updates off
+                  // holds it, exactly as the fan-out below is narrowed (codex
+                  // #6363 r9 P2). Decided by the number's slot on the row, not
+                  // by whether the recipient was redirected: with no account
+                  // phone, validation resolves a slot phone directly (codex r21
+                  // P2). The holder's own number never declines. Fail closed.
+                  const contactDeclined = await require('./contact-notification-prefs')
+                    .contactPhoneDeclinesText(customerId, smsRecipient, 'appointment_confirmation');
                   const sendResult = (holdImpliedSmsLeg || v2SmsBlocked || contactDeclined)
                     ? {
                       sent: false,
