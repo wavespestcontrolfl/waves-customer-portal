@@ -701,8 +701,6 @@ function assertVoidExpected(row, expected) {
     || (row.stripe_payment_intent_id || null) !== (expected.paymentIntentId || null);
   if (changed) throw new Error("Invoice status changed while voiding — re-check and retry");
 }
-// The bar's pin, read again right before the one external effect (cancelling the pay-page PaymentIntent), so the
-// window between the first read and that cancel is a single query, not the Stripe round trip. No-op without `expected`.
 // The bar's void only: a saved-card charge attempt or orphan charge that exists by the time the void holds the invoice's
 // row lock refuses the void (the same durable fence the charge paths use), read-only, inside the void transaction.
 async function assertVoidChargeFence(trx, id, expected) {
@@ -723,11 +721,52 @@ async function assertVoidNoPaymentPlan(trx, id, expected) {
   const plan = await trx("payment_plans").where({ invoice_id: id }).whereNot("status", "cancelled").first("id");
   if (plan) throw new Error("A payment plan exists on this invoice while voiding — cancel it on the Invoices page instead of voiding from the bar");
 }
-async function recheckVoidExpected(id, expected) {
+// The void's PaymentIntent triage (unchanged for the page, which runs it before its transaction): refuse money in
+// flight, cancel a still-cancelable intent, unbind combined-payment siblings. With the bar's `expected` it also
+// requires the freshly retrieved Stripe status to be the one the card showed (or canceled).
+async function triageVoidPaymentIntent({ id, piId, expected, conn }) {
+  if (!piId) return;
+  const StripeService = require("./stripe");
+  let voidPi;
+  try {
+    voidPi = await StripeService.retrievePaymentIntent(piId);
+  } catch (e) {
+    throw new Error(`Open payment session ${piId} could not be verified (${e.message}); resolve it before voiding`);
+  }
+  if (!voidPi) {
+    throw new Error(`Open payment session ${piId} could not be verified (payment service unavailable); resolve it before voiding`);
+  }
+  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(voidPi.status)) {
+    throw new Error(`A payment is already in flight (${voidPi.status}); wait for it to settle or refund it before voiding`);
+  }
+  assertVoidPiStatus(voidPi, expected);
+  if (voidPi.status !== "canceled") {
+    try {
+      await StripeService.cancelPaymentIntent(piId, { cancellation_reason: "abandoned" });
+    } catch (e) {
+      throw new Error(`Couldn't cancel the open payment session ${piId} (${e.message}); resolve it before voiding`);
+    }
+  }
+  // A combined PI is stamped on its SIBLINGS too (codex #3427 r16 P2):
+  // canceling it while voiding one allocated invoice must unbind every
+  // other collectible row, or they stay stuck behind a canceled intent
+  // (edits blocked, open sibling pages posting to a dead PI).
+  await require("./pay-combined").clearPaymentIntentStamps(conn, piId, { keepInvoiceIds: [String(id)] });
+}
+// Bar only: the PaymentIntent must still be in the Stripe state the card showed (unconfirmed), or canceled.
+function assertVoidPiStatus(pi, expected) {
+  if (!expected || pi.status === "canceled" || pi.status === expected.paymentIntentStatus) return;
+  throw new Error("Invoice status changed while voiding — re-check and retry");
+}
+// Bar only (`expected`), inside the void transaction: take the invoice row (FOR NO KEY UPDATE, held to commit, so no
+// other writer can change it), assert the card's version on the locked row, then run the PaymentIntent triage. The
+// Stripe cancel and the void's UPDATE therefore see the same invoice the card showed.
+async function voidLockAndTriage(trx, { id, piId, expected }) {
   if (!expected) return;
-  const row = await db("invoices").where({ id }).first();
-  if (!row) throw new Error("Invoice not found");
-  assertVoidExpected(row, expected);
+  const locked = await trx("invoices").where({ id }).forNoKeyUpdate().first();
+  if (!locked) throw new Error("Invoice not found");
+  assertVoidExpected(locked, expected);
+  await triageVoidPaymentIntent({ id, piId, expected, conn: trx });
 }
 function applyVoidExpected(q, expected) {
   if (!expected) return q;
@@ -11004,34 +11043,9 @@ const InvoiceService = {
     // flight; cancel a still-cancelable intent. Pre-lock Stripe triage (mirrors the
     // apply-credit route); the transaction re-checks the PI id under the row lock.
     const triagedVoidPiId = current.stripe_payment_intent_id || null;
-    if (triagedVoidPiId) {
-      const StripeService = require("./stripe");
-      let voidPi;
-      try {
-        voidPi = await StripeService.retrievePaymentIntent(triagedVoidPiId);
-      } catch (e) {
-        throw new Error(`Open payment session ${triagedVoidPiId} could not be verified (${e.message}); resolve it before voiding`);
-      }
-      if (!voidPi) {
-        throw new Error(`Open payment session ${triagedVoidPiId} could not be verified (payment service unavailable); resolve it before voiding`);
-      }
-      if (PI_MONEY_IN_FLIGHT_STATUSES.includes(voidPi.status)) {
-        throw new Error(`A payment is already in flight (${voidPi.status}); wait for it to settle or refund it before voiding`);
-      }
-      if (voidPi.status !== "canceled") {
-        await recheckVoidExpected(id, expected);
-        try {
-          await StripeService.cancelPaymentIntent(triagedVoidPiId, { cancellation_reason: "abandoned" });
-        } catch (e) {
-          throw new Error(`Couldn't cancel the open payment session ${triagedVoidPiId} (${e.message}); resolve it before voiding`);
-        }
-      }
-      // A combined PI is stamped on its SIBLINGS too (codex #3427 r16 P2):
-      // canceling it while voiding one allocated invoice must unbind every
-      // other collectible row, or they stay stuck behind a canceled intent
-      // (edits blocked, open sibling pages posting to a dead PI).
-      await require("./pay-combined").clearPaymentIntentStamps(db, triagedVoidPiId, { keepInvoiceIds: [String(id)] });
-    }
+    // The page triages here, before the transaction. The bar (`expected`) triages inside it, under the invoice row
+    // lock (voidLockAndTriage below), so the version it checked cannot change before the Stripe cancel.
+    if (!expected) await triageVoidPaymentIntent({ id, piId: triagedVoidPiId, expected, conn: db });
     // Void + deposit-ledger restore commit TOGETHER: a committed void beside
     // a still-consumed deposit strands the customer's money — the credit can
     // no longer roll forward or refund (a restore failure rolls the void
@@ -11083,6 +11097,7 @@ const InvoiceService = {
       if (requireUnsettled) {
         await assertInvoiceGenuinelyUnsettledLocked(trx, id);
       }
+      await voidLockAndTriage(trx, { id, piId: triagedVoidPiId, expected });
       const [updated] = await applyVoidExpected(trx("invoices").where({ id, status: current.status }), expected)
         .update({ status: "void", send_claim_token: null, updated_at: new Date() })
         .returning("*");

@@ -12,6 +12,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   acquireTermiteGateAtEntry: jest.fn(async () => []),
 }));
 jest.mock('../services/estimate-deposits', () => ({ restoreDepositCreditForVoidedInvoice: jest.fn(async () => 0) }));
+jest.mock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
 const mockRetrievePi = jest.fn();
 const mockCancelPi = jest.fn();
 const mockFence = jest.fn(async () => undefined);
@@ -25,7 +26,7 @@ const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, cre
 
 function chain({ first, returning } = {}) {
   const q = { calls: [] };
-  for (const name of ['where', 'whereNot', 'whereIn', 'whereRaw', 'whereNull', 'update']) {
+  for (const name of ['where', 'whereNot', 'whereIn', 'whereRaw', 'whereNull', 'update', 'forNoKeyUpdate']) {
     q[name] = jest.fn((...args) => { q.calls.push([name, ...args]); return q; });
   }
   q.first = jest.fn(async () => first);
@@ -40,12 +41,14 @@ beforeEach(() => {
   db.transaction = jest.fn(async (fn) => fn(db));
 });
 
-function queueVoid({ current = row(), returning = [row({ status: 'void' })], plan, bar = true } = {}) {
+function queueVoid({ current = row(), returning = [row({ status: 'void' })], plan, bar = true, locked } = {}) {
   const update = chain({ returning });
   db
     .mockReturnValueOnce(chain({ first: current }))
-    .mockReturnValueOnce(chain({ first: undefined })) // payments guard
-    .mockReturnValueOnce(update); // the void UPDATE
+    .mockReturnValueOnce(chain({ first: undefined })); // payments guard
+  // Bar only: the invoice row taken FOR NO KEY UPDATE inside the transaction (version re-asserted on it).
+  if (bar) db.mockReturnValueOnce(chain({ first: locked || current }));
+  db.mockReturnValueOnce(update); // the void UPDATE
   // Bar only: the payment-plan fence read right after the UPDATE (the charge fence is mocked at the Stripe module).
   if (bar) db.mockReturnValueOnce(chain({ first: plan }));
   db
@@ -55,7 +58,7 @@ function queueVoid({ current = row(), returning = [row({ status: 'void' })], pla
 }
 
 test('without `expected` the void UPDATE carries no version predicates (the page and other callers)', async () => {
-  const update = queueVoid();
+  const update = queueVoid({ bar: false });
   await InvoiceService.voidInvoice('inv-1');
   expect(update.calls.filter(([name]) => name === 'whereRaw' || name === 'whereNull')).toEqual([]);
   expect(update.where).toHaveBeenCalledTimes(1);
@@ -99,34 +102,59 @@ test('the same invoice whose pay-page session was added since the card is refuse
   expect(mockRetrievePi).not.toHaveBeenCalled();
 });
 
-test('an edit between the first read and the PaymentIntent cancel is caught by a re-read before Stripe cancels anything', async () => {
+test('an edit between the first read and the lock is caught on the LOCKED row, before Stripe is touched', async () => {
   const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
-  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1' };
-  mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
-  db
-    .mockReturnValueOnce(chain({ first: withPi })) // first read: matches the card
-    .mockReturnValueOnce(chain({ first: undefined })) // payments guard
-    .mockReturnValueOnce(chain({ first: row({ stripe_payment_intent_id: 'pi_test_1', updated_at: new Date('2099-01-03T00:00:00Z') }) })); // re-read: edited
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_payment_method' };
+  queueVoid({ current: withPi, locked: row({ stripe_payment_intent_id: 'pi_test_1', updated_at: new Date('2099-01-03T00:00:00Z') }) });
   await expect(InvoiceService.voidInvoice('inv-1', { expected })).rejects.toThrow(/changed while voiding/);
-  expect(mockRetrievePi).toHaveBeenCalledTimes(1);
+  expect(mockRetrievePi).not.toHaveBeenCalled();
   expect(mockCancelPi).not.toHaveBeenCalled();
-  expect(db.transaction).not.toHaveBeenCalled();
 });
 
-test('without `expected` the PaymentIntent cancel makes no extra invoice read (the page path)', async () => {
+test('with `expected` the row is taken FOR NO KEY UPDATE before the Stripe cancel and the cancel runs inside the transaction', async () => {
   const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_payment_method' };
+  const order = [];
+  mockRetrievePi.mockImplementation(async () => { order.push('retrieve'); return { id: 'pi_test_1', status: 'requires_payment_method' }; });
+  mockCancelPi.mockImplementation(async () => { order.push('cancel'); return {}; });
+  db.transaction = jest.fn(async (fn) => { order.push('txn'); return fn(db); });
+  queueVoid({ current: withPi, returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_test_1' })] });
+  await InvoiceService.voidInvoice('inv-1', { expected });
+  expect(order).toEqual(['txn', 'retrieve', 'cancel']);
+});
+
+test('a session that moved to requires_action since the card is refused, never cancelled', async () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_confirmation' };
+  mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_action' });
+  queueVoid({ current: withPi });
+  await expect(InvoiceService.voidInvoice('inv-1', { expected })).rejects.toThrow(/changed while voiding/);
+  expect(mockCancelPi).not.toHaveBeenCalled();
+});
+
+test('a session canceled since the card, or still in the carded state, passes the status check', async () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_payment_method' };
+  mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'canceled' });
+  queueVoid({ current: withPi, returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_test_1' })] });
+  await InvoiceService.voidInvoice('inv-1', { expected });
+  expect(mockCancelPi).not.toHaveBeenCalled();
   mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
   mockCancelPi.mockResolvedValue({});
-  const update = chain({ returning: [row({ status: 'void' })] });
-  jest.doMock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
-  db
-    .mockReturnValueOnce(chain({ first: withPi }))
-    .mockReturnValueOnce(chain({ first: undefined })) // payments guard
-    .mockReturnValueOnce(update) // straight to the void UPDATE: no re-read between
-    .mockReturnValueOnce(chain({ first: undefined }))
-    .mockReturnValueOnce(chain());
-  await InvoiceService.voidInvoice('inv-1').catch(() => null);
+  queueVoid({ current: withPi, returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_test_1' })] });
+  await InvoiceService.voidInvoice('inv-1', { expected });
   expect(mockCancelPi).toHaveBeenCalledTimes(1);
+});
+
+test('without `expected` the page triages before its transaction, with no extra invoice read (the page path)', async () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  const order = [];
+  mockRetrievePi.mockImplementation(async () => { order.push('retrieve'); return { id: 'pi_test_1', status: 'requires_action' }; });
+  mockCancelPi.mockImplementation(async () => { order.push('cancel'); return {}; });
+  db.transaction = jest.fn(async (fn) => { order.push('txn'); return fn(db); });
+    const update = queueVoid({ current: withPi, bar: false });
+  await InvoiceService.voidInvoice('inv-1').catch(() => null);
+  expect(order).toEqual(['retrieve', 'cancel', 'txn']);
   expect(update.update).toHaveBeenCalledTimes(1);
 });
 
@@ -157,7 +185,7 @@ describe('the saved-card charge fence inside the void transaction (bar only)', (
   });
 
   test('the page path (no `expected`) never reads the fence', async () => {
-    queueVoid();
+    queueVoid({ bar: false });
     await InvoiceService.voidInvoice('inv-1');
     expect(mockFence).not.toHaveBeenCalled();
   });

@@ -56,6 +56,7 @@ Use for: "void this invoice", "void invoice WPC-2026-0534", "cancel this invoice
         invoice_number: { type: 'string', description: 'The invoice number, e.g. WPC-2026-0534 (use instead of invoice_id)' },
       },
     },
+    _sideEffects: true,
   },
 ];
 
@@ -209,8 +210,11 @@ async function paymentIntentState(invoice) {
 async function linkedVisit(invoice) {
   const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
   if (!visitId) return null;
-  const visit = await db('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date');
-  return visit ? { id: visit.id, status: visit.status || null, date: visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null } : null;
+  const visit = await db('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date', 'window_start', 'window_end');
+  return visit ? {
+    id: visit.id, status: visit.status || null, date: visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null,
+    window: [visit.window_start, visit.window_end].map((v) => (v ? String(v).slice(0, 8) : '')).join('-'),
+  } : null;
 }
 
 function planEffects({ invoice, credit, pi, visit, statementOpen }) {
@@ -243,7 +247,7 @@ function versionOf({ invoice, pi, visit, lines }) {
     payer_id: invoice.payer_id || null,
     payer_statement_id: invoice.payer_statement_id || null,
     payment_intent: pi ? `${pi.id}:${pi.status}` : null,
-    visit: visit ? `${visit.id}:${visit.status}` : null,
+    visit: visit ? `${visit.id}:${visit.status}:${visit.date}:${visit.window}` : null,
     lines: digest(lines),
   };
 }
@@ -291,6 +295,8 @@ async function buildPlan(input) {
       total: Number(invoice.total) || 0,
       creditApplied: Number(invoice.credit_applied) || 0,
       paymentIntentId: invoice.stripe_payment_intent_id || null,
+      // The Stripe state the card showed: voidInvoice cancels only a session still in this state (or canceled).
+      paymentIntentStatus: piState.pi ? piState.pi.status : null,
     },
     note: 'PREVIEW ONLY — nothing was changed. Confirm voids exactly this invoice; if anything changed it refuses.',
   };

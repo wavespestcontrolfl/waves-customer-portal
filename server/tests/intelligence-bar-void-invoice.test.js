@@ -48,7 +48,7 @@ function freshState() {
     }],
     customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample' }],
     payments: [], payer_statements: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [],
-    scheduled_services: [{ id: VISIT, status: 'completed', scheduled_date: '2099-01-01' }],
+    scheduled_services: [{ id: VISIT, status: 'completed', scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '11:00:00' }],
   };
 }
 
@@ -109,6 +109,7 @@ describe('registration', () => {
     expect(registry.actions.get('void_invoice')).toMatchObject({ domain: 'customers', role: 'admin', approval: 'ui_confirm', scope: 'record', module: 'void-invoice-tools.js' });
     expect(registry.policyErrors).not.toContain('void_invoice');
     expect(Object.keys(VOID_INVOICE_TOOLS[0].input_schema.properties)).toEqual(['invoice_id', 'invoice_number']);
+    expect(VOID_INVOICE_TOOLS[0]._sideEffects).toBe(true);
   });
 
   test('the discovery search finds it by the operator’s words, delete included (never a delete)', () => {
@@ -167,7 +168,7 @@ describe('the preview', () => {
     expect(text).toMatch(/linked visit \(2099-01-01, completed\) is not changed/);
     expect(text).toMatch(/Nothing is sent: no text, email or call/);
     expect(text).toMatch(/No refund, no card charge, no new invoice/);
-    expect(card._expected).toEqual({ status: 'sent', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), total: 129, creditApplied: 0, paymentIntentId: null });
+    expect(card._expected).toEqual({ status: 'sent', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), total: 129, creditApplied: 0, paymentIntentId: null, paymentIntentStatus: null });
     expect(Invoices.voidInvoiceFromBar).not.toHaveBeenCalled();
     const lines = cardLines('void_invoice', card).map((l) => l.text).join('\n');
     expect(lines).toMatch(/Void invoice WPC-2099-0001 for Robin Sample: \$129\.00 \(sent, \$129\.00 due\)/);
@@ -196,6 +197,7 @@ describe('the preview', () => {
     mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
     const card = await preview();
     expect(card.effects.map((e) => e.text).join('\n')).toMatch(/open card-payment session \(nobody has tried to pay\) is cancelled with Stripe/);
+    expect(card._expected).toMatchObject({ paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_payment_method' });
     mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'canceled' });
     expect((await preview()).effects.map((e) => e.text).join('\n')).not.toMatch(/is cancelled with Stripe/);
   });
@@ -315,7 +317,7 @@ describe('the confirmed run', () => {
     expect(Invoices.voidInvoiceFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.voidInvoiceFromBar).toHaveBeenCalledWith({
       invoiceId: INV,
-      expected: { status: 'sent', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), total: 129, creditApplied: 0, paymentIntentId: null },
+      expected: { status: 'sent', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), total: 129, creditApplied: 0, paymentIntentId: null, paymentIntentStatus: null },
     });
     expect(res).toMatchObject({ success: true, status: 'void', sent_to_customer: false, invoice_id: INV, invoice_number: 'WPC-2099-0001' });
     expect(res.note).toMatch(/Nothing was sent to anyone/);
@@ -334,6 +336,8 @@ describe('the confirmed run', () => {
     ['a line changed', (s) => { s.invoices[0].line_items = [{ description: 'Quarterly Pest Control', amount: 129 }, { description: 'Extra', amount: 5 }]; }],
     ['the visit link changed', () => { mockLinkedVisit.mockResolvedValue(null); }],
     ['the visit changed', (s) => { s.scheduled_services[0].status = 'cancelled'; }],
+    ['the visit date moved', (s) => { s.scheduled_services[0].scheduled_date = '2099-01-09'; }],
+    ['the visit window moved', (s) => { s.scheduled_services[0].window_start = '13:00:00'; }],
     ['the invoice moved to another customer', (s) => { s.invoices[0].customer_id = 'cust-2'; }],
     ['the invoice was voided by someone else', (s) => { s.invoices[0].status = 'void'; }],
   ])('drift (%s) refuses with preview_changed and runs nothing', async (_name, mutate) => {
