@@ -293,6 +293,29 @@ describe('GET /reports/:token/share-photo', () => {
       expect((await fetch(`${baseUrl}/reports/not-a-token/share-photo`)).status).toBe(404);
     });
   });
+
+  test('suppressed, callback, no photo, dark and malformed tokens all answer the same body', async () => {
+    const bodies = [];
+    const read = async (setup, path) => {
+      jest.clearAllMocks();
+      gates.reportWebShareLive.mockReturnValue(true);
+      gates.reportSimpleWebLive.mockReturnValue(true);
+      webShare.findShareFrontPhoto.mockResolvedValue({ key: 'k' });
+      setup();
+      await withServer(async (baseUrl) => {
+        const res = path ? await fetch(`${baseUrl}${path}`) : await get(baseUrl);
+        expect(res.status).toBe(404);
+        bodies.push(await res.text());
+      });
+    };
+    await read(() => mockDbFor([paramGateRecord({ structured_notes: { typedReportDelivery: 'shadow' } })]));
+    await read(() => mockDbFor([paramGateRecord(), fullRecord({ is_callback: true })]));
+    await read(() => { webShare.findShareFrontPhoto.mockResolvedValue(null); mockDbFor([paramGateRecord(), fullRecord()]); });
+    await read(() => { gates.reportWebShareLive.mockReturnValue(false); mockDbFor([paramGateRecord(), fullRecord()]); });
+    await read(() => {}, '/reports/not-a-token/share-photo');
+    expect(new Set(bodies).size).toBe(1);
+    expect(JSON.parse(bodies[0])).toEqual({ error: 'Report not found' });
+  });
 });
 
 describe('dark share-photo answers before every limiter (real limiters)', () => {

@@ -300,7 +300,7 @@ function reportsAskPrivacyHeaders(req, res, next) {
 function reportSharePhotoPreGuard(req, res, next) {
   const match = (req.method === 'GET' || req.method === 'HEAD') ? REPORT_SHARE_PHOTO_PATH_RE.exec(req.path || '') : null;
   if (match && (!webShareService.webShareEnabled() || !REPORT_SHARE_PHOTO_TOKEN_RE.test(match[1]))) {
-    return res.status(404).json({ error: 'Not found' });
+    return res.status(404).json({ error: 'Report not found' });
   }
   return next();
 }
@@ -1773,7 +1773,7 @@ const sharePhotoLimiter = rateLimit({
 // front photo = the same generic 404.
 router.get('/:token/share-photo', sharePhotoLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '') || !webShareService.webShareEnabled()) {
-    return res.status(404).json({ error: 'Not found' });
+    return res.status(404).json({ error: 'Report not found' });
   }
   try {
     const service = await db('service_records')
@@ -1781,10 +1781,10 @@ router.get('/:token/share-photo', sharePhotoLimiter, async (req, res, next) => {
       .select('id', 'customer_id', 'scheduled_service_id', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service) || service.is_callback === true) {
-      return res.status(404).json({ error: 'Not found' });
+      return res.status(404).json({ error: 'Report not found' });
     }
     const photo = await webShareService.findShareFrontPhoto(service);
-    if (!photo) return res.status(404).json({ error: 'Not found' });
+    if (!photo) return res.status(404).json({ error: 'Report not found' });
     const bytes = await webShareService.readSharePhoto(photo);
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'no-store');
