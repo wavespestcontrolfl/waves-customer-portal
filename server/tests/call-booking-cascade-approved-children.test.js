@@ -87,6 +87,7 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     ['service changed', { service_type: 'lawn_care' }, 'service_changed'],
     ['was reassigned to another technician (its own cancel notice would go to someone the card did not show)', { technician_id: 'tech-10' }, 'technician_changed'],
     ['lost its technician', { technician_id: null }, 'technician_changed'],
+    ['was grouped (visit_id set; package follow-ups group automatically, and a grouped cancel runs the group hook)', { visit_id: 'visit-grp-1' }, 'grouped_changed'],
   ])('an approved child that %s since the card is NOT cancelled and is reported (%s)', async (_label, patch, reason) => {
     const { cancelled, report, log } = await run({ locked: { 'child-1': { ...CHILD, ...patch } } });
     expect(cancelled).toBe(0);

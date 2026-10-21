@@ -954,6 +954,16 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
       expect(cancelWithEffectsRefusal(impact).code).toBe('by_owner_rule');
     });
 
+    test('a GROUPED linked visit (visit_id set) refuses the whole card (linked_followup_grouped, cancel_with_effects_unsupported)', async () => {
+      noCard();
+      mockLinkedFollowUps = [{ ...child, visit_id: 'visit-grp-1' }];
+      const impact = await run();
+      expect(impact.card_cancel_refusals).toEqual(['linked_followup_grouped']);
+      const refusal = cancelWithEffectsRefusal(impact);
+      expect(refusal.code).toBe('cancel_with_effects_unsupported');
+      expect(refusal.error).toMatch(/linked follow-up visit that is part of a grouped visit/);
+    });
+
     test('a linked visit with no money on it is carded', async () => {
       noCard();
       mockLinkedFollowUps = [child];

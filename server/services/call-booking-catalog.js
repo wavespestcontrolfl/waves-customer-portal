@@ -896,9 +896,12 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want) {
   const changed = (reason) => Object.assign(new Error(`linked follow-up ${childId} changed since the card: ${reason}`), { code: 'LINKED_CHILD_CHANGED', reason });
   const locked = await applyCallFollowUpCancelFilter(trx('scheduled_services'), parentServiceId)
-    .where('id', childId).forUpdate().first('id', 'status', 'scheduled_date', 'service_type', 'technician_id');
+    .where('id', childId).forUpdate().first('id', 'status', 'scheduled_date', 'service_type', 'technician_id', 'visit_id');
   if (!locked) throw changed('no_longer_linked');
   if (String(locked.status) !== String(want.status)) throw changed('status_changed');
+  // The card refuses a grouped linked visit; one grouped since (package follow-ups group automatically) would run the
+  // group hook (detach, window change, dissolve) on cancel, effects the card never showed.
+  if (locked.visit_id) throw changed('grouped_changed');
   if (callBookingDateOnly(locked.scheduled_date) !== callBookingDateOnly(want.scheduled_date)) throw changed('date_changed');
   if ((locked.service_type || null) !== (want.service_type || null)) throw changed('service_changed');
   // The child's own tech cancel notice goes to whoever is assigned NOW: a reassigned child is not the one the card showed.

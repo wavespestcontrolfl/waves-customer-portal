@@ -448,7 +448,7 @@ const EFFECTS_MONEY_BLOCKERS = new Set([
 const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
 const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
 const CANCEL_COMBINED_PAYMENT_MESSAGE = "A combined card payment on this visit's invoice also covers other visits, and combined payments stay with the office by the owner's rule, so the bar can't cancel it; cancel it from Dispatch. Nothing was changed.";
-const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit with its own invoice, so the bar can't cancel this visit from here yet. Nothing was changed.";
+const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit that is part of a grouped visit, so the bar can't cancel this visit from here yet. Nothing was changed.";
 
 // The refusal (error + code) for an impact computed WITH effects whose card_cancel_refusals is non-empty. Order: a fee
 // due, then money the bar never refunds or charges, then the cases the replay does not cover yet. null = no refusal.
@@ -508,6 +508,8 @@ async function linkedChildMoneyReason(conn, followUps) {
   const InspectionCredit = require('./inspection-credit');
   const rows = await conn('scheduled_services').whereIn('id', ids).select('*');
   for (const row of rows || []) {
+    // A grouped child (visit_id set): its cancel runs the group hook (detach, window change, dissolve), as for the parent.
+    if (row.visit_id) return 'grouped_visit';
     if (await prepaidCommitmentReason(conn, row)) return 'prepaid_or_coverage';
     if (await estimateMoneyReason(conn, row)) return 'estimate_money';
     if ((await cardRailRows(conn, row.id)).length) return 'card_rail';
@@ -565,7 +567,7 @@ async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, a
   const blockers = refusals.filter((code) => !EFFECTS_ALLOWED_REFUSALS.has(code));
   if (creditReversal) blockers.push('inspection_credit_redeemed');
   if (await estimateMoneyReason(conn, row)) blockers.push('estimate_money');
-  if (linked.followUpMoney) blockers.push('linked_followup_money');
+  if (linked.followUpMoney) blockers.push(linked.followUpMoney === 'grouped_visit' ? 'linked_followup_grouped' : 'linked_followup_money');
   if (linked.invoiceDownstream) blockers.push('invoice_downstream_effects');
   if (invoices.some((inv) => inv.combined_payment)) blockers.push('combined_payment');
   return {
