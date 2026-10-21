@@ -108,15 +108,17 @@ function windows(text, start, end) {
   };
 }
 
+/** The number is an identifier, a quantity or part of an address, by what sits next to it. */
+function namesSomethingElse(w) {
+  return IDENTIFIER_BEFORE.test(w.beforeRaw) || UNIT_AFTER.test(w.afterRaw) || ID_AFTER.test(w.afterRaw)
+    || UNIT_BEFORE.test(w.beforeRaw) || STREET_AFTER.test(w.afterRaw);
+}
+
 /** True when the number at [start, end) has a money cue next to it and is not an identifier, quantity, address or time. */
 function moneyHere(text, start, end, { clock = null, consumedMoney = false } = {}) {
   const w = windows(text, start, end);
-  if (IDENTIFIER_BEFORE.test(w.beforeRaw)) return false;
-  if (UNIT_AFTER.test(w.afterRaw)) return false;
-  if (ID_AFTER.test(w.afterRaw)) return false;
-  if (UNIT_BEFORE.test(w.beforeRaw)) return false;
+  if (namesSomethingElse(w)) return false;
   if (!consumedMoney && DATE_BEFORE.test(w.beforeRaw)) return false;
-  if (STREET_AFTER.test(w.afterRaw)) return false;
   const cued = consumedMoney || MONEY_WORD.test(w.cue) || /\$\s*$/.test(w.beforeRaw);
   if (!cued) return false;
   if (clock && !consumedMoney) {
