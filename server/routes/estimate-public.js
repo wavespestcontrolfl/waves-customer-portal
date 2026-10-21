@@ -25415,8 +25415,12 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloor
           pa = v ? roundMonthly(ann / v) : pa;
         }
       }
+      const name = typeof (row.n ?? row.name) === 'string' && String(row.n ?? row.name).trim()
+        ? String(row.n ?? row.name).trim()
+        : null;
       tiers[tierKey] = {
         mo, ann, pa, v,
+        ...(name ? { name } : {}),
         ...(serviceKey === 'lawn_care' && lawnRowFloorMonthly(row) != null
           ? { floorMonthly: lawnRowFloorMonthly(row) }
           : {}),
@@ -25432,9 +25436,21 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloor
 // Swap a non-pest service row's prices/visits to the selected tier's values so
 // shapeFromV1 sums the chosen cadence. (shapeFromV1 reads svc.mo for the total;
 // the others keep the per-service treatment detail consistent.)
-function applySelectedTierToServiceRow(svc, tier) {
+function applySelectedTierToServiceRow(svc, tier, tierNames = []) {
   if (!tier) return svc;
   const next = { ...svc };
+  // The engine names the row after its DEFAULT tier ("Monthly Mosquito
+  // Program (12 visits)"). Swap in the selected tier's name, but only when
+  // the row's name is one of this service's tier names — a custom or
+  // presentation name stays as written. Without it the Seasonal combo row
+  // showed the Monthly name beside 9-visit prices (EST-2026-1185).
+  if (tier.name) {
+    for (const field of ['name', 'displayName', 'label']) {
+      if (typeof next[field] === 'string' && tierNames.includes(next[field].trim())) {
+        next[field] = tier.name;
+      }
+    }
+  }
   if (tier.mo != null) { next.mo = tier.mo; next.monthly = tier.mo; }
   if (tier.ann != null) { next.ann = tier.ann; next.annual = tier.ann; }
   if (tier.pa != null) { next.perTreatment = tier.pa; next.perApp = tier.pa; next.perVisit = tier.pa; }
@@ -25470,7 +25486,10 @@ function comboPricingEntry(v1, ladder, pestTier, prefs, tierBaseMap, selection =
   const overridden = (Array.isArray(v1.services) ? v1.services : []).map((svc) => {
     const key = recurringServiceKey(svc);
     const tier = key && selection[key] ? tierBaseMap?.[key]?.[selection[key]] : null;
-    return tier ? applySelectedTierToServiceRow(svc, tier) : svc;
+    const tierNames = tier
+      ? Object.values(tierBaseMap[key]).map((t) => t?.name).filter(Boolean)
+      : [];
+    return tier ? applySelectedTierToServiceRow(svc, tier, tierNames) : svc;
   });
   return shapeFromV1({ ...v1, services: overridden }, ladder, pestTier, prefs, options);
 }

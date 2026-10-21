@@ -2287,6 +2287,7 @@ async function resolveLinkedLeadWon({ estimateId, customerId, database = db }) {
 }
 
 module.exports = {
+  CLOSED_LEAD_STATUSES,
   isRepeatQuoteWizardLead,
   taggedUnownedEstimates,
   invoiceSentConversionTargets,
