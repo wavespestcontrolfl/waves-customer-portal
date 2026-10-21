@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { createRef } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import GlobalCommandPalette from './GlobalCommandPalette';
@@ -67,5 +67,36 @@ describe('Intelligence Bar mic context', () => {
     await openBar(null);
     expect(micProps.length).toBeGreaterThan(0);
     expect(micProps.every((props) => props.dictationContext === undefined)).toBe(true);
+  });
+});
+
+// GATE_DICTATION_MONEY_NORMALIZE: the mic hands over the server's note about an amount it could not
+// settle; the question carries it as dictation_money while those digits are still in the message.
+describe('Intelligence Bar dictated amounts', () => {
+  const AMBIGUOUS = { heard: '6133', candidates: ['$61.33', '$6,133'] };
+  const queryBody = () => {
+    const call = fetch.mock.calls.find(([url, opts]) => String(url).includes('/intelligence-bar/query') && opts?.method === 'POST');
+    return call ? JSON.parse(call[1].body) : null;
+  };
+  async function dictateAndAsk(spoken, typedAfter) {
+    useIsMobile.mockReturnValue(false);
+    await openBar(null);
+    const mic = micProps.filter((props) => props.title === 'Dictate your question').at(-1);
+    act(() => mic.onAppend(spoken, { money: { changes: [], ambiguous: [AMBIGUOUS] } }));
+    const box = await screen.findByPlaceholderText(/Ask anything|Tell me|Ask/);
+    if (typedAfter) fireEvent.change(box, { target: { value: typedAfter } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() => expect(queryBody()).not.toBeNull());
+    return queryBody();
+  }
+
+  it('sends the ambiguous amount with the question that still contains it', async () => {
+    const body = await dictateAndAsk('charge 6133 a month');
+    expect(body.dictation_money).toEqual([AMBIGUOUS]);
+  });
+
+  it('sends nothing when the operator edited the digits out', async () => {
+    const body = await dictateAndAsk('charge 6133 a month', 'charge $61.33 a month');
+    expect(body.dictation_money).toBeUndefined();
   });
 });

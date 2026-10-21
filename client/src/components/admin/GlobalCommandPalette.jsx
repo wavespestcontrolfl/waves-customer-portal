@@ -58,6 +58,13 @@ function taskLoadReopens(loaded, held, operation) {
   return loaded.threadId !== held.threadId || loaded.taskId !== held.activeTask?.taskId || held.reopened;
 }
 
+// The dictated amounts still in the message being sent, as the request's dictation_money field
+// (empty when none: nothing is added to the request).
+function dictationMoneyFor(question, ambiguous) {
+  const kept = (ambiguous || []).filter((item) => item?.heard && String(question).includes(item.heard));
+  return kept.length ? { dictation_money: kept.slice(0, 3).map(({ heard, candidates }) => ({ heard, candidates })) } : {};
+}
+
 function dismissedThreadKey() {
   let uid = "";
   try {
@@ -368,6 +375,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // the way, so Ask waits for them instead of sending what was typed so far.
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
+  const dictationMoneyRef = useRef([]);
   dictationPendingRef.current = dictationPending;
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
@@ -706,6 +714,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     ...(attachments.length
       ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
       : {}),
+    ...dictationMoneyFor(q, dictationMoneyRef.current),
   }), [conversationHistory, context, threadId, ibPageData, location.pathname, location.search, attachments]);
 
   // Applies a server reply to the conversation: the answer, its cards (added to
@@ -791,6 +800,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // A failed request keeps its prompt and attachments so a retry is the
         // same request; only an answered one clears the composer.
         if (answered) {
+          dictationMoneyRef.current = [];
           setPrompt("");
           resetAttachments();
         }
@@ -923,14 +933,20 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setLoading(false);
     startNewConversation();
     setResponse(null);
+    dictationMoneyRef.current = [];
     setPrompt("");
     setShowThreads(false);
     resetAttachments();
   };
 
   // Merge each dictation transcript chunk into the input, space-separated.
-  const appendTranscript = useCallback((text) => {
+  // An amount the server could not settle ("6133": $61.33 or $6,133) rides to the next question as
+  // dictation_money; the server decides whether it matters (GATE_DICTATION_MONEY_NORMALIZE).
+  const appendTranscript = useCallback((text, extra) => {
     if (!text) return;
+    if (Array.isArray(extra?.money?.ambiguous) && extra.money.ambiguous.length) {
+      dictationMoneyRef.current = [...dictationMoneyRef.current, ...extra.money.ambiguous];
+    }
     setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
   }, []);
 

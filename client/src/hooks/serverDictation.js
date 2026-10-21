@@ -67,11 +67,12 @@ async function postClip(url, blob, durationSeconds, token) {
     err.status = r.status;
     throw err;
   }
-  return String(data?.text || "").trim();
+  // `money` (GATE_DICTATION_MONEY_NORMALIZE) rides beside the words when the server sends it.
+  return { text: String(data?.text || "").trim(), money: data?.money && typeof data.money === "object" ? data.money : null };
 }
 
 /**
- * Sends one clip and returns the words. Only ids go with it, in the query string
+ * Sends one clip and returns { text, money } (the words, and the server's dictated-amount notes when it sends them). Only ids go with it, in the query string
  * (the server checks them before it reads the clip, and builds the transcriber's
  * word list from its own records). Throws an Error carrying `status` when the
  * server refuses.

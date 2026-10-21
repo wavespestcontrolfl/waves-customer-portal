@@ -104,11 +104,13 @@ describe('server dictation endpoint', () => {
     mockBuild.mockResolvedValue('SERVER-BUILT WORD LIST');
     mockHints.mockResolvedValue({ prompt: 'WORD LIST WITH NAMES', keywords: ['Examplesmith', 'Todayman'] });
     delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
+    delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
     mockTranscribe.mockResolvedValue({ text: '  Treated the lanai for roaches. ' });
     mockImplausible.mockReturnValue(false);
   });
   afterAll(() => {
     delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
+    delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
     if (originalGate === undefined) delete process.env.GATE_SERVER_DICTATION;
     else process.env.GATE_SERVER_DICTATION = originalGate;
     if (originalModel === undefined) delete process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL;
@@ -313,6 +315,57 @@ describe('server dictation endpoint', () => {
       const bad = await clip(baseUrl, { fields: { duration_seconds: '1' } });
       expect(bad.status).toBe(502);
       expect((await bad.json()).text).toBeUndefined();
+    });
+  });
+
+  describe('GATE_DICTATION_MONEY_NORMALIZE', () => {
+    const say = async (baseUrl, words) => {
+      mockTranscribe.mockResolvedValue({ text: words });
+      const res = await clip(baseUrl);
+      expect(res.status).toBe(200);
+      return res.json();
+    };
+
+    test('gate off: the words come back untouched, with no money key', async () => {
+      await withServer(async (baseUrl) => {
+        expect(await say(baseUrl, 'Charge sixty-one thirty-three a month')).toEqual({ text: 'Charge sixty-one thirty-three a month' });
+      });
+    });
+
+    test('only the exact value "true" turns it on', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = '1';
+      await withServer(async (baseUrl) => {
+        expect(await say(baseUrl, 'Charge sixty-one thirty-three a month')).toEqual({ text: 'Charge sixty-one thirty-three a month' });
+      });
+    });
+
+    test('gate on: a spoken amount becomes dollars and cents, with the change listed', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      await withServer(async (baseUrl) => {
+        const body = await say(baseUrl, 'Charge sixty-one thirty-three a month');
+        expect(body.text).toBe('Charge $61.33 a month');
+        expect(body.money.changes).toEqual([expect.objectContaining({ from: 'sixty-one thirty-three', to: '$61.33' })]);
+        expect(body.money.ambiguous).toEqual([]);
+      });
+    });
+
+    test('gate on: a run-together amount keeps its digits and is flagged for the bar', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      await withServer(async (baseUrl) => {
+        const body = await say(baseUrl, 'The price is 6133 a month');
+        expect(body.text).toBe('The price is 6133 a month');
+        expect(body.money.ambiguous).toEqual([{ heard: '6133', candidates: ['$61.33', '$6,133'] }]);
+      });
+    });
+
+    test('gate on: words with no money cue pass through; silence is still { text: "" } plus an empty money note', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      await withServer(async (baseUrl) => {
+        const plain = await say(baseUrl, 'Treated 1234 Main St at 10:30, 5 gallons.');
+        expect(plain).toEqual({ text: 'Treated 1234 Main St at 10:30, 5 gallons.', money: { changes: [], ambiguous: [] } });
+        const silence = await say(baseUrl, '');
+        expect(silence.text).toBe('');
+      });
     });
   });
 

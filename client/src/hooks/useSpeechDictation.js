@@ -194,11 +194,14 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       if (!token) return;
       setUploading(true);
       try {
-        const text = await transcribeClip(blob, durationSeconds, clip, token);
+        const { text, money } = await transcribeClip(blob, durationSeconds, clip, token);
         // The round trip can outlive the field: unmounted, or the mic now
         // belongs to another customer or visit. Never append into the wrong field.
         if (!mountedRef.current || targetRef.current.key !== clip.key) return;
-        if (text && onTranscriptRef.current) onTranscriptRef.current(text);
+        if (text && onTranscriptRef.current) {
+          if (money) onTranscriptRef.current(text, { money });
+          else onTranscriptRef.current(text);
+        }
       } catch (e) {
         // 404 = the gate went off mid-session: the next tap uses the browser's mic again.
         if (clip.server && e?.status === 404 && mountedRef.current) dropServerMode();

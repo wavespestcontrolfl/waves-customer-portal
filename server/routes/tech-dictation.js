@@ -27,6 +27,9 @@
  * GATE_DICTATION_CUSTOMER_NAMES adds customer names to the word list and their surnames to the
  * transcriber's keyword hints (services/dictation-word-list.js buildDictationHints); off = as above.
  *
+ * GATE_DICTATION_MONEY_NORMALIZE rewrites dictated dollar amounts in the answer (utils/spoken-money.js) and
+ * adds `money: { changes, ambiguous }` beside `text`; off = `{ text }` only.
+ *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
  * marks the transcription lane `unrecordable`).
@@ -40,6 +43,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('../services/dictation-upload');
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
+const { normalizeSpokenMoney } = require('../utils/spoken-money');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -129,8 +133,19 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
         logger.warn(`[server-dictation] implausible transcript rejected chars=${text.length} seconds=${durationSeconds}`);
         return res.status(502).json({ error: 'Transcription looked unreliable. Try again or type.' });
       }
-      return res.json({ text });
+      return res.json(dictationAnswer(text));
     } catch (err) { return next(err); }
   });
+
+// GATE_DICTATION_MONEY_NORMALIZE: "sixty-one thirty-three" -> $61.33 where a money cue is next to it; an
+// amount that could be $61.33 or $6,133 is flagged, not guessed. Off = { text } as before.
+function dictationAnswer(text) {
+  if (featureGates.dictationMoneyNormalizeLive() !== true) return { text };
+  const money = normalizeSpokenMoney(text);
+  if (money.changes.length || money.ambiguous.length) {
+    logger.info(`[server-dictation] money changes=${money.changes.length} ambiguous=${money.ambiguous.length}`);
+  }
+  return { text: money.text, money: { changes: money.changes, ambiguous: money.ambiguous } };
+}
 
 module.exports = router;
