@@ -52,10 +52,14 @@ const looksLikeBearerToken = (header, token) => Boolean(header) || token.length 
 // "Basic <base64>" in any casing (HTTP schemes are case-insensitive), removed
 // only when the token decodes to "user:password", so prose such as "Basic
 // perimeter treatment" stays (Codex #6375 r3, pre-push audit r4).
-const BASIC_RE = /\b(basic)\s+([A-Za-z0-9+\/]{4,}={0,2})/gi;
-function looksLikeBasicCredential(scheme, token) {
+const BASIC_RE = /(\bauthorization\s*:\s*)?\b(basic)\s+([A-Za-z0-9+\/]{4,}={0,2})/gi;
+// After an "Authorization:" header any Basic token is a credential; elsewhere
+// it must decode (UTF-8, any language) to "user:password" (Codex #6375 r6).
+function looksLikeBasicCredential(header, token) {
+  if (header) return true;
   try {
-    return /^[\x20-\x7e]+:[\x20-\x7e]*$/.test(Buffer.from(token, 'base64').toString('latin1'));
+    const decoded = Buffer.from(token, 'base64').toString('utf8');
+    return decoded.includes(':') && !/[\u0000-\u001f\u007f\ufffd]/.test(decoded) && decoded.indexOf(':') > 0;
   } catch {
     return false;
   }
@@ -107,7 +111,7 @@ function scrubNoteText(input) {
   });
   text = text.replace(JWT_RE, swap)
     .replace(BEARER_RE, (match, header, token) => (looksLikeBearerToken(header, token) ? `${header || ''}${swap()}` : match))
-    .replace(BASIC_RE, (match, scheme, token) => (looksLikeBasicCredential(scheme, token) ? swap() : match));
+    .replace(BASIC_RE, (match, header, scheme, token) => (looksLikeBasicCredential(header, token) ? `${header || ''}${swap()}` : match));
   text = text.replace(ENV_SECRET_RE, (match, name) => { removed += 1; return `${name}=${REMOVED}`; });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);

@@ -278,10 +278,10 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
   });
 
   test('a lower-case "basic" scheme is removed when the token decodes to user:password', () => {
-    for (const note of ['Authorization: basic dXNlcjpwYXNzd29yZA==', 'AUTHORIZATION: BASIC YWRtaW46aHVudGVyMjI=', 'Authorization: Basic YTpi']) {
+    for (const note of ['Authorization: basic dXNlcjpwYXNzd29yZA==', 'AUTHORIZATION: BASIC YWRtaW46aHVudGVyMjI=', 'Authorization: Basic YTpi', 'Authorization: Basic YTpww6Rzcw==', 'use basic YTpww6Rzcw== here']) {
       const { text, removed } = scrubNote(note);
       expect(removed).toBeGreaterThan(0);
-      expect(text).not.toMatch(/dXNlcjpwYXNz|YWRtaW46aHVudGVy|YTpi/);
+      expect(text).not.toMatch(/dXNlcjpwYXNz|YWRtaW46aHVudGVy|YTpi|YTpww6Rzcw/);
     }
   });
 
