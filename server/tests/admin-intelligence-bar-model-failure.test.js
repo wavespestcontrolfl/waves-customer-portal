@@ -369,6 +369,20 @@ describe('review round 1 fixes (#6368)', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'task-1', taskState: 'awaiting_approval', pendingActions: [card] }));
   });
 
+  test('unreadable receipts keep the cards this request minted too (r4)', async () => {
+    const { sendModelFailureTask } = require('../routes/admin-intelligence-bar');
+    const res = { json: jest.fn() };
+    const card = { id: 'pa-3' };
+    await sendModelFailureTask(res, {
+      activeTask: { id: 'task-1', runner_token: 'rt', session_id: 's1' },
+      actorId: 'admin-1',
+      handled: { taskState: 'outcome_unknown', receiptsKnown: false },
+      payload: { response: 'I could not check whether any change was saved.', pendingActions: [] },
+      pendingProposals: [card],
+    });
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ taskState: 'outcome_unknown', pendingActions: [card] }));
+  });
+
   test('a readable snapshot answers from the snapshot (it rebuilds the cards)', async () => {
     const { sendModelFailureTask } = require('../routes/admin-intelligence-bar');
     IbTasks.snapshot.mockResolvedValueOnce({ taskId: 'task-1', pendingActions: [{ id: 'pa-2' }] });
@@ -396,13 +410,28 @@ describe('review round 1 fixes (#6368)', () => {
   });
 });
 
+
+// A transaction double with the lane lock and the recovered-at marker (r4).
+function laneTrx(chain, { recovered = null } = {}) {
+  Object.assign(chain, {
+    first: chain.first || jest.fn(async () => (recovered ? { value: recovered } : undefined)),
+    insert: chain.insert || jest.fn(() => chain),
+    onConflict: chain.onConflict || jest.fn(() => chain),
+    merge: chain.merge || jest.fn(async () => 1),
+  });
+  const trx = jest.fn(() => chain);
+  trx.raw = jest.fn(async () => undefined);
+  trx.fn = { now: () => 'now()' };
+  return trx;
+}
+
 describe('the standing bell closes when the model answers again', () => {
   test('closeFailureBellOnRecovery marks open ib:model-failure rows done once, then is a no-op', async () => {
     const db = require('../models/db');
     const select = jest.fn(async () => [{ id: 11 }, { id: 12 }]);
     const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
     db.mockImplementation(() => chain);
-    db.transaction = async (fn) => fn(() => chain);
+    db.transaction = async (fn) => fn(laneTrx(chain));
     mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     try {
@@ -470,7 +499,7 @@ describe('round 3 fixes (#6368)', () => {
     const select = jest.fn(async () => []);
     const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
     db.mockImplementation(() => chain);
-    db.transaction = async (fn) => fn(() => chain);
+    db.transaction = async (fn) => fn(laneTrx(chain));
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     try {
       await ModelFailure.closeFailureBellOnRecovery({ lane: 'tech', now: Date.now() + 10 * 60000 });
@@ -489,7 +518,7 @@ describe('round 4 fixes (#6368)', () => {
     db.mockImplementation(() => chain);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     const since = new Date('2026-10-21T00:00:00Z');
-    db.transaction = async (fn) => fn(() => chain);
+    db.transaction = async (fn) => fn(laneTrx(chain));
     try {
       await ModelFailure.closeFailureBellOnRecovery({ lane: 'admin', now: Date.now() + 20 * 60000, answeredSince: since });
       expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining("metadata->>'lastFailureAt'"), [since]);
@@ -517,7 +546,7 @@ describe('round 4 audit fixes (#6368)', () => {
     const db = require('../models/db');
     const select = jest.fn(async () => [{ id: 21 }]);
     const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
-    const trx = jest.fn(() => chain);
+    const trx = laneTrx(chain);
     db.mockImplementation(() => chain);
     db.transaction = async (fn) => fn(trx);
     mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
@@ -534,5 +563,48 @@ describe('round 4 audit fixes (#6368)', () => {
   test('recovery is judged against this attempt, not a resumed task\'s first start', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
     expect(src).toContain('answeredSince: attemptStartedAt');
+  });
+});
+
+describe('round 4 Codex fixes (#6368)', () => {
+  test('recovery takes the lane lock and records when its answer began', async () => {
+    const db = require('../models/db');
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select: jest.fn(async () => []) };
+    const trx = laneTrx(chain);
+    db.mockImplementation(() => chain);
+    db.transaction = async (fn) => fn(trx);
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    try {
+      const since = new Date('2026-10-21T01:00:00Z');
+      await ModelFailure.closeFailureBellOnRecovery({ lane: 'admin', now: Date.now() + 90 * 60000, answeredSince: since });
+      expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['ib:model-failure:admin']);
+      expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ key: 'ib.model_failure.recovered_at.admin', value: since.toISOString() }));
+    } finally {
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
+  });
+  test('a first failure that finds a newer recovery does not ring; an older one rings', async () => {
+    const db = require('../models/db');
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    const compose = require('../services/admin-alert-compose');
+    const mockRaiseAdminAlert = jest.spyOn(compose, 'raiseAdminAlert').mockImplementation(async () => ({ id: 1 }));
+    const failedAt = Date.parse('2026-10-21T01:00:00Z');
+    const run = async (recovered) => {
+      const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), update: jest.fn(async () => 0) };
+      const trx = laneTrx(chain, { recovered });
+      db.mockImplementation(() => chain);
+      db.transaction = async (fn) => fn(trx);
+      mockRaiseAdminAlert.mockClear();
+      await ModelFailure.ringUnlessRecovered({ code: 'anthropic_400', gap: null, lane: 'admin', failedAt });
+      return mockRaiseAdminAlert.mock.calls.length;
+    };
+    try {
+      expect(await run('2026-10-21T01:00:05Z')).toBe(0);
+      expect(await run('2026-10-21T00:59:00Z')).toBe(1);
+      expect(await run(null)).toBe(1);
+    } finally {
+      mockRaiseAdminAlert.mockRestore();
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
   });
 });

@@ -4293,10 +4293,11 @@ function modelFailureHistory(body, activeTask, failureTurn, answer) {
 // snapshot cannot be read, the cautious payload keeps this request's cards.
 async function sendModelFailureTask(res, { activeTask, actorId, handled, payload, pendingProposals }) {
   await IbTasks.checkpoint(activeTask.id, actorId, { runnerToken: activeTask.runner_token, state: handled.taskState, response: payload });
+  // Both fallbacks keep the cards this request minted (Codex #6368 r4).
   const fallback = { ...payload, taskId: activeTask.id, taskState: handled.taskState };
   // Unreadable receipts would fail the snapshot the same way: answer the
   // cautious payload already built ("I could not check ...").
-  if (!handled.receiptsKnown) return res.json(fallback);
+  if (!handled.receiptsKnown) return res.json({ ...fallback, pendingActions: pendingProposals });
   try {
     const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
     const snapshot = await IbTasks.snapshot(savedTask, actorId);

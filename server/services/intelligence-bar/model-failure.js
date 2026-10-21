@@ -164,6 +164,25 @@ async function recordFailureGap(code) {
 // different models, so one lane's recovery must not close the other's alert.
 const laneKey = (lane) => `${BELL_DEDUPE_KEY}:${lane === 'tech' ? 'tech' : 'admin'}`;
 
+// Ringing and recovery take the same per-lane transaction lock, and a recovery
+// records when its answering attempt began (system_settings, shared by every
+// replica). A first failure that finds a recovery newer than itself does not
+// ring: the model already answered again (Codex #6368 r4).
+const recoveredKey = (lane) => `ib.model_failure.recovered_at.${lane === 'tech' ? 'tech' : 'admin'}`;
+const lockLane = (trx, lane) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [laneKey(lane)]);
+async function recoveredAt(trx, lane) {
+  const row = await trx('system_settings').where({ key: recoveredKey(lane) }).first('value');
+  const at = row && Date.parse(row.value);
+  return Number.isFinite(at) ? at : 0;
+}
+async function noteRecovery(trx, lane, answeredSince) {
+  const at = new Date(answeredSince || Date.now()).toISOString();
+  await trx('system_settings')
+    .insert({ key: recoveredKey(lane), value: at, category: 'intelligence-bar', description: 'When the bar model last answered after a failure check' })
+    .onConflict('key')
+    .merge({ value: trx.raw('GREATEST(system_settings.value::timestamptz, EXCLUDED.value::timestamptz)::text'), updated_at: trx.fn.now() });
+}
+
 // Every failure stamps the open lane bell with its time (a deduped failure
 // does not touch the row otherwise), so a recovery that started before this
 // failure cannot close it (Codex #6368 r4).
@@ -214,16 +233,34 @@ async function ringFailureBell({ code, gap, lane }) {
  * Everything the route needs after a model call failed. Never throws.
  * Returns { answer, taskState, code } (taskState null without a saved task).
  */
+async function ringUnlessRecovered({ code, gap, lane, failedAt }) {
+  try {
+    const db = require('../../models/db');
+    await db.transaction(async (trx) => {
+      await lockLane(trx, lane);
+      await stampLastFailure(lane, new Date(failedAt));
+      if (await recoveredAt(trx, lane) > failedAt) return;
+      await ringFailureBell({ code, gap, lane });
+    });
+  } catch (err) {
+    // The lock or the marker read failed: ring anyway (a missed outage is worse).
+    logger.warn(`[intelligence-bar] model failure lane lock unavailable (code=${err?.code || err?.name || 'error'})`);
+    await stampLastFailure(lane, new Date(failedAt));
+    await ringFailureBell({ code, gap, lane });
+  }
+}
+
 async function handleModelFailure({ err, activeTask, actorId, lane = 'admin', hadImages = false }) {
+  const failedAt = Date.now();
   const code = modelFailureCode(err);
   const receipts = activeTask ? await readReceipts(activeTask.id, actorId) : [];
   const status = classifyReceipts(receipts);
   const gap = await recordFailureGap(code);
-  // Stamp the open bell first, then ring: a recovery that locks the row after
-  // this stamp skips it; one that locked it first closes it, and this failure
-  // then rings a new bell (dedupe ignores done rows).
-  await stampLastFailure(lane);
-  await ringFailureBell({ code, gap, lane });
+  // Stamp the open bell first, then ring, under the lane lock: a recovery that
+  // locks the row after this stamp skips it; one that ran first closed it, and
+  // this failure then rings a new bell (dedupe ignores done rows) unless that
+  // recovery's answer began after this failure.
+  await ringUnlessRecovered({ code, gap, lane, failedAt });
   laneState(lane).mayBeOpen = true;
   return {
     code,
@@ -255,6 +292,8 @@ async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin', an
     // Select and close under the same row locks, so a failure stamp cannot land
     // between them (stampLastFailure waits for the lock, then finds the row done).
     return await db.transaction(async (trx) => {
+      await lockLane(trx, lane);
+      await noteRecovery(trx, lane, answeredSince);
       const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
         .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
         // Only a bell whose last failure came before this answer's attempt began.
@@ -283,6 +322,7 @@ module.exports = {
   buildAnswer,
   handleModelFailure,
   closeFailureBellOnRecovery,
+  ringUnlessRecovered,
   GAP_SOURCE,
   BELL_DEDUPE_KEY,
 };
