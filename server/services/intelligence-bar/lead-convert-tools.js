@@ -160,10 +160,12 @@ async function estimateEffect(lead, customerId) {
 // row below booked advances to booked, a lost row recovers, booked and completed rows are left alone; a moved
 // row keeps a customer it already has and is stamped with this one only when it has none).
 async function funnelEffect(leadId, customerId) {
-  const rows = (await db('ad_service_attribution').where({ lead_id: leadId }).select('funnel_stage', 'customer_id')) || [];
+  const rows = (await db('ad_service_attribution').where({ lead_id: leadId }).select('id', 'funnel_stage', 'customer_id')) || [];
   const state = rows.map((r) => [r.funnel_stage || null, r.customer_id || null]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  // Each row as the claim re-reads it: id|stage|customer (the card's exact set).
+  const keys = rows.map((r) => `${r.id}|${r.funnel_stage || ''}|${r.customer_id || ''}`).sort();
   if (!rows.length) {
-    return { state, lines: ['The lead has no ad funnel row, so none moves. The funnel settlement can still rebuild one for a repeat quote-wizard lead.'] };
+    return { state, keys, lines: ['The lead has no ad funnel row, so none moves. The funnel settlement can still rebuild one for a repeat quote-wizard lead.'] };
   }
   const describe = (r) => {
     const stage = r.funnel_stage || 'none';
@@ -175,7 +177,7 @@ async function funnelEffect(leadId, customerId) {
   };
   const lines = rows.slice(0, MAX_LISTED_FUNNEL_ROWS).map(describe);
   if (rows.length > MAX_LISTED_FUNNEL_ROWS) lines.push(`${rows.length - MAX_LISTED_FUNNEL_ROWS} more ad funnel rows are handled the same way.`);
-  return { state, lines };
+  return { state, keys, lines };
 }
 
 // The lead (unconverted) and the customer the call names, or the refusal. Without a customer_id the
@@ -277,9 +279,10 @@ function versionOf({ lead, customer, others, othersTruncated, estimate, funnel, 
     lead_values: digest([lead.monthly_value, lead.initial_service_value, lead.waveguard_tier]),
     customer_id: customer.id,
     customer_contact: digest([customer.first_name, customer.last_name, customer.company_name, customer.phone, customer.email, customer.address_line1, customer.city, customer.zip]),
-    others: digest({ ids: others.map((o) => o.id), truncated: othersTruncated }),
+    // Every displayed match entry (id, name, city, match reason), not only the ids.
+    others: digest({ entries: others.map((o) => [o.id, o.name, o.city, o.matched_on]), truncated: othersTruncated }),
     estimate: digest(estimate.state),
-    funnel: digest(funnel.state),
+    funnel: digest(funnel.keys),
     body: digest(body),
   };
 }
@@ -326,6 +329,9 @@ async function buildPlan(input) {
       status: lead.status,
       updatedAt: msOf(lead.updated_at),
       customerId: lead.customer_id || null,
+      estimateLinkId: lead.estimate_id || null,
+      // The ad funnel rows as the card showed them (id|stage|customer).
+      funnelKeys: funnel.keys,
       // The lead's contact as the card showed it (re-read by the claim).
       lead: Object.fromEntries(['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'].map((c) => [c, lead[c] ?? null])),
       // The customer as the card showed it (the columns the claim re-reads).

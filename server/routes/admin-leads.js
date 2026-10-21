@@ -1303,16 +1303,29 @@ function whereColumnsMatch(builder, columns, snapshot) {
   for (const column of columns) builder.whereRaw(`COALESCE(${column}::text, '') = ?`, [String(snapshot?.[column] ?? '')]);
   return builder;
 }
+// The lead's customer link and linked estimate, as the card showed them (null = none).
+function whereLeadLinks(q, expected) {
+  if (expected.customerId) q.where('customer_id', expected.customerId);
+  else q.whereNull('customer_id');
+  if (expected.estimateLinkId) q.where('estimate_id', expected.estimateLinkId);
+  else q.whereNull('estimate_id');
+}
+// The lead's ad funnel rows are exactly the card's: the same count, and every card row (id|stage|customer) still there.
+function whereFunnelMatches(q, expected) {
+  const keys = expected.funnelKeys || [];
+  q.whereRaw('(SELECT COUNT(*) FROM ad_service_attribution WHERE lead_id = leads.id) = ?', [keys.length]);
+  q.whereRaw("(SELECT COUNT(*) FROM ad_service_attribution a WHERE a.lead_id = leads.id AND a.id::text || '|' || COALESCE(a.funnel_stage, '') || '|' || COALESCE(a.customer_id::text, '') = ANY (?::text[])) = ?", [keys, keys.length]);
+}
 function withExpectedLead(identity, expected, customerId) {
   if (!expected) return identity;
   return (q) => {
     identity(q);
     q.whereNull('converted_at').where('status', expected.status)
       .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
-    if (expected.customerId) q.where('customer_id', expected.customerId);
-    else q.whereNull('customer_id');
+    whereLeadLinks(q, expected);
     whereColumnsMatch(q, LEAD_SNAPSHOT_COLUMNS, expected.lead);
     q.whereExists(whereColumnsMatch(db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at'), CUSTOMER_SNAPSHOT_COLUMNS, expected.customer));
+    whereFunnelMatches(q, expected);
     // The approved estimates are all still unowned, and (lead with no linked estimate) no other unowned
     // estimate is tagged with this lead.
     const ids = expected.estimateIds || [];

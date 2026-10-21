@@ -37,7 +37,7 @@ function freshState() {
       { id: CUST, first_name: 'Robin', last_name: 'Sample', phone: '(941) 555-0142', email: 'ROBIN@example.test', address_line1: '12 Sample Way', city: 'Venice', zip: '34285', deleted_at: null },
     ],
     estimates: [{ id: EST, status: 'sent', customer_id: null }],
-    ad_service_attribution: [{ lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }],
+    ad_service_attribution: [{ id: 'asa-1', lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }],
     // The customers that share the lead's phone or email (the contact-match read).
     contactMatches: [{ id: CUST, first_name: 'Robin', last_name: 'Sample', phone: '(941) 555-0142', email: 'ROBIN@example.test', city: 'Venice' }],
   };
@@ -249,7 +249,7 @@ describe('the confirmed run', () => {
         leadId: LEAD, status: 'contacted', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), customerId: null,
         lead: { first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285' },
         customer: { first_name: 'Robin', last_name: 'Sample', company_name: null, phone: '(941) 555-0142', email: 'ROBIN@example.test', address_line1: '12 Sample Way', city: 'Venice', zip: '34285' },
-        estimateIds: [EST], estimateLinked: true,
+        estimateIds: [EST], estimateLinked: true, estimateLinkId: EST, funnelKeys: ['asa-1|contacted|'],
       },
     });
     expect(res).toMatchObject({ success: true, status: 'won', sent_to_customer: false, lead_id: LEAD, customer_id: CUST });
@@ -576,6 +576,29 @@ describe('a lead already linked to a customer', () => {
     state.leads[0].customer_id = OTHER;
     expect(await confirm(card)).toMatchObject({ preview_changed: true });
     expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
+  });
+});
+
+describe('the card pins what it displayed', () => {
+  test('a duplicate-match entry that changes name, city or reason (same id) is drift', async () => {
+    state.contactMatches = [state.contactMatches[0], { id: OTHER, first_name: 'Robyn', last_name: 'Sample', phone: '941-555-0142', email: 'x@example.test', city: 'Nokomis' }];
+    for (const change of [{ last_name: 'Renamed' }, { city: 'Osprey' }, { phone: '941-555-0999', email: 'robin@example.test' }]) {
+      state.contactMatches[1] = { id: OTHER, first_name: 'Robyn', last_name: 'Sample', phone: '941-555-0142', email: 'x@example.test', city: 'Nokomis' };
+      const card = await preview();
+      state.contactMatches[1] = { ...state.contactMatches[1], ...change };
+      expect(await confirm(card)).toMatchObject({ preview_changed: true });
+    }
+    expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
+  });
+  test('the funnel rows (with ids) and the linked estimate id are handed to the claim', async () => {
+    const card = await preview();
+    await confirm(card);
+    expect(Leads.convertLeadFromBar.mock.calls[0][0].expected).toMatchObject({ estimateLinkId: EST, funnelKeys: ['asa-1|contacted|'] });
+  });
+  test('a funnel row replaced by another with the same stage and owner is drift', async () => {
+    const card = await preview();
+    state.ad_service_attribution = [{ id: 'asa-2', lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }];
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
   });
 });
 

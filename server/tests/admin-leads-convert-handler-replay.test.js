@@ -34,6 +34,7 @@ function seed() {
     leads: { id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null },
     customers: { id: CUST, ...CUSTOMER_FIELDS },
     estimates: [],
+    funnel: [],
   };
   db.raw = jest.fn((sql) => ({ raw: sql }));
   db.mockImplementation((table) => {
@@ -174,7 +175,13 @@ function claimOf(row) {
       if (prop === 'whereNot') return (k, v) => { if (mode === 'top') calls.push(['whereNot', k]); list.push((r) => r[k] !== v); return builder(list, mode); };
       if (prop === 'orWhereRaw') return (_sql, [iso]) => { const c = (r) => new Date(r.updated_at).getTime() === new Date(iso).getTime(); c.or = true; list.push(c); return builder(list, mode); };
       if (prop === 'whereRaw') return (sql, [first, count]) => {
-        if (/^\(SELECT COUNT/.test(sql)) {
+        if (/FROM ad_service_attribution WHERE lead_id/.test(sql)) {
+          calls.push(['whereRaw', 'funnel-count']);
+          list.push(() => (tables.funnel || []).length === first);
+        } else if (/FROM ad_service_attribution a WHERE/.test(sql)) {
+          calls.push(['whereRaw', 'funnel-rows']);
+          list.push(() => (tables.funnel || []).filter((r) => first.includes(`${r.id}|${r.funnel_stage || ''}|${r.customer_id || ''}`)).length === count);
+        } else if (/^\(SELECT COUNT/.test(sql)) {
           calls.push(['whereRaw', 'estimates']);
           list.push(() => (tables.estimates || []).filter((e) => e.customer_id == null && first.includes(e.id)).length === count);
         } else if (/^COALESCE\((\w+)::text/.test(sql)) {
@@ -197,7 +204,7 @@ const EXPECTED = {
   leadId: LEAD, status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null,
   customer: Object.fromEntries(Object.entries(CUSTOMER_FIELDS).filter(([k]) => k !== 'deleted_at')),
   lead: { first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285' },
-  estimateIds: [], estimateLinked: true,
+  estimateIds: [], estimateLinked: true, estimateLinkId: null, funnelKeys: [],
 };
 const FULL_LEAD = () => ({
   id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null, converted_at: null, customer_id: null,
@@ -222,8 +229,9 @@ test('the bar adds the card\u2019s version to the same UPDATE and converts when 
   const res = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
   expect(res.status).toBe(200);
   expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id'],
+    ['whereNull', 'estimate_id'],
     ...['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'].map((c) => ['whereRaw', `lead.${c}`]),
-    ['whereExists', 'customers'], ['whereRaw', 'estimates']]);
+    ['whereExists', 'customers'], ['whereRaw', 'funnel-count'], ['whereRaw', 'funnel-rows'], ['whereRaw', 'estimates']]);
   // The subquery asks for the carded customer, not deleted.
   expect(claim.existsSubs[0].conds.slice(0, 2)).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
   // ...and the columns the card showed.
@@ -360,5 +368,48 @@ test.each([
   expect((await run(EXPECTED)).status).toBe(409);
   leadAttribution.markConverted.mockImplementationOnce(convertsRow(row));
   expect((await viaPage(BODY)).status).toBe(200);
+});
+
+describe('the lead\u2019s linked estimate and the card\u2019s funnel rows in the claim', () => {
+  test('a linked estimate set, changed or cleared after the card answers 409; the page ignores it', async () => {
+    const linked = { ...EXPECTED, estimateLinkId: 'est-1' };
+    tables.estimates = [{ id: 'est-1', customer_id: 'x', estimate_data: '{}' }];
+    for (const [expected, change, status] of [
+      [linked, { estimate_id: 'est-1' }, 200],
+      [linked, { estimate_id: 'est-2' }, 409],
+      [linked, { estimate_id: null }, 409],
+      [EXPECTED, { estimate_id: 'est-9' }, 409],
+    ]) {
+      leadAttribution.markConverted.mockImplementationOnce(convertsRow({ ...FULL_LEAD(), ...change }));
+      expect((await run(expected)).status).toBe(status);
+    }
+    leadAttribution.markConverted.mockImplementationOnce(convertsRow({ ...FULL_LEAD(), estimate_id: 'est-9' }));
+    expect((await viaPage(BODY)).status).toBe(200);
+  });
+
+  const ROW = { id: 'asa-1', funnel_stage: 'booked', customer_id: null };
+  const KEY = 'asa-1|booked|';
+  const withRows = { ...EXPECTED, funnelKeys: [KEY] };
+  test.each([
+    ['unchanged', [ROW], 200],
+    ['a row added', [ROW, { id: 'asa-2', funnel_stage: 'lead', customer_id: null }], 409],
+    ['the row removed', [], 409],
+    ['the stage changed (booked to lost)', [{ ...ROW, funnel_stage: 'lost' }], 409],
+    ['the owner changed', [{ ...ROW, customer_id: 'other' }], 409],
+    ['a different row of the same count', [{ ...ROW, id: 'asa-9' }], 409],
+  ])('funnel rows: %s', async (_n, rows, status) => {
+    tables.funnel = rows;
+    leadAttribution.markConverted.mockImplementationOnce(convertsRow(FULL_LEAD()));
+    expect((await run(withRows)).status).toBe(status);
+    // The page never carries the funnel predicate.
+    leadAttribution.markConverted.mockImplementationOnce(convertsRow(FULL_LEAD()));
+    expect((await viaPage(BODY)).status).toBe(200);
+  });
+
+  test('a card that showed no rows refuses a row that appeared', async () => {
+    tables.funnel = [{ id: 'asa-3', funnel_stage: 'lead', customer_id: null }];
+    leadAttribution.markConverted.mockImplementationOnce(convertsRow(FULL_LEAD()));
+    expect((await run(EXPECTED)).status).toBe(409);
+  });
 });
 
