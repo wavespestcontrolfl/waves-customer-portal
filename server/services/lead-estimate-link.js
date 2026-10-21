@@ -1293,9 +1293,18 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, ap
   if (!customerId || !lead) return 0;
   try {
     if (Array.isArray(approvedEstimateIds)) {
-      if (!approvedEstimateIds.length) return 0;
+      // Each approved id must still be THIS lead's: its linked estimate, or one still tagged with its id
+      // (an estimate retagged to another lead after the card is not attached).
+      let ids = approvedEstimateIds;
+      if (lead.estimate_id) {
+        ids = ids.filter((id) => String(id) === String(lead.estimate_id));
+      } else if (ids.length) {
+        const rows = await database('estimates').whereIn('id', ids).whereNull('customer_id').select('id', 'estimate_data');
+        ids = rows.filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id).map((e) => e.id);
+      }
+      if (!ids.length) return 0;
       return await database('estimates')
-        .whereIn('id', approvedEstimateIds)
+        .whereIn('id', ids)
         .whereNull('customer_id')
         .update({ customer_id: customerId, updated_at: new Date() });
     }

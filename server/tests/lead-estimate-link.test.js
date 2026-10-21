@@ -2925,20 +2925,34 @@ describe('linkLeadEstimatesToCustomer', () => {
     expect(n).toBe(0);
   });
 
-  test('an approved id set (the Intelligence Bar card) attaches ONLY those ids, still guarded to unowned, and reads nothing else', async () => {
-    const { database, ops } = makeBackfillDb({ rowsUpdated: 1, taggedRows: [{ id: 'est-z', estimate_data: JSON.stringify({ lead_id: 'lead-6' }) }] });
+  test('an approved id set (the Intelligence Bar card) attaches only approved ids that are still this lead\u2019s, guarded to unowned', async () => {
+    const taggedRows = [
+      { id: 'est-a', estimate_data: JSON.stringify({ lead_id: 'lead-6' }) },
+      // Approved at the card, retagged to another lead since: not attached.
+      { id: 'est-q', estimate_data: JSON.stringify({ lead_id: 'lead-other' }) },
+    ];
+    const { database, ops } = makeBackfillDb({ rowsUpdated: 1, taggedRows });
     const n = await linkLeadEstimatesToCustomer({
-      database, lead: { id: 'lead-6', estimate_id: null }, customerId: 'cust-6', approvedEstimateIds: ['est-a'],
+      database, lead: { id: 'lead-6', estimate_id: null }, customerId: 'cust-6', approvedEstimateIds: ['est-a', 'est-q'],
     });
     expect(n).toBe(1);
-    expect(ops).toHaveLength(1);
-    expect(ops[0].selected).toBe(false);
-    expect(ops[0].wheres).toContainEqual(['whereIn', 'id', ['est-a']]);
-    expect(ops[0].wheres).toContainEqual(['whereNull', 'customer_id']);
-    // The lead's linked estimate is not attached unless it is in the approved set.
+    const update = ops.find((o) => o.patch);
+    expect(update.wheres).toContainEqual(['whereIn', 'id', ['est-a']]);
+    expect(update.wheres).toContainEqual(['whereNull', 'customer_id']);
+    // Nothing approved still tagged: no write.
+    const none = makeBackfillDb({ taggedRows: [taggedRows[1]] });
+    expect(await linkLeadEstimatesToCustomer({ database: none.database, lead: { id: 'lead-6', estimate_id: null }, customerId: 'cust-6', approvedEstimateIds: ['est-q'] })).toBe(0);
+    expect(none.ops.some((o) => o.patch)).toBe(false);
+  });
+
+  test('with a linked estimate only that estimate can be attached, and an empty approved set attaches nothing', async () => {
     const linked = makeBackfillDb({ rowsUpdated: 1 });
-    expect(await linkLeadEstimatesToCustomer({ database: linked.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: [] })).toBe(0);
-    expect(linked.ops).toHaveLength(0);
+    expect(await linkLeadEstimatesToCustomer({ database: linked.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: ['est-fk', 'est-x'] })).toBe(1);
+    expect(linked.ops.find((o) => o.patch).wheres).toContainEqual(['whereIn', 'id', ['est-fk']]);
+    const empty = makeBackfillDb({ rowsUpdated: 1 });
+    expect(await linkLeadEstimatesToCustomer({ database: empty.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: [] })).toBe(0);
+    expect(await linkLeadEstimatesToCustomer({ database: empty.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: ['other'] })).toBe(0);
+    expect(empty.ops).toHaveLength(0);
   });
 });
 
