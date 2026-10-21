@@ -1481,56 +1481,58 @@ function webTileWriteOptions(req, metadata) {
   };
 }
 
-// The web report tile's tap is a cross_sell_requested event that names the tile; while either of the tile's
-// gates is dark, or the visit is a callback, the tap answers the same 409 as a stale offer, before any recompute or write.
+// Binds the evidence stamp to the decision. The stamp is taken AFTER the rebuild (its own snapshot writes are done),
+// then the report is rebuilt once more and stamped again: the stamp counts only when the finding still stands on the
+// second build and both stamps match (an edit between the first build and the first stamp shows in the second build;
+// one after it changes the stamp). The write transaction compares against the returned stamp. Null = refuse.
+async function bindTileEvidence(token, metadata, stands, webActions) {
+  const first = await webActions.tileEvidence(stands.service, stands.line, db);
+  if (!first) return null;
+  const again = await webTileStillStands(token, metadata);
+  if (!again || !again.stands || again.line !== stands.line) return null;
+  const second = await webActions.tileEvidence(again.service, again.line, db);
+  return second && webActions.tileEvidenceUnchanged(first, second) ? second : null;
+}
+
+// The tile tap's preflight, as one outcome: 'next' (not this gate's call: a malformed token or an unknown record goes on
+// to the handler's generic 404), 'stale' (the same 409 as a stale offer) or 'ok' (evidence stamped on req). A malformed
+// token is checked before anything gate-derived. A callback visit never carries the tile, whatever
+// GATE_RESERVICE_REPORT_COPY says. The tap must still match the CURRENT report: the same structured table /data uses,
+// re-derived from a fresh build, with the same kind for the same service; the write transaction repeats the check
+// under its lock, so this is the cheap early refusal. A failed read throws (the gate answers 503).
+async function webTileTapOutcome(req, metadata, webActions) {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) return 'next';
+  if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))) return 'stale';
+  const record = await db('service_records').where({ report_view_token: req.params.token }).first('is_callback');
+  if (record?.is_callback === true) return 'stale';
+  const stands = await webTileStillStands(req.params.token, metadata);
+  if (stands === null) return 'next';
+  const evidence = stands.stands ? await bindTileEvidence(req.params.token, metadata, stands, webActions) : null;
+  if (!evidence) return 'stale';
+  req.webTileService = stands.service;
+  req.webTileLine = stands.line;
+  req.webTileEvidence = evidence;
+  return 'ok';
+}
+
+// The web report tile's tap is a cross_sell_requested event that names the tile; it answers 409 (stale offer) while a
+// tile gate is dark, the visit is a callback or the finding no longer stands, and 503 when the check cannot be read,
+// all before any recompute or write. Other events pass straight through.
 async function webTileTapGate(req, res, next) {
+  const metadata = req.body?.metadata;
+  const webActions = require('../services/service-report/web-actions');
+  const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    && metadata.source === webActions.WEB_TILE_SOURCE;
+  if (!named) return next();
+  let outcome;
   try {
-    const metadata = req.body?.metadata;
-    const webActions = require('../services/service-report/web-actions');
-    const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-      && metadata.source === webActions.WEB_TILE_SOURCE;
-    if (!named) return next();
-    // A malformed token gets the handler's generic 404 whatever the gates say: nothing gate-derived is ever answered for it.
-    if (!FULL_TOKEN_RE.test(req.params.token || '')) return next();
-    const stale = () => res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
-    if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))) return stale();
-    // A complaint-driven (callback) visit never carries the tile, whatever GATE_RESERVICE_REPORT_COPY says, so a tap
-    // from a page that somehow showed one is refused here too.
-    const record = await db('service_records').where({ report_view_token: req.params.token }).first('is_callback');
-    if (record?.is_callback === true) return stale();
-    // The tap must still match the CURRENT report: re-derive the tile's structured decision (the same table /data uses)
-    // from a fresh build, and refuse unless the same kind of finding still stands for the same service. A stale tab can
-    // therefore never create a request or an estimate for a finding the report no longer shows. (The write transaction
-    // repeats this check under its lock; this early refusal is the cheap path.)
-    let stands;
-    try {
-      stands = await webTileStillStands(req.params.token, metadata);
-    } catch (err) {
-      logger.warn(`[reports-public] tile tap re-derive failed: ${err.message}`);
-      return res.status(503).json({ error: 'Could not record the request — please try again' });
-    }
-    if (stands === null) return next();
-    if (!stands.stands) return stale();
-    // Stamp the evidence AFTER the rebuild (its own snapshot writes are done), then rebuild once more and stamp again:
-    // the stamp is bound to the decision only when the finding still stands on the second build and both stamps match
-    // (an edit between the first build and the first stamp shows in the second build; one after it changes the stamp).
-    // The write transaction compares against this stamp.
-    try {
-      req.webTileService = stands.service;
-      req.webTileLine = stands.line;
-      const first = await webActions.tileEvidence(stands.service, stands.line, db);
-      if (!first) return stale();
-      const again = await webTileStillStands(req.params.token, metadata);
-      if (!again || !again.stands || again.line !== stands.line) return stale();
-      const second = await webActions.tileEvidence(again.service, again.line, db);
-      if (!second || !webActions.tileEvidenceUnchanged(first, second)) return stale();
-      req.webTileEvidence = second;
-    } catch (err) {
-      logger.warn(`[reports-public] tile tap evidence read failed: ${err.message}`);
-      return res.status(503).json({ error: 'Could not record the request — please try again' });
-    }
-    return next();
-  } catch (err) { return next(err); }
+    outcome = await webTileTapOutcome(req, metadata, webActions);
+  } catch (err) {
+    logger.warn(`[reports-public] tile tap check failed: ${err.message}`);
+    return res.status(503).json({ error: 'Could not record the request — please try again' });
+  }
+  if (outcome === 'stale') return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+  return next();
 }
 
 router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, webTileTapGate, async (req, res, next) => {
