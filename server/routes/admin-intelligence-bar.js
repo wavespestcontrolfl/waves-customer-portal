@@ -25,7 +25,8 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, nameMatchV2Live } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live } = require('../config/feature-gates');
+const ModelFailure = require('../services/intelligence-bar/model-failure');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -2581,7 +2582,7 @@ ANALYSIS STYLE:
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
-You are the embedded SEO operator for Waves Pest Control & Lawn Care (wavespestcontrol.com). The site is a static Astro build on Cloudflare Pages serving pest control, lawn care, mosquito, termite, tree & shrub, and rodent services across Southwest Florida (Manatee, Sarasota, Charlotte counties). USDA Zones 9b–10a.
+You are the embedded SEO operator for Waves Pest Control (wavespestcontrol.com). The site is a static Astro build on Cloudflare Pages serving pest control, lawn care, mosquito, termite, tree & shrub, and rodent services across Southwest Florida (Manatee, Sarasota, Charlotte counties). USDA Zones 9b–10a.
 
 You think like a commercially aware SEO operator inside a 5-person field service company, not an outside consultant. The owner (Waves) runs all SEO/content personally using AI tooling — time is the most expensive resource. Prioritize actions that improve traffic, rankings, leads, authority, and revenue. No generic advice.
 
@@ -3337,10 +3338,10 @@ async function liveTeamPrompt() {
   }
 }
 
-const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
+const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
 
 BUSINESS CONTEXT:
-- Waves Pest Control & Lawn Care serves Southwest Florida (Manatee, Sarasota, Charlotte counties)
+- Waves Pest Control serves Southwest Florida (Manatee, Sarasota, Charlotte counties)
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
@@ -3414,7 +3415,12 @@ function isValidConversationHistory(history) {
 async function runQuery(req, res, next) {
   // A resumed task keeps its original start, so a late card is not ordered as the newest.
   const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
+  // This attempt's own start (a resume keeps the task's first start above for
+  // card ordering); a model-failure recovery is judged against this one.
+  const attemptStartedAt = new Date();
   let activeTask = null;
+  let requestPendingProposals = []; // the catch keeps cards minted before a model failure
+  let failureTurn = null; // the catch keeps the asked turn in the returned history
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
     const priorThread = UUID_RE.test(String(req.body.thread_id || ''))
@@ -3430,6 +3436,15 @@ async function runQuery(req, res, next) {
     const historyBase = Array.isArray(priorReply?.conversationHistory) ? priorReply.conversationHistory : conversationHistory;
     const imageTainted = images.length > 0 || hasImageTaintedHistory(historyBase);
     const piiTaintedHistory = hasPiiTaintedHistory(historyBase);
+    // Kept for a model-failure reply, so "try that again" still has the ask.
+    // PII-marked on purpose: the tools that ran are unknown at that point.
+    failureTurn = {
+      historyBase,
+      imageTainted,
+      userTurn: appendTaintMarker(appendTaintMarker(continuing ? CONTINUATION_TURN
+        : (images.length ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]` : prompt),
+      imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER),
+    };
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -3676,6 +3691,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       }
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
+    requestPendingProposals = pendingProposals;
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
     // Owner-direct bulk cap: direct commits this task already made, by tool
     // (seeded so a resumed task keeps its count; Codex r1 on #5675).
@@ -3731,7 +3747,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         tools,
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
         messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
-      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
+      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
+        // Tagged here so the catch below can tell a failed MODEL call from any other error.
+        .catch(err => { throw ModelFailure.tagModelCallError(err); });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
@@ -4233,6 +4251,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
+    // The request finished on a model answer: a standing "model not answering"
+    // bell is cleared here, never after a middle round a later round may still fail.
+    // Only a real model answer (not the too-many-steps or empty-reply fallback) clears it.
+    if (ibModelFailureNoticeLive() && !noReply) {
+      // Deliberate fire-and-forget: the answer never waits on the bell close.
+      void ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: attemptStartedAt })
+        .catch(closeErr => logger.error(`[intelligence-bar] model failure bell close failed (code=${closeErr?.code || closeErr?.name || 'error'})`));
+    }
     if (activeTask) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
         state: payload.taskState, response: payload, messages: currentMessages,
@@ -4243,12 +4269,86 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     res.json(payload);
 
   } catch (err) {
+    // GATE_IB_MODEL_FAILURE_NOTICE (read at call time): a failed MODEL call (the
+    // tag is set only around messages.create) is answered plainly, recorded as a
+    // gap and rung once an hour. Anything else, or gate off, is today's path.
+    if (ibModelFailureNoticeLive() && ModelFailure.isModelCallError(err) && !res.headersSent
+        && await answerModelFailure(req, res, { err, activeTask, pendingProposals: requestPendingProposals, failureTurn })) return;
     if (activeTask) {
       try { await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'outcome_unknown' }); }
       catch { /* Existing action receipts remain authoritative. */ }
     }
     logger.error(`[intelligence-bar] Query failed (code=${err.code || 'unknown'})`);
     next(err);
+  }
+}
+
+// The plain reply for a failed model call. The task keeps a state that stays
+// true: failed (resumable) when nothing ran, awaiting_approval when a card
+// waits, outcome_unknown when a change was saved or may have run (its receipts
+// stay the authority). Returns false, having answered nothing, when it could
+// not finish; the caller then takes the ordinary error path.
+// The asked turn and this answer join the history, as on a normal reply.
+function modelFailureHistory(body, activeTask, failureTurn, answer) {
+  const prior = Array.isArray(body.conversationHistory) ? body.conversationHistory.slice(-8) : [];
+  const userTurn = String((failureTurn && failureTurn.userTurn) || '').trim() ? failureTurn.userTurn : null;
+  if (!userTurn) return (activeTask && activeTask.response && activeTask.response.conversationHistory) || prior;
+  const base = Array.isArray(failureTurn.historyBase) ? failureTurn.historyBase : prior;
+  const tainted = appendTaintMarker(appendTaintMarker(answer, failureTurn.imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER);
+  return [...base.slice(-8), { role: 'user', content: userTurn }, { role: 'assistant', content: tainted }];
+}
+
+// A saved task answers from its snapshot (which rebuilds its cards); when the
+// snapshot cannot be read, the cautious payload keeps this request's cards.
+async function sendModelFailureTask(res, { activeTask, actorId, handled, payload, pendingProposals }) {
+  await IbTasks.checkpoint(activeTask.id, actorId, { runnerToken: activeTask.runner_token, state: handled.taskState, response: payload });
+  // Both fallbacks keep the cards this request minted (Codex #6368 r4).
+  const fallback = { ...payload, taskId: activeTask.id, taskState: handled.taskState };
+  // Unreadable receipts would fail the snapshot the same way: answer the
+  // cautious payload already built ("I could not check ...").
+  if (!handled.receiptsKnown) return res.json({ ...fallback, pendingActions: pendingProposals });
+  try {
+    const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
+    const snapshot = await IbTasks.snapshot(savedTask, actorId);
+    if (snapshot) return res.json(snapshot);
+  } catch (snapshotErr) {
+    logger.warn(`[intelligence-bar] model failure snapshot unavailable (code=${snapshotErr?.code || snapshotErr?.name || 'error'})`);
+  }
+  return res.json({ ...fallback, pendingActions: pendingProposals });
+}
+
+async function answerModelFailure(req, res, { err, activeTask, pendingProposals = [], failureTurn = null }) {
+  const body = req.body || {};
+  try {
+    const actorId = getAdminActorId(req);
+    const lane = req.techRole !== 'admin' || body.context === 'tech' ? 'tech' : 'admin';
+    const hadImages = Array.isArray(body.images) && body.images.length > 0;
+    const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId, lane, hadImages });
+    logger.error(`[intelligence-bar] Query failed, model call (code=${handled.code})`);
+    const payload = {
+      ...((activeTask && activeTask.response) || {}),
+      conversationHistory: modelFailureHistory(body, activeTask, failureTurn, handled.answer),
+      response: handled.answer,
+      // The failed exchange is not appended to a server thread, so the client
+      // drops its thread: the next ask starts without one and the no-thread
+      // follow-up guards apply (fails closed), never a stale thread id.
+      // Report the real availability (as the append-failure path does); with no
+      // threadId the palette drops its current thread, and History stays.
+      threadsEnabled: IbThreads.threadsEnabled() && lane === 'admin' && body.context !== 'agent_estimate',
+      threadId: undefined,
+      threadSeq: undefined,
+      toolCalls: [],
+      structuredData: null,
+      // Cards minted in an earlier round of this request stay confirmable.
+      pendingActions: activeTask ? [] : pendingProposals,
+      modelFailure: { code: handled.code },
+    };
+    if (activeTask) await sendModelFailureTask(res, { activeTask, actorId, handled, payload, pendingProposals });
+    else res.json(payload);
+    return true;
+  } catch (failure) {
+    logger.warn(`[intelligence-bar] model failure notice not delivered (code=${failure?.code || failure?.name || 'error'})`);
+    return false;
   }
 }
 
@@ -5282,3 +5382,4 @@ module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((too
 // re-implementation of it.
 module.exports.getToolsForContext = getToolsForContext;
 module.exports.confirmationDisplayParams = confirmationDisplayParams;
+module.exports.sendModelFailureTask = sendModelFailureTask;
