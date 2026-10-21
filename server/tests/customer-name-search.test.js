@@ -34,6 +34,17 @@ describe('shouldSearchSoundAlike', () => {
     expect(shouldSearchSoundAlike('Orlan damp', 2)).toBe(true);
     expect(shouldSearchSoundAlike('Orlan damp', 3)).toBe(false);
   });
+  test('never for a text-only address: street words, state, or a place the exact rows matched', () => {
+    for (const text of ['Main Street', 'Oak Ave', 'Pine Ridge Rd', 'Bradenton FL', 'Palm Court', 'unit five']) {
+      expect(shouldSearchSoundAlike(text, 0)).toBe(false);
+    }
+    // A city on file: the exact rows matched the text on their city column.
+    expect(shouldSearchSoundAlike('Fort Myers', 1, [{ city: 'Fort Myers', address_line1: '1 Sample Way' }])).toBe(false);
+    expect(shouldSearchSoundAlike('Fort Myers', 1, [{ address: '2 Fort Myers Cove', city: 'Sample' }])).toBe(false);
+    // The exact rows matched on a name: the name pass still runs.
+    expect(shouldSearchSoundAlike('Orlan damp', 1, [{ city: 'Fort Myers', address_line1: '1 Sample Way' }])).toBe(true);
+  });
+
   test('never for a phone, email, address or one letter', () => {
     for (const text of ['941-555-0100', 'a@b.co', '12 Main St', 'x', '', undefined, null]) {
       expect(shouldSearchSoundAlike(text, 0)).toBe(false);

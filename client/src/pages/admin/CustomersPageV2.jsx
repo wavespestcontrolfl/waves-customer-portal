@@ -1029,6 +1029,7 @@ function customerSortValue(customer, key) {
 function CustomerDirectoryView({
   view,
   totalCustomers,
+  approximateCount,
   workspaceMode,
   isMobile,
   sortBy,
@@ -1067,7 +1068,9 @@ function CustomerDirectoryView({
         )}
         {" "}
         <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
-          {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
+          {approximateCount > 0
+            ? `${totalCustomers} exact · ${approximateCount} suggestion${approximateCount !== 1 ? "s" : ""}`
+            : `${totalCustomers} result${totalCustomers !== 1 ? "s" : ""}`}
         </div>
         {/* Desktop table header */}
         {!workspaceMode && !isMobile && (
@@ -1868,6 +1871,7 @@ export default function CustomersPageV2() {
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
+  const [approximateCount, setApproximateCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [geocodeReviewRefreshToken, setGeocodeReviewRefreshToken] = useState(0);
   const refreshCustomersAndGeocodeReview = () => {
@@ -2160,6 +2164,7 @@ export default function CustomersPageV2() {
         hasLoadedRef.current = true;
         setCustomers(Array.isArray(data) ? data : data.customers || []);
         setTotalCustomers(data.total || 0);
+        setApproximateCount(Number(data.approximateCount) || 0);
         setTotalPages(data.totalPages || 1);
         setLoading(false);
       })
@@ -2169,6 +2174,7 @@ export default function CustomersPageV2() {
         // search/filter state: operators could otherwise open the wrong account.
         setCustomers([]);
         setTotalCustomers(0);
+        setApproximateCount(0);
         setTotalPages(1);
         setError(e);
         setLoading(false);
@@ -2471,6 +2477,7 @@ export default function CustomersPageV2() {
       <CustomerDirectoryView
         view={view}
         totalCustomers={totalCustomers}
+        approximateCount={approximateCount}
         workspaceMode={workspaceMode}
         isMobile={isMobile}
         sortBy={sortBy}

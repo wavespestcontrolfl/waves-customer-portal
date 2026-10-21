@@ -75,6 +75,8 @@ jest.setTimeout(120000);
       customer('exactB', 'Quillon', 'Fenwrock'),
       customer('exactC', 'Quillon', 'Fenwrack'),
       customer('exactD', 'Quillon', 'Fenwreck'),
+      customer('townsman', 'Dara', 'Wexley', { city: 'Brantmoorton', address_line1: '9 Sample Way' }),
+      customer('streetman', 'Pell', 'Marwick', { address_line1: '4 Quillow Street' }),
     ]);
     techId = randomUUID();
     otherTechId = randomUUID();
@@ -179,6 +181,19 @@ jest.setTimeout(120000);
       }
     });
 
+    test('a text-only address search never runs the name pass', async () => {
+      // "Brantmoorton" is a city on file; "Brantmoor" is also a customer's last name.
+      const city = await get('/admin/customers?search=Brantmoorton');
+      expect(names(city.body.customers)).toEqual(['Dara Wexley']);
+      expect(city.body.approximateCount).toBe(0);
+      // A street word: the search is an address.
+      const street = await get('/admin/customers?search=Quillow%20Street');
+      expect(names(street.body.customers)).toEqual(['Pell Marwick']);
+      expect(street.body.approximateCount).toBe(0);
+      const none = await get('/admin/customers?search=Wexford%20Street');
+      expect(none.body.customers).toEqual([]);
+    });
+
     test('the directory filters still apply to approximate rows', async () => {
       const { body } = await get('/admin/customers?search=Orlan%20damp&tier=Gold');
       expect(names(body.customers)).toEqual(['Orlan Stompf']);
@@ -209,7 +224,7 @@ jest.setTimeout(120000);
       expect(body.services.length).toBe(2);
       expect(body.services.every((row) => row.approximate === true)).toBe(true);
       expect(body.approximateCount).toBe(2);
-      expect(body.services.map((row) => row.customerName).sort()).toEqual(['Orlan Stompf', 'Orlan Stimpf']);
+      expect(body.services.map((row) => row.customerName).sort()).toEqual(['Orlan Stimpf', 'Orlan Stompf']);
     });
 
     test('exact rows come first and are unchanged', async () => {
@@ -221,6 +236,25 @@ jest.setTimeout(120000);
       expect(on.body.services.slice(0, off.body.services.length)).toEqual(off.body.services);
       expect(on.body.services.slice(off.body.services.length).map((row) => row.customerName)).toEqual(['Orlan Stimpf']);
       expect(on.body.total).toBe(off.body.total);
+    });
+
+    test('the row cap keeps the best-ranked customer first: a lower-ranked customer\'s many visits cannot hide it', async () => {
+      const first = (await get('/admin/customers?search=Orlan%20damp')).body.customers.map((row) => row.id);
+      expect(first.length).toBe(2);
+      const [best, second] = first;
+      // 30 early visits for the second-ranked customer; the best match has one, later.
+      await db('scheduled_services').insert(Array.from({ length: 30 }, (_, n) => ({
+        customer_id: second, technician_id: techId, scheduled_date: futureDate(10 + n), service_type: 'Lawn Care', status: 'confirmed',
+      })));
+      await db('scheduled_services').where({ customer_id: best }).update({ scheduled_date: futureDate(90) });
+      try {
+        const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`);
+        expect(body.services.length).toBe(25);
+        expect(body.services[0].customerId).toBe(best);
+        expect(body.services.filter((row) => row.customerId === second).length).toBe(24);
+      } finally {
+        await db('scheduled_services').where({ customer_id: second, service_type: 'Lawn Care' }).del();
+      }
     });
 
     test('a technician only gets their own assigned appointments', async () => {

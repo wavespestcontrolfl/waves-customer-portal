@@ -10454,10 +10454,11 @@ router.get('/list', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
-      )
+      );
+    const byDate = (qb) => qb
       .orderBy('scheduled_services.scheduled_date')
       .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
-    const exactServices = await listColumns(q).limit(limit).offset(offset);
+    const exactServices = await byDate(listColumns(q)).limit(limit).offset(offset);
 
     // Sound-alike appointments (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found
     // fewer than 3 appointments and reads as a name, the upcoming appointments of customers
@@ -10468,7 +10469,7 @@ router.get('/list', async (req, res, next) => {
     // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
     const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive();
     let approximateServices = [];
-    if (customerSearchFuzzy && page === 1 && shouldSearchSoundAlike(search, total)) {
+    if (customerSearchFuzzy && page === 1 && shouldSearchSoundAlike(search, total, exactServices)) {
       const ranked = await findSoundAlikeCustomers(db, search, {
         scopeQuery: db('customers').whereNull('customers.deleted_at').whereIn(
           'customers.id',
@@ -10478,11 +10479,14 @@ router.get('/list', async (req, res, next) => {
       });
       if (ranked.length) {
         const rank = new Map(ranked.map((entry, at) => [entry.id, at]));
-        const found = await listColumns(unsearchedQ.clone())
-          .whereIn('scheduled_services.customer_id', ranked.map((entry) => entry.id))
+        // The best-ranked customer's visits come first IN THE QUERY, so the row cap can
+        // never hide the best match behind a lower-ranked customer's many visits.
+        const rankedIds = ranked.map((entry) => entry.id);
+        const found = await byDate(listColumns(unsearchedQ.clone())
+          .whereIn('scheduled_services.customer_id', rankedIds)
+          .orderByRaw('array_position(?::uuid[], scheduled_services.customer_id)', [rankedIds]))
           .limit(APPROXIMATE_APPOINTMENT_LIMIT);
         approximateServices = found
-          .sort((a, b) => rank.get(a.customer_id) - rank.get(b.customer_id))
           .map((row) => ({ ...row, _approximate: true, _matchReasons: ranked[rank.get(row.customer_id)].reasons || [] }));
       }
     }

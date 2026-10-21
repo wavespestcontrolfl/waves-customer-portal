@@ -27,10 +27,9 @@ export default function DidYouMean({ className = '', style }) {
       className={className}
       style={{
         padding: '6px 14px',
-        fontSize: 11,
+        // 14px: the portal's minimum readable text.
+        fontSize: 14,
         fontWeight: 600,
-        letterSpacing: '0.04em',
-        textTransform: 'uppercase',
         color: '#71717A',
         background: '#FAFAFA',
         borderTop: '1px solid #E4E4E7',

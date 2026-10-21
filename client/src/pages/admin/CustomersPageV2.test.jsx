@@ -136,6 +136,18 @@ describe('CustomersPageV2 workflow state', () => {
     expect(screen.getByRole('button', { name: 'Add Customer', exact: true })).toBeInTheDocument();
   });
 
+  it('counts exact results and suggestions apart when the server returns sound-alike rows', async () => {
+    const suggestion = { ...list.customers[0], id: 'customer-s', firstName: 'Orlan', lastName: 'Stumpf', approximate: true };
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?')
+      ? response({ customers: [suggestion, { ...suggestion, id: 'customer-t', lastName: 'Stampf' }], total: 0, totalPages: 1, approximateCount: 2 })
+      : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Orlan Stumpf customer profile' });
+    expect(screen.getByText('0 exact · 2 suggestions')).toBeInTheDocument();
+    expect(screen.queryByText('0 results')).toBeNull();
+    expect(screen.getByTestId('did-you-mean')).toBeInTheDocument();
+  });
+
   it('opens the churn alert with the at-risk filter and preserves manual changes on profile return', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {

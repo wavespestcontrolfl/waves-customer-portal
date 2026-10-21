@@ -27,10 +27,38 @@ const MAX_APPROXIMATE_ROWS = MAX_RESULTS_V2; // 8
 const INDEX_CAP = 20000;
 const INDEX_KEY = 'customers:live';
 
-function shouldSearchSoundAlike(search, exactTotal) {
+// Words that make a text search an address, not a name: street suffixes, unit
+// words and the state. "Main Street", "100 Oak Ave" (a digit already rules it
+// out), "Bradenton FL" never run the name pass.
+const ADDRESS_WORDS = new Set([
+  'st', 'street', 'ave', 'avenue', 'av', 'rd', 'road', 'dr', 'drive', 'ln', 'lane', 'blvd', 'boulevard',
+  'ct', 'court', 'cir', 'circle', 'way', 'pl', 'place', 'ter', 'terrace', 'trl', 'trail', 'pkwy', 'parkway',
+  'hwy', 'highway', 'loop', 'cv', 'cove', 'apt', 'unit', 'suite', 'ste', 'fl', 'florida',
+]);
+
+function normalizedWords(text) {
+  return String(text || '').toLowerCase().normalize('NFKC').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+// True when one of the exact rows already matched the text on its address or
+// city (the exact search is a "contains" on those columns), so the text is a
+// place, not a misspelled name: "Fort Myers" matching a city on file.
+// Rows may be raw customer rows (address_line1, city) or schedule rows (address, city).
+function matchedOnAddress(search, exactRows) {
+  const needle = normalizedWords(search).join(' ');
+  if (!needle) return false;
+  return (exactRows || []).some((row) => {
+    const place = normalizedWords([row.address_line1, row.address_line2, row.address, row.city].filter(Boolean).join(' ')).join(' ');
+    return place.includes(needle);
+  });
+}
+
+function shouldSearchSoundAlike(search, exactTotal, exactRows = []) {
   return typeof search === 'string'
     && isNameLikeSearch(search)
-    && Number(exactTotal) < EXACT_ROWS_BELOW;
+    && Number(exactTotal) < EXACT_ROWS_BELOW
+    && !normalizedWords(search).some((word) => ADDRESS_WORDS.has(word))
+    && !matchedOnAddress(search, exactRows);
 }
 
 function loadNameCandidates(knex) {
