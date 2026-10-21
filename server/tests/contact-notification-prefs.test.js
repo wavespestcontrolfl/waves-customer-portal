@@ -310,6 +310,41 @@ describe('contactPhoneDeclinesText (single-number texts addressed to the estimat
   });
 });
 
+describe('contactEmailDeclines (single-recipient emails addressed to the estimate\'s own address: the accept onboarding email)', () => {
+  let customer;
+  beforeEach(() => {
+    customer = { ...CUSTOMER };
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      return { where: () => ({ first: async () => { if (failWith) throw failWith; return customer; } }) };
+    });
+  });
+
+  test('any slot\'s address declines by that contact\'s email switch — slot 2 too (codex r16 security); the holder\'s address, an unknown address and a contact with email on never do', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false }];
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'Terry@Example.com')).toBe(true);
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'sam@example.com')).toBe(false);
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'pat@example.com')).toBe(false);
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'stranger@example.com')).toBe(false);
+    expect(await ContactPrefs.contactEmailDeclines(null, 'terry@example.com')).toBe(false);
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', '')).toBe(false);
+  });
+
+  test('deny wins when two slots carry the address; fails closed on an unreadable row; the gate off never declines', async () => {
+    customer = { ...CUSTOMER, service_contact3_name: 'Terry', service_contact3_phone: '+19415550404', service_contact3_email: 'terry@example.com' };
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550404', email_enabled: false }];
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'terry@example.com')).toBe(true);
+    rows = [];
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'terry@example.com')).toBe(false);
+    failWith = new Error('timeout');
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'terry@example.com')).toBe(true);
+    failWith = null;
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false }];
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'terry@example.com')).toBe(false);
+  });
+});
+
 describe('pruneContactNotificationPrefs (holder contact save)', () => {
   test('deletes the rows of phones no longer in a slot and keeps the survivors', async () => {
     rows = [

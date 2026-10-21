@@ -329,6 +329,34 @@ async function contactPhoneDeclinesText(customerId, phone, column = null, { dbh 
   return (await filterContactsByOwnPrefs([{ phone: slot.phone, role: slot.role }], customerId, column, { channel: 'sms', dbh })).length === 0;
 }
 
+// Does the address a single-recipient EMAIL is going to belong to one of
+// this customer's on-location contacts who turned their email off? The
+// estimate accept flow's onboarding email (estimate-accepted-email.js) falls
+// back to the ESTIMATE's own address, which may be ANY slot's — the tenant
+// in slot 2 who requested it (codex #6363 r16 security P2) — so every slot
+// carrying the address is checked and deny wins; the matched slot's phone
+// keys the contact's row. The holder's own address, an address in no slot,
+// and the gate off never decline. Fail CLOSED on an unreadable row or table.
+async function contactEmailDeclines(customerId, email, { dbh = db } = {}) {
+  const addr = (v) => String(v || '').trim().toLowerCase();
+  const current = addr(email);
+  if (!contactPrefsLive() || !customerId || !current) return false;
+  let customer;
+  try {
+    customer = await dbh('customers').where({ id: customerId }).first();
+  } catch (err) {
+    if (dbh && dbh.isTransaction) throw err;
+    logger.warn(`[contact-prefs] customer read failed (${err.message}) — holding the email`);
+    return true;
+  }
+  if (!customer || addr(customer.email) === current) return false;
+  const slots = require('./customer-contact').getServiceContactSlots(customer).filter((s) => s.phone && addr(s.email) === current);
+  for (const slot of slots) {
+    if (await contactDeclinesChannel(customerId, { phone: slot.phone, role: slot.role }, 'email', { dbh })) return true;
+  }
+  return false;
+}
+
 // Dispatch-time recheck for a DEFERRED email (an automation step, a queued
 // template run) whose address was resolved when it was enqueued: when that
 // address is the slot-1 contact's and the contact has since turned their
@@ -438,6 +466,7 @@ module.exports = {
   filterReportEmailRecipientsByContactPrefs,
   contactDeclinesChannel,
   contactPhoneDeclinesText,
+  contactEmailDeclines,
   rerouteForContactEmailOptOut,
   pruneContactNotificationPrefs,
   upsertContactNotificationPrefs,
