@@ -21,7 +21,8 @@
  *
  * receiptGuard (optional, the Intelligence Bar record_payment card only): { check, relabel }. `check` is handed to the inline receipt
  * email and text as their provider-boundary check (beforeProviderHandoff on sendReceiptEmail / InvoiceService.sendReceipt) and returns
- * true only for a destination the card showed; `relabel({ emailResult, smsResult })` words a leg it refused. The Invoices page sends none.
+ * true only for a destination the card showed; `relabel({ emailResult, smsResult })` words a leg it refused; `claimOptions` ({ refuseQueuedJob })
+ * keeps the card's send from ever claiming an automatic receipt job already queued for the invoice. The Invoices page sends none.
  *
  * The card also supplies a settlementFence (below), carrying `closeoutTarget` (the visit id its card said the payment's closeout would
  * complete, or 'none'): written as a pin inside the settlement transaction and handed to the closeout as its approved target, so a visit
@@ -507,7 +508,7 @@ async function recordManualPayment(id, {
     const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
     // The payment is already recorded: a claim failure only skips the
     // receipt (reported back), never fails the payment.
-    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !updatedInvoice.receipt_sent_at })
+    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !updatedInvoice.receipt_sent_at, ...receiptGuard?.claimOptions })
       .catch((err) => ({ error: err.message }));
     if (claim.inFlight && !claim.byOperator) {
       // A queued job for this invoice is delivering the receipt right now.
@@ -542,7 +543,7 @@ async function recordManualPayment(id, {
           await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
         }
       } finally {
-        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult, terminal: receiptGuard?.terminal(emailResult?.ok === true) });
+        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult });
       }
       if (receiptGuard) ({ emailResult, smsResult } = receiptGuard.relabel({ emailResult, smsResult }));
     }

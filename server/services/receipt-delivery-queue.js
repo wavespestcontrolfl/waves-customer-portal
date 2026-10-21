@@ -466,7 +466,11 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // the drain's recovery of a crashed operator send) delivered the receipt in
 // between, and this send is refused ({ alreadySent: true }). A caller that
 // saw it already stamped is a deliberate resend and is never refused here.
-async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } = {}) {
+// refuseQueuedJob (the Intelligence Bar's record_payment card): an automatic receipt job already queued for the invoice is never
+// claimed. The call answers { inFlight: true, byOperator: false, queuedJob: true } and leaves the row exactly as it was, so the
+// card's send can never hold (and a crash or stale recovery can never re-queue) a job under the card's approval: the job
+// delivers on its own, and the caller reports it as queued. A row the claim creates itself is unaffected.
+async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false, refuseQueuedJob = false } = {}) {
   // A stale row is settled first by the same rules as the drain's recovery
   // (closed on its own recorded email, removed when a claim created it,
   // otherwise requeued), so what is left running is genuinely in flight. A
@@ -515,6 +519,7 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       // delivers only the legs that operator chose, so it is no promise that
       // this caller's receipt goes out.
       if (job.status === 'running') return { inFlight: true, byOperator: String(job.locked_by || '').startsWith('operator:') };
+      if (refuseQueuedJob && QUEUED_STATUSES.includes(job.status)) return { inFlight: true, byOperator: false, queuedJob: true };
       if (await stampedSinceRead() || await summaryTextStarted()) return { alreadySent: true };
       // A completed or failed job sends nothing more: no claim to hold.
       if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
@@ -601,7 +606,6 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 // holdForReconciliation parks the job as 'failed' (the status the drain and the claim never
 // pick up; closeout status reads it as a failed delivery) for a person to reconcile.
 // Default off: the Invoices route hands the job back as it always did.
-// terminal (optional, { status, lastError, emailResult }): see 1b below.
 // `report` (optional): an object this fills with `stamped` (see above) beside the returned disposition.
 // Returns what became of the automatic receipt job, for callers that report it
 // (the IB tool states what the queue will actually do from this, never a guess):
@@ -610,10 +614,9 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 //   'removed'                 the claim created the row itself: no automatic receipt exists
 //   'returned_to_queue'       the job is queued again and WILL be delivered automatically
 //   'held_for_reconciliation' parked as failed; the queue will not send it again
-//   'finalized'               a caller's check refused a leg: the job is finished as the caller said (see `terminal`), never sent
 //   'release_failed'          the release could not be written; stale-claim recovery settles it
 //                             later and may re-queue it
-async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false, terminal = null, report = null } = {}) {
+async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false, report = null } = {}) {
   if (!claim?.id) return 'none';
   try {
     // Anything delivered stamps the invoice first (the caller's own stamp may
@@ -640,20 +643,6 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
         return settled(await mine().update({
           status: 'completed', sms_result: smsResult, email_result: emailResult, completed_at: trx.fn.now(), last_error: null, ...unlock,
         }), 'completed');
-      }
-      // 1b. A caller's provider-boundary check refused a leg (the Intelligence Bar's record_payment card: the contact changed since
-      //     the card, or the customer opted out of receipts). A job that is not the claim's own row must not go back to the drain,
-      //     which would send the receipt to the live destination without that check: it is finished as `terminal`
-      //     ({ status, lastError, emailResult }). A row the claim created itself is removed below, as always.
-      if (terminal && (prior || takenOver)) {
-        return settled(await mine().update({
-          status: terminal.status,
-          sms_result: smsResult,
-          email_result: terminal.emailResult || emailResult,
-          last_error: terminal.lastError || null,
-          ...(terminal.status === 'completed' ? { completed_at: trx.fn.now() } : {}),
-          ...unlock,
-        }), 'finalized');
       }
       // 2. The outcome of a leg is unknown: never queued.
       if (holdForReconciliation) {

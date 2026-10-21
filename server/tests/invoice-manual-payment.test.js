@@ -615,6 +615,19 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(calls.paymentsInsert).toBeNull();
     });
 
+    test('a receipt asked for while an automatic receipt job is queued refuses with drift and records nothing; no receipt asked, no look', async () => {
+      const calls = settle();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'receipt_delivery_jobs' ? recorder({ first: { id: 'job-1' } }) : base(table)));
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ receiptRequested: true })) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/already queued/);
+      expect(calls.paymentsInsert).toBeNull();
+      settle();
+      db.mockImplementation((table) => { if (table === 'receipt_delivery_jobs') throw new Error('no look expected'); return base(table); });
+      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ receiptRequested: false })) })).resolves.toBeTruthy();
+    });
+
     test('a card shown on another ET day refuses with drift and records nothing (the payment is never dated differently than approved)', async () => {
       const calls = settle();
       const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ paymentDate: '2020-01-01' })) }));
@@ -759,46 +772,29 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(out.receipt.sms).toEqual({ ok: false, error: 'receipt_texts_opted_out' });
     });
 
-    describe('a refused leg finishes the invoice\'s queued receipt job instead of handing it back to the drain (Codex r5)', () => {
-      const releaseArgs = () => ReceiptDeliveryQueue.releaseOperatorReceiptClaim.mock.calls.at(-1)[1];
+    describe('the card\'s receipt claim never takes an automatic receipt job already queued (Codex r5)', () => {
+      const claimArgs = () => ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mock.calls.at(-1)[1];
 
-      test('a changed contact: the claim is released with a terminal "failed / contact_changed_since_card" for the job', async () => {
-        settle();
-        senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550100' });
-        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'contact_changed_since_card' });
-      });
-
-      test('an opted-out customer: the job is finished the way the queue closes an opt-out (completed, receipt_opted_out)', async () => {
-        settle();
-        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut: true });
-        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(releaseArgs().terminal).toEqual({ status: 'completed', lastError: null, emailResult: { ok: false, error: 'receipt_opted_out' } });
-      });
-
-      test('unreadable settings fail closed as a failed job for a person', async () => {
-        settle();
-        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100', optedOut: null });
-        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'receipt_settings_unreadable_since_card' });
-      });
-
-      test('a provider failure with nothing refused still parks the job: it is never handed back to the unguarded drain (Codex r5b)', async () => {
-        settle();
-        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
-        sendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider timeout' });
-        await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(releaseArgs().terminal).toEqual({ status: 'failed', lastError: 'receipt_not_delivered_from_card' });
-      });
-
-      test('nothing refused and the email delivered: no terminal; the page path (no guard) passes none either', async () => {
+      test('the guard asks the claim to refuse a queued job; the page path asks nothing of the kind', async () => {
         settle();
         senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
         await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
-        expect(releaseArgs().terminal).toBeNull();
+        expect(claimArgs()).toEqual({ sawUnsent: true, refuseQueuedJob: true });
         settle();
         await recordManualPayment('inv-1', { method: 'check' });
-        expect(releaseArgs().terminal).toBeUndefined();
+        expect(claimArgs()).toEqual({ sawUnsent: true });
+      });
+
+      test('a queued job (the claim answers it as queued, untouched): nothing is sent by the card, the receipt reads as queued, the payment stays recorded', async () => {
+        settle();
+        senders({ emailTo: 'pat@example.test', smsTo: '+19415550100' });
+        ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ inFlight: true, byOperator: false, queuedJob: true });
+        const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
+        expect(out.invoice).toBeTruthy();
+        expect(out.receipt).toEqual({ queued: true });
+        expect(sendReceiptEmail).not.toHaveBeenCalled();
+        expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+        expect(ReceiptDeliveryQueue.releaseOperatorReceiptClaim).not.toHaveBeenCalled();
       });
     });
 

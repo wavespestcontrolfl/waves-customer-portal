@@ -525,55 +525,40 @@ postgres('operator receipt claim on PostgreSQL', () => {
     });
   });
 
-  describe('terminal — a caller\'s provider-boundary check refused a leg (the Intelligence Bar record_payment card)', () => {
-    const contactChanged = { status: 'failed', lastError: 'contact_changed_since_card' };
+  describe('refuseQueuedJob — the Intelligence Bar record_payment card never claims an automatic receipt job (Codex r5)', () => {
+    test.each(['queued', 'retry_scheduled'])('a %s job is answered as queued and left exactly as it was: the drain still owns it and stale recovery has nothing to requeue', async (status) => {
+      const invoiceId = await seedJob({ status, source: 'stripe_webhook' });
+      const before = await job(invoiceId);
+      expect(await claimReceiptJobForOperatorSend(invoiceId, { refuseQueuedJob: true })).toEqual({ inFlight: true, byOperator: false, queuedJob: true });
+      const after = await job(invoiceId);
+      expect(after).toMatchObject({ status, source: 'stripe_webhook', locked_by: null, locked_at: null });
+      expect(after.updated_at).toEqual(before.updated_at);
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).toContain(invoiceId);
+    });
 
-    test.each(['queued', 'retry_scheduled'])('a %s job the operator claimed is finished as the caller said, not handed back to the drain', async (status) => {
-      const invoiceId = await seedJob({ status });
+    test('without the option the same queued job is claimed as before (the Invoices page)', async () => {
+      const invoiceId = await seedJob({ status: 'queued' });
       const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: contactChanged })).toBe('finalized');
-      expect(await job(invoiceId)).toMatchObject({ status: 'failed', locked_by: null, locked_at: null, last_error: 'contact_changed_since_card' });
-      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
-      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
+      expect(claim).toMatchObject({ id: expect.any(String), prior: { status: 'queued' } });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
     });
 
-    test('an opt-out finishes the job the way the queue closes one: completed with receipt_opted_out', async () => {
-      const invoiceId = await seedJob();
-      const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: { status: 'completed', lastError: null, emailResult: { ok: false, error: 'receipt_opted_out' } } });
-      const row = await job(invoiceId);
-      expect(row).toMatchObject({ status: 'completed', locked_by: null, email_result: { ok: false, error: 'receipt_opted_out' } });
-      expect(row.completed_at).not.toBeNull();
-      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+    test('a finished job holds no claim, as always; an invoice with no job gets the claim\'s own row', async () => {
+      const done = await seedJob({ status: 'completed' });
+      expect(await claimReceiptJobForOperatorSend(done, { refuseQueuedJob: true })).toEqual({ id: null });
+      const fresh = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(fresh, { refuseQueuedJob: true });
+      expect(claim).toMatchObject({ id: expect.any(String), prior: null });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
     });
 
-    test('a job another path enqueued during the claim is finished too', async () => {
-      const taken = randomUUID();
-      const claim = await claimReceiptJobForOperatorSend(taken);
-      await enqueueReceiptDelivery({ invoiceId: taken, source: 'ib_closeout_repair' });
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: contactChanged });
-      expect(await job(taken)).toMatchObject({ status: 'failed', source: 'ib_closeout_repair', last_error: 'contact_changed_since_card' });
-    });
-
-    test('a row the claim created itself is removed as always: the card\'s refusal leaves no job behind', async () => {
+    test('a claim-created row the process never released is DELETED by stale recovery, never requeued or sent', async () => {
       const invoiceId = randomUUID();
-      const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false, terminal: contactChanged })).toBe('removed');
+      const claim = await claimReceiptJobForOperatorSend(invoiceId, { refuseQueuedJob: true });
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_at: new Date(Date.now() - 60 * 60 * 1000) });
+      await recoverStaleLocks({ invoiceId });
       expect(await job(invoiceId)).toBeUndefined();
-    });
-
-    test('a delivered email still completes the job — terminal only applies to an undelivered one', async () => {
-      const invoiceId = await seedJob();
-      const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: true, emailResult: { ok: true }, terminal: contactChanged });
-      expect(await job(invoiceId)).toMatchObject({ status: 'completed', email_result: { ok: true } });
-    });
-
-    test('no terminal: the job goes back as it was (the Invoices page path)', async () => {
-      const invoiceId = await seedJob({ status: 'retry_scheduled' });
-      const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('returned_to_queue');
-      expect(await job(invoiceId)).toMatchObject({ status: 'retry_scheduled' });
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
     });
   });
 

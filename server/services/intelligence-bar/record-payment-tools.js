@@ -239,6 +239,11 @@ async function receiptReach(invoice) {
 // The receipt the operator asked for, or { reach: null } when none: who it reaches, or the refusal.
 async function receiptPlan(invoice, sendReceipt) {
   if (!sendReceipt) return { reach: null };
+  // An automatic receipt job already owns this invoice's receipt: the card's send never claims it (the settlement's fence and the
+  // receipt claim refuse it too), so the receipt is refused here, before anything is shown.
+  if (await db('receipt_delivery_jobs').where({ invoice_id: invoice.id }).whereIn('status', ['queued', 'retry_scheduled', 'running']).first('id')) {
+    return refusal('A receipt for this invoice is already queued; record the payment without a receipt here, or send it from the Invoices page.', 'receipt_already_queued', { invoice_id: invoice.id });
+  }
   const reach = await receiptReach(invoice);
   const legs = !reach ? [] : [reach.via !== 'sms' && reach.email, reach.via !== 'email' && reach.phone].filter(Boolean);
   if (!reach || reach.payerBilled || !reach.via || !legs.length) {
@@ -371,7 +376,7 @@ async function buildPlan(input) {
     // the invoice lock (record-payment-fences.js), and the receipt's destination check. Functions: not part of any pin or display.
     _approved: {
       expectedAmountCents: dueCents,
-      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none', paymentDate, closeout: closeoutPin(closeout) }),
+      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none', paymentDate, closeout: closeoutPin(closeout), receiptRequested: read.sendReceipt }),
       ...(read.sendReceipt ? { receiptGuard: receiptGuardFor({ email: emailDigest(reach.email), phone: phoneDigest(reach.phone) }) } : {}),
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',
@@ -422,12 +427,13 @@ async function commitRecord(input, actionContext) {
       error: 'The Invoices page answered, but the invoice does not read as paid. Check the invoice before trying again.' };
   }
   const receipt = receiptReport(plan, json.receipt);
-  const sent = receipt.requested && (receipt.queued || receipt.email === 'sent' || receipt.text === 'sent');
+  const sent = receipt.requested && (receipt.email === 'sent' || receipt.text === 'sent');
   logger.info(`[intelligence-bar:record-payment] recorded ${plan.method} payment on invoice ${plan.invoice_id}`);
   return {
     ...base, success: true, status: 'paid', method: plan.method, amount: plan.balance_due, receipt, sent_to_customer: Boolean(sent),
     note: `${plan.invoice_number} is marked paid (${money(plan.balance_due * 100)} by ${plan.method}).${plan.sends_to_customer
-      ? (sent ? ' The receipt was sent.' : ' The receipt was not sent; resend it from the invoice if the customer needs one.')
+      ? (receipt.queued ? ' A receipt for this invoice had been queued since the card: it goes out on its own, and this card did not send one.'
+        : sent ? ' The receipt was sent.' : ' The receipt was not sent; resend it from the invoice if the customer needs one.')
       : ' Nothing was sent to the customer.'}`,
   };
 }

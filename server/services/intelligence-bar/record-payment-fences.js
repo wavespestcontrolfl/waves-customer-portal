@@ -15,6 +15,7 @@
  *           settlement builds the invoice notes from the locked row and the paid UPDATE writes no other unpinned column;
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
  *           been edited since (edit time, scheduled date, service type) or is gone;
+ *         - a receipt was asked for and an automatic receipt job is already queued, waiting to retry or running for the invoice;
  *         - a project's report is held for this payment ('held' / 'releasing'): paying would release it to the customer, which
  *           the card cannot disclose. Under the lock the project rows are locked FOR UPDATE;
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
@@ -25,8 +26,7 @@
  *   receiptGuard { check, relabel }  the provider-boundary check for the inline receipt (beforeProviderHandoff on the receipt email
  *       and text). It allows a send only to the email / phone the card showed (digests, receipt-destination-digest.js); the App leg
  *       is never approved. The email also needs the customer's receipt opt-out to read false (the manual email ignores it on its own).
- *       `terminal(emailDelivered)` tells the receipt queue how to finish a job already queued for the invoice when the email did not
- *       go out, whether a leg was refused or not (never back to the drain). `relabel` words a refused leg: contact changed, the customer opted out of receipts, or the settings could not be read.
+ *       `claimOptions` makes the receipt claim refuse an automatic job already queued for the invoice. `relabel` words a refused leg: contact changed, the customer opted out of receipts, or the settings could not be read.
  */
 const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
 const { etDateString } = require('../../utils/datetime-et');
@@ -39,6 +39,7 @@ const pinnedColumnsOf = (invoice) => Object.fromEntries(PINNED_COLUMNS.map((key)
 const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown — nothing was recorded';
 const DATE_TEXT = 'The day changed after the confirmation card was shown, so the payment would be recorded as of a different day — nothing was recorded';
 const VISIT_TEXT = 'The linked visit changed after the confirmation card was shown — nothing was recorded';
+const QUEUED_RECEIPT_TEXT = 'A receipt for this invoice is already queued; record the payment without a receipt here, or send it from the Invoices page — nothing was recorded';
 const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 const CONTACT_CHANGED = 'receipt not sent: contact changed';
@@ -77,13 +78,18 @@ async function heldReportExists(database, invoiceId, { lock }) {
   return projects.some((p) => ['held', 'releasing'].includes(String(p.report_hold_status || '').toLowerCase()));
 }
 
+// An automatic receipt job (queued, waiting to retry, or being delivered) already owns this invoice's receipt.
+async function receiptJobExists(database, invoiceId) {
+  return Boolean(await database('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', ['queued', 'retry_scheduled', 'running']).first('id'));
+}
+
 async function annualTermExists(database, row) {
   if (await require('../invoice-prepay').resolveInvoiceTermId(row, database, { strict: true })) return true;
   return Boolean((await database.schema.hasTable('annual_prepay_terms'))
     && await database('annual_prepay_terms').where({ prepay_invoice_id: row.id }).first('id'));
 }
 
-// pin: { invoiceId, status, updatedAtMs, columns, closeoutTarget, closeout, paymentDate } as the card read the invoice. closeout is the
+// pin: { invoiceId, status, updatedAtMs, columns, closeoutTarget, closeout, paymentDate, receiptRequested } as the card read the invoice. closeout is the
 // visit the closeout would complete { visitId, serviceType, date, updatedAtMs } (null = none); paymentDate is the ET day the card showed. closeoutTarget is the visit the card
 // said the payment's closeout would complete, or 'none': the settlement pins it in its transaction and hands it to the closeout
 // (invoice-issued-closeout.js approvedTarget), so a visit that became closable after the card is left open, on retries too.
@@ -96,6 +102,7 @@ function settlementFenceFor(pin) {
     if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
     if (await heldReportExists(database, pin.invoiceId, { lock: Boolean(locked) })) throw drift(HELD_REPORT_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
+    if (pin.receiptRequested && await receiptJobExists(database, pin.invoiceId)) throw drift(QUEUED_RECEIPT_TEXT);
     return true;
   };
   fence.closeoutTarget = pin.closeoutTarget;
@@ -125,19 +132,9 @@ function receiptGuardFor(approved) {
     emailResult: refused.has('email') && emailResult && !emailResult.ok ? { ok: false, error: refused.get('email') } : emailResult,
     smsResult: refused.has('sms') && smsResult && !smsResult.ok ? { ok: false, error: refused.get('sms') } : smsResult,
   });
-  // What a refused leg means for a receipt job already queued for the invoice: it must not go back to the drain, which would send
-  // to the live destination without this check. An opt-out is the queue's own opt-out close; anything else is parked as failed
-  // for a person (the App leg's refusal is no email or text decision and does not count).
-  // A guarded send whose email did not go out, for ANY reason (a provider failure included), is parked too: handing the job back
-  // would let the drain retry to the live destination without this check. emailDelivered closes the job in the release anyway.
-  const terminal = (emailDelivered = false) => {
-    if (emailDelivered) return null;
-    const reasons = ['email', 'sms'].filter((channel) => refused.has(channel)).map((channel) => refused.get(channel));
-    if (!reasons.length) return { status: 'failed', lastError: 'receipt_not_delivered_from_card' };
-    if (reasons.every((reason) => reason === OPTED_OUT)) return { status: 'completed', lastError: null, emailResult: { ok: false, error: 'receipt_opted_out' } };
-    return { status: 'failed', lastError: reasons.includes(CONTACT_CHANGED) ? 'contact_changed_since_card' : 'receipt_settings_unreadable_since_card' };
-  };
-  return { check, relabel, terminal };
+  // The card's send never claims an automatic receipt job already queued for the invoice (the queue answers it as queued and leaves it
+  // alone), so neither a failed release nor stale recovery can re-queue one under the card's approval.
+  return { check, relabel, claimOptions: { refuseQueuedJob: true } };
 }
 
 module.exports = { settlementFenceFor, receiptGuardFor, pinnedColumnsOf, PINNED_COLUMNS, CONTACT_CHANGED };
