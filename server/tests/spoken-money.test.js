@@ -48,6 +48,10 @@ const REWRITES = [
   ['charge one hundred twenty five fifty', SAME],
   ['charge one hundred and twenty five fifty a month', SAME],
   ['price two thousand five hundred twenty', 'price $2,520'],
+  ['charge twenty-five hundred dollars and fifty cents', SAME],
+  // a dictated list is not one amount
+  ['the prices are sixty, seventy, eighty dollars', 'the prices are sixty, seventy, $80'],
+  ['price sixty, seventy-five', SAME],
   // cents are not dollars
   ['charge one hundred fifty five cents', SAME],
   ['charge 61 33 cents', SAME],

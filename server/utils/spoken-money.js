@@ -136,7 +136,7 @@ function normalizeSpokenMoney(input) {
   };
 
   // 1. "sixty one dollars and thirty three cents" / "61 dollars 33 cents" -> $61.33
-  apply(new RegExp(`(?<![\\w$.,])(${ANY}|\\d{1,6})\\s+dollars?(?:\\s+and)?\\s+(${U100}|\\d{1,2})\\s+cents?\\b`, 'i'), (m, s, e) => {
+  apply(new RegExp(`(?<![\\w$.,-])(?<!${NUMWORD_RE}[-\\s])(?<!${NUMWORD_RE}\\s+and\\s)(${ANY}|\\d{1,6})\\s+dollars?(?:\\s+and)?\\s+(${U100}|\\d{1,2})\\s+cents?\\b`, 'i'), (m, s, e) => {
     const d = /^\d+$/.test(m[1]) ? Number(m[1]) : wordsToNumber(m[1]);
     const c = /^\d+$/.test(m[2]) ? Number(m[2]) : wordsToNumber(m[2]);
     if (d == null || c == null || c > 99) return null;
@@ -146,7 +146,7 @@ function normalizeSpokenMoney(input) {
 
   // 2. Two spoken numbers, dollars then cents: "sixty-one thirty-three" -> $61.33
   apply(new RegExp(
-    `(?<![\\w$.,-])(?<!${NUMWORD_RE}[-\\s])(?<!\\band\\s)(${U100})[\\s,]+(${TENS_RE}(?:[-\\s]${ONES_RE})?|${TEENS_RE})(?![\\w-])(?!\\s+(?:hundred|thousand)\\b)(?![-\\s]+${NUMWORD_RE}\\b)(\\s+dollars?\\b)?`, 'i',
+    `(?<![\\w$.,-])(?<!${NUMWORD_RE}[-\\s])(?<!\\band\\s)(${U100})\\s+(${TENS_RE}(?:[-\\s]${ONES_RE})?|${TEENS_RE})(?![\\w-])(?!\\s+(?:hundred|thousand)\\b)(?![-\\s]+${NUMWORD_RE}\\b)(\\s+dollars?\\b)?`, 'i',
   ), (m, s, e) => {
     const d = wordsToNumber(m[1]);
     const c = wordsToNumber(m[2]);
