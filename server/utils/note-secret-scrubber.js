@@ -44,7 +44,10 @@ const PREFIXED_RES = [
   /\bAIza[0-9A-Za-z_-]{35}/g,
   /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
 ];
-const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi;
+// "Bearer <token>": a long token always; a short one when it looks like a token
+// (a digit or . _ ~ + / = -) or follows "Authorization:", so "the bearer of" stays (Codex #6375 r4).
+const BEARER_RE = /(\bauthorization\s*:\s*)?\bBearer\s+([A-Za-z0-9._~+/=-]+)/gi;
+const looksLikeBearerToken = (header, token) => Boolean(header) || token.length >= 16 || /[0-9._~+/=-]/.test(token);
 // HTTP Basic credentials ("Authorization: Basic dXNlcjpwYXNz", or bare "Basic <base64>").
 // The scheme is case-insensitive in HTTP ("basic dXNl..."). Capital "Basic" is
 // always removed, as before; another casing only when the token decodes to
@@ -103,7 +106,8 @@ function scrubNoteText(input) {
     if (clean !== url) removed += 1;
     return clean;
   });
-  text = text.replace(JWT_RE, swap).replace(BEARER_RE, swap)
+  text = text.replace(JWT_RE, swap)
+    .replace(BEARER_RE, (match, header, token) => (looksLikeBearerToken(header, token) ? `${header || ''}${swap()}` : match))
     .replace(BASIC_RE, (match, scheme, token) => (looksLikeBasicCredential(scheme, token) ? swap() : match));
   text = text.replace(ENV_SECRET_RE, (match, name) => { removed += 1; return `${name}=${REMOVED}`; });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);

@@ -242,6 +242,28 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
     expect(result.data.notes.details.gate).toBe(1234);
   });
 
+  test('a 19-digit card number rounded by JSON parsing is still removed (r4)', async () => {
+    const notes = JSON.parse('{"details":{"card":4000000000000000006,"dogs":2}}');
+    const result = await read(ENTRY, { id: 1, notes });
+    expect(JSON.stringify(result)).not.toMatch(/40000000000000000/);
+    expect(result.data.notes.details.dogs).toBe(2);
+  });
+
+  test('one 1,000-character budget covers a whole structured note (r4)', async () => {
+    const notes = Array.from({ length: 20 }, (_, i) => `note ${i}: ${'the dog stays in the back yard. '.repeat(31)}`);
+    const result = await read(ENTRY, { id: 1, notes });
+    const text = result.data.notes.join('');
+    expect(text.replace(/\[cut\]/g, '').length).toBeLessThanOrEqual(1000);
+    expect(text).toContain('[cut]');
+  });
+
+  test('a short Bearer token is removed; "the bearer of" prose stays (r4)', () => {
+    expect(scrubNote('Authorization: Bearer test-token').text).not.toContain('test-token');
+    expect(scrubNote('Authorization: Bearer abc').text).not.toContain('abc');
+    expect(scrubNote('use Bearer dev.123 for staging').text).not.toContain('dev.123');
+    expect(scrubNote('the bearer of this note is the tenant').text).toBe('the bearer of this note is the tenant');
+  });
+
   test('a private link used as a key is replaced too (pre-push audit)', async () => {
     const key = 'https://portal.wavespestcontrol.com/l/abc234def5';
     const result = await read(ENTRY, { id: 1, notes: { [key]: 'reference' } });

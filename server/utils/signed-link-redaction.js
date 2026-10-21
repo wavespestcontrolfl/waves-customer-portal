@@ -37,7 +37,7 @@
  */
 const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
-const { scrubNote, SCAN_LIMIT } = require('./note-secret-scrubber');
+const { scrubNote, SCAN_LIMIT, NOTE_CAP, CUT } = require('./note-secret-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -345,21 +345,42 @@ function scrubFreeText(text, state) {
 // string already gets (a signed or private link becomes a marker). No prose
 // rule runs on it, so gate codes and lockbox instructions come back as written. A credential-named key inside it is still
 // removed.
+// A 13-19 digit integer with a card prefix (2-6) is treated as a card number
+// even when JSON parsing rounded it so it fails the Luhn check (Codex #6375 r4).
+const CARD_LIKE_NUMBER_RE = /^[2-6]\d{12,18}$/;
+function returnNumber(item, state) {
+  const digits = String(item);
+  if (CARD_LIKE_NUMBER_RE.test(digits) && (typeof item === 'bigint' || !Number.isSafeInteger(item) || scrubNote(digits).removed)) {
+    state.noteSecrets += 1;
+    return '[card number removed]';
+  }
+  const { text, removed } = scrubNote(digits);
+  if (!removed) return item;
+  state.noteSecrets += removed;
+  return text;
+}
+
+// One NOTE_CAP budget for a whole structured note: string leaves draw from it,
+// and once it is spent the rest is "[cut]" (Codex #6375 r4).
+function returnNoteString(item, state) {
+  const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state), { truncated: item.length > SCAN_LIMIT });
+  state.noteSecrets += removed;
+  if (state.noteBudget === undefined) return text;
+  if (state.noteBudget <= 0) return CUT;
+  const kept = text.length > state.noteBudget ? `${text.slice(0, state.noteBudget)}${CUT}` : text;
+  state.noteBudget -= text.length;
+  return kept;
+}
+
 function returnNote(item, state, depth = 0) {
-  if (typeof item === 'string') {
-    const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state), { truncated: item.length > SCAN_LIMIT });
-    state.noteSecrets += removed;
-    return text;
-  }
-  // A number can be a card number too ({ card_number: 4242424242424242 }):
-  // a numeric leaf the scrubber would change comes back as the scrubbed text.
-  if (typeof item === 'number' || typeof item === 'bigint') {
-    const { text, removed } = scrubNote(String(item));
-    if (!removed) return item;
-    state.noteSecrets += removed;
-    return text;
-  }
+  if (typeof item === 'string') return returnNoteString(item, state);
+  // A number can be a card number too ({ card_number: 4242424242424242 }).
+  if (typeof item === 'number' || typeof item === 'bigint') return returnNumber(item, state);
   if (!item || typeof item !== 'object') return item;
+  if (depth === 0) {
+    state.noteBudget = NOTE_CAP;
+    try { return returnNote(item, state, 1); } finally { delete state.noteBudget; }
+  }
   if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
   if (Array.isArray(item)) return item.map(entry => returnNote(entry, state, depth + 1));
   const out = {};
