@@ -73,11 +73,21 @@ function nextStepText(data) {
   return primary ? (termite.nextStep || data.typedReport?.todaysResult?.nextStep) : data.typedReport?.todaysResult?.nextStep;
 }
 
-// The lawn action. Rain that already watered the treatment in, or a report that says nothing is needed, reads as
-// "Nothing needed" (the aftercare line can still describe the water-in, and the banner then reports the rain).
+// Rain that watered the treatment in completes the watering task only: a hold on the sprinklers the visit set stays
+// (the banner keeps that line), and the report may still hold another customer task.
+const KEPT_HOLD_LINE = /^Skip your turf watering until /;
+function remainingTask(v2) {
+  const lines = Array.isArray(v2?.banner?.lines) ? v2.banner.lines : [];
+  return sentence(lines.find((line) => typeof line === 'string' && KEPT_HOLD_LINE.test(line)))
+    || sentence(v2?.snapshot?.customerAction, 240);
+}
+
+// The lawn action. Covered by rain: what is left to do, else "Nothing needed". A report that says nothing is needed
+// reads the same. Otherwise the watering line the page recommends.
 function lawnAction(data) {
   const v2 = data.reportV2;
-  if (v2?.banner?.state === 'water_in_by_rain' || v2?.snapshot?.noActionNeeded === true) return NO_ACTION;
+  if (v2?.banner?.state === 'water_in_by_rain') return remainingTask(v2) || NO_ACTION;
+  if (v2?.snapshot?.noActionNeeded === true) return NO_ACTION;
   return treated(data) ? lawnWatering(v2) : null;
 }
 

@@ -55,16 +55,45 @@ describe('buildWebTop', () => {
     expect('action' in buildWebTop({ ...data, applicationMade: false })).toBe(false);
   });
 
-  test('lawn: rain that watered the treatment in, or noActionNeeded, reads as nothing needed (never the rain line)', () => {
-    const rained = lawn();
-    rained.reportV2.banner = { state: 'water_in_by_rain', lines: ['Rain since your visit has watered today\u2019s treatment in.'] };
-    rained.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
-    expect(buildWebTop(rained).action).toBe(NO_ACTION);
-    const quiet = lawn();
-    quiet.reportV2.snapshot.noActionNeeded = true;
-    quiet.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
-    expect(buildWebTop(quiet).action).toBe(NO_ACTION);
+  describe('lawn: rain that watered the treatment in completes the watering task only', () => {
+    const rained = (lines, customerAction) => {
+      const data = lawn();
+      data.reportV2.banner = { state: 'water_in_by_rain', lines };
+      data.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
+      data.reportV2.snapshot.customerAction = customerAction;
+      return data;
+    };
+    const RAIN = ['Rain since your visit has watered today\u2019s treatment in.', 'No extra sprinkler run is needed for it.'];
+    const HOLD = 'Skip your turf watering until Sat 9 AM.';
+
+    test('a kept hold on the sprinklers is the task (never the rain line, never the old water-in)', () => {
+      const out = buildWebTop(rained([HOLD, ...RAIN], null));
+      expect(out.action).toBe(HOLD);
+      expect(out.hold).toBe('Keep pets off the lawn until it is dry.');
+    });
+
+    test('another customer task from the report is the task', () => {
+      expect(buildWebTop(rained(RAIN, 'Mow no lower than 3.5 inches.')).action).toBe('Mow no lower than 3.5 inches.');
+    });
+
+    test('a kept hold wins over a long report task', () => {
+      expect(buildWebTop(rained([HOLD, ...RAIN], 'Mow no lower than 3.5 inches.')).action).toBe(HOLD);
+    });
+
+    test('nothing left: nothing needed, and the hold row still shows its hold', () => {
+      const out = buildWebTop(rained(RAIN, null));
+      expect(out.action).toBe(NO_ACTION);
+      expect(out.hold).toBe('Keep pets off the lawn until it is dry.');
+    });
+
+    test('noActionNeeded (no rain state) reads as nothing needed, never the aftercare water-in', () => {
+      const quiet = lawn();
+      quiet.reportV2.snapshot.noActionNeeded = true;
+      quiet.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
+      expect(buildWebTop(quiet).action).toBe(NO_ACTION);
+    });
   });
+
 
   test('lawn: no watering banner and nothing needed says so; otherwise no action', () => {
     const data = lawn();
