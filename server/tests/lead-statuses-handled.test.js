@@ -107,7 +107,8 @@ describe("lead status 'handled'", () => {
     expect(route).toMatch(/onlyIf: unlessHandledSince\(seen, req\.body\.seen_updated_at\)/);
     // manual convert (won): the same refusal, re-asserted in markConverted's claim (codex #5477 r14)
     expect(route).toMatch(/const refusal = handledStatusRefusal\('won', seen, lead\.status, req\.body\.seen_updated_at, lead\.updated_at\);/);
-    expect(route).toMatch(/onlyIfIdentity: unlessHandledSince\(seen, req\.body\.seen_updated_at\),/);
+    // the bar's card pins wrap the same predicate (withExpectedLead returns it unchanged without pins)
+    expect(route).toMatch(/onlyIfIdentity: withExpectedLead\(unlessHandledSince\(seen, req\.body\.seen_updated_at\), req\.ibExpectedLead, customerId\),/);
     const la = fs.readFileSync(path.join(__dirname, '../services/lead-attribution.js'), 'utf8');
     expect(la).toMatch(/\.modify\(\(q\) => \{ if \(onlyIf\) q\.where\(onlyIf\); \}\)\.update\(\{\s*status: 'lost',/);
     const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');

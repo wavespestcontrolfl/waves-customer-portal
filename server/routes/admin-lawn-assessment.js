@@ -19,6 +19,21 @@ const { decodedBase64Bytes } = require('../utils/request-photo-validation');
 const shotListLive = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_SHOT_LIST');
 // GATE_LAWN_PHOTO_LABEL_PICK: the technician's customer-facing label for a photo (shot-list captures only).
 const labelPickLive = () => shotListLive() && require('../config/feature-gates').lawnPhotoLabelPickLive();
+// GATE_REPORT_WEB_SLIDER (beside the shot list): last visit's front/back photo for the tech's "same angle" guide.
+// Best-effort: a failed read leaves the guide out, never the lookup.
+async function sameAngleGuide(serviceId) {
+  const gates = require('../config/feature-gates');
+  if (!shotListLive() || typeof gates.reportWebSliderLive !== 'function' || !gates.reportWebSliderLive()) return {};
+  try {
+    const lastVisitShots = await require('../services/service-report/lawn-slider').lastVisitShotsForService({
+      serviceId, knex: db, photoUrl: (photo) => (photo?.s3_key && !String(photo.s3_key).startsWith('pending/') && PhotoService ? PhotoService.getViewUrl(photo.s3_key, 3600).catch(() => null) : null),
+    });
+    return lastVisitShots ? { lastVisitShots } : {};
+  } catch (err) {
+    logger.warn(`[lawn-assessment] same-angle guide failed: ${err.message}`);
+    return {};
+  }
+}
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
 const visitRuns = require('../services/lawn-visit-runs');
@@ -1526,7 +1541,8 @@ router.get('/service/:serviceId', async (req, res, next) => {
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
 
-    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), ...(labelPickLive() ? { labelPickEnabled: true } : {}), assessment: null });
+    const sameAngle = await sameAngleGuide(req.params.serviceId);
+    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), ...(labelPickLive() ? { labelPickEnabled: true } : {}), ...sameAngle, assessment: null });
 
     const visitRun = await visitRuns.loadRun(assessment.id, db);
     const photos = await db('lawn_assessment_photos')
@@ -1540,6 +1556,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
       ...(shotListLive() ? { shotListEnabled: true } : {}),
       // GATE_LAWN_PHOTO_LABEL_PICK: tells the sheet to show the label chooser (key absent when off).
       ...(labelPickLive() ? { labelPickEnabled: true } : {}),
+      ...sameAngle,
       assessment: {
         ...normalizeAssessmentRow(assessment),
         photo_records: photos,

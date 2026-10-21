@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { createRef } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import GlobalCommandPalette from './GlobalCommandPalette';
@@ -67,5 +67,47 @@ describe('Intelligence Bar mic context', () => {
     await openBar(null);
     expect(micProps.length).toBeGreaterThan(0);
     expect(micProps.every((props) => props.dictationContext === undefined)).toBe(true);
+  });
+});
+
+// GATE_DICTATION_MONEY_NORMALIZE: the server reads a dictated question for amounts, so the bar only
+// says that dictation went into the message (dictation_used); no heard words or amounts are sent.
+describe('Intelligence Bar dictation flag', () => {
+  const queryBody = () => {
+    const call = fetch.mock.calls.find(([url, opts]) => String(url).includes('/intelligence-bar/query') && opts?.method === 'POST');
+    return call ? JSON.parse(call[1].body) : null;
+  };
+  async function ask({ dictate = [], typed } = {}) {
+    useIsMobile.mockReturnValue(false);
+    await openBar(null);
+    const mic = micProps.filter((props) => props.title === 'Dictate your question').at(-1);
+    for (const chunk of dictate) act(() => mic.onAppend(chunk, { money: { changes: [], ambiguous: [{ heard: '6133' }] } }));
+    const box = await screen.findByPlaceholderText(/Ask anything|Tell me|Ask/);
+    if (typed) fireEvent.change(box, { target: { value: typed } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() => expect(queryBody()).not.toBeNull());
+    return queryBody();
+  }
+
+  it('a dictated message carries dictation_used: true and nothing else about the amounts', async () => {
+    const body = await ask({ dictate: ['charge 6133 a month'] });
+    expect(body.dictation_used).toBe(true);
+    expect(body).not.toHaveProperty('dictation_money');
+    expect(JSON.stringify(body)).not.toMatch(/suggested|candidates/);
+  });
+
+  it('several chunks still send the one flag', async () => {
+    const body = await ask({ dictate: ['charge sixty-one', 'thirty-three a month'] });
+    expect(body.dictation_used).toBe(true);
+  });
+
+  it('a typed message sends no flag', async () => {
+    const body = await ask({ typed: 'charge 6133 a month' });
+    expect(body).not.toHaveProperty('dictation_used');
+  });
+
+  it('an edited dictated message still sends the flag (the server reads what is there)', async () => {
+    const body = await ask({ dictate: ['charge 6133 a month'], typed: 'charge $61.33 a month' });
+    expect(body.dictation_used).toBe(true);
   });
 });
