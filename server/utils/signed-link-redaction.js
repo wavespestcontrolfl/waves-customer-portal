@@ -360,42 +360,79 @@ function returnNumber(item, state) {
   return text;
 }
 
-// One NOTE_CAP budget for a whole structured note: string leaves draw from it,
-// and once it is spent the rest is "[cut]" (Codex #6375 r4).
+// One NOTE_CAP budget for a whole structured note, counted in serialized
+// characters: string leaves, keys (quotes, colon, comma), scalars (boolean,
+// number, null, empty string), brackets and commas all draw from it. Once it is
+// spent no entry is added and one "[cut]" marker closes the object or array
+// (Codex #6375 r4, r7).
+const noteFits = (state, cost) => state.noteBudget === undefined || cost <= state.noteBudget;
+const chargeNote = (state, cost) => { if (state.noteBudget !== undefined) state.noteBudget -= cost; };
+const serialLength = value => (typeof value === 'string' ? value.length + 2 : String(value).length);
+// What an entry needs at least: its own text for a scalar, brackets for a container
+// and the quotes for a string (the string is then cut to what is left).
+const leastLeafCost = entry => {
+  if (typeof entry === 'string') return 2;
+  if (entry && typeof entry === 'object') return 2;
+  return serialLength(entry);
+};
+
 function returnNoteString(item, state) {
   const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state), { truncated: item.length > SCAN_LIMIT });
   state.noteSecrets += removed;
   if (state.noteBudget === undefined) return text;
-  if (state.noteBudget <= 0) return CUT;
-  const kept = text.length > state.noteBudget ? `${text.slice(0, state.noteBudget)}${CUT}` : text;
-  state.noteBudget -= text.length;
+  const room = Math.max(state.noteBudget - 2, 0);
+  const kept = text.length > room ? `${text.slice(0, room)}${CUT}` : text;
+  chargeNote(state, kept.length + 2);
   return kept;
 }
 
-function returnNote(item, state, depth = 0) {
-  if (typeof item === 'string') return returnNoteString(item, state);
-  // A number can be a card number too ({ card_number: 4242424242424242 }).
-  if (typeof item === 'number' || typeof item === 'bigint') return returnNumber(item, state);
-  if (!item || typeof item !== 'object') return item;
-  if (depth === 0) {
-    state.noteBudget = NOTE_CAP;
-    try { return returnNote(item, state, 1); } finally { delete state.noteBudget; }
+// A scalar that is not a string, charged at its serialized length.
+function returnNoteScalar(item, state) {
+  const result = typeof item === 'number' || typeof item === 'bigint' ? returnNumber(item, state) : item;
+  chargeNote(state, serialLength(result));
+  return result;
+}
+
+function returnNoteEntries(item, state, depth) {
+  chargeNote(state, 2);
+  if (Array.isArray(item)) {
+    const list = [];
+    for (const entry of item) {
+      if (!noteFits(state, 1 + leastLeafCost(entry))) { list.push(CUT); break; }
+      chargeNote(state, 1);
+      list.push(returnNote(entry, state, depth + 1));
+    }
+    return list;
   }
-  if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
-  if (Array.isArray(item)) return item.map(entry => returnNote(entry, state, depth + 1));
   const out = {};
   let hiddenKeys = 0;
   for (const [rawKey, entry] of Object.entries(item)) {
     // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
     const scrubbedKey = scrubNote(redactString(rawKey, state)).text;
     const key = scrubbedKey === rawKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
+    const keyCost = serialLength(key) + 2;
+    if (!noteFits(state, keyCost + leastLeafCost(entry))) { out[CUT] = true; break; }
     if (key !== rawKey) state.noteSecrets += 1;
+    chargeNote(state, keyCost);
     if (entry !== null && entry !== undefined && isCredentialField(rawKey, entry)) {
       state.noteSecrets += 1;
       out[key] = REDACTED_FIELD;
+      chargeNote(state, serialLength(REDACTED_FIELD));
     } else out[key] = returnNote(entry, state, depth + 1);
   }
   return out;
+}
+
+function returnNote(item, state, depth = 0) {
+  if (typeof item === 'string') return returnNoteString(item, state);
+  // A number can be a card number too ({ card_number: 4242424242424242 }).
+  if (!item || typeof item !== 'object') return returnNoteScalar(item, state);
+  if (depth === 0) {
+    state.noteBudget = NOTE_CAP;
+    try { return returnNote(item, state, 1); } finally { delete state.noteBudget; }
+  }
+  if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
+  return returnNoteEntries(item, state, depth);
 }
 
 // A copy of `value` with credentials removed. `state` counts what was removed.

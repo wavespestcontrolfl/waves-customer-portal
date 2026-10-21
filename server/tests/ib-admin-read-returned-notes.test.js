@@ -13,7 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const { executeAdminReadTool } = require('../services/intelligence-bar/admin-read-tools');
-const { scrubNote, NOTE_CAP } = require('../utils/note-secret-scrubber');
+const { scrubNote, NOTE_CAP, CUT } = require('../utils/note-secret-scrubber');
 const { noteUntrustedRead, newRequestTaint } = require('../services/intelligence-bar/owner-direct');
 
 const AUTH = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoidG9rZW4ifQ.c2lnbmF0dXJl';
@@ -220,6 +220,31 @@ describe('Basic credentials and env-style secrets (Codex #6375 r2)', () => {
   });
 });
 
+describe('Codex #6375 r7: spaced and punctuated credential assignments, any Authorization scheme', () => {
+  const { scrubNote } = require('../utils/note-secret-scrubber');
+  test.each([
+    ['db.password: hunter22', 'hunter22', 'db.password: [removed]'],
+    ['DB_PASSWORD = hunter22', 'hunter22', 'DB_PASSWORD = [removed]'],
+    ['X-API-Key: abc123xyz', 'abc123xyz', 'X-API-Key: [removed]'],
+    ['Authorization: Token abc123xyz', 'abc123xyz', 'Authorization: [removed]'],
+    ['Authorization: Digest nonce77abcd', 'nonce77abcd', 'Authorization: [removed]'],
+    ['dbPassword=hunter22 and api key: abc12345', 'abc12345', 'dbPassword=[removed] and api key: [removed]'],
+  ])('%s is scrubbed and the key stays', (note, secret, expected) => {
+    const { text, removed } = scrubNote(note);
+    expect(text).not.toContain(secret);
+    expect(text).toBe(expected);
+    expect(removed).toBeGreaterThan(0);
+  });
+  test('ordinary prose and labels without a credential word stay as written', () => {
+    const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+  test('a second pass over scrubbed text changes nothing', () => {
+    const once = scrubNote('DB_PASSWORD=hunter22; db.password: hunter22').text;
+    expect(scrubNote(once).text).toBe(once);
+  });
+});
+
 describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
   const { scrubNote, SCAN_LIMIT } = require('../utils/note-secret-scrubber');
   const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
@@ -255,6 +280,29 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
     const text = result.data.notes.join('');
     expect(text.replace(/\[cut\]/g, '').length).toBeLessThanOrEqual(1000);
     expect(text).toContain('[cut]');
+  });
+
+  test('keys and scalars count against the 1,000-character budget too (r7)', async () => {
+    const note = {};
+    for (let i = 0; i < 300; i += 1) note[`key_${i}`] = [true, 12345, null, ''][i % 4];
+    const result = await read(ENTRY, { id: 1, notes: note });
+    const body = JSON.stringify(result.data.notes);
+    const marker = JSON.stringify({ [CUT]: true }).length;
+    expect(body.length).toBeLessThanOrEqual(NOTE_CAP + marker);
+    expect(result.data.notes[CUT]).toBe(true);
+    expect(Object.keys(result.data.notes).length).toBeLessThan(300);
+  });
+
+  test('an array of scalars is budgeted and closed with one cut marker (r7)', async () => {
+    const result = await read(ENTRY, { id: 1, notes: Array.from({ length: 2000 }, (_, i) => (i % 2 ? true : 7)) });
+    expect(JSON.stringify(result.data.notes).length).toBeLessThanOrEqual(NOTE_CAP + JSON.stringify(CUT).length + 1);
+    expect(result.data.notes[result.data.notes.length - 1]).toBe(CUT);
+  });
+
+  test('a small structured note is returned whole, without a marker (r7)', async () => {
+    const note = { floor: 2, dog: true, gate: 'side', spare: null };
+    const result = await read(ENTRY, { id: 1, notes: note });
+    expect(result.data.notes).toEqual(note);
   });
 
   test('a short Bearer token is removed; "the bearer of" prose stays (r4)', () => {

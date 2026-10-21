@@ -336,13 +336,18 @@ const NOTES_RETURNED_NOTE = `Free-text notes are returned as written, with secre
 // Said when a row is in keep mode: the answer holds only the reviewed fields.
 const KEEP_NOTE = 'This read returns only a reviewed list of fields (ids, names, contact details, dates, numbers and statuses). Free text, notes, titles, tags and any field not on the list exist on the record but are not shown; say so if the operator asks for one.';
 
+function projectRow(parsed, entry) {
+  const omitted = entry.omit ? omitPaths(parsed, entry.omit) : parsed;
+  return entry.keep ? keepPaths(omitted, entry.keep) : omitted;
+}
+
 function answerFrom(parsed, status, entry) {
   const state = newState();
   // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read,
   // unless GATE_IB_READ_NOTES is on: then it is returned through the fixed-format scrubber only.
   // The row's projection next: keys it omits never reach the model, and a row in keep mode (an allow-list) passes ONLY the
   // keys it lists, so a column added later is dropped until a person reviews it. Then every string is scrubbed.
-  const projected = entry.keep ? keepPaths(entry.omit ? omitPaths(parsed, entry.omit) : parsed, entry.keep) : (entry.omit ? omitPaths(parsed, entry.omit) : parsed);
+  const projected = projectRow(parsed, entry);
   const returning = readNotesLive();
   const clean = returning
     ? redactSecrets(projected, state, 0, { freeText: entry.freeText || {} })

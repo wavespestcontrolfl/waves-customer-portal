@@ -21,10 +21,14 @@
  *    (token, signature, sig, key, apikey, X-Amz-*, ...) and user:password@ in a URL
  *  - card numbers (Luhn, utils/pan-scrub.js)
  *  - SSN pattern ddd-dd-dddd
+ *  - the value of a structural credential assignment: a key whose last word is
+ *    password, passwd, secret, token, api key, credential, auth or authorization,
+ *    then '=' or ':' and 4+ characters ("db.password: x", "X-API-Key: x"); and an
+ *    "Authorization:" header with any scheme word ("Token x", "Digest x")
  *  - any other run of 32 or more base64/hex characters
  */
 const { scrubPans } = require('./pan-scrub');
-const { isCredentialName } = require('./credential-fields');
+const { isCredentialName, nameWords } = require('./credential-fields');
 
 const REMOVED = '[removed]';
 const NOTE_CAP = 1000;
@@ -68,6 +72,24 @@ function looksLikeBasicCredential(header, token) {
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
 // upper-case name, '=', no spaces (Codex #6375 r2).
 const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)/g;
+// Structural credential assignments in a config or header format (Codex #6375 r7):
+// "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
+// "Authorization: Token abc123xyz". The KEY must end in a credential word (names
+// split on . _ - and camelCase), then optional spaces, '=' or ':', optional
+// spaces, and a value of 4+ characters. The key stays, the value is replaced.
+// Still no prose rules: "the password is in the lockbox" has no '=' or ':' and
+// "gate code: 1234" has no credential word, so both come back as written.
+const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
+const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
+function isAssignmentSecretKey(key) {
+  const words = nameWords(key);
+  const last = words[words.length - 1];
+  if (ASSIGN_KEY_WORDS.has(last)) return true;
+  return last === 'key' && words[words.length - 2] === 'api';
+}
+const isAlreadyRemoved = value => value.startsWith(REMOVED) || value.startsWith(`"${REMOVED}`) || value.startsWith(`'${REMOVED}`);
+
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;
 // user:password@ in a link of ANY scheme (postgresql://, redis://, ftp://,
@@ -113,6 +135,12 @@ function scrubNoteText(input) {
     .replace(BEARER_RE, (match, header, token) => (looksLikeBearerToken(header, token) ? `${header || ''}${swap()}` : match))
     .replace(BASIC_RE, (match, header, scheme, token) => (looksLikeBasicCredential(header, token) ? `${header || ''}${swap()}` : match));
   text = text.replace(ENV_SECRET_RE, (match, name) => { removed += 1; return `${name}=${REMOVED}`; });
+  text = text.replace(AUTH_HEADER_RE, (match, head, scheme, value) => (isAlreadyRemoved(scheme) || isAlreadyRemoved(value) ? match : `${head}${swap()}`));
+  text = text.replace(KEY_ASSIGN_RE, (match, key, sep, value) => {
+    if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) return match;
+    removed += 1;
+    return `${key}${sep}${REMOVED}`;
+  });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);
   if (noPans !== text) removed += 1;
