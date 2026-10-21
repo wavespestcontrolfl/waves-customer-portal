@@ -68,7 +68,7 @@ const CLOCK_BEFORE = /\b(?:at|by|around|before|after|until|till|from|between)\s+
 const DATE_BEFORE = /\b(?:dated|since|year|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:\w+\s+)?$/i;
 // A year needs date context right before it (a month name, in, since, year, of...). A money word right
 // before it ("charge 2026", "price in 2026") makes it an amount to flag, not a year.
-const YEAR_BEFORE = /\b(?:in|since|year|of|dated|during|until|by|before|after|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:\w+,?\s+)?$/i;
+const YEAR_BEFORE = /\b(?:in|since|year|of|dated|during|until|by|before|after|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:[\w']+,?\s+){0,3}$/i; // "October the 21st, 2026" (up to 3 words between, Codex r2)
 const MONEY_BEFORE_YEAR = /\b(?:price[ds]?|pricing|charge[ds]?|charging|costs?|rates?|invoice[ds]?|pa(?:y|id|ys|ying)|total|amount|quote[ds]?|fees?|bill(?:ed)?|owe[sd]?|balance|refund(?:ed)?|discount)(?:\s+(?:of|is|was|at|for|to|the|a))*\s+$/i;
 const PRICE_AFTER = /^\s*(?:dollars?|bucks?|a\s+month|per\b|each\b|\/\s?mo|monthly|every\b)/i;
 

@@ -175,7 +175,7 @@ describe('ambiguous run-together amounts', () => {
   });
 
   test.each(['charge 1500 a month', 'price 1233 a visit', 'call 941-555-6133 price', 'invoice 6133', 'price at 1234 Main St',
-    'the price in 2026', 'paid in 2026', 'dated October 20, 2026 invoice total', 'charge for 6133 gallons',
+    'the price in 2026', 'paid in 2026', 'dated October 20, 2026 invoice total', 'October the 21st, 2026 total was paid', 'on March the 3rd 2026 the price was set', 'charge for 6133 gallons',
     'price 6133 University Town Center Drive', 'charge at 6133 Old Tampa Road', '6133 was the invoice number, total is fine',
     '6133 is the gate code, price later', 'the rate in milliliters is 6133', 'area in square feet is 6133, price', 'charge them at 2230',
     'charge by 1430', 'price for the visit at 2359', 'rate in yards is 6133', 'treated 6133 sq ft', '$6,133 a month', '$6133.50 total', 'zip 34202 price'])(
