@@ -5348,8 +5348,14 @@ async function paymentIntentSharedWithOtherInvoice(conn, paymentIntentId, invoic
 async function lockPinnedPaymentIntent(pinnedById, candidate) {
   if (!pinnedById || !candidate.stripe_payment_intent_id) return { lock: null, shared: false };
   const lock = await db.transaction();
-  await require("./pay-combined").lockCombinedCustomers(lock, [String(candidate.customer_id)]);
-  return { lock, shared: await paymentIntentSharedWithOtherInvoice(lock, candidate.stripe_payment_intent_id, candidate.id) };
+  try {
+    await require("./pay-combined").lockCombinedCustomers(lock, [String(candidate.customer_id)]);
+    return { lock, shared: await paymentIntentSharedWithOtherInvoice(lock, candidate.stripe_payment_intent_id, candidate.id) };
+  } catch (err) {
+    // The caller never receives the transaction, so it must be rolled back here (frees the connection and the lock).
+    await lock.rollback().catch(() => {});
+    throw err;
+  }
 }
 
 async function releaseCombinedLock(lock) {
@@ -13467,6 +13473,10 @@ const InvoiceService = {
               return { skipped: `status moved to ${locked.status}`, invoice: locked };
             } else if (pinnedMismatch(locked)) {
               return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
+            } else if (pinnedById && await require("./appointment-cancel-impact").invoiceDownstreamReason(trx, [locked])) {
+              // Setup-fee, annual-prepay or membership-dues effects the card refused at preview: an invoice edited
+              // since can keep its amounts and still gain one, and the void would then restore an unapproved obligation.
+              return { skipped: "downstream billing effects appeared since the confirmed card; needs office review", invoice: locked };
             }
             // A different/new PI attached after triage means a customer is
             // actively starting a payment — skip.

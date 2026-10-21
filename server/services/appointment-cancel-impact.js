@@ -741,6 +741,7 @@ module.exports = {
   linkedFollowUpRows,
   lockLinkedFollowUps,
   linkedChildMoneyReason,
+  invoiceDownstreamReason,
   cancelImpactsMatch,
   previewCancelFee,
   feeRailClear,

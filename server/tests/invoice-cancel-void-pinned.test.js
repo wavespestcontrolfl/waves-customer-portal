@@ -9,6 +9,7 @@
  */
 let mockInvoiceRows = [];
 let mockLockedOverride = {};
+let mockOtherRows = {};
 const mockUpdates = [];
 jest.mock('../models/db', () => {
   const makeChain = (table) => {
@@ -26,7 +27,7 @@ jest.mock('../models/db', () => {
     });
     chain.select = jest.fn(() => chain);
     const rows = () => {
-      if (table !== 'invoices') return [];
+      if (table !== 'invoices') return mockOtherRows[table] || [];
       let r = mockInvoiceRows;
       if (state.idIn) r = r.filter((x) => state.idIn.includes(String(x.id)));
       if (state.whereObj?.id) r = r.filter((x) => String(x.id) === String(state.whereObj.id));
@@ -85,6 +86,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockInvoiceRows = [INV_A, INV_B];
   mockLockedOverride = {};
+  mockOtherRows = {};
   mockUpdates.length = 0;
   jest.spyOn(InvoiceService, 'restoreRodentSetupObligationForReversedInvoice').mockResolvedValue(undefined);
 });
@@ -344,5 +346,68 @@ describe('pinned sweep takes the combined-payment lock', () => {
     stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
     await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
     expect(lockCalls()).toHaveLength(0);
+  });
+});
+
+// Downstream billing effects (a rodent setup-fee line or claim, an annual-prepay invoice, a membership-dues stamp) were
+// refused at preview. An invoice edited after the final preview can keep its amounts and still gain one, so the pinned
+// void repeats the check on the locked invoice row and skips the void on drift.
+describe('pinned void rechecks downstream billing effects under the invoice lock', () => {
+  const SETUP = [{ description: 'Bait Station Setup — one-time setup fee', amount: 150 }];
+  const run = async () => {
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    return { pinned, voided: [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))] };
+  };
+
+  test.each([
+    ['gained a rodent setup-fee line', () => { mockLockedOverride['inv-b'] = { line_items: SETUP }; }],
+    ['gained a membership-dues stamp', () => { mockLockedOverride['inv-b'] = { line_items: [{ description: 'Dues', membership_dues_month: '2026-11' }] }; }],
+    ['gained a setup-fee claim', () => { mockOtherRows.setup_fee_claims = [{ id: 'claim-1' }]; }],
+    ['became an annual-prepay invoice', () => { mockOtherRows.annual_prepay_terms = [{ id: 'term-1' }]; }],
+  ])('an invoice that %s since the card is NOT voided (reported by the follow-through as not carried out)', async (_label, drift) => {
+    mockInvoiceRows = [INV_B];
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    drift();
+    const voided = [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))];
+    expect(voided).toEqual([]);
+    expect(voidedIds()).toEqual([]);
+  });
+
+  test('an unchanged plain invoice is still voided', async () => {
+    mockInvoiceRows = [INV_B];
+    expect((await run()).voided).toEqual(['inv-b']);
+  });
+
+  test('Dispatch\'s unpinned sweep does not run the check (it voids as before)', async () => {
+    mockInvoiceRows = [INV_B];
+    mockLockedOverride['inv-b'] = { line_items: SETUP };
+    const voided = [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1'))];
+    expect(voided).toEqual(['inv-b']);
+  });
+});
+
+// If preparing the combined-payment lock fails, the manual transaction is rolled back and the error surfaces (the
+// candidate is logged and left open) - no leaked connection or advisory lock.
+describe('combined-payment lock preparation failure', () => {
+  const stripe = require('../services/stripe');
+  const db = require('../models/db');
+
+  test('a failing advisory lock rolls the manual transaction back, calls no Stripe, and voids nothing', async () => {
+    mockInvoiceRows = [{ ...INV_A, customer_id: 'cust-1', stripe_payment_intent_id: 'pi_test' }];
+    stripe.retrievePaymentIntent.mockReset().mockResolvedValue({ status: 'requires_payment_method' });
+    stripe.cancelPaymentIntent.mockReset();
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    stripe.retrievePaymentIntent.mockClear();
+    db.raw.mockImplementation((sql, bindings) => {
+      if (bindings?.[0] === 'pay.combined.customer') throw new Error('lock timeout');
+      return sql;
+    });
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    db.raw.mockImplementation((x) => x);
+    expect([...voided]).toEqual([]);
+    expect(db.__lockTrx.rollback).toHaveBeenCalledTimes(1);
+    expect(db.__lockTrx.commit).not.toHaveBeenCalled();
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
   });
 });
