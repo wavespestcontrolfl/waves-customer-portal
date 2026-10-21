@@ -179,6 +179,7 @@ describe('GATE_IB_OPENAI_BACKUP on /query', () => {
     });
   });
   afterAll(() => { global.fetch = realFetch; delete process.env.GATE_IB_OPENAI_BACKUP; });
+  afterEach(() => { delete process.env.INTELLIGENCE_BAR_BACKUP_MODEL; });
 
   test('a usage-limit 400 finishes on OpenAI: one tool call runs once, the answer says who answered', async () => {
     process.env.GATE_IB_OPENAI_BACKUP = 'true';
@@ -306,6 +307,30 @@ describe('GATE_IB_OPENAI_BACKUP on /query', () => {
     expect(input.filter(item => item.type === 'function_call').map(item => item.call_id)).toEqual(['tu_1']);
     expect(input.filter(item => item.type === 'function_call_output').map(item => item.call_id)).toEqual(['tu_1']);
     expect(input.find(item => item.role === 'assistant')).toMatchObject({ content: 'Looking.' });
+  });
+
+  test('two tool rounds with reasoning: each round replays its reasoning item, in order, with encrypted content requested', async () => {
+    process.env.GATE_IB_OPENAI_BACKUP = 'true';
+    process.env.INTELLIGENCE_BAR_BACKUP_MODEL = 'gpt-5.6-sol'; // a reasoning model: include + reasoning are sent
+    mockMessagesCreate.mockRejectedValue(LIMIT_ERROR);
+    const reasoning = (id) => ({ type: 'reasoning', id, summary: [], encrypted_content: `enc_${id}` });
+    const call = (id, call_id, args) => ({ type: 'function_call', id, call_id, name: 'query_customers', arguments: JSON.stringify(args), status: 'completed' });
+    openaiScript = [
+      completed([reasoning('rs_1'), call('fc_1', 'call_a', { search: 'a' })]),
+      completed([reasoning('rs_2'), call('fc_2', 'call_b', { search: 'b' })]),
+      completed([reasoning('rs_3'), textOf('Both looked up.')]),
+    ];
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'two lookups', context: 'customers' });
+      expect(status).toBe(200);
+      expect(body.response).toBe('Both looked up.\n\n(answered by the backup model)');
+    });
+    expect(mockExecuteTool).toHaveBeenCalledTimes(2);
+    expect(openaiRequests.every(request => request.include?.[0] === 'reasoning.encrypted_content')).toBe(true);
+    const shape = request => request.input.map(item => item.id || item.call_id && `out:${item.call_id}` || item.role);
+    expect(shape(openaiRequests[1]).slice(1)).toEqual(['rs_1', 'fc_1', 'out:call_a']);
+    expect(shape(openaiRequests[2]).slice(1)).toEqual(['rs_1', 'fc_1', 'out:call_a', 'rs_2', 'fc_2', 'out:call_b']);
+    expect(openaiRequests[2].input.find(item => item.id === 'rs_2')).toMatchObject({ type: 'reasoning', encrypted_content: 'enc_rs_2' });
   });
 
   test('the last round tells the backup it may not call a tool', async () => {

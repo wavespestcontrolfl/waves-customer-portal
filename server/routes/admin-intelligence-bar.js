@@ -25,9 +25,8 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
-const OpenaiToolAdapter = require('../services/intelligence-bar/openai-tool-adapter');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -3702,20 +3701,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     let offeredChoices = null;
 
     // GATE_IB_OPENAI_BACKUP (read at call time): a provider error from the Anthropic
-    // call finishes this request on OpenAI (ib-openai-backup.js). Tool search is off
-    // from then on and the saved task is marked, so it never holds two providers.
-    let onBackup = false;
-    let backupOrigin = null; // the Anthropic error that caused the switch
-    const switchToBackup = async () => {
-      const next = IbOpenaiBackup.backupRequestState({ tools, messages: currentMessages, context, actionScope });
-      tools = next.tools;
-      currentMessages = next.messages;
-      toolSearch = next.toolSearch;
-      systemPrompt = IbOpenaiBackup.backupSystemPrompt(systemPrompt);
-      onBackup = true;
-      if (activeTask) await IbTasks.markModelProvider(activeTask.id, getAdminActorId(req), activeTask.runner_token, IbOpenaiBackup.BACKUP_PROVIDER);
-    };
-    if (ibOpenaiBackupLive() && IbOpenaiBackup.taskOnBackup(req.ibResumedTask)) await switchToBackup();
+    // call finishes this request on OpenAI (ib-openai-backup.js owns the switch).
+    const modelCaller = IbOpenaiBackup.createModelCaller({
+      context, actionScope, task: req.ibResumedTask, finalMessages: finalRoundMessages,
+      read: () => ({ tools, messages: currentMessages, systemPrompt }),
+      apply: next => { tools = next.tools; currentMessages = next.messages; toolSearch = next.toolSearch; systemPrompt = next.systemPrompt; },
+      markTask: async () => activeTask && IbTasks.markModelProvider(activeTask.id, getAdminActorId(req), activeTask.runner_token, IbOpenaiBackup.BACKUP_PROVIDER),
+    });
+    await modelCaller.startFromTask();
 
     // Tool-use loop
     let lastToolResponse = null;
@@ -3723,9 +3716,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const finalRound = round === MAX_TOOL_ROUNDS - 1;
       stepLimitReached = finalRound;
-      const backupRound = () => OpenaiToolAdapter.callBackup({ system: systemPrompt, tools, tech: context === 'tech', finalRound,
-        messages: finalRound ? finalRoundMessages(currentMessages) : currentMessages });
-      const askModel = () => ledgerCall('anthropic', model, () => anthropic.messages.create({
+      const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
         max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
@@ -3739,24 +3730,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         tools,
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
         messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
-      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
-      let response;
-      if (!onBackup) {
-        try { response = await askModel(); } catch (err) {
-          if (!ibOpenaiBackupLive() || !IbOpenaiBackup.isProviderError(err)) throw err;
-          logger.warn(`[intelligence-bar] Anthropic call failed (code=${err.status || err.code || 'unknown'}); finishing on the OpenAI backup`);
-          await switchToBackup();
-          backupOrigin = err;
-        }
-      }
-      if (onBackup) {
-        try { response = await backupRound(); } catch (backupErr) {
-          logger.error(`[intelligence-bar] OpenAI backup failed (code=${backupErr.status || backupErr.code || 'unknown'})`);
-          // The ORIGINAL Anthropic error is what a failed backup rethrows, so whatever handles a failed model call sees what it always saw.
-          throw backupOrigin || backupErr;
-        }
-      }
-
+      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' }) });
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
       // silent invalidator crept back into the prefix.
@@ -4071,7 +4045,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const cardNotice = cardClaimNotice(finalResponse, pendingProposals.length);
       if (cardNotice) finalResponse += `\n\n${cardNotice}`;
     }
-    if (onBackup) finalResponse += `\n\n${IbOpenaiBackup.ANSWER_LINE}`;
+    finalResponse += modelCaller.answerSuffix();
 
     // Log the query for analytics. tool_calls stores names + field keys only;
     // prompt/response are additionally redacted when a PII-bearing tool ran

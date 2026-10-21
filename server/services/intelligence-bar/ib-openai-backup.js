@@ -22,6 +22,9 @@ const ToolSearch = require('./tool-search');
 const ActionRegistry = require('./action-registry');
 const apiToolDefinition = require('./tool-definition');
 const { gapReportPromptLine } = require('../agent-gap-reports');
+const { ibOpenaiBackupLive } = require('../../config/feature-gates');
+const { callBackup } = require('./openai-tool-adapter');
+const logger = require('../logger');
 
 const BACKUP_PROVIDER = 'openai_backup';
 const ANSWER_LINE = '(answered by the backup model)';
@@ -93,4 +96,65 @@ function backupSystemPrompt(systemPrompt) {
   return text;
 }
 
-module.exports = { isProviderError, taskOnBackup, backupRequestState, backupSystemPrompt, loadedToolNames, BACKUP_PROVIDER, ANSWER_LINE };
+const errorCode = err => err?.status || err?.code || 'unknown';
+
+/**
+ * The one place the /query loop asks a model, built once per request.
+ * `call({ ask, finalRound })` runs `ask` (the Anthropic call); on a provider
+ * error with the gate on it switches the request to the backup and runs that
+ * round there, and every later round goes straight to the backup. A failed
+ * backup rethrows the ORIGINAL Anthropic error, so whatever handles a failed model
+ * call sees what it always saw.
+ *
+ * The route hands over what the helper may change and nothing else:
+ *   read()           -> { tools, messages, systemPrompt }  (the request's live values)
+ *   apply(next)      -> sets tools, messages, toolSearch, systemPrompt on the request
+ *   markTask()       -> marks the saved task (a no-op without one)
+ *   finalMessages(m) -> the last round's messages (the step-limit note)
+ * `task` is the resumed task, if any: one marked as a backup task starts on the backup.
+ */
+function createModelCaller({ context, actionScope, task, read, apply, markTask, finalMessages }) {
+  let onBackup = false;
+  let origin = null;
+
+  async function switchOver() {
+    const live = read();
+    const next = backupRequestState({ tools: live.tools, messages: live.messages, context, actionScope });
+    apply({ ...next, systemPrompt: backupSystemPrompt(live.systemPrompt) });
+    onBackup = true;
+    await markTask();
+  }
+
+  async function runBackup(finalRound) {
+    const live = read();
+    try {
+      return await callBackup({ system: live.systemPrompt, tools: live.tools, finalRound, tech: context === 'tech',
+        messages: finalRound ? finalMessages(live.messages) : live.messages });
+    } catch (backupErr) {
+      logger.error(`[intelligence-bar] OpenAI backup failed (code=${errorCode(backupErr)})`);
+      throw origin || backupErr;
+    }
+  }
+
+  async function call({ ask, finalRound }) {
+    if (!onBackup) {
+      try { return await ask(); } catch (err) {
+        if (!ibOpenaiBackupLive() || !isProviderError(err)) throw err;
+        logger.warn(`[intelligence-bar] Anthropic call failed (code=${errorCode(err)}); finishing on the OpenAI backup`);
+        origin = err;
+        await switchOver();
+      }
+    }
+    return runBackup(finalRound);
+  }
+
+  return {
+    call,
+    // A resumed backup task continues on the backup while the gate is on.
+    startFromTask: async () => { if (ibOpenaiBackupLive() && taskOnBackup(task)) await switchOver(); },
+    // The line that ends an answer the backup wrote; empty otherwise.
+    answerSuffix: () => (onBackup ? `\n\n${ANSWER_LINE}` : ''),
+  };
+}
+
+module.exports = { createModelCaller, isProviderError, taskOnBackup, backupRequestState, backupSystemPrompt, loadedToolNames, BACKUP_PROVIDER, ANSWER_LINE };

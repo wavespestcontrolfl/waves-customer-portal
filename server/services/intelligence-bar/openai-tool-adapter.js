@@ -21,15 +21,21 @@
  *     `tool_reference` results (a reference becomes the plain capability list),
  *   - `cache_control` and `defer_loading` (Anthropic prompt-cache / tool-search),
  *   - server tool definitions (any tool carrying a `type` other than 'custom').
- * OpenAI reasoning items are not returned to the loop either; with store:false
- * the next round sends the function calls and their outputs without them.
+ * Reasoning: a reasoning model's reply carries `reasoning` items that the
+ * Responses API wants back, next to the item that followed them, on the next
+ * round (store:false keeps nothing server-side, so the request asks for
+ * `reasoning.encrypted_content`). The loop's history is Anthropic-shaped, so each
+ * reply's raw items ride in a side table keyed by that reply's `content` array
+ * (the loop appends that very array to the history); toInputItems replays them in
+ * their original order for the rounds of THIS request. A history rebuilt from a
+ * checkpoint has no side table and is converted without reasoning.
  *
  * The request carries `store: false`: Intelligence Bar prompts carry customer
  * detail, the same rule llm/call.js applies to every OpenAI request.
  */
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const BACKUP_LANE_ID = 'ib_admin_backup';
@@ -122,6 +128,34 @@ const argumentsText = input => {
 const blocksOf = message => (typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : (Array.isArray(message.content) ? message.content : []));
 const isText = block => block.type === 'text' && typeof block.text === 'string';
 
+// reply.content (the array itself) -> the round's raw output items, replayable.
+const rawRounds = new WeakMap();
+
+// The round's output items in their original order, as far as they can be passed
+// back statelessly: every item with an id, every reasoning item with encrypted
+// content, and no reasoning run at the end (nothing follows it to pair with).
+// Null when the round has no reasoning to keep or an item lacks what a replay needs.
+function replayableRound(output) {
+  const items = (Array.isArray(output) ? output : []).filter(item => item && ['reasoning', 'message', 'function_call'].includes(item.type));
+  let end = items.length;
+  while (end > 0 && items[end - 1].type === 'reasoning') end -= 1;
+  const kept = items.slice(0, end);
+  if (!kept.some(item => item.type === 'reasoning')) return null;
+  const usable = kept.every(item => typeof item.id === 'string' && item.id
+    && (item.type !== 'reasoning' || (typeof item.encrypted_content === 'string' && item.encrypted_content))
+    && (item.type !== 'function_call' || (typeof item.call_id === 'string' && item.call_id)));
+  return usable ? kept.map(replayItem) : null;
+}
+
+function replayItem(item) {
+  if (item.type === 'reasoning') return { type: 'reasoning', id: item.id, summary: item.summary || [], encrypted_content: item.encrypted_content };
+  if (item.type === 'function_call') return { type: 'function_call', id: item.id, call_id: item.call_id, name: item.name, arguments: item.arguments || '{}' };
+  return {
+    type: 'message', id: item.id, role: 'assistant', status: item.status || 'completed',
+    content: (Array.isArray(item.content) ? item.content : []).map(part => (part?.type === 'output_text' ? { type: 'output_text', text: part.text || '', annotations: [] } : part)),
+  };
+}
+
 function assistantItems(blocks) {
   const items = [];
   let text = [];
@@ -156,7 +190,8 @@ function userItems(blocks) {
 function toInputItems(messages) {
   const items = [];
   for (const message of Array.isArray(messages) ? messages : []) {
-    items.push(...(message.role === 'assistant' ? assistantItems(blocksOf(message)) : userItems(blocksOf(message))));
+    const replay = message.role === 'assistant' ? rawRounds.get(message.content) : null;
+    items.push(...(replay || (message.role === 'assistant' ? assistantItems(blocksOf(message)) : userItems(blocksOf(message)))));
   }
   return pairCalls(items);
 }
@@ -209,11 +244,24 @@ function stopReasonOf(data, content) {
   return data?.status === 'incomplete' && data?.incomplete_details?.reason === 'max_output_tokens' ? 'max_tokens' : 'end_turn';
 }
 
+// reply -> the ledger code of an answer that is not a clean success. The ledger
+// records a resolved call as ok, so callBackup flips these rows itself, with the
+// codes llm/call.js files for the same OpenAI outcomes: any non-completed status
+// is openai_incomplete (a cut-off answer is one), a refusal with no text is openai_refusal.
+const failures = new WeakMap();
+function ledgerFailure(data, blocks) {
+  if (data?.status && data.status !== 'completed') return 'openai_incomplete';
+  const refused = blocks.some(block => block.refusal);
+  return refused && !blocks.some(block => block.type === 'text' && !block.refusal && block.text.trim()) ? 'openai_refusal' : null;
+}
+
 function fromOpenAIResponse(data) {
   const raw = (Array.isArray(data?.output) ? data.output : []).flatMap(outputBlocks);
   const stop_reason = stopReasonOf(data, raw);
   const content = raw.map(({ refusal, ...block }) => block);
-  return {
+  const replay = replayableRound(data?.output);
+  if (replay) rawRounds.set(content, replay);
+  const reply = {
     id: data?.id,
     model: data?.model,
     role: 'assistant',
@@ -224,6 +272,9 @@ function fromOpenAIResponse(data) {
     // the Anthropic cache counters read as 0 there.
     usage: data?.usage,
   };
+  const failure = ledgerFailure(data, raw);
+  if (failure) failures.set(reply, failure);
+  return reply;
 }
 
 // ── the call ─────────────────────────────────────────────────────────────
@@ -242,7 +293,10 @@ function requestBody({ model, system, tools, messages, finalRound, tech }) {
     body.tool_choice = finalRound ? 'none' : 'auto';
     body.parallel_tool_calls = true;
   }
-  if (/^gpt-[56](?:\.|-|$)/i.test(String(model))) body.reasoning = { effort: tech ? 'low' : 'medium' };
+  if (/^gpt-[56](?:\.|-|$)/i.test(String(model))) {
+    body.reasoning = { effort: tech ? 'low' : 'medium' };
+    body.include = ['reasoning.encrypted_content']; // store:false keeps no reasoning server-side
+  }
   return body;
 }
 
@@ -283,7 +337,9 @@ async function callBackup({ system, tools, messages, finalRound = false, tech = 
   }
   const model = backupModel();
   const body = requestBody({ model, system, tools, messages, finalRound, tech });
-  return ledgerCall('openai', model, async () => fromOpenAIResponse(await postResponses(body)), { laneId: 'ib_admin_backup' });
+  const reply = await ledgerCall('openai', model, async () => fromOpenAIResponse(await postResponses(body)), { laneId: 'ib_admin_backup' });
+  if (failures.has(reply)) ledgerCallRejected(reply, failures.get(reply));
+  return reply;
 }
 
 module.exports = { callBackup, backupModel, toOpenAITools, toInputItems, fromOpenAIResponse, requestBody, BACKUP_LANE_ID, OPENAI_RESPONSES_API };

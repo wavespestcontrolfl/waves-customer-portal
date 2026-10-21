@@ -6,7 +6,11 @@
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
 const mockLedgerCall = jest.fn((provider, model, fn) => fn());
-jest.mock('../services/llm-dispatch-metrics', () => ({ ledgerCall: (...args) => mockLedgerCall(...args) }));
+const mockLedgerRejected = jest.fn();
+jest.mock('../services/llm-dispatch-metrics', () => ({
+  ledgerCall: (...args) => mockLedgerCall(...args),
+  ledgerCallRejected: (...args) => mockLedgerRejected(...args),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const Adapter = require('../services/intelligence-bar/openai-tool-adapter');
@@ -162,12 +166,47 @@ describe('fromOpenAIResponse', () => {
   });
 });
 
+describe('reasoning replay', () => {
+  const reasoning = (id, enc = `enc_${id}`) => ({ type: 'reasoning', id, summary: [], ...(enc ? { encrypted_content: enc } : {}) });
+  const fc = (id, call_id) => ({ type: 'function_call', id, call_id, name: 'q', arguments: '{"a":1}', status: 'completed' });
+
+  test('a reply with reasoning is replayed in its original order, with ids, instead of the plain conversion', () => {
+    const reply = Adapter.fromOpenAIResponse({ output: [
+      reasoning('rs_1'), { type: 'message', id: 'msg_1', status: 'completed', content: [{ type: 'output_text', text: 'Checking.' }] }, fc('fc_1', 'call_1'),
+    ] });
+    const items = Adapter.toInputItems([
+      { role: 'assistant', content: reply.content },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: '{}' }] },
+    ]);
+    expect(items.map(i => i.id || `out:${i.call_id}`)).toEqual(['rs_1', 'msg_1', 'fc_1', 'out:call_1']);
+    expect(items[0]).toEqual({ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc_rs_1' });
+    expect(items[2]).toMatchObject({ type: 'function_call', call_id: 'call_1', arguments: '{"a":1}' });
+  });
+
+  test('a trailing reasoning item is dropped; a round missing encrypted content falls back to the plain conversion', () => {
+    const trailing = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), fc('fc_1', 'c1'), reasoning('rs_2')] });
+    expect(Adapter.toInputItems([{ role: 'assistant', content: trailing.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]).map(i => i.id || `out:${i.call_id}`))
+      .toEqual(['rs_1', 'fc_1', 'out:c1']);
+    const bare = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), fc('fc_1', 'c1')] });
+    const plain = Adapter.toInputItems([{ role: 'assistant', content: bare.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]);
+    expect(plain.map(i => i.type)).toEqual(['function_call', 'function_call_output']);
+    expect(plain[0].id).toBeUndefined();
+  });
+
+  test('a history copied from elsewhere (no side table) converts without reasoning', () => {
+    const reply = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), fc('fc_1', 'c1')] });
+    const copy = [...reply.content];
+    expect(Adapter.toInputItems([{ role: 'assistant', content: copy }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]).map(i => i.type))
+      .toEqual(['function_call', 'function_call_output']);
+  });
+});
+
 describe('requestBody', () => {
   const base = { model: 'gpt-5.6-sol', system: 'SYS', tools: [tool('q')], messages: [{ role: 'user', content: 'hi' }] };
 
   test('never stores, carries instructions and function tools, and forbids tools on the final round', () => {
     const body = Adapter.requestBody({ ...base, finalRound: false });
-    expect(body).toMatchObject({ store: false, instructions: 'SYS', tool_choice: 'auto', parallel_tool_calls: true, reasoning: { effort: 'medium' } });
+    expect(body).toMatchObject({ store: false, instructions: 'SYS', tool_choice: 'auto', parallel_tool_calls: true, reasoning: { effort: 'medium' }, include: ['reasoning.encrypted_content'] });
     expect(body.tools).toHaveLength(1);
     expect(Adapter.requestBody({ ...base, finalRound: true }).tool_choice).toBe('none');
     expect(Adapter.requestBody({ ...base, tech: true }).reasoning).toEqual({ effort: 'low' });
@@ -178,12 +217,13 @@ describe('requestBody', () => {
     expect('tool_choice' in body).toBe(false);
     expect('tools' in body).toBe(false);
     expect('reasoning' in body).toBe(false);
+    expect('include' in body).toBe(false);
   });
 });
 
 describe('callBackup', () => {
   const realFetch = global.fetch;
-  afterEach(() => { global.fetch = realFetch; mockLedgerCall.mockClear(); process.env.OPENAI_API_KEY = 'test-openai-key'; });
+  afterEach(() => { global.fetch = realFetch; mockLedgerCall.mockClear(); mockLedgerRejected.mockClear(); process.env.OPENAI_API_KEY = 'test-openai-key'; });
 
   const args = { system: 'SYS', tools: [tool('q')], messages: [{ role: 'user', content: 'hi' }] };
 
@@ -196,6 +236,21 @@ describe('callBackup', () => {
     expect(init.headers.Authorization).toBe('Bearer test-openai-key');
     expect(JSON.parse(init.body).store).toBe(false);
     expect(mockLedgerCall).toHaveBeenCalledWith('openai', Adapter.backupModel(), expect.any(Function), { laneId: 'ib_admin_backup' });
+  });
+
+  test('an incomplete answer or a refusal is filed as a failed ledger row, a clean answer is not', async () => {
+    const reply = body => { global.fetch = jest.fn(async () => ({ ok: true, status: 200, json: async () => body })); return Adapter.callBackup(args); };
+    await reply({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'fine' }] }] });
+    expect(mockLedgerRejected).not.toHaveBeenCalled();
+    const cut = await reply({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] });
+    expect(cut.stop_reason).toBe('max_tokens');
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(cut, 'openai_incomplete');
+    const filtered = await reply({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [] });
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(filtered, 'openai_incomplete');
+    const refused = await reply({ status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] });
+    expect(refused.stop_reason).toBe('refusal');
+    expect(mockLedgerRejected).toHaveBeenLastCalledWith(refused, 'openai_refusal');
+    expect(mockLedgerRejected).toHaveBeenCalledTimes(3);
   });
 
   test('an HTTP error rejects with its status (the ledger files it as openai_<status>) and no body text', async () => {
