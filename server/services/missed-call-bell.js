@@ -305,9 +305,12 @@ async function stampShadow(kind, shapeOpts, now, narrow) {
 // the 2-minute sweep offers the call once more, push only. Pass 2 settles
 // whatever happens and, when the push is dead again, raises one admin alert
 // per ET day.
-function pushReachedNoPhone(stats) {
+// firstPassSubs: on the retry pass, how many subscriptions pass 1 found. Expired
+// ones are deactivated by the push service, so the retry can find none left;
+// that still means the push reached no phone either time.
+function pushReachedNoPhone(stats, firstPassSubs = 0) {
   const push = stats?.push;
-  return Boolean(push) && Number(push.subscriptions || 0) > 0
+  return Boolean(push) && (Number(push.subscriptions || 0) > 0 || firstPassSubs > 0)
     && Number(push.sent || 0) === 0 && Number(push.skipped || 0) === 0;
 }
 
@@ -330,27 +333,27 @@ async function raisePushDeadAlert(row) {
   });
 }
 
-async function holdForPushRetry({ row, stats, fenced, pushRetry }) {
+async function holdForPushRetry({ row, stats, fenced, pushRetry, firstPassSubs }) {
   if (pushRetry) {
-    if (pushReachedNoPhone(stats)) await raisePushDeadAlert(row).catch((err) => logger.warn(`[missed-call-bell] push alert failed: ${err.message}`));
+    if (pushReachedNoPhone(stats, firstPassSubs)) await raisePushDeadAlert(row).catch((err) => logger.warn(`[missed-call-bell] push alert failed: ${err.message}`));
     return false;
   }
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('missedCallPushCheck') || !stats?.bellWritten || !pushReachedNoPhone(stats)) return false;
-  await fenced().update({ metadata: db.raw("(metadata - 'missed_call_notified_at') || jsonb_build_object('missed_call_push_retries', 1)") });
+  await fenced().update({ metadata: db.raw("(metadata - 'missed_call_notified_at') || jsonb_build_object('missed_call_push_retries', 1, 'missed_call_push_first_subs', ?::int)", [Number(stats.push.subscriptions)]) });
   return true;
 }
 
 // The end of one delivery pass: settle it, release the lease for the next
 // sweep, or (gate D) hold the call for the push retry.
-async function finishDelivery({ row, stats, fenced, settle, pushRetry }) {
+async function finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs }) {
   const delivered = pushRetry || Boolean(stats && !stats.error
     && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
   if (!delivered) {
     await fenced().update({ metadata: db.raw("metadata - 'missed_call_notified_at'") }).catch(() => {});
     return;
   }
-  const held = await holdForPushRetry({ row, stats, fenced, pushRetry }).catch(() => false);
+  const held = await holdForPushRetry({ row, stats, fenced, pushRetry, firstPassSubs }).catch(() => false);
   if (!held) await settle().catch(() => {});
 }
 
@@ -369,7 +372,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     // and this write loses the race (codex r4).
     const token = new Date().toISOString();
     const reclaimed = Boolean(parseMeta(row.metadata).missed_call_notified_at);
-    const claimed = await db('call_log')
+    const [claimed] = await db('call_log')
       .where({ id: row.id })
       .modify(whereNotBlockedCall)
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
@@ -379,7 +382,10 @@ async function ringMissedCallIfUnanswered(callSid) {
       .whereRaw("COALESCE(call_outcome,'') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw(...unansweredClause(gaps))
       .whereRaw(calledBack)
-      .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [token]) });
+      // RETURNING: the push-retry state below is read from the row this very
+      // claim won, never from the snapshot read before it (a concurrent pass
+      // may have released its lease with a retry recorded in between).
+      .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [token]) }, ['metadata']);
     if (!claimed) return false;
     // Every later write is fenced on the token: a stale owner waking up
     // late can't settle or release a lease someone else now holds.
@@ -415,7 +421,9 @@ async function ringMissedCallIfUnanswered(callSid) {
     // A push-only retry (GATE_MISSED_CALL_PUSH_CHECK, pass 2): the bell row from
     // pass 1 stands. Keyed on the stored counter, not the gate, so a gate flipped
     // off between the passes can never write a second bell.
-    const pushRetry = Number(parseMeta(row.metadata).missed_call_push_retries || 0) >= 1;
+    const claimedMeta = parseMeta(claimed.metadata);
+    const pushRetry = Number(claimedMeta.missed_call_push_retries || 0) >= 1;
+    const firstPassSubs = Number(claimedMeta.missed_call_push_first_subs || 0);
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
@@ -437,7 +445,7 @@ async function ringMissedCallIfUnanswered(callSid) {
         ...(pushRetry ? { pushOnly: true } : {}),
       });
     } finally {
-      await finishDelivery({ row, stats, fenced, settle, pushRetry });
+      await finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs });
     }
     // Post-check (hook P1): a recording that persisted between the claim
     // and here makes this call the voicemail lane's — retire the bell just

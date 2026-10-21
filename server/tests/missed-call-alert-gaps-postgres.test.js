@@ -442,6 +442,58 @@ jest.setTimeout(30000);
       expect((await meta(row.id)).missed_call_settled_at).toBeTruthy();
     });
 
+    test('on: when every first-pass subscription expired, the retry finds none left and still raises the alert', async () => {
+      setGates(['missedCallPushCheck']);
+      const row = call(10, { customer_id: randomUUID() });
+      await database('call_log').insert(row);
+      triggerNotification
+        .mockResolvedValueOnce({ bellWritten: true, push: { subscriptions: 2, sent: 0, expired: 2, failed: 0, skipped: 0, results: [] } })
+        .mockResolvedValueOnce({ bellWritten: false, push: { subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0, results: [] } });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      expect((await meta(row.id)).missed_call_push_first_subs).toBe(2);
+      expect(await sweepMissedCalls()).toBe(1);
+      expect((await meta(row.id)).missed_call_settled_at).toBeTruthy();
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a retry with no recorded dead first pass and no subscriptions raises no alert', async () => {
+      const row = call(10, { customer_id: randomUUID(), metadata: { missed_call_push_retries: 1 } });
+      await database('call_log').insert(row);
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: { subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0, results: [] } });
+      expect(await sweepMissedCalls()).toBe(1);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('a pass that read the row before another pass released its lease with a retry recorded still sends push only', async () => {
+      setGates(['missedCallPushCheck']);
+      const row = call(10, { customer_id: randomUUID() });
+      await database('call_log').insert(row);
+      // The stale read: the other pass sets the retry between this pass's read and its claim.
+      const real = mockConn;
+      let interfere = async () => {
+        await database('call_log').where({ id: row.id }).update({ metadata: { missed_call_push_retries: 1, missed_call_push_first_subs: 2 } });
+      };
+      mockConn = Object.assign((...args) => {
+        const qb = real(...args);
+        if (args[0] === 'call_log' && interfere) {
+          const run = interfere;
+          interfere = null;
+          const first = qb.first.bind(qb);
+          qb.first = async (...a) => { const r = await first(...a); await run(); return r; };
+        }
+        return qb;
+      }, { raw: (...a) => real.raw(...a), transaction: (...a) => real.transaction(...a) });
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: { subscriptions: 2, sent: 2, expired: 0, failed: 0, skipped: 0, results: [] } });
+      try {
+        expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      } finally {
+        mockConn = real;
+      }
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification.mock.calls[0][2].pushOnly).toBe(true);
+      expect((await meta(row.id)).missed_call_settled_at).toBeTruthy();
+    });
+
     test('the retry still stops when the caller got through meanwhile', async () => {
       setGates(['missedCallPushCheck']);
       const customer = randomUUID();
