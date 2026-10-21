@@ -289,6 +289,7 @@ describe('invoices left to the Invoices page (needs_invoices_page)', () => {
     ['a bait-station setup line', (s) => { s.invoices[0].line_items = [{ description: 'Bait Station Setup — one-time setup fee', amount: 129 }]; }],
     ['a setup-fee claim', (s) => { s.setup_fee_claims = [{ id: 'c1', invoice_id: INV }]; }],
     ['an annual-plan term', (s) => { s.annual_prepay_terms = [{ id: 't1', prepay_invoice_id: INV }]; }],
+    ['an invoice covered by an annual plan (covered-term stamp; the term lookup answers none)', (s) => { s.invoices[0].annual_prepay_covered_term_id = 'term-1'; }],
     ['an annual-plan tag', () => { mockResolveTerm.mockResolvedValue('term-1'); }],
     ['a shared combined payment', (s) => { s.invoices[0].stripe_payment_intent_id = 'pi_test_1'; s.invoices.push({ id: 'other', stripe_payment_intent_id: 'pi_test_1', status: 'sent' }); }],
     ['a queued pay-link text', () => { mockQueuedText.mockResolvedValue({ id: 'sms-1' }); }],

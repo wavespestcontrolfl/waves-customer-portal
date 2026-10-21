@@ -163,6 +163,9 @@ async function pageOnlyRefusal(invoice) {
     if (await db('setup_fee_claims').where({ invoice_id: invoice.id }).first('id')) {
       return toPage(`Invoice ${invoice.invoice_number} has a setup-fee claim.`, 'setup_fee', at);
     }
+    if (invoice.annual_prepay_covered_term_id) {
+      return toPage(`Invoice ${invoice.invoice_number} is covered by an annual plan.`, 'annual_plan_covered', at);
+    }
     if (await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id')
       || await require('../invoice-prepay').resolveInvoiceTermId(invoice, db, { strict: true })) {
       return toPage(`Invoice ${invoice.invoice_number} belongs to an annual plan.`, 'annual_plan', at);
