@@ -235,6 +235,13 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     expect(text).toBe(expected);
     expect(removed).toBeGreaterThan(0);
   });
+  test('a parameterized Authorization header loses its whole value to the end of the line (Codex #6375 r8)', () => {
+    const digest = scrubNote('Authorization: Digest username="admin", realm="api", nonce="n0nce99", response="deadbeef"\nNext line stays.');
+    expect(digest.text).toBe('Authorization: [removed]\nNext line stays.');
+    const aws = scrubNote('Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261021/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abcdef0123456789');
+    expect(aws.text).toBe('Authorization: [removed]');
+    expect(aws.text).not.toMatch(/Signature|AKIDEXAMPLE/);
+  });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });

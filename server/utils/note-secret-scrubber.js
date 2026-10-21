@@ -79,7 +79,10 @@ const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOK
 // spaces, and a value of 4+ characters. The key stays, the value is replaced.
 // Still no prose rules: "the password is in the lockbox" has no '=' or ':' and
 // "gate code: 1234" has no credential word, so both come back as written.
-const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
+// The header's whole value goes, to the end of the line: a parameterized scheme
+// (Digest username=..., nonce=..., response=...; AWS4-HMAC-SHA256 ... Signature=...)
+// carries secrets after its first token (Codex #6375 r8).
+const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+([^\n]{4,})/gi;
 const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
 const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
 function isAssignmentSecretKey(key) {
