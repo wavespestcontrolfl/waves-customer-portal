@@ -2641,11 +2641,17 @@ function parseDateOnly(value, field) {
   return String(value).slice(0, 10);
 }
 
-// req.ibApprovedPayment is set only by recordPaymentFromBar (the Intelligence Bar card): the amount due and the invoice
-// status / edit time the card showed, enforced inside the settlement on the locked row, and that the invoice is still the
-// customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
+// req.ibApprovedPayment is set only by recordPaymentFromBar (the Intelligence Bar card): the amount due the card showed, the
+// card's settlementFence (its invoice pin, held-report and annual-plan checks, run before the Stripe retirement and again under
+// the invoice row lock) and receiptGuard (a receipt goes only to the destinations the card showed), and that the invoice is still
+// the customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
 const cardPinsOf = (req) => (req.ibApprovedPayment
-  ? { expectedAmountCents: req.ibApprovedPayment.expectedAmountCents, expectedInvoiceVersion: req.ibApprovedPayment.expectedInvoiceVersion, cardFences: req.ibApprovedPayment.cardFences, requireSelfPay: true }
+  ? {
+    expectedAmountCents: req.ibApprovedPayment.expectedAmountCents,
+    settlementFence: req.ibApprovedPayment.settlementFence,
+    receiptGuard: req.ibApprovedPayment.receiptGuard,
+    requireSelfPay: true,
+  }
   : {});
 
 // Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.
@@ -3791,7 +3797,7 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
 
 // The Intelligence Bar's record_payment runs the SAME handler as POST /:id/record-payment. `body` is exactly what the
 // Invoices page sends (method, reference, note, sendReceipt, via); `recordedBy` is the staff member's name as the page
-// path would read it from the login; approvedPayment: { expectedAmountCents, expectedInvoiceVersion: { status, updatedAtMs } }.
+// path would read it from the login; approvedPayment: { expectedAmountCents, settlementFence, receiptGuard }.
 function recordPaymentFromBar({ invoiceId, body, actor, approvedPayment }) {
   return runInvoiceHandler(recordPaymentHandler, barRequest(invoiceId, body, actor, {
     technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,

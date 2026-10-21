@@ -21,7 +21,6 @@ jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: 
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
 const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
-const { emailDigest, phoneDigest } = require('../services/receipt-destination-digest');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const { resolveInvoiceTermId } = require('../services/invoice-prepay');
 const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
@@ -36,9 +35,6 @@ const INV = '00000000-0000-4000-8000-0000000000a1';
 const CUST = '00000000-0000-4000-8000-0000000000c1';
 const ADMIN = { isAdmin: true, technicianId: 'staff-1', operationId: 'op-1' };
 const EDITED = new Date('2099-01-01T12:00:00.123Z');
-const COLUMNS = {
-  customer_id: CUST, scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0',
-};
 
 let state;
 function freshState() {
@@ -189,11 +185,7 @@ describe('the preview', () => {
   test('the body is the page’s body: method, reference, note, an explicit sendReceipt false and no via', async () => {
     const card = await preview({ note: 'n' });
     expect(card._body).toEqual({ method: 'check', reference: '1042', note: 'n', sendReceipt: false });
-    expect(card._approved).toEqual({
-      expectedAmountCents: 11700,
-      expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS },
-      cardFences: { refuseHeldReport: true, refuseAnnualTerm: true },
-    });
+    expect(card._approved).toEqual({ expectedAmountCents: 11700, settlementFence: expect.any(Function) });
   });
 
   test('a balance net of account credit is the amount due', async () => {
@@ -371,12 +363,40 @@ describe('confirm', () => {
       invoiceId: INV,
       body: { method: 'check', reference: '1042', note: 'n', sendReceipt: true, via: 'both' },
       actor: { technicianId: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' },
-      approvedPayment: {
-        expectedAmountCents: 11700,
-        expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS },
-        cardFences: { refuseHeldReport: true, refuseAnnualTerm: true, approvedReceipt: { email: emailDigest('robin@example.test'), phone: phoneDigest('9415550142') } },
-      },
+      approvedPayment: { expectedAmountCents: 11700, settlementFence: expect.any(Function), receiptGuard: { check: expect.any(Function), relabel: expect.any(Function) } },
     });
+    // The receipt guard it hands over allows exactly the destinations the card showed.
+    const { receiptGuard } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
+    expect(await receiptGuard.check({ channel: 'email', to: 'ROBIN@example.test' })).toBe(true);
+    expect(await receiptGuard.check({ channel: 'sms', to: '+19415550142' })).toBe(true);
+    expect(await receiptGuard.check({ channel: 'email', to: 'other@example.test' })).toBe(false);
+    expect(await receiptGuard.check({ channel: 'app', to: null })).toBe(false);
+  });
+
+  test('the settlement fence it hands over is pinned to the invoice the card showed', async () => {
+    db.schema = { hasTable: jest.fn(async () => false) };
+    const card = await preview();
+    await confirm(card);
+    const { settlementFence } = Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment;
+    // Before the lock (the plain connection): the same invoice passes, the strict edit time included.
+    await expect(settlementFence(db)).resolves.toBe(true);
+    // A change after the card refuses with a 409 the route answers as PREVIEW_CHANGED.
+    state.invoices[0].customer_id = '00000000-0000-4000-8000-0000000000c9';
+    await expect(settlementFence(db)).rejects.toMatchObject({ statusCode: 409, drift: true });
+    state.invoices[0].customer_id = CUST;
+    state.invoices[0].updated_at = new Date('2099-01-02T00:00:00Z');
+    await expect(settlementFence(db)).rejects.toMatchObject({ drift: true });
+    // Under the lock the edit time is not compared (the combined-session release rewrites it); the pinned columns still are.
+    await expect(settlementFence(db, { ...state.invoices[0] })).resolves.toBe(true);
+    await expect(settlementFence(db, { ...state.invoices[0], total: '99.00' })).rejects.toMatchObject({ drift: true });
+    delete db.schema;
+  });
+
+  test('the card’s customer label says a receipt is attempted by its channels, not that one will be sent', async () => {
+    const card = await preview({ send_receipt: true });
+    const contract = buildContract({ toolName: 'record_payment', params: { ...BASE, send_receipt: true }, preview: card, summary: 'x' });
+    expect(JSON.stringify(contract)).toMatch(/A receipt will be attempted by email and text/);
+    expect(JSON.stringify(contract)).not.toMatch(/will be sent a receipt/);
   });
 
   test('without a receipt the result says nothing was sent; with one it reports each leg from the handler’s own answer', async () => {

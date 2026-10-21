@@ -1071,7 +1071,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
-    if (toolName === 'record_payment') contactLabel = 'Customer will be sent a receipt (see the Message lines)';
+    if (toolName === 'record_payment') contactLabel = `A receipt will be attempted by ${preview?.receipt_channels || 'email or text'} (sent unless the customer's receipt settings or a changed address or phone skip it; see the Message lines)`;
     if (toolName === 'accept_estimate') contactLabel = 'Customer will be emailed (see the Message lines)';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3

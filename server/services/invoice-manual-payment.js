@@ -19,25 +19,12 @@
  * credit), nothing is written and a 409 says so, so the ledger can never
  * record a different sum than the money that arrived.
  *
- * expectedInvoiceVersion (optional, the Intelligence Bar record_payment card only): { status,
- * updatedAtMs } — the invoice's status and edit time the card showed. The edit time is checked on the
- * pre-lock read (before any Stripe session is retired) and again at the start of the settlement
- * transaction, BEFORE the combined-session release (which rewrites the invoice's edit time itself when
- * it clears a stamp, so the locked row's edit time cannot be compared). The status is re-checked on the
- * LOCKED row right before the paid flip, with the optional `columns` (the customer, visit link, service record,
- * completion packet, payer links, total and credit), beside the amount due (expectedAmountCents) and
- * self-pay (requireSelfPay). A difference writes nothing and a 409
- * says so. The Invoices page never sets it.
+ * receiptGuard (optional, the Intelligence Bar record_payment card only): { check, relabel }. `check` is handed to the inline receipt
+ * email and text as their provider-boundary check (beforeProviderHandoff on sendReceiptEmail / InvoiceService.sendReceipt) and returns
+ * true only for a destination the card showed; `relabel({ emailResult, smsResult })` words a leg it refused. The Invoices page sends none.
  *
- * cardFences (optional, the Intelligence Bar record_payment card only): { refuseHeldReport, refuseAnnualTerm, approvedReceipt }.
- *   - refuseHeldReport: under the lock, the invoice's projects rows are locked FOR UPDATE and a report held for this payment
- *     ('held' / 'releasing') refuses the settlement (paying would release it to the customer, which the card cannot disclose).
- *   - refuseAnnualTerm: under the lock, an invoice an annual-prepay term resolves to (its tag, its visit's term as the anchor, or
- *     a term whose prepay_invoice_id is this invoice) refuses; those settle a prepaid term and stay on the Invoices page.
- *   - approvedReceipt: { email, phone } the card showed, as digests (receipt-destination-digest.js; null = no such leg). The inline receipt
- *     is handed a provider-boundary check (beforeProviderHandoff on sendReceiptEmail / InvoiceService.sendReceipt) that skips a
- *     leg whose live destination differs and reports it as "receipt not sent: contact changed". The App leg is never approved.
- *   The Invoices page sends none of these.
+ * The card also supplies a settlementFence (below) that throws its own 409 refusals (`drift: true`); the fence is handed the LOCKED
+ * invoice row as its second argument when it runs under the lock.
  *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
  * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
@@ -85,6 +72,15 @@ const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
 
+// Append the operator note to the invoice notes (don't clobber existing notes). Built from the LOCKED row's notes inside the
+// settlement transaction, so a note saved between the unlocked read and the lock is kept, not overwritten.
+function appendOperatorNote(existing, { method, reference, note }) {
+  if (!note) return existing || null;
+  // ET wall-clock date (the one convention — utils/datetime-et), not UTC.
+  const line = `[${etDateString()}] ${method.toUpperCase()}${reference ? ` ${reference}` : ''}: ${note}`;
+  return existing ? `${existing}\n${line}` : line;
+}
+
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
 
@@ -117,56 +113,6 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
   return { status: 409, error: `Open payment session ${openPiId} could not be verified (${verdict.detail || 'payment service unavailable'}); resolve it before ${action}` };
 }
 
-const INVOICE_VERSION_DRIFT_TEXT = 'The invoice changed after the confirmation card was shown — nothing was recorded';
-// status and edit time (ms) as the card read them.
-// columns (optional): the invoice fields that decide what this settlement records or completes (the visit link, the
-// service record and completion packet, the payer links, total and credit), compared on every check. They are the
-// part of the pin the locked row can still prove after the release has rewritten the edit time.
-const PINNED_COLUMNS = ['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied'];
-const MONEY_COLUMNS = new Set(['total', 'credit_applied']);
-const pinnedColumnValue = (row, key) => (MONEY_COLUMNS.has(key) ? String(Math.round((Number(row[key]) || 0) * 100)) : String(row[key] ?? ''));
-function invoiceMatchesVersion(row, { status, updatedAtMs, columns = null }, { editTime = true } = {}) {
-  const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
-  if (String(row.status || '').toLowerCase() !== String(status || '').toLowerCase()) return false;
-  if (editTime && at !== (updatedAtMs ?? null)) return false;
-  return !columns || PINNED_COLUMNS.every((key) => pinnedColumnValue(row, key) === pinnedColumnValue(columns, key));
-}
-
-const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
-
-// The card-only fences that need the locked invoice row (see cardFences above). Returns the flag object the transaction
-// returns, or null. A lookup that throws aborts the transaction: nothing is recorded (fail closed).
-async function cardFenceRefusal(trx, locked, { refuseHeldReport = false, refuseAnnualTerm = false } = {}) {
-  if (refuseHeldReport) {
-    const projects = await trx('projects').where({ invoice_id: locked.id }).forUpdate().select('id', 'report_hold_status');
-    if (projects.some((p) => ['held', 'releasing'].includes(String(p.report_hold_status || '').toLowerCase()))) return { heldReport: true };
-  }
-  if (refuseAnnualTerm) {
-    const termId = await require('./invoice-prepay').resolveInvoiceTermId(locked, trx, { strict: true });
-    if (termId) return { annualTerm: true };
-    const linked = (await trx.schema.hasTable('annual_prepay_terms'))
-      && await trx('annual_prepay_terms').where({ prepay_invoice_id: locked.id }).first('id');
-    if (linked) return { annualTerm: true };
-  }
-  return null;
-}
-
-// The receipt's last check at the provider boundary (the approvedReceipt fence): { email, phone } the card showed.
-function approvedReceiptGuard(approved) {
-  const refused = new Set();
-  const guard = async (facts) => {
-    const channel = facts?.channel;
-    const { emailDigest, phoneDigest } = require('./receipt-destination-digest');
-    const allowed = (channel === 'email' && Boolean(approved.email) && emailDigest(facts.to) === approved.email)
-      || (channel === 'sms' && Boolean(approved.phone) && phoneDigest(facts.to) === approved.phone);
-    if (!allowed) refused.add(channel);
-    return allowed;
-  };
-  guard.refused = refused;
-  return guard;
-}
-const CONTACT_CHANGED = 'receipt not sent: contact changed';
-
 async function recordManualPayment(id, {
   method,
   reference,
@@ -175,8 +121,7 @@ async function recordManualPayment(id, {
   sendReceipt = true,
   via = 'both',
   expectedAmountCents = null,
-  expectedInvoiceVersion = null,
-  cardFences = null,
+  receiptGuard,
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
@@ -198,10 +143,6 @@ async function recordManualPayment(id, {
 
   const invoice = await db('invoices').where({ id }).first();
   if (!invoice) throw refusal(404, 'Invoice not found');
-  // The Intelligence Bar card's pin, first: a stale card refuses before anything else is looked at or retired.
-  if (expectedInvoiceVersion && !invoiceMatchesVersion(invoice, expectedInvoiceVersion)) {
-    throw refusal(409, INVOICE_VERSION_DRIFT_TEXT, { drift: true });
-  }
   // Phase 2: an accrued invoice is collected ONLY via its consolidated
   // statement — never mark an individual accrued invoice paid here (it would
   // settle once manually and again when the statement settles).
@@ -260,15 +201,6 @@ async function recordManualPayment(id, {
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
   if (openPi) throw refusal(openPi.status, openPi.error);
 
-  // Append operator note to invoice notes (don't clobber existing notes).
-  let nextNotes = invoice.notes || null;
-  if (trimmedNote) {
-    // ET wall-clock date (the one convention — utils/datetime-et), not UTC.
-    const stamp = etDateString();
-    const line = `[${stamp}] ${method.toUpperCase()}${trimmedReference ? ` ${trimmedReference}` : ''}: ${trimmedNote}`;
-    nextNotes = nextNotes ? `${nextNotes}\n${line}` : line;
-  }
-
   // Atomic transition. Two concurrent double-clicks both pass the
   // precheck above, but Postgres serializes UPDATEs against the same
   // row so only one of these statements actually changes anything;
@@ -289,12 +221,6 @@ async function recordManualPayment(id, {
     // commit, so /setup cannot stamp a confirmable combined PI between
     // the check and the paid flip. Throws are 409-shaped; the caller
     // surfaces them.
-    // The card's edit-time pin, read in this transaction BEFORE the release below (which rewrites updated_at when it clears
-    // a combined stamp, so the locked row's edit time can no longer be compared).
-    if (expectedInvoiceVersion) {
-      const seen = await trx('invoices').where({ id }).first('status', 'updated_at', ...PINNED_COLUMNS);
-      if (!seen || !invoiceMatchesVersion(seen, expectedInvoiceVersion)) return { versionDrift: true };
-    }
     await require('./pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
     // Seam re-check under the row lock (codex #3610 r2 P1, mirrors
     // apply-credit): /setup could have minted a NEW standalone PI between
@@ -306,10 +232,6 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
-    // The card's status and pinned columns, on the LOCKED row, in the same transaction as the paid flip (the edit time was
-    // compared above, before the release rewrote it): an edit that landed while the release waited on its lock or Stripe
-    // and moved the visit link, the payer links or the amount is caught here.
-    if (expectedInvoiceVersion && !invoiceMatchesVersion(locked, expectedInvoiceVersion, { editTime: false })) return { versionDrift: true };
     // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
     // read at the top of this function can be overtaken by a Bill-To
     // assignment that stamps the withdrawal, and only `status` is re-checked
@@ -382,11 +304,7 @@ async function recordManualPayment(id, {
       const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
       if (neverRan) return { visitNeverRan: neverRan };
     }
-    if (cardFences) {
-      const fenced = await cardFenceRefusal(trx, locked, cardFences);
-      if (fenced) return fenced;
-    }
-    if (settlementFence && !(await settlementFence(trx))) return { fenceLost: true };
+    if (settlementFence && !(await settlementFence(trx, locked))) return { fenceLost: true };
     const [row] = await trx('invoices')
       .where({ id })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -406,7 +324,7 @@ async function recordManualPayment(id, {
         // seam comparison, which already ran.
         stripe_payment_intent_id: null,
         processor: null,
-        notes: nextNotes,
+        notes: appendOperatorNote(locked.notes, { method, reference: trimmedReference, note: trimmedNote }),
         updated_at: trx.fn.now(),
       })
       .returning('*');
@@ -462,15 +380,6 @@ async function recordManualPayment(id, {
 
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
-  }
-  if (updatedInvoice?.heldReport) {
-    throw refusal(409, HELD_REPORT_TEXT, { drift: true });
-  }
-  if (updatedInvoice?.annualTerm) {
-    throw refusal(409, 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.', { drift: true });
-  }
-  if (updatedInvoice?.versionDrift) {
-    throw refusal(409, INVOICE_VERSION_DRIFT_TEXT, { drift: true });
   }
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
@@ -607,19 +516,18 @@ async function recordManualPayment(id, {
       emailResult = { ok: false, error: `receipt claim failed: ${claim.error}` };
     }
     const canSend = !claim.inFlight && !claim.alreadySent && !claim.error;
-    // The card's approved destinations (cardFences.approvedReceipt): the sends below get a provider-boundary check, and only then.
-    const guard = cardFences?.approvedReceipt ? approvedReceiptGuard(cardFences.approvedReceipt) : null;
-    const guardOptions = guard ? { beforeProviderHandoff: guard } : null;
+    // The card's provider-boundary check for the sends below (none for the page).
+    const handoffArgs = receiptGuard ? [{ beforeProviderHandoff: receiptGuard.check }] : [];
     const emailLeg = via === 'email' || via === 'both';
     const smsLeg = via === 'sms' || via === 'both';
     if (canSend) {
       try {
         if (emailLeg) {
-          emailResult = await (guardOptions ? sendReceiptEmail(id, guardOptions) : sendReceiptEmail(id)).catch((err) => ({ ok: false, error: err.message }));
+          emailResult = await sendReceiptEmail(id, ...handoffArgs).catch((err) => ({ ok: false, error: err.message }));
           if (emailResult?.ok) await recordOperatorReceiptDelivered(claim, 'email');
         }
         const r = smsLeg
-          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true, ...guardOptions })
+          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true, ...handoffArgs[0] })
             .catch((err) => ({ sent: false, reason: err.message }))
           : null;
         if (r) smsResult = r.sent ? { ok: true } : { ok: false, error: r.reason || r.code || 'not-sent' };
@@ -630,9 +538,7 @@ async function recordManualPayment(id, {
       } finally {
         await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult });
       }
-      // A leg the card's provider-boundary check refused reads as the contact change it was, not as a provider failure.
-      if (guard?.refused.has('email') && emailResult && !emailResult.ok) emailResult = { ok: false, error: CONTACT_CHANGED };
-      if (guard?.refused.has('sms') && smsResult && !smsResult.ok) smsResult = { ok: false, error: CONTACT_CHANGED };
+      if (receiptGuard) ({ emailResult, smsResult } = receiptGuard.relabel({ emailResult, smsResult }));
     }
     if (emailResult?.ok || smsResult?.ok) {
       await db('activity_log').insert({

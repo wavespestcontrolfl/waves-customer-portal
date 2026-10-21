@@ -270,97 +270,6 @@ describe('recordManualPayment — refusal contract', () => {
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   });
 
-  describe('expectedInvoiceVersion (the Intelligence Bar card pin)', () => {
-    const SEEN = new Date('2099-01-01T12:00:00.123Z');
-    const version = { status: 'sent', updatedAtMs: SEEN.getTime() };
-
-    test('a pre-lock difference refuses with 409 + drift before the Stripe session is retired or a transaction opens', async () => {
-      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: new Date('2099-01-01T12:00:05Z'), stripe_payment_intent_id: 'pi_live' }) }));
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
-      expect(err.statusCode).toBe(409);
-      expect(err.drift).toBe(true);
-      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
-      expect(db.transaction).not.toHaveBeenCalled();
-    });
-
-    // A trx stand-in over a mutable invoice row: the combined-session release can bump updated_at (as clearPaymentIntentStamps does).
-    function trxOver(row, { onRelease } = {}) {
-      const calls = { update: null, paymentsInsert: null };
-      require('../services/pay-combined').releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(row); });
-      db.transaction.mockImplementation(async (fn) => {
-        const trx = jest.fn((table) => {
-          if (table === 'invoices') {
-            const r = recorder({ first: row, returning: [{ ...row, status: 'paid' }] });
-            r.first = jest.fn(async () => ({ ...row }));
-            calls.update = r.update;
-            return r;
-          }
-          if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
-          if (table === 'activity_log') return recorder();
-          throw new Error(`unexpected trx table ${table}`);
-        });
-        trx.fn = { now: () => 'NOW()' };
-        return fn(trx);
-      });
-      return calls;
-    }
-
-    test('an edit that landed before the transaction started refuses with drift and writes nothing', async () => {
-      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
-      const calls = trxOver(openInvoice({ updated_at: new Date('2099-01-01T12:00:09Z') }));
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
-      expect(err.statusCode).toBe(409);
-      expect(err.drift).toBe(true);
-      expect(calls.update).not.toHaveBeenCalled();
-      expect(calls.paymentsInsert).toBeNull();
-      expect(sendReceiptEmail).not.toHaveBeenCalled();
-    });
-
-    test('a status change on the LOCKED row refuses with drift and writes nothing', async () => {
-      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
-      const calls = trxOver(openInvoice({ updated_at: SEEN }), { onRelease: (row) => { row.status = 'viewed'; } });
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
-      expect(err.drift).toBe(true);
-      expect(calls.update).not.toHaveBeenCalled();
-      expect(calls.paymentsInsert).toBeNull();
-    });
-
-    test.each([
-      ['the visit link', { scheduled_service_id: 'sv-other' }],
-      ['the service record', { service_record_id: 'sr-other' }],
-      ['the customer (a customer merge repoints the invoice without touching updated_at)', { customer_id: 'cust-merged' }],
-      ['the amount', { total: '120.00' }],
-      ['the credit applied', { credit_applied: '5.00' }],
-    ])('an edit to %s that lands while the release waits is caught on the LOCKED row (Codex pre-push P1, round 2)', async (_name, patch) => {
-      const columns = { customer_id: 'cust-1', scheduled_service_id: 'sv-1', service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
-      const row = openInvoice({ updated_at: SEEN, ...columns });
-      db.mockImplementation(() => recorder({ first: { ...row } }));
-      const calls = trxOver(row, { onRelease: (r) => { Object.assign(r, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }); } });
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: { ...version, columns } }));
-      expect(err.statusCode).toBe(409);
-      expect(err.drift).toBe(true);
-      expect(calls.update).not.toHaveBeenCalled();
-      expect(calls.paymentsInsert).toBeNull();
-    });
-
-    test('the combined-session release rewriting the invoice edit time is NOT drift: the approved payment still records (Codex pre-push P1)', async () => {
-      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
-      const calls = trxOver(openInvoice({ updated_at: SEEN }), { onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });
-      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, expectedInvoiceVersion: version });
-      expect(out.invoice).toBeDefined();
-      expect(calls.update).toHaveBeenCalled();
-      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-    });
-
-    test('without the option nothing changes: an invoice with any edit time settles as before', async () => {
-      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: new Date() }) }));
-      db.transaction.mockImplementation(async () => null);
-      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check' }));
-      expect(err.message).toBe('Invoice status changed before payment could be recorded');
-      expect(err.drift).toBeUndefined();
-    });
-  });
-
   test.each([
     ['a payer assigned on the locked row', { payer_id: 'payer-1' }, true],
     ['a statement assigned on the locked row', { payer_statement_id: 'stmt-1' }, true],
@@ -616,98 +525,165 @@ describe('recordManualPayment — settlement', () => {
 });
 
 
-describe('recordManualPayment — cardFences (the Intelligence Bar record_payment card)', () => {
+describe('recordManualPayment — what the Intelligence Bar card adds (settlementFence from record-payment-fences.js, receiptGuard)', () => {
+  const { settlementFenceFor, receiptGuardFor } = require('../services/intelligence-bar/record-payment-fences');
   const { emailDigest, phoneDigest } = require('../services/receipt-destination-digest');
-  // A settlement fixture whose trx also answers projects / annual_prepay_terms.
-  function settleWith({ row = openInvoice(), projects = [], termLinked = false, hasTermTable = true } = {}) {
-    const paid = { ...row, status: 'paid' };
-    const calls = { update: null, paymentsInsert: null, projectsLocked: false };
+  const SEEN = new Date('2099-01-01T12:00:00.123Z');
+  const COLUMNS = { customer_id: 'cust-1', scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
+  const pin = (over = {}) => ({ invoiceId: 'inv-1', status: 'sent', updatedAtMs: SEEN.getTime(), columns: COLUMNS, ...over });
+  const card = (over = {}) => openInvoice({ updated_at: SEEN, ...over });
+
+  // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
+  // `projects` / `terms` feed the fence's own lookups on the plain connection and on the trx.
+  function settle({ pre = card(), locked = card(), onRelease = null, projects = [], termLinked = false, hasTermTable = true } = {}) {
+    const calls = { update: null, updateArgs: null, paymentsInsert: null, projectsLocked: false };
+    const answer = (table, row) => {
+      if (table === 'projects') {
+        const r = recorder();
+        r.forUpdate = jest.fn(() => { calls.projectsLocked = true; return r; });
+        r.select = jest.fn(async () => projects);
+        return r;
+      }
+      if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
+      return null || row;
+    };
     db.mockImplementation((table) => {
-      if (table === 'invoices') return recorder({ first: row });
+      if (table === 'invoices') return recorder({ first: { ...pre } });
+      if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
       if (table === 'activity_log') return recorder();
       if (table === 'notification_prefs') return recorder({ first: null });
       throw new Error(`unexpected table ${table}`);
     });
+    db.schema = { hasTable: jest.fn(async () => hasTermTable) };
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
-        if (table === 'invoices') { const r = recorder({ first: row, returning: [paid] }); calls.update = r.update; return r; }
-        if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
-        if (table === 'projects') {
-          const r = recorder();
-          r.forUpdate = jest.fn(() => { calls.projectsLocked = true; return r; });
-          r.select = jest.fn(async () => projects);
+        if (table === 'invoices') {
+          const r = recorder({ first: locked, returning: [{ ...locked, status: 'paid' }] });
+          r.first = jest.fn(async () => ({ ...locked }));
+          r.update = jest.fn((args) => { calls.updateArgs = args; return r; });
+          calls.update = r.update;
           return r;
         }
-        if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
+        if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
+        if (table === 'scheduled_services') return recorder({ first: { id: 'sv-other', status: 'scheduled' } });
+        if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
         throw new Error(`unexpected trx table ${table}`);
       });
       trx.fn = { now: () => 'NOW()' };
       trx.schema = { hasTable: jest.fn(async () => hasTermTable) };
+      require('../services/pay-combined').releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(locked); });
       return fn(trx);
     });
     return calls;
   }
+  afterEach(() => { delete db.schema; });
 
-  test('no fences: the settlement never reads projects or terms (the page path)', async () => {
-    const calls = settleWith({ projects: [{ id: 'p1', report_hold_status: 'held' }], row: openInvoice({ annual_prepay_term_id: 'term-1' }) });
-    await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
-    expect(calls.projectsLocked).toBe(false);
-    expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+  describe('settlementFence', () => {
+    test('runs on the plain connection before the Stripe retirement, and on the transaction with the LOCKED row right before the paid flip', async () => {
+      const fence = jest.fn(async () => true);
+      const calls = settle();
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence });
+      expect(fence).toHaveBeenCalledTimes(2);
+      expect(fence.mock.calls[0]).toEqual([db]);
+      expect(fence.mock.calls[1][0]).toEqual(expect.any(Function));
+      expect(fence.mock.calls[1][1]).toMatchObject({ id: 'inv-1', status: 'sent' });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a stale card refuses BEFORE the open card session is retired (edit time compared on the plain read)', async () => {
+      const calls = settle({ pre: card({ updated_at: new Date('2099-01-01T12:00:09Z'), stripe_payment_intent_id: 'pi_live' }) });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test.each([
+      ['the status', { status: 'viewed' }],
+      ['the customer (a customer merge repoints the invoice without touching updated_at)', { customer_id: 'cust-merged' }],
+      ['the visit link', { scheduled_service_id: 'sv-other' }],
+      ['the service record', { service_record_id: 'sr-other' }],
+      ['the amount', { total: '120.00' }],
+      ['the credit applied', { credit_applied: '5.00' }],
+    ])('a change to %s that lands while the release waits is caught on the LOCKED row: nothing written (Codex r2)', async (_name, patch) => {
+      const calls = settle({ onRelease: (row) => Object.assign(row, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }) });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('the release rewriting the invoice edit time is not drift: the approved payment records (Codex pre-push P1)', async () => {
+      const calls = settle({ onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(out.invoice).toBeDefined();
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test.each(['held', 'releasing'])('a %s report that appeared by the lock refuses and rolls back; the project rows are locked FOR UPDATE', async (status) => {
+      const calls = settle({ projects: [{ id: 'p1', report_hold_status: status }] });
+      const fence = settlementFenceFor(pin());
+      // The plain-connection run sees the report too, so the Stripe session is never retired for it.
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/releases a held report to the customer/);
+      expect(calls.paymentsInsert).toBeNull();
+      expect(require('../services/project-report-hold').scheduleHoldReleaseSweep).not.toHaveBeenCalled();
+    });
+
+    test('the lock-time report check locks the project rows, and a released or absent report records', async () => {
+      const calls = settle({ projects: [{ id: 'p1', report_hold_status: 'released' }, { id: 'p2', report_hold_status: null }] });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(calls.projectsLocked).toBe(true);
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a report lookup that throws aborts the settlement and records nothing (fail closed)', async () => {
+      const calls = settle();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return base(table); });
+      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) })).rejects.toThrow(/report_hold_status/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test.each([
+      ['the invoice carries an annual-plan tag', { pre: card({ annual_prepay_term_id: 'term-1' }), locked: card({ annual_prepay_term_id: 'term-1' }) }],
+      ['a term lists this invoice as its prepay invoice', { termLinked: true }],
+    ])('an annual-plan invoice (%s) refuses with drift and rolls back', async (_name, fixture) => {
+      const calls = settle(fixture);
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/annual-plan invoice/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('an invoice with no term records, and a missing terms table does not block', async () => {
+      const calls = settle({ hasTermTable: false });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
   });
 
-  test.each(['held', 'releasing'])('refuseHeldReport: a %s report that appeared by the lock refuses with drift and rolls back (nothing written)', async (status) => {
-    const calls = settleWith({ projects: [{ id: 'p1', report_hold_status: status }] });
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseHeldReport: true } }));
-    expect(err.statusCode).toBe(409);
-    expect(err.drift).toBe(true);
-    expect(err.message).toMatch(/releases a held report to the customer/);
-    expect(calls.projectsLocked).toBe(true);
-    expect(calls.update).not.toHaveBeenCalled();
-    expect(calls.paymentsInsert).toBeNull();
-    expect(require('../services/project-report-hold').scheduleHoldReleaseSweep).not.toHaveBeenCalled();
+  describe('the invoice notes are built from the LOCKED row (Codex r2 P1: no concurrent edit is erased)', () => {
+    test('a note saved between the unlocked read and the lock is kept, and the operator note is appended to it', async () => {
+      const calls = settle({ pre: card({ notes: 'old note' }), locked: card({ notes: 'old note\nsaved in the gap' }) });
+      await recordManualPayment('inv-1', { method: 'check', reference: '1042', note: 'left at desk', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(calls.updateArgs.notes).toBe(`old note\nsaved in the gap\n[${require('../utils/datetime-et').etDateString()}] CHECK 1042: left at desk`);
+    });
+
+    test('the page path writes the same notes it always did (no operator note: the existing notes unchanged)', async () => {
+      const calls = settle({ pre: card({ notes: 'keep me' }), locked: card({ notes: 'keep me' }) });
+      await recordManualPayment('inv-1', { method: 'cash', sendReceipt: false });
+      expect(calls.updateArgs.notes).toBe('keep me');
+      const none = settle({ pre: card(), locked: card() });
+      await recordManualPayment('inv-1', { method: 'cash', sendReceipt: false });
+      expect(none.updateArgs.notes).toBeNull();
+    });
   });
 
-  test('refuseHeldReport: the project rows are locked FOR UPDATE, and a released or absent report records', async () => {
-    const calls = settleWith({ projects: [{ id: 'p1', report_hold_status: 'released' }, { id: 'p2', report_hold_status: null }] });
-    await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseHeldReport: true } });
-    expect(calls.projectsLocked).toBe(true);
-    expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-  });
-
-  test('refuseHeldReport: a lookup that throws aborts the transaction and records nothing (fail closed)', async () => {
-    const calls = settleWith();
-    const base = db.transaction.getMockImplementation();
-    db.transaction.mockImplementation(async (fn) => base(async (trx) => {
-      const inner = trx.getMockImplementation();
-      trx.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return inner(table); });
-      return fn(trx);
-    }));
-    await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseHeldReport: true } })).rejects.toThrow(/report_hold_status/);
-    expect(calls.paymentsInsert).toBeNull();
-  });
-
-  test.each([
-    ['the invoice carries an annual-plan tag', { row: openInvoice({ annual_prepay_term_id: 'term-1' }) }],
-    ['a term lists this invoice as its prepay invoice', { termLinked: true }],
-  ])('refuseAnnualTerm: %s → drift, rolled back', async (_name, fixture) => {
-    const calls = settleWith(fixture);
-    const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseAnnualTerm: true } }));
-    expect(err.statusCode).toBe(409);
-    expect(err.drift).toBe(true);
-    expect(err.message).toMatch(/annual-plan invoice/);
-    expect(calls.update).not.toHaveBeenCalled();
-    expect(calls.paymentsInsert).toBeNull();
-  });
-
-  test('refuseAnnualTerm: an invoice with no term records (and a missing terms table does not block)', async () => {
-    const calls = settleWith({ hasTermTable: false });
-    await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseAnnualTerm: true } });
-    expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-  });
-
-  describe('approvedReceipt: the receipt sends hand the senders a provider-boundary check', () => {
-    const approvedReceipt = { email: emailDigest('pat@example.test'), phone: phoneDigest('(941) 555-0100') };
-    const fences = { approvedReceipt };
+  describe('receiptGuard: the receipt sends hand the senders a provider-boundary check', () => {
+    const guard = () => receiptGuardFor({ email: emailDigest('pat@example.test'), phone: phoneDigest('(941) 555-0100') });
     // Senders that call the check with the destination they are about to use, as the real ones do.
     function senders({ emailTo, smsTo }) {
       sendReceiptEmail.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'email', to: emailTo, amount: '117.00' })) === true ? { ok: true } : { ok: false, error: 'Receipt email handoff aborted by the caller' }));
@@ -719,40 +695,36 @@ describe('recordManualPayment — cardFences (the Intelligence Bar record_paymen
     });
 
     test('the approved destinations send (case and formatting do not matter)', async () => {
-      settleWith();
+      settle();
       senders({ emailTo: 'Pat@Example.test ', smsTo: '+19415550100' });
-      const out = await recordManualPayment('inv-1', { method: 'check', cardFences: fences });
+      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
       expect(out.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
     });
 
     test('a changed email or phone skips that leg and reports "receipt not sent: contact changed"', async () => {
-      settleWith();
+      settle();
       senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550199' });
-      const out = await recordManualPayment('inv-1', { method: 'check', cardFences: fences });
+      const out = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
       expect(out.invoice).toBeTruthy();
       expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt not sent: contact changed' }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
-      settleWith();
+      settle();
       senders({ emailTo: 'pat@example.test', smsTo: '+19415550199' });
-      const half = await recordManualPayment('inv-1', { method: 'check', cardFences: fences });
+      const half = await recordManualPayment('inv-1', { method: 'check', receiptGuard: guard() });
       expect(half.receipt).toEqual({ email: { ok: true }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
     });
 
-    test('an App leg or a destination the card did not show is never approved', async () => {
-      const guardFor = async (facts, approved) => {
-        let seen;
-        settleWith();
-        sendReceiptEmail.mockImplementation(async (_id, opts) => { seen = await opts.beforeProviderHandoff(facts); return { ok: seen === true }; });
-        await recordManualPayment('inv-1', { method: 'check', via: 'email', cardFences: { approvedReceipt: approved } });
-        return seen;
-      };
-      expect(await guardFor({ channel: 'push', to: null }, approvedReceipt)).toBe(false);
-      expect(await guardFor({ channel: 'app', to: null }, approvedReceipt)).toBe(false);
-      expect(await guardFor({ channel: 'email', to: 'pat@example.test' }, { email: null, phone: null })).toBe(false);
+    test('an App leg, or a destination the card did not show, is never approved', async () => {
+      const check = async (facts, approved) => receiptGuardFor(approved).check(facts);
+      const approved = { email: emailDigest('pat@example.test'), phone: phoneDigest('9415550100') };
+      expect(await check({ channel: 'push', to: null }, approved)).toBe(false);
+      expect(await check({ channel: 'app', to: null }, approved)).toBe(false);
+      expect(await check({ channel: 'email', to: 'pat@example.test' }, { email: null, phone: null })).toBe(false);
+      expect(await check({ channel: 'sms', to: '9415550100' }, { email: null, phone: null })).toBe(false);
     });
 
-    test('without approvedReceipt the senders are called exactly as before (no check passed)', async () => {
-      settleWith();
-      await recordManualPayment('inv-1', { method: 'check', cardFences: { refuseHeldReport: false } });
+    test('without a receiptGuard the senders are called exactly as before (no check passed)', async () => {
+      settle();
+      await recordManualPayment('inv-1', { method: 'check' });
       expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1');
       expect(InvoiceService.sendReceipt.mock.calls[0][1]).not.toHaveProperty('beforeProviderHandoff');
     });

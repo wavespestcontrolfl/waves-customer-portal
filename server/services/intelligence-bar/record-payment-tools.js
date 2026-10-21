@@ -38,7 +38,7 @@
  *                  recipients, the visit the closeout would complete, the exact request body).
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the
  *                  handler with exactly the carded body. The bar also hands the handler the amount due
- *                  and the invoice's status and edit time the card showed; the settlement enforces them
+ *                  and a settlement fence built from the invoice the card showed (record-payment-fences.js); the settlement enforces them
  *                  on the LOCKED invoice row in the same transaction as the paid flip (and that the
  *                  invoice is still the customer's own). The Invoices page sends none of that.
  */
@@ -50,6 +50,7 @@ const { maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { VALID_PAYMENT_METHODS } = require('../invoice-manual-payment');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus } = require('../invoice-helpers');
 const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
+const { settlementFenceFor, receiptGuardFor, pinnedColumnsOf } = require('./record-payment-fences');
 const { etDateString } = require('../../utils/datetime-et');
 
 function recordPaymentLive() {
@@ -353,20 +354,15 @@ async function buildPlan(input) {
       ? `Receipt sent now by ${reach.via === 'both' ? 'email and text' : reach.via === 'email' ? 'email' : 'text'}`
       : 'No receipt is sent',
     sends_to_customer: read.sendReceipt,
+    receipt_channels: read.sendReceipt ? (reach.via === 'both' ? 'email and text' : reach.via === 'email' ? 'email' : 'text') : null,
     _version: versionOf({ invoice, dueCents, input: read, reach, closeout, body }),
     _body: body,
+    // What the settlement is handed (never shown): the amount due, the fence it runs before the Stripe retirement and again under
+    // the invoice lock (record-payment-fences.js), and the receipt's destination check. Functions: not part of any pin or display.
     _approved: {
       expectedAmountCents: dueCents,
-      // Re-proved inside the settlement under the invoice lock: no held report, no annual-prepay term, and a receipt only to the
-      // destinations the card showed.
-      cardFences: { refuseHeldReport: true, refuseAnnualTerm: true, ...(read.sendReceipt ? { approvedReceipt: { email: emailDigest(reach.email), phone: phoneDigest(reach.phone) } } : {}) },
-      expectedInvoiceVersion: {
-        status: invoice.status,
-        updatedAtMs: msOf(invoice.updated_at),
-        // What the settlement completes or records beyond the status: re-proved on the locked row.
-        columns: Object.fromEntries(['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied']
-          .map((key) => [key, invoice[key] ?? null])),
-      },
+      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice) }),
+      ...(read.sendReceipt ? { receiptGuard: receiptGuardFor({ email: emailDigest(reach.email), phone: phoneDigest(reach.phone) }) } : {}),
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',
   };
