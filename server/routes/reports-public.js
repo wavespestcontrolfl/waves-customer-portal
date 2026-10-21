@@ -1301,6 +1301,12 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Without the cross-sell gate the only referral card that can ask is the lawn card (GATE_REPORT_WEB_SHARE):
+// both gates live AND this visit is one /data offers the card for. Used by the referral tap and its event.
+async function referralViaLawnCard(service) {
+  return webShareService.webShareEnabled() && Boolean(await webShareService.resolveShareEligibility(service));
+}
+
 // POST /api/reports/:token/events — token-scoped report interaction events.
 router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -1309,7 +1315,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
+      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
@@ -1330,8 +1336,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
     // Same copy as an unknown event — the gate state is not probeable.
     if ((eventName === 'cross_sell_requested' || eventName === 'referral_cta_clicked')
       && !require('../config/feature-gates').isEnabled('reportCrossSell')
-      // The lawn card's tap (GATE_REPORT_WEB_SHARE) records the same referral click.
-      && !(eventName === 'referral_cta_clicked' && webShareService.webShareEnabled())) {
+      // The lawn card's tap (GATE_REPORT_WEB_SHARE) records the same referral click, for a visit
+      // /data offers the card for (the same eligibility function) and no other.
+      && !(eventName === 'referral_cta_clicked' && await referralViaLawnCard(service))) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
@@ -1733,8 +1740,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     // The lawn card (GATE_REPORT_WEB_SHARE) takes the same tap without the cross-sell gate.
     // Without the cross-sell gate the only card that can ask is the lawn card, so the visit must be one
     // /data offers it for: the same eligibility function, re-run before any promoter enrollment.
-    if (!require('../config/feature-gates').isEnabled('reportCrossSell')
-      && !(webShareService.webShareEnabled() && await webShareService.resolveShareEligibility(service))) {
+    if (!require('../config/feature-gates').isEnabled('reportCrossSell') && !(await referralViaLawnCard(service))) {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Enrollment + share copy live in ONE composer shared with the estimate

@@ -87,6 +87,18 @@ describe('ShareLawnCard', () => {
     expect(navigator.share.mock.calls[1][0].files[0]).toBe(firstFile);
   });
 
+  it.each([['DataError'], ['NotSupportedError'], ['TypeError'], [undefined]])('any other share failure (%s) keeps the built card: picture, save link and a fresh Share button', async (name) => {
+    navigator.canShare = vi.fn(() => true);
+    navigator.share = vi.fn(async () => { const e = new Error('os failure'); if (name) e.name = name; throw e; });
+    render(<ShareLawnCard {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share your lawn' }));
+    expect(await screen.findByRole('button', { name: 'Share' })).toBeEnabled();
+    expect(screen.getByAltText('Your lawn card')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Save the picture' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(buildLawnShareCard).toHaveBeenCalledTimes(1);
+  });
+
   it('a second refusal keeps the card ready instead of looping or rebuilding', async () => {
     navigator.canShare = vi.fn(() => true);
     navigator.share = vi.fn(async () => { throw Object.assign(new Error('expired'), { name: 'NotAllowedError' }); });

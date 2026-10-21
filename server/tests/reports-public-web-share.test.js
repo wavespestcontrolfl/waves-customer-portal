@@ -530,12 +530,39 @@ describe('the lawn card tap without GATE_REPORT_CROSS_SELL', () => {
     expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
   });
 
-  test('referral_cta_clicked is accepted from the lawn card', async () => {
-    mockDbFor([fullRecord()]);
+  test('referral_cta_clicked via the lawn card re-runs the eligibility for this visit', async () => {
+    webShare.resolveShareEligibility.mockResolvedValue({ score: 88, assessmentId: 'as-1', photo: {} });
+    mockDbFor([fullRecord({ service_type: 'Lawn Care' })]);
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, '/events', { eventName: 'referral_cta_clicked', metadata: { source: 'lawn_card' } })).status).toBe(200);
+    });
+    expect(webShare.resolveShareEligibility).toHaveBeenCalledWith(expect.objectContaining({ id: 'service-1', service_type: 'Lawn Care' }));
+  });
+
+  test.each(['pest report', 'low score', 'no front photo', 'callback'])('referral_cta_clicked for an ineligible visit (%s) is refused like gates off and records no event', async () => {
+    webShare.resolveShareEligibility.mockResolvedValue(null);
+    const reads = mockDbFor([fullRecord()]);
+    const tables = [];
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { tables.push(table); return impl(table); });
+    let body;
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, '/events', { eventName: 'referral_cta_clicked', metadata: { source: 'lawn_card' } });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(400);
+      body = await res.json();
     });
+    expect(body).toEqual({ error: 'Unknown report event' });
+    expect(tables).not.toContain('service_report_events');
+    expect(reads.insert).not.toHaveBeenCalled();
+  });
+
+  test('with the cross-sell gate on, the event needs no lawn-card eligibility', async () => {
+    gates.isEnabled.mockReturnValue(true);
+    mockDbFor([fullRecord()]);
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, '/events', { eventName: 'referral_cta_clicked', metadata: {} })).status).toBe(200);
+    });
+    expect(webShare.resolveShareEligibility).not.toHaveBeenCalled();
   });
 
   test('referral_cta_clicked is refused with the cross-sell and share gates off', async () => {
@@ -545,5 +572,44 @@ describe('the lawn card tap without GATE_REPORT_CROSS_SELL', () => {
       const res = await post(baseUrl, '/events', { eventName: 'referral_cta_clicked', metadata: { source: 'lawn_card' } });
       expect(res.status).toBe(400);
     });
+  });
+});
+
+describe('the early guard answers with the same security headers as any other response', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    gates.reportWebShareLive.mockReturnValue(false);
+  });
+
+  test('server/index.js mounts the guard after the helmet middleware and before cors, the global limiter and the body parsers', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+    const at = (needle) => { const i = src.indexOf(needle); expect(i).toBeGreaterThan(-1); return i; };
+    const guard = at("app.use('/api/reports', reportsPublicRoutes.reportSharePhotoPreGuard);");
+    expect(guard).toBeGreaterThan(at('return strictHelmet(req, res, next);'));
+    expect(guard).toBeLessThan(at('app.use(cors({'));
+    expect(guard).toBeLessThan(at("app.use('/api/', limiter);"));
+    expect(guard).toBeLessThan(at("app.use(express.json({ limit: '1mb'"));
+  });
+
+  test('a dark 404 behind helmet carries Referrer-Policy no-referrer, a CSP, no-store and noindex', async () => {
+    const helmet = require('helmet');
+    const app = express();
+    app.use('/reports', reportsRouter.reportsAskPrivacyHeaders);
+    app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"] } } }));
+    app.use('/reports', reportsRouter.reportSharePhotoPreGuard);
+    app.use((req, res) => res.status(200).json({ reached: true }));
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/reports/${VALID_TOKEN}/share-photo`);
+      expect(res.status).toBe(404);
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(res.headers.get('content-security-policy')).toBeTruthy();
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

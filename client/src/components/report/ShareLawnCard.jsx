@@ -41,7 +41,7 @@ export default function ShareLawnCard({ token, score, assessmentId, apiBase, sta
   };
 
   // Hands the built file to the share sheet. The sheet needs a fresh tap: after a slow build the
-  // browser can refuse it (NotAllowedError, tap too old). Then the card stays ready for a new tap.
+  // browser can refuse it (NotAllowedError, tap too old), and the OS can fail it. Then the card stays ready.
   const sharePrepared = async ({ file, blob, link }) => {
     try {
       await navigator.share({ files: [file], text: `${SHARE_TEXT} ${bareLink(link)}` });
@@ -49,11 +49,11 @@ export default function ShareLawnCard({ token, score, assessmentId, apiBase, sta
     } catch (err) {
       if (err && err.name === 'AbortError') {
         setState(preparedRef.current ? 'ready' : 'idle');
-      } else if (err && err.name === 'NotAllowedError') {
+      } else {
+        // Expired tap (NotAllowedError) or any OS failure: the card is built, so keep it. Show the picture
+        // with the save fallback and a fresh Share button.
         showPicture(blob);
         setState('ready');
-      } else {
-        setState('failed');
       }
     }
   };
