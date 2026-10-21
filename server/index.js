@@ -212,6 +212,9 @@ app.use('/ingest', require('./routes/posthog-ingest'));
 // middleware — CORS preflights, the global /api limiter, body-parser errors —
 // so every response on those token routes carries them.
 app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
+// A dark web-report photo check (GATE_REPORT_WEB_ACTIONS) answers the generic 404 here, ahead of the global /api
+// limiter, so a dark route can never read as a 429 (the router mounts the same guard first as well).
+app.use('/api/reports', reportsPublicRoutes.reportPhotoCheckPreGuard);
 
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened

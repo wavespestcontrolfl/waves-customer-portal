@@ -136,6 +136,7 @@ const OUTCOME_COPY = {
   unclear: `We could not get a clear read from this photo. Call us at ${WAVES_SUPPORT_PHONE_DISPLAY} and we will take a look.`,
   request: CALL_LINE,
   referral: CALL_LINE,
+  fix_conditions: `This looks like a growing-conditions problem, not a pest. Call us at ${WAVES_SUPPORT_PHONE_DISPLAY} and we will tell you what to change.`,
 };
 
 function headlineFrom(type, body) {
@@ -160,6 +161,11 @@ function photoAnswer(type, reply) {
     return { ok: false, status: status >= 400 && status < 600 ? status : 502, message };
   }
   const kind = reply.body.next_step?.kind;
+  // The plant engine's fix_conditions hint maps to next_step.kind 'none' (no booking), which must not
+  // read as "no action is needed": conditions have to change. Checked first. Never covered.
+  if (reply.body.v2?.next_step_hint?.kind === 'fix_conditions') {
+    return { ok: true, headline: headlineFrom(type, reply.body), message: OUTCOME_COPY.fix_conditions, canRebook: false };
+  }
   const message = OUTCOME_COPY[kind] || CALL_LINE;
   return {
     ok: true,

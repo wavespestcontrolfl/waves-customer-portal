@@ -200,6 +200,20 @@ describe('web-actions: photo answers', () => {
     expect(answer.message).toContain(PHONE);
   });
 
+  test('a fix_conditions plant hint never reads as "no action is needed", even though its next_step kind is none', () => {
+    const answer = webActions.photoAnswer('lawn', {
+      status: 200,
+      body: { result: { observations: 'Some thinning.' }, next_step: { kind: 'none' }, v2: { next_step_hint: { kind: 'fix_conditions', text: 'Water less.' } } },
+    });
+    expect(answer.message).toBe(`This looks like a growing-conditions problem, not a pest. Call us at ${PHONE} and we will tell you what to change.`);
+    expect(answer.message).not.toMatch(/no action/i);
+    expect(answer.canRebook).toBe(false);
+    // a covered plan does not turn it into a booking either
+    expect(webActions.photoAnswer('lawn', { status: 200, body: { next_step: { kind: 'reservice', url: '/reservice/x' }, v2: { next_step_hint: { kind: 'fix_conditions' } } } }).canRebook).toBe(false);
+    // other hints keep the next_step outcome
+    expect(webActions.photoAnswer('lawn', { status: 200, body: { next_step: { kind: 'none' }, v2: { next_step_hint: { kind: 'none' } } } }).message).toBe('Based on what we can see, no action is needed right now.');
+  });
+
   test('a clear "nothing to worry about" read is the plain answer with no booking flag', () => {
     const answer = webActions.photoAnswer('pest', reply('none'));
     expect(answer.message).toBe('Based on what we can see, no action is needed right now.');

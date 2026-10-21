@@ -218,11 +218,24 @@ function webPhotoCheckLive() {
 
 function isReportLimiterExempt(req) {
   const path = req.path || '';
-  // A dark route answers 404 before any limiter, so a probe never sees a revealing 429.
-  if (req.method === 'POST' && /^\/[a-f0-9]{32}\/photo-check\/?$/i.test(path) && !webPhotoCheckLive()) return true;
   if (req.method === 'POST' && /^\/[a-f0-9]{32}\/events$/i.test(path)) return true;
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/recap\/video\/?$/i.test(path)) return true;
   return false;
+}
+
+// A dark photo-check answers the generic 404 BEFORE any limiter, so a probe never sees a
+// revealing 429. Mounted app-level in server/index.js ahead of the global /api limiter
+// (production mounts that before this router) and first in this router, ahead of
+// reportLimiter. Only POST /:token/photo-check (any token segment, optional trailing slash)
+// is touched; everything else is next().
+const PHOTO_CHECK_PATH_RE = /^\/[^/]+\/photo-check\/?$/i;
+function reportPhotoCheckPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !PHOTO_CHECK_PATH_RE.test(req.path || '')) return next();
+  // Dark, or live with a malformed token (not 32 hex): the same generic 404, before any limiter or database read.
+  if (!webPhotoCheckLive() || !FULL_TOKEN_RE.test(req.path.split('/')[1] || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  return next();
 }
 
 const reportLimiter = rateLimit({
@@ -307,6 +320,7 @@ function reportsAskPrivacyHeaders(req, res, next) {
 // Also mounted app-level ahead of the global /api limiter and JSON parser
 // (server/index.js); kept here so the router is self-contained.
 router.use(reportsAskPrivacyHeaders);
+router.use(reportPhotoCheckPreGuard);
 
 router.use(reportLimiter);
 
@@ -2937,6 +2951,7 @@ async function ensureReportToken(serviceRecordId) {
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
+module.exports.reportPhotoCheckPreGuard = reportPhotoCheckPreGuard;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
