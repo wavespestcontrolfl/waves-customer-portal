@@ -745,6 +745,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       }
       for (const visit of c.linked_visits || []) {
         push('operational', `Also cancels the linked follow-up visit${visit.service_type ? ` (${visit.service_type})` : ''}${visit.scheduled_date ? ` on ${visit.scheduled_date}` : ''}, with no text for it`);
+        if (visit.technician_notice === 'may_notify') {
+          push('comms', `Tech ${visit.technician_name || 'assigned to it'} will get a cancel notice for ${visit.scheduled_date || 'that day'} ${visit.service_type || 'visit'} (tech home card + push)`);
+        }
       }
     }
     // Inspection-credit reversal (appointment-cancel-impact.js's read-only
@@ -1200,7 +1203,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // tool (it never deletes a variable or writes anything but true/false).
       || (toolName === 'set_railway_gate' && preview?.prior_kind !== 'boolean'),
     notifies_customer: notifiesCustomer,
-    notifies_technician: cancelTechnicianNotice !== 'none',
+    notifies_technician: cancelTechnicianNotice !== 'none' || (preview?.cancellation?.linked_visits || []).some((v) => v.technician_notice === 'may_notify'),
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)

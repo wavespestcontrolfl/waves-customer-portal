@@ -4846,7 +4846,10 @@ const AppointmentReminders = {
           // (blocked / opted out / no eligible recipient) releases the
           // claim: re-attempting cannot change the outcome, and a route
           // retry stays possible.
-          if (!accepted && retryable) {
+          // An approved send (the Intelligence Bar cancel card) is never left for the sweep: a retry would render the
+          // live template and resolve today's recipients, not the text and people the card approved. A failed
+          // approved send finalizes as terminal 'suppressed' (below) and reports not-sent, so the operator sends it by hand.
+          if (!accepted && retryable && !options.approvedNotice) {
             // Revert OUR pre-dispatch 'sent' stamp to pending first
             // (codex r22) — retaining must retain a RETRYABLE state.
             await db('appointment_reminders')

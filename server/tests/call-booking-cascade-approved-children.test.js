@@ -36,8 +36,8 @@ function fakeConn({ children, locked }) {
   return { conn, log };
 }
 
-const CHILD = { id: 'child-1', status: 'confirmed', source_action: 'package_followup_auto', scheduled_date: '2026-11-02', service_type: 'pest_control' };
-const APPROVED = { id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' };
+const CHILD = { id: 'child-1', status: 'confirmed', source_action: 'package_followup_auto', scheduled_date: '2026-11-02', service_type: 'pest_control', technician_id: 'tech-9' };
+const APPROVED = { id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', technician_id: 'tech-9' };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -72,12 +72,21 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     ['moved to another date', { scheduled_date: '2026-11-09' }, 'date_changed'],
     ['status changed', { status: 'pending' }, 'status_changed'],
     ['service changed', { service_type: 'lawn_care' }, 'service_changed'],
+    ['was reassigned to another technician (its own cancel notice would go to someone the card did not show)', { technician_id: 'tech-10' }, 'technician_changed'],
+    ['lost its technician', { technician_id: null }, 'technician_changed'],
   ])('an approved child that %s since the card is NOT cancelled and is reported (%s)', async (_label, patch, reason) => {
     const { cancelled, report, log } = await run({ locked: { 'child-1': { ...CHILD, ...patch } } });
     expect(cancelled).toBe(0);
     expect(report.skipped).toEqual([{ id: 'child-1', reason }]);
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(log.updates).toEqual([]);
+  });
+
+  test('a card from before technicians were pinned (no technician_id key) is not refused on that field', async () => {
+    const { technician_id: _t, ...legacy } = APPROVED;
+    const { cancelled, report } = await run({ approvedChildren: [legacy] });
+    expect(cancelled).toBe(1);
+    expect(report.skipped).toEqual([]);
   });
 
   test('an approved child that gained an invoice since the card is NOT cancelled', async () => {

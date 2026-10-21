@@ -200,7 +200,7 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     const result = await executeTool('cancel_appointment', input(), ADMIN);
     expect(result.success).toBe(true);
     expect(result.customer_text_sent).toBe(false);
-    expect(result.warning).toMatch(/cancelled, but the customer text did not go out: customer opted out/);
+    expect(result.warning).toMatch(/cancelled, but the customer text did not go out \(customer opted out\) and will not be retried automatically — send it by hand/);
   });
 
   test('drift between the card and Confirm (an invoice changed) -> preview_changed, nothing replayed', async () => {

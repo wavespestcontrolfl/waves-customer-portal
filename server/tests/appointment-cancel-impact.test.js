@@ -16,11 +16,13 @@ let mockCustomerRow = null;
 let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
 let mockOpenOverdueAlerts = 0;
 let mockLinkedFollowUps = [];
+let mockTechnicians = [];
 jest.mock('../models/db', () => {
   const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
   const railQb = (table) => ({ where: () => ({ select: async () => mockCardRailRows[table] }) });
   const alertsQb = { whereIn: () => alertsQb, where: () => alertsQb, whereNull: () => alertsQb, count: async () => [{ count: String(mockOpenOverdueAlerts) }] };
-  const db = jest.fn((table) => (table === 'customers' ? customersQb : table === 'dispatch_alerts' ? alertsQb : (table in mockCardRailRows) ? railQb(table) : {
+  const techniciansQb = { whereIn: () => techniciansQb, select: async () => mockTechnicians };
+  const db = jest.fn((table) => (table === 'technicians' ? techniciansQb : table === 'customers' ? customersQb : table === 'dispatch_alerts' ? alertsQb : (table in mockCardRailRows) ? railQb(table) : {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
     first: async () => mockAppointmentRow,
@@ -101,6 +103,7 @@ const TEXT_PREVIEW = {
 beforeEach(() => {
   jest.clearAllMocks();
   mockLinkedFollowUps = [];
+  mockTechnicians = [];
   mockAppointmentRow = {
     id: 'svc-synthetic-1',
     status: 'confirmed',
@@ -828,7 +831,44 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([]));
     const impact = await run();
     expect(impact.card_cancel_refusals).toEqual([]);
-    expect(impact.linked_visits).toEqual([{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }]);
+    expect(impact.linked_visits).toEqual([{
+      id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control',
+      technician_id: null, technician_name: null, technician_notice: 'none',
+    }]);
+  });
+
+  // The child's own tech cancel notice (transitionJobStatus -> notifyVisitCancelled) is pinned like the parent's.
+  describe('linked visit technician notice', () => {
+    const child = (extra = {}) => ({ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', technician_id: 'tech-9', ...extra });
+    const withGate = async (fn) => {
+      const prior = process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+      process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
+      try { return await fn(); } finally { if (prior === undefined) delete process.env.GATE_TECH_VISIT_NOTIFICATIONS; else process.env.GATE_TECH_VISIT_NOTIFICATIONS = prior; }
+    };
+    beforeEach(() => { noCard(); mockLinkedFollowUps = [child()]; mockTechnicians = [{ id: 'tech-9', name: 'Tess Technician' }]; });
+
+    test('gate on, a different technician assigned: the child pins technician id + name and may_notify', async () => {
+      const impact = await withGate(() => run({ actorId: 'admin-1' }));
+      expect(impact.linked_visits[0]).toMatchObject({ technician_id: 'tech-9', technician_name: 'Tess Technician', technician_notice: 'may_notify' });
+    });
+
+    test('the confirming actor is the child\'s own technician: no notice, like the parent rule', async () => {
+      const impact = await withGate(() => run({ actorId: 'tech-9' }));
+      expect(impact.linked_visits[0].technician_notice).toBe('none');
+    });
+
+    test('gate off: assigned technician is still pinned but no notice is promised', async () => {
+      delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+      const impact = await run({ actorId: 'admin-1' });
+      expect(impact.linked_visits[0]).toMatchObject({ technician_id: 'tech-9', technician_notice: 'none' });
+    });
+
+    test('a child reassigned to another technician between card and confirm is drift', async () => {
+      const before = await withGate(() => run({ actorId: 'admin-1' }));
+      mockLinkedFollowUps = [child({ technician_id: 'tech-10' })];
+      mockTechnicians = [{ id: 'tech-10', name: 'Tom Technician' }];
+      expect(cancelImpactsMatch(before, await withGate(() => run({ actorId: 'admin-1' })))).toBe(false);
+    });
   });
 
   test('a linked follow-up that has an invoice of its own is refused (linked_followup_billed)', async () => {

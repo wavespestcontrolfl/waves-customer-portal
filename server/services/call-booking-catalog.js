@@ -896,11 +896,13 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want) {
   const changed = (reason) => Object.assign(new Error(`linked follow-up ${childId} changed since the card: ${reason}`), { code: 'LINKED_CHILD_CHANGED', reason });
   const locked = await applyCallFollowUpCancelFilter(trx('scheduled_services'), parentServiceId)
-    .where('id', childId).forUpdate().first('id', 'status', 'scheduled_date', 'service_type');
+    .where('id', childId).forUpdate().first('id', 'status', 'scheduled_date', 'service_type', 'technician_id');
   if (!locked) throw changed('no_longer_linked');
   if (String(locked.status) !== String(want.status)) throw changed('status_changed');
   if (callBookingDateOnly(locked.scheduled_date) !== callBookingDateOnly(want.scheduled_date)) throw changed('date_changed');
   if ((locked.service_type || null) !== (want.service_type || null)) throw changed('service_changed');
+  // The child's own tech cancel notice goes to whoever is assigned NOW: a reassigned child is not the one the card showed.
+  if (Object.prototype.hasOwnProperty.call(want, 'technician_id') && (locked.technician_id || null) !== (want.technician_id || null)) throw changed('technician_changed');
   if (await require('./invoice').anyInvoiceLinkedToVisit(trx, childId).first('id')) throw changed('invoice_added');
 }
 
@@ -912,7 +914,7 @@ async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want)
 // packageOnly: the skipped / no-show cascade (job-status.js) — a package
 // visit 2 is treatment 2 of a visit 1 that never happened, so it goes; a
 // call-booked child keeps its office-owned lifecycle there, as before.
-// approvedChildren (opt-in, the Intelligence Bar cancel card): [{ id, status, scheduled_date, service_type }], the
+// approvedChildren (opt-in, the Intelligence Bar cancel card): [{ id, status, scheduled_date, service_type, technician_id }], the
 // linked visits the operator approved. Only those are cancelled, each one only after it is re-read under its OWN row
 // lock and still matches the card (still a live linked follow-up, same status, date and service, no invoice of its
 // own); any other child, and any approved child that changed, is NOT cancelled and is listed in report.skipped

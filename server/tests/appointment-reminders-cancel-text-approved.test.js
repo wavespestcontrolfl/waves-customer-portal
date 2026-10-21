@@ -8,7 +8,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockState = {
-  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true,
+  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [],
 };
 jest.mock('../models/db', () => {
   const chain = (table) => {
@@ -22,7 +22,7 @@ jest.mock('../models/db', () => {
         if (table === 'scheduled_services') return { status: mockState.cancelled ? 'cancelled' : 'confirmed', tech_name: null };
         return null;
       },
-      update: async () => mockState.claim,
+      update: async (patch) => { mockState.updates.push(patch); return mockState.claim; },
       then: (res, rej) => Promise.resolve([]).then(res, rej),
     };
     return q;
@@ -61,6 +61,7 @@ beforeEach(() => {
   mockState.customer = { id: 'cust-1', first_name: 'Synthia', last_name: 'Tester', phone: '+19415550101' };
   mockState.prefs = null;
   mockState.claim = 1;
+  mockState.updates = [];
   mockSelectVariant.mockResolvedValue(null);
   // Mirrors getTemplate: a pinned snapshot body renders as given, else the base body.
   mockGetTemplate.mockImplementation(async (_key, vars, _ctx, opts = {}) => render(opts.templateBody ?? BASE, vars));
@@ -142,5 +143,32 @@ describe('handleCancellation sends the approved text', () => {
     await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false });
     await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, approvedNotice: [] });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+// An approved send is never left for the cancellation sweep: a retry would render the live template and resolve
+// today's recipients, not what the card approved.
+describe('a failed approved send is not retried by the sweep', () => {
+  const noticeStates = () => mockState.updates.filter((p) => 'cancellation_notice_state' in p).map((p) => p.cancellation_notice_state);
+
+  test('approved: a transient provider failure finalizes the claim terminally as suppressed and reports not-sent', async () => {
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    mockSendCustomerMessage.mockRejectedValue(new Error('provider timeout'));
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(outcome.notificationSent).toBe(false);
+    const states = noticeStates();
+    expect(states[states.length - 1]).toBe('suppressed');
+    // Never put back to a retryable 'pending' lease (the sweep's input) after the failure.
+    expect(states.slice(states.indexOf('suppressed') + 1)).toEqual([]);
+    expect(states.filter((x) => x === 'pending' || x === 'pending_notify').length).toBeLessThanOrEqual(1);
+  });
+
+  test('not approved (a plain Dispatch cancel): the same failure is NOT finalized as suppressed - the retry path is unchanged', async () => {
+    mockSendCustomerMessage.mockRejectedValue(new Error('provider timeout'));
+    await AppointmentReminders.handleCancellation('svc-1', { outcome: {} });
+    expect(noticeStates()).not.toContain('suppressed');
   });
 });

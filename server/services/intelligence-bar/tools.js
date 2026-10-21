@@ -4434,7 +4434,7 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
   logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);
   const warnings = [];
   if (sendText && json.notificationSent === false) {
-    warnings.push(`The visit is cancelled, but the customer text did not go out: ${json.notificationError || 'no reason given'}.`);
+    warnings.push(`The visit is cancelled, but the customer text did not go out (${json.notificationError || 'no reason given'}) and will not be retried automatically — send it by hand.`);
   }
   // A linked visit that changed since the card (or was not on it) is left alone, never cancelled unseen.
   const skipped = json.linkedVisitsSkipped || [];

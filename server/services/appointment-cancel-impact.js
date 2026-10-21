@@ -151,7 +151,7 @@ async function cardRailRows(conn, scheduledServiceId) {
 async function linkedFollowUpRows(conn, scheduledServiceId) {
   const { applyCallFollowUpCancelFilter } = require('./call-booking-catalog');
   return applyCallFollowUpCancelFilter(conn('scheduled_services'), scheduledServiceId)
-    .select('id', 'status', 'scheduled_date', 'service_type');
+    .select('id', 'status', 'scheduled_date', 'service_type', 'technician_id');
 }
 
 // Row-locks the visit's live linked follow-ups (FOR UPDATE, on the cancel transaction) so none of them can be moved,
@@ -459,7 +459,7 @@ function cancelWithEffectsRefusal(impact) {
 
 // What the Dispatch cancel replay does to the linked visits and invoices, read-only. A linked follow-up with an
 // invoice of its own is refused (the Dispatch handler cancels the child without running its invoice void).
-async function loadLinkedEffects(scheduledServiceId) {
+async function loadLinkedEffects(scheduledServiceId, actorId = null) {
   const InvoiceService = require('./invoice');
   const [invoiceRows, followUps] = await Promise.all([
     InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('id', 'invoice_number', 'status', 'total'),
@@ -469,6 +469,12 @@ async function loadLinkedEffects(scheduledServiceId) {
   for (const child of followUps) {
     if (await InvoiceService.anyInvoiceLinkedToVisit(db, child.id).first('id')) followUpBilled = true;
   }
+  // Cancelling a child also runs its own tech cancel notice (transitionJobStatus -> notifyVisitCancelled): the
+  // child's assigned technician is pinned with the same rule technician_notice uses for the parent.
+  const techIds = [...new Set(followUps.map((c) => c.technician_id).filter(Boolean))];
+  const techRows = techIds.length ? await db('technicians').whereIn('id', techIds).select('id', 'name') : [];
+  const techName = new Map((techRows || []).map((t) => [String(t.id), t.name || null]));
+  const notifyGate = gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS');
   return {
     linked_invoices: (invoiceRows || []).map((inv) => ({
       id: inv.id,
@@ -482,6 +488,9 @@ async function loadLinkedEffects(scheduledServiceId) {
         status: child.status || null,
         scheduled_date: child.scheduled_date ? dateOnlyString(child.scheduled_date) : null,
         service_type: child.service_type || null,
+        technician_id: child.technician_id || null,
+        technician_name: child.technician_id ? (techName.get(String(child.technician_id)) || null) : null,
+        technician_notice: notifyGate && child.technician_id && String(child.technician_id) !== String(actorId || '') ? 'may_notify' : 'none',
       }))
       .sort((a, b) => String(a.id).localeCompare(String(b.id))),
     followUpBilled,
@@ -490,8 +499,8 @@ async function loadLinkedEffects(scheduledServiceId) {
 
 // The with-effects block of the impact: the linked invoices and visits, the customer text, and the refusal codes that
 // still block once the allowed ones (EFFECTS_ALLOWED_REFUSALS) are set aside.
-async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText }) {
-  const linked = await loadLinkedEffects(scheduledServiceId);
+async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId }) {
+  const linked = await loadLinkedEffects(scheduledServiceId, actorId);
   const customerText = notifyCustomer === false
     ? { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' }
     : await require('./appointment-reminders').previewCancellationText(scheduledServiceId, ...(approvedText ? [{ approved: approvedText }] : []));
@@ -612,7 +621,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   // with the gate on, so the impact of a gate-off proposal stays byte-identical to before. `notify_customer` is the
   // choice the card shows ("cancel without a text" sets it false) and Confirm sends to the Dispatch handler.
   const { effects, blocking } = withEffects
-    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText })
+    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId })
     : { effects: {}, blocking: refusals };
 
   return {
