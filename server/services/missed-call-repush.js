@@ -118,6 +118,9 @@ async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = und
     const nowMs = now.getTime();
     const officeHours = hours !== undefined ? hours : await require('./voice-agent/relay-context').loadOfficeHours();
     if (!officeOpenAt(officeHours, now)) return 0;
+    // Retire bells whose caller already got through first, so a resolved call
+    // never buzzes again; the sibling sweep runs concurrently (pre-push audit).
+    await require('./missed-call-bell').retireCalledBackMissedCalls().catch(() => {});
 
     const candidates = await db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })

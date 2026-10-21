@@ -18,7 +18,7 @@ const ORIGINAL = (phone) => `${phone} called and did not leave a voicemail.`;
 
 function visitQuery(result) {
   const chain = {};
-  for (const m of ['where', 'whereNotIn', 'orderBy']) chain[m] = jest.fn(() => chain);
+  for (const m of ['where', 'whereIn', 'orderBy']) chain[m] = jest.fn(() => chain);
   chain.first = jest.fn(async () => { if (result instanceof Error) throw result; return result; });
   db.mockReturnValue(chain);
   return chain;
@@ -90,7 +90,7 @@ describe('payload', () => {
     });
     expect(db).toHaveBeenCalledWith('scheduled_services');
     expect(chain.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
-    expect(chain.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'completed', 'rescheduled']);
+    expect(chain.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']); // live visits only
     expect(chain.where).toHaveBeenCalledWith('scheduled_date', '>=', '2026-10-20');
     expect(chain.orderBy).toHaveBeenCalledWith('scheduled_date', 'asc');
   });

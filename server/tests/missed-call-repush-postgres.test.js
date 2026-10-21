@@ -16,6 +16,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+// The called-back retire runs first (pre-push audit); its own suites cover it.
+jest.mock('../services/missed-call-bell', () => ({ retireCalledBackMissedCalls: jest.fn(async () => 0) }));
 jest.mock('../services/notification-bell-policy', () => ({
   isBellPolicyEnabled: jest.fn(() => false),
   bellAllowed: jest.fn(async () => true),
@@ -82,6 +84,13 @@ jest.setTimeout(30000);
   }
   const stored = (row) => database('notifications').where({ id: row.id }).first();
   const run = (opts = {}) => sweepMissedCallRepush({ now: NOW, hours: HOURS, ...opts });
+
+  test('the called-back retire runs before any re-push is chosen (pre-push audit)', async () => {
+    const { retireCalledBackMissedCalls } = require('../services/missed-call-bell');
+    retireCalledBackMissedCalls.mockClear();
+    await run();
+    expect(retireCalledBackMissedCalls).toHaveBeenCalledTimes(1);
+  });
 
   test('re-pushes once after 30 minutes in office hours: same tag, renotify, no new bell row', async () => {
     const row = await bell(31);

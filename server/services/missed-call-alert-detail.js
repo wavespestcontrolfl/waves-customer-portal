@@ -19,7 +19,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-const NOT_UPCOMING = ['cancelled', 'completed', 'rescheduled'];
+// Live visits only (the repo's LIVE_VISIT_STATUSES): a skipped or other
+// terminal row must never show as the next visit (pre-push audit).
+const UPCOMING = ['pending', 'confirmed'];
 const MAX_LINE_CHARS = 26;
 
 function parseMeta(meta) {
@@ -59,7 +61,7 @@ async function nextVisitDate(customerId, now = new Date()) {
     const { etDateString, dateOnlyString } = require('../utils/datetime-et');
     const row = await db('scheduled_services')
       .where({ customer_id: customerId })
-      .whereNotIn('status', NOT_UPCOMING)
+      .whereIn('status', UPCOMING)
       .where('scheduled_date', '>=', etDateString(now))
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
