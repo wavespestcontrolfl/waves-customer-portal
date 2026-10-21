@@ -812,7 +812,9 @@ async function repairCloseout(input, actionContext = {}) {
       // The manual fixes ride the top-level text too: the gap collector reads
       // only `error`, so a capability decline that lives only under manual[]
       // ("the bar can't bill this visit from here") would never reach the gap list.
-      const manualFixes = [...new Set(plan.manual.map((m) => m.fix).filter(Boolean))];
+      // A lookup that failed ("... could not be read") is a transient fault, not a
+      // missing capability: it stays under manual[] only, out of the gap text (Codex r8).
+      const manualFixes = [...new Set(plan.manual.map((m) => m.fix).filter((fix) => fix && !/could not be read/i.test(fix)))];
       return {
         error: status.summary?.closedOut
           ? 'This visit is fully closed out — nothing to repair.'
