@@ -599,6 +599,10 @@ class AppointmentTagger {
             last_name: nameParts.slice(1).join(' ') || service.last_name || null,
           },
           dbh: trx,
+          // Whose address this is (an on-location contact's, or not): each
+          // step's dispatch-time contact recheck reads the stamp back
+          // (codex #6363 r10 P1).
+          context: { recipientRole: recipient.role || null },
         });
         if (result?.enrolled) {
           logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} sequence (service ${service.id})`);
@@ -733,7 +737,10 @@ class AppointmentTagger {
         automationKey,
         entityType: 'scheduled_service',
         entityId: service.id,
-        recipient: { email: recipient.email, type: 'customer', id: service.customer_id || '' },
+        // `role`: whose address this is (an on-location contact's, or not) —
+        // the run's dispatch-time contact recheck reads the stamp back
+        // (codex #6363 r10 P1).
+        recipient: { email: recipient.email, type: 'customer', id: service.customer_id || '', role: recipient.role || '' },
         payload: {
           scheduled_service_id: service.id,
           customer_id: service.customer_id || '',

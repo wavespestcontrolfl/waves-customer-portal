@@ -744,7 +744,12 @@ async function contactPreferencePayload(req) {
     // An email-only choice with no address on file (the holder removed it)
     // is nothing — the save clears it; a row from before that reads as the
     // default rather than as an option the card no longer offers (codex r6).
-    preferences[key] = chosen === 'email' && !contact.email ? 'both' : chosen;
+    // So does a text-only report choice from before the contact report text
+    // was switched off — the senders read it the same way (codex r10,
+    // contact-notification-prefs.js effectiveChannelChoice).
+    const unavailable = (chosen === 'email' && !contact.email)
+      || (col === 'service_complete_channel' && chosen === 'sms' && !contactReportTextsOn());
+    preferences[key] = unavailable ? 'both' : chosen;
   }
   preferences.smsEnabled = own?.sms_enabled !== false;
   preferences.emailEnabled = own?.email_enabled !== false;

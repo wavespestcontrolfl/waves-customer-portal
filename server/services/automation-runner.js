@@ -328,6 +328,11 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
   const leadId = await enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context });
+  // Whose address this enrollment mails, when the enqueue resolved it to an
+  // on-location contact (project-email.js resolveProjectEmailRecipientForSend
+  // role): the step's dispatch-time contact recheck reads it back (codex
+  // #6363 r10 P1). Absent for the holder's and third-party addresses.
+  const recipientRole = require('./customer-contact').isServiceContactRole(context.recipientRole) ? String(context.recipientRole) : null;
 
   // Customer-linked enrollment mutations serialize with a concurrent
   // merge-undo (r21): the undo's active-enrollment absence probe runs
@@ -401,7 +406,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
         last_name: fresh.last_name || customer.last_name || null,
       };
     }
-    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId });
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId, recipientRole });
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
@@ -462,7 +467,7 @@ async function enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, con
   }
 }
 
-async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId }) {
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId, recipientRole = null }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
@@ -509,9 +514,14 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   // Table-qualified (Codex #4813 r4 P1): the same payload is the
   // ON CONFLICT ... DO UPDATE merge below, where a bare `metadata` is
   // ambiguous between the target row and EXCLUDED and fails the insert.
-  reactivatePayload.metadata = leadId
-    ? dbh.raw("jsonb_set(COALESCE(automation_enrollments.metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)])
-    : dbh.raw("COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id'");
+  // The recipient_role stamp (whose address this episode mails — codex
+  // #6363 r10 P1) is this episode's fact too: set when the enqueue resolved
+  // an on-location contact, dropped otherwise.
+  const stamps = { ...(leadId ? { lead_id: leadId } : {}), ...(recipientRole ? { recipient_role: recipientRole } : {}) };
+  reactivatePayload.metadata = dbh.raw(
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role') || ?::jsonb",
+    [JSON.stringify(stamps)],
+  );
   if (existing) {
     const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })
@@ -529,7 +539,7 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     status: 'active',
     current_step: 0,
     next_send_at: nextSendAt,
-    ...(leadId ? { metadata: JSON.stringify({ lead_id: leadId }) } : {}),
+    ...(Object.keys(stamps).length ? { metadata: JSON.stringify(stamps) } : {}),
   };
 
   let row;
@@ -665,7 +675,11 @@ async function resolveConsultationBlock(step, enrollment, recipient) {
 async function stepRecipientAfterContactOptOut(enrollment, step, testRecipient) {
   const recipient = testRecipient || enrollment.email;
   if (testRecipient || !enrollment.customer_id) return { recipient };
-  const reroute = await require('./contact-notification-prefs').rerouteForContactEmailOptOut(enrollment.customer_id, recipient);
+  // Whose address the enrollment carries is the enqueue's stamp
+  // (metadata.recipient_role), never inferred from the address (codex
+  // #6363 r10 P1): an enrollment mailing a third party keeps its address.
+  const reroute = await require('./contact-notification-prefs')
+    .rerouteForContactEmailOptOut(enrollment.customer_id, recipient, { recipientRole: enrollment.metadata?.recipient_role || null });
   if (!reroute.rerouted) return { recipient };
   if (reroute.email) return { recipient: reroute.email };
   const sendRow = await db('automation_step_sends').insert({

@@ -38,6 +38,9 @@ const TwilioService = require('../services/twilio');
 
 // ── in-memory db ──────────────────────────────────────────────────────────
 let tables;
+// Runs when a customers row is locked FOR UPDATE: stands in for a writer that
+// committed between a login's lookup and its lock.
+let onCustomersLock = null;
 const norm = (col) => String(col).replace(/^[a-z]+\./, '');
 const digitsOf = (v) => String(v || '').replace(/\D/g, '');
 function builder(table) {
@@ -102,7 +105,7 @@ function builder(table) {
   b.leftJoin = () => b;
   b.select = () => b;
   b.limit = () => b;
-  b.forUpdate = () => b;
+  b.forUpdate = () => { if (table === 'customers' && onCustomersLock) onCustomersLock(); return b; };
   b.first = async () => sorted()[0] || null;
   b.pluck = async (col) => sorted().map((r) => r[norm(col)]);
   b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
@@ -240,6 +243,19 @@ describe('contact login — who a number signs in as', () => {
     expect(res.body.customer).toMatchObject({ firstName: 'Sam', lastName: 'Spouse', phone: CONTACT_PHONE, email: 'sam@example.com' });
     expect(JSON.stringify(res.body)).not.toMatch(/Pat|Owner|pat@example\.com|9415550101/);
     expect(res.body.properties.map((p) => p.id)).toEqual(['cust-holder']);
+  });
+
+  test('the holder removing the contact between the OTP check and the mint leaves no session: 401, no family written, nothing of the property returned (codex r10 P2)', async () => {
+    onCustomersLock = () => {
+      Object.assign(tables.customers[0], { service_contact_name: null, service_contact_phone: null, service_contact_email: null });
+      onCustomersLock = null;
+    };
+    const res = await login(CONTACT_PHONE);
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'Invalid or expired verification code' });
+    expect(tables.customer_refresh_tokens).toEqual([]);
+    // The holder's own login is minted without the slot check.
+    expect((await login(HOLDER_PHONE)).status).toBe(200);
   });
 
   test('send-code actually sends to a contact number (both login steps use the same resolver)', async () => {

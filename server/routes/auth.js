@@ -10,6 +10,7 @@ const TwilioService = require('../services/twilio');
 const {
   authenticate,
   createRefreshSession,
+  createContactRefreshSession,
   generateToken,
   reissueRefreshSessionForProperty,
   revokeCustomerRefreshSessions,
@@ -456,7 +457,13 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     const contact = identity.contact || null;
     const contactKey = contact ? contact.phoneKey : null;
     const accountId = accountIdForCustomer(customer);
-    const refreshSession = await createRefreshSession(customer.id, accountId, { contactKey });
+    // A contact's family is minted under the row's lock with the slot
+    // re-checked (createContactRefreshSession): a removal that raced the
+    // OTP leaves no family to revive (codex #6363 r10 P2).
+    const refreshSession = contact
+      ? await createContactRefreshSession(customer.id, accountId, contactKey)
+      : await createRefreshSession(customer.id, accountId);
+    if (!refreshSession) return res.status(401).json(invalidResponse);
     const token = generateToken(customer.id, accountId, refreshSession.familyId, { contactKey });
     const refreshToken = refreshSession.refreshToken;
 

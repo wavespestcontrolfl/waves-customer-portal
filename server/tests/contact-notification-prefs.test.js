@@ -68,6 +68,18 @@ describe('contactAllows (pure)', () => {
     expect(ContactPrefs.contactAllows({ en_route_channel: null }, 'tech_en_route', 'email')).toBe(true);
   });
 
+  test('a text-only service-report choice exists only while the contact report text does: gate off, it reads as the default and the email leg stays (codex r10)', () => {
+    const row = { service_complete_channel: 'sms' };
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    expect(ContactPrefs.contactAllows(row, 'service_completed', 'email')).toBe(true);
+    expect(ContactPrefs.contactAllows(row, 'service_completed', 'sms')).toBe(true);
+    // Every other purpose keeps its text-only choice; so does the report with the gate on.
+    expect(ContactPrefs.contactAllows({ en_route_channel: 'sms' }, 'tech_en_route', 'email')).toBe(false);
+    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
+    expect(ContactPrefs.contactAllows(row, 'service_completed', 'email')).toBe(false);
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+  });
+
   test('the appointment email event types map to their purpose column; no-show and cancellation to none', () => {
     expect(ContactPrefs.columnForEmailEvent('appointment.confirmation')).toBe('appointment_confirmation');
     expect(ContactPrefs.columnForEmailEvent('appointment.reminder_72h')).toBe('service_reminder_72h');
@@ -139,8 +151,14 @@ describe('filterReportEmailRecipientsByContactPrefs (service-report email)', () 
       { customer_id: 'cust-1', phone_key: '9415550202', service_completed: false },
       { customer_id: 'cust-1', phone_key: '9415550303', service_complete_channel: 'sms' },
     ];
+    // A text-only report choice holds the email only while the contact
+    // report text exists (codex r10): with it off the choice reads as the
+    // default and Terry's email stays.
+    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
     const kept = await ContactPrefs.filterReportEmailRecipientsByContactPrefs(reportRecipients, CUSTOMER);
     expect(kept.map((r) => r.role)).toEqual(['primary']);
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    expect((await ContactPrefs.filterReportEmailRecipientsByContactPrefs(reportRecipients, CUSTOMER)).map((r) => r.role)).toEqual(['service_contact_2', 'primary']);
   });
 
   test('an email-only slot (no phone, so no row) and a slot with no row pass through', async () => {
@@ -216,12 +234,24 @@ describe('rerouteForContactEmailOptOut (deferred sends: automation steps, queued
     await expect(ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).rejects.toThrow('timeout');
   });
 
-  test('an address the holder has since replaced on slot 1 is re-resolved: the contact\'s current address with the switch on, the holder with it off (codex r9 P1)', async () => {
+  test('a send the enqueue stamped as the slot-1 contact\'s is re-resolved whatever address it carries: the contact\'s current address with the switch on, the holder with it off (codex r9 P1)', async () => {
     rows = [];
     wireCustomer({ ...CUSTOMER, service_contact_email: 'sam.new@example.com' });
-    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam.new@example.com', rerouted: true });
+    const stamped = { recipientRole: 'service_contact' };
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com', stamped)).toEqual({ email: 'sam.new@example.com', rerouted: true });
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
-    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'pat@example.com', rerouted: true });
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com', stamped)).toEqual({ email: 'pat@example.com', rerouted: true });
+    // The same address stamped as the holder's (a send the resolver addressed to the primary) is not the contact's.
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com', { recipientRole: 'primary' })).toEqual({ email: 'sam@example.com', rerouted: false });
+  });
+
+  test('an unstamped address is the contact\'s only when it IS slot 1\'s current one; a third party\'s (a tenant\'s estimate under a landlord\'s row) is never reassigned (codex r10 P1)', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
+    wireCustomer(CUSTOMER);
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'tenant@example.com')).toEqual({ email: 'tenant@example.com', rerouted: false });
+    // An address slot 1 USED to carry, with no stamp, is unknowable — it stays.
+    wireCustomer({ ...CUSTOMER, service_contact_email: 'sam.new@example.com' });
+    expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam@example.com', rerouted: false });
   });
 
   test('passes through: the holder\'s own address, another slot\'s address, a contact with email on, and the gate off', async () => {
@@ -234,6 +264,38 @@ describe('rerouteForContactEmailOptOut (deferred sends: automation steps, queued
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false }];
     delete process.env.GATE_CONTACT_LOGIN;
     expect(await ContactPrefs.rerouteForContactEmailOptOut('cust-1', 'sam@example.com')).toEqual({ email: 'sam@example.com', rerouted: false });
+  });
+});
+
+describe('contactPhoneDeclinesText (single-number texts addressed to the estimate\'s own phone: estimate-public.js accept flow)', () => {
+  let customer;
+  beforeEach(() => {
+    customer = { ...CUSTOMER };
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      return { where: () => ({ first: async () => { if (failWith) throw failWith; return customer; } }) };
+    });
+  });
+
+  test('a contact\'s number declines by their master switch, or by the purpose asked about; the holder\'s number and an unknown number never do', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', sms_enabled: false },
+      { customer_id: 'cust-1', phone_key: '9415550303', appointment_confirmation: false }];
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550202', null)).toBe(true);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '9415550303', null)).toBe(false);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '9415550303', 'appointment_confirmation')).toBe(true);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550101', null)).toBe(false);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415559999', 'appointment_confirmation')).toBe(false);
+    expect(await ContactPrefs.contactPhoneDeclinesText(null, '+19415550202', null)).toBe(false);
+  });
+
+  test('fails closed on an unreadable row; the gate off never declines', async () => {
+    rows = [];
+    failWith = new Error('timeout');
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550202', null)).toBe(true);
+    failWith = null;
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', sms_enabled: false }];
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550202', null)).toBe(false);
   });
 });
 

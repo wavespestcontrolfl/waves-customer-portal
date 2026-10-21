@@ -982,7 +982,7 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     expect(inserted.metadata).toBe(JSON.stringify({ lead_id: 'lead-123' }));
   });
 
-  test('reactivating a prior enrollment MERGES lead_id via jsonb_set — never overwrites the whole metadata object', async () => {
+  test('reactivating a prior enrollment MERGES lead_id into the row\'s metadata — never overwrites the whole object', async () => {
     const reactivateUpdate = chain();
     reactivateUpdate.update = jest.fn(() => reactivateUpdate);
     reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
@@ -1002,7 +1002,7 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     });
 
     const patch = reactivateUpdate.update.mock.calls[0][0];
-    expect(patch.metadata).toEqual({ sql: expect.stringContaining('jsonb_set'), bindings: [JSON.stringify('lead-456')] });
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining("|| ?::jsonb"), bindings: [JSON.stringify({ lead_id: 'lead-456' })] });
     // Table-qualified: the same payload is the ON CONFLICT merge, where a
     // bare `metadata` is ambiguous with EXCLUDED (Codex #4813 r4 P1).
     expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
@@ -1025,9 +1025,32 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     await enrollCustomer({ templateKey: 'new_lead', customer: { email: 'lead@example.com' } });
 
     const patch = reactivateUpdate.update.mock.calls[0][0];
-    expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: undefined });
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: [JSON.stringify({})] });
     expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
     expect(patch.metadata.sql).not.toContain('jsonb_set');
+  });
+
+  test('context.recipientRole stamps metadata.recipient_role for an on-location contact\'s address only — the dispatch-time contact recheck reads it back (codex #6363 r10 P1)', async () => {
+    const insertChain = chain({ returning: [{ id: 'enr-new' }] });
+    const queues = () => ({
+      automation_templates: [chain({ first: { key: 'bed_bug', name: 'Bed bug', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [chain({ first: undefined }), insertChain],
+    });
+    setDbQueues(queues());
+    await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'onsite@example.com' }, context: { recipientRole: 'service_contact' } });
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBe(JSON.stringify({ recipient_role: 'service_contact' }));
+    // The holder's (primary) address carries no stamp; a reactivation drops a stale one.
+    const insertChain2 = chain({ returning: [{ id: 'enr-2' }] });
+    setDbQueues({ ...queues(), automation_enrollments: [chain({ first: undefined }), insertChain2] });
+    await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'pat@example.com' }, context: { recipientRole: 'primary' } });
+    expect(insertChain2.insert.mock.calls[0][0].metadata).toBeUndefined();
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
+    setDbQueues({ ...queues(), automation_enrollments: [chain({ first: { id: 'enr-1', status: 'completed', email: 'pat@example.com', metadata: { recipient_role: 'service_contact' } } }), reactivateUpdate] });
+    await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'pat@example.com' } });
+    expect(reactivateUpdate.update.mock.calls[0][0].metadata).toEqual({ sql: expect.stringContaining("- 'recipient_role'"), bindings: [JSON.stringify({})] });
   });
 
   test('no context.leadId leaves metadata untouched (byte-identical to every pre-existing enroll site)', async () => {

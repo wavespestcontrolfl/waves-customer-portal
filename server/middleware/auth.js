@@ -329,6 +329,23 @@ async function createRefreshSession(customerId, accountId = null, { contactKey =
   });
 }
 
+// The first family of a CONTACT session (GATE_CONTACT_LOGIN). The slot check
+// verify-code ran on its lookup is re-run on the customers row under its
+// lock, in the transaction that inserts the family: the holder's contact
+// save locks the same row before it revokes the removed phones' families,
+// so a login either lands first and is revoked by that save, or finds the
+// number gone and mints nothing (codex #6363 r10 P2). Null = the claim no
+// longer holds.
+async function createContactRefreshSession(customerId, accountId, contactKey) {
+  return db.transaction(async (trx) => {
+    const fresh = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
+    if (!fresh || fresh.active !== true || !contactSessionFor(fresh, contactKey)) return null;
+    const resolvedAccountId = accountId || customerId;
+    await ensureSelfAccountRow(trx, customerId, resolvedAccountId);
+    return insertRefreshRecord(trx, customerId, resolvedAccountId, undefined, undefined, null, null, contactKey);
+  });
+}
+
 // A CONTACT family (GATE_CONTACT_LOGIN) stays bound to the phone it was
 // minted for. It rotates only while the gate is on, the row is ACTIVE (no
 // cancelled allowance: a churned account's contacts have nothing to see) and
@@ -843,6 +860,7 @@ module.exports = {
   sessionCustomerAdmitted,
   resolveBearerCustomer,
   createRefreshSession,
+  createContactRefreshSession,
   generateToken,
   generateRefreshToken,
   reissueRefreshSessionForProperty,

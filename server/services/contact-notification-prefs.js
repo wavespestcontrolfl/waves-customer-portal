@@ -68,12 +68,31 @@ function contactPrefsLive() {
   }
 }
 
+function reportTextLive() {
+  try {
+    return require('../config/feature-gates').contactReportTextLive();
+  } catch {
+    return false;
+  }
+}
+
 function phoneKey(value) {
   return String(value || '').replace(/\D/g, '').slice(-10);
 }
 
 function columnForEmailEvent(eventType) {
   return EMAIL_EVENT_COLUMN[String(eventType || '')] || null;
+}
+
+// The delivery choice a stored row means TODAY. A text-only service-report
+// choice exists only while the contact report text (GATE_CONTACT_REPORT_TEXT)
+// does: the route refuses a new one with the gate off, and one stored before
+// a rollback reads as the default — otherwise the gate flip would end both of
+// that contact's report legs at once (codex #6363 r10 P2).
+function effectiveChannelChoice(row, column) {
+  const chosen = CHANNEL_COLUMN_FOR[column] ? row[CHANNEL_COLUMN_FOR[column]] : null;
+  if (column === 'service_completed' && chosen === 'sms' && !reportTextLive()) return 'both';
+  return chosen;
 }
 
 // Pure: does this contact's row allow `column` (a purpose; null = a purpose
@@ -84,7 +103,7 @@ function contactAllows(row, column, channel = 'sms') {
   if (channel === 'email' && row.email_enabled === false) return false;
   if (!column) return true;
   if (row[column] === false) return false;
-  const chosen = CHANNEL_COLUMN_FOR[column] ? row[CHANNEL_COLUMN_FOR[column]] : null;
+  const chosen = effectiveChannelChoice(row, column);
   if (chosen === 'sms' && channel === 'email') return false;
   if (chosen === 'email' && channel === 'sms') return false;
   return true;
@@ -222,6 +241,31 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
   return !contactAllows(row, null, channel);
 }
 
+// Does the number a single-recipient TEXT is addressed to belong to one of
+// this customer's on-location contacts who declines `column` (null = the
+// master switch alone) by text? The estimate accept flow (estimate-public.js)
+// texts the ESTIMATE's own phone, which may be a contact's — the tenant who
+// requested it under the landlord's row — and dispatches outside the
+// recipient fan-out the other seams filter (codex #6363 r10 P2). The holder's
+// own number, a number in no slot, and the gate off never decline. Fail
+// CLOSED on an unreadable row or table, as every other seam here.
+async function contactPhoneDeclinesText(customerId, phone, column = null, { dbh = db } = {}) {
+  const key = phoneKey(phone);
+  if (!contactPrefsLive() || !customerId || !key) return false;
+  let customer;
+  try {
+    customer = await dbh('customers').where({ id: customerId }).first();
+  } catch (err) {
+    if (dbh && dbh.isTransaction) throw err;
+    logger.warn(`[contact-prefs] customer read failed (${err.message}) — holding the text to ${key.slice(-4)}`);
+    return true;
+  }
+  if (!customer || phoneKey(customer.phone) === key) return false;
+  const slot = require('./customer-contact').getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === key);
+  if (!slot) return false;
+  return (await filterContactsByOwnPrefs([{ phone: slot.phone, role: slot.role }], customerId, column, { channel: 'sms', dbh })).length === 0;
+}
+
 // Dispatch-time recheck for a DEFERRED email (an automation step, a queued
 // template run) whose address was resolved when it was enqueued: when that
 // address is the slot-1 contact's and the contact has since turned their
@@ -229,7 +273,19 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
 // the holder has no address (codex #6363 r7 P1). Returns the address to use
 // (null = hold) and whether it moved. Holder / unmatched addresses pass
 // through; gate off = pass-through.
-async function rerouteForContactEmailOptOut(customerId, email, { dbh = db } = {}) {
+//
+// WHOSE address it is comes from the enqueue, not from matching: a send the
+// enqueue stamped as the slot-1 contact's (`recipientRole`, kept on the
+// enrollment's metadata / the run's context by appointment-tagger.js) is the
+// contact's whatever address it carries — the holder may have replaced it
+// since — and is re-resolved from the current row with the contact's switch
+// applied (codex #6363 r9 P1): the contact's current address, the holder
+// when the switch is off, nothing when the holder has none. A send with no
+// stamp (queued before the stamp existed) is the contact's only when its
+// address IS slot 1's current one. Every other address — the holder's, a
+// tenant's estimate under a landlord's record, an operator-entered inbox —
+// is somebody else's mail and passes through untouched (codex r10 P1).
+async function rerouteForContactEmailOptOut(customerId, email, { dbh = db, recipientRole = null } = {}) {
   const current = String(email || '').trim().toLowerCase();
   if (!contactPrefsLive() || !customerId || !current) return { email: email || null, rerouted: false };
   // The lookup's failure propagates (codex #6363 r8 P1): the callers' own
@@ -238,16 +294,9 @@ async function rerouteForContactEmailOptOut(customerId, email, { dbh = db } = {}
   const customer = await dbh('customers').where({ id: customerId }).first();
   if (!customer) return { email, rerouted: false };
   const addr = (v) => String(v || '').trim().toLowerCase();
-  // A customer-recipient run is addressed from the row itself: the holder's
-  // address or the slot-1 contact's (project-email.js
-  // resolveProjectEmailRecipient). The holder's own address, and another
-  // slot's, pass through. Anything else is slot 1's — the address it has
-  // NOW, or one the holder has since replaced — so the recipient is
-  // re-resolved from the current row with the contact's switch applied
-  // (codex #6363 r9 P1): the contact's current address, the holder when the
-  // switch is off, or nothing when the holder has none.
-  if (current === addr(customer.email)) return { email, rerouted: false };
-  if ([customer.service_contact2_email, customer.service_contact3_email].map(addr).includes(current)) return { email, rerouted: false };
+  const slotOnes = require('./customer-contact').isServiceContactRole(recipientRole)
+    || current === addr(customer.service_contact_email);
+  if (!slotOnes) return { email, rerouted: false };
   const target = await require('./project-email').resolveProjectEmailRecipientForSend(customer);
   const targetEmail = addr(target.email) || null;
   if (targetEmail === current) return { email, rerouted: false };
@@ -312,6 +361,7 @@ module.exports = {
   declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
   contactDeclinesChannel,
+  contactPhoneDeclinesText,
   rerouteForContactEmailOptOut,
   pruneContactNotificationPrefs,
   upsertContactNotificationPrefs,

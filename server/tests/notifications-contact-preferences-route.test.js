@@ -248,6 +248,16 @@ describe('PUT /contact-preferences', () => {
     expect((await put({ serviceCompleteChannel: 'both' })).status).toBe(200);
   });
 
+  test('a text-only report choice stored while the contact report text was on reads as the default once it is off (codex r10)', async () => {
+    tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', service_complete_channel: 'sms' });
+    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
+    expect((await get()).body.preferences.serviceCompleteChannel).toBe('sms');
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    expect((await get()).body.preferences.serviceCompleteChannel).toBe('both');
+    // The stored row is left as it is: the choice returns with the gate.
+    expect(tables.service_contact_notification_prefs[0].service_complete_channel).toBe('sms');
+  });
+
   test('email-only delivery needs an address on file for this contact', async () => {
     mockSession.current.contactSession = TERRY;
     const res = await put({ enRouteChannel: 'email' });

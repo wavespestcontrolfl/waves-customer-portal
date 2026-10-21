@@ -346,6 +346,10 @@ function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, pay
     recipient_email: recipient.email,
     recipient_type: recipient.type || automation.audience || '',
     recipient_id: recipient.id || '',
+    // Whose address the run mails, when the emitter resolved it to an
+    // on-location contact (appointment-tagger.js); dispatchRun's contact
+    // recheck reads it back (codex #6363 r10 P1). Absent otherwise.
+    ...(require('./customer-contact').isServiceContactRole(recipient.role) ? { recipient_role: recipient.role } : {}),
   };
   if (entityType) context.entity_type = entityType;
   if (entityId) {
@@ -429,7 +433,7 @@ function recipientFor(triggerEventKey, input = {}, automation = {}) {
       }
     }
   }
-  return { email, type, id, idIsCustomer };
+  return { email, type, id, idIsCustomer, role: cleanString(rawRecipient.role, '') };
 }
 
 function entityFor(triggerEventKey, input = {}) {
@@ -1976,7 +1980,11 @@ async function dispatchRun(run, automation, executionPayload, payloadFingerprint
   // switch — off since the run was queued means the holder gets it, or the
   // run is skipped when the holder has no address.
   if (run.recipient_type === 'customer' && run.recipient_id) {
-    const reroute = await require('./contact-notification-prefs').rerouteForContactEmailOptOut(run.recipient_id, run.recipient_email);
+    // Whose address the run carries is the enqueue's stamp (context
+    // .recipient_role), never inferred from the address (codex #6363 r10
+    // P1): a run mailing a third party keeps its address.
+    const reroute = await require('./contact-notification-prefs')
+      .rerouteForContactEmailOptOut(run.recipient_id, run.recipient_email, { recipientRole: asObject(run.context).recipient_role || null });
     if (reroute.rerouted && !reroute.email) return { skipReason: 'on-location contact turned email off; no account holder email' };
     if (reroute.rerouted) run = { ...run, recipient_email: reroute.email };
   }

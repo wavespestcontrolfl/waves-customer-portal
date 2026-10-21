@@ -15772,6 +15772,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.warn(`[estimate-accept] accept SMS phone resolution failed for customer ${customerId}: ${phoneErr.message}`);
       }
     }
+    // The accept texts go to the ESTIMATE's phone, which may be an
+    // on-location contact's (the tenant who requested it under the
+    // landlord's row). That contact's own text choices (contact login,
+    // GATE_CONTACT_LOGIN) hold them as every other seam does (codex #6363
+    // r10 P2): the master switch for the booking link, the appointment-
+    // confirmation choice for the confirmation. The holder's own number
+    // never declines.
+    const contactDeclinesText = async (column) => !!(acceptSmsPhone && customerId
+      && await require('../services/contact-notification-prefs').contactPhoneDeclinesText(customerId, acceptSmsPhone, column));
     // Gated on the accept SHAPE, not on a phone (pre-push Codex P1): a
     // phoneless one-time accept with an email on the account (or its
     // primary) still owes the appointment confirmation — the SMS legs
@@ -15788,6 +15797,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Booking link rides SMS only; the onboarding email above
             // carries the customer's next steps.
             logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; skipping booking-link SMS`);
+          } else if (bookingUrl && await contactDeclinesText(null)) {
+            logger.info(`[estimate-accept] the contact at the estimate phone declines texts; skipping booking-link SMS for estimate ${estimate.id}`);
           } else if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
@@ -15900,6 +15911,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               smsAttempt: async () => {
                 if (!acceptSmsPhone) {
                   logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; confirmation goes by email`);
+                  return false;
+                }
+                if (await contactDeclinesText('appointment_confirmation')) {
+                  logger.info(`[estimate-accept] the contact at the estimate phone declines confirmation texts for estimate ${estimate.id}`);
                   return false;
                 }
                 const customerBody = await renderCustomerConfirmationBody();
