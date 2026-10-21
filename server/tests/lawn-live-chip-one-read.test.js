@@ -57,6 +57,19 @@ describe('one weather read per view', () => {
     expect(fetchForecast).toHaveBeenCalledTimes(1);
   });
 
+  test('chip first (no banner read yet): the shared series gets a valid Date window', async () => {
+    const fetchForecast = jest.fn(async () => series());
+    const shared = createSharedSeries(fetchForecast, NOW);
+    const chip = await resolveLiveChip({
+      completedAt: COMPLETED, instruction: instruction(), products: [], latitude: 27.4, longitude: -82.4, series: shared,
+    });
+    expect(chip.state).toBe('no_rain');
+    expect(fetchForecast).toHaveBeenCalledTimes(1);
+    const { from } = fetchForecast.mock.calls[0][0];
+    expect(from).toBeInstanceOf(Date);
+    expect(from.getTime()).toBe(Date.parse(COMPLETED));
+  });
+
   test('a failed read is a miss for both and is not retried within the view', async () => {
     const fetchForecast = jest.fn(async () => { throw new Error('down'); });
     const shared = createSharedSeries(fetchForecast, NOW);

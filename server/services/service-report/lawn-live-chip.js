@@ -28,7 +28,7 @@ const RAIN_HOUR_INCHES = 0.01;
 
 const toMs = (value) => {
   if (value == null || value === '') return NaN;
-  const t = value instanceof Date ? value.getTime() : Date.parse(value);
+  const t = value instanceof Date ? value.getTime() : (typeof value === 'number' ? value : Date.parse(value));
   return Number.isFinite(t) ? t : NaN;
 };
 
@@ -159,7 +159,7 @@ async function resolveLiveChip({
     if (nowMs <= fromMs || nowMs - fromMs > COPY.visitWindowDays * DAY_MS) return null;
 
     const forecast = series
-      ? await series.read({ latitude, longitude, from: fromMs })
+      ? await series.read({ latitude, longitude, from: new Date(fromMs) })
       : await fetchForecast({
         latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs), exactTotal: true,
       });
