@@ -1,0 +1,9 @@
+{
+  "_note": "Fixed sentences for the live 'lawn status now' chip on the web service report (GATE_REPORT_WEB_LIVE_CHIP). Web only, never the PDF, never frozen. The rain-covered line is the watering-copy.json water-in line reworded for a visit that may be days old ('today's treatment' is wrong after day one). recentHours is how many hours back, counted from the START of the rainy hour, still counts as 'rain fell about N hours ago'. Only an hour that starts at or after the completion can support that claim.",
+  "recentHours": 3,
+  "visitWindowDays": 7,
+  "rainHoursAgoOne": "Rain fell about 1 hour ago. Wait until the lawn is dry.",
+  "rainHoursAgo": "Rain fell about {n} hours ago. Wait until the lawn is dry.",
+  "wateredIn": "Rain since your visit has watered the treatment in.",
+  "noRain": "No rain since your treatment."
+}

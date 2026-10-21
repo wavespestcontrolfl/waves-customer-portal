@@ -86,6 +86,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { whereNotBlockedCall } = require('../middleware/spam-block');
 const {
   missedCallShapeEligible, isEmptyVoicemailRecording, UNKNOWN_CALLER_MIN_SECONDS,
+  classifySpamWave,
   UNANSWERED, UNANSWERED_STATUSES, TERMINAL_STATUSES, VOICEMAIL_GRACE_MS,
 } = require('./missed-call-bell');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -335,6 +336,31 @@ function holdOptions(row, dbi = db) {
   return { callAt: new Date(row.created_at), originCallId: row.id, excludeMessageTypes: [MESSAGE_TYPE], dbi };
 }
 
+// A call that actually reached someone: an outbound call whose customer leg was
+// dialed (bridged_at), or an inbound call that was handled (answered by a
+// person or Sandy, an AI outcome, a recording or voicemail). Unanswered,
+// failed and unbridged calls are not. `outbound` / `inbound` add the caller's
+// own conditions (a phone match) to each branch. Shared with the Intelligence
+// Bar name matcher's recent-contact bonus.
+function whereCompletedCall(query, { outbound, inbound } = {}) {
+  return query.where((q) => q
+    .where((out) => {
+      out.where('direction', 'outbound');
+      if (outbound) outbound(out);
+      out.whereNotNull('bridged_at');
+    })
+    .orWhere((inb) => {
+      inb.where('direction', 'inbound');
+      if (inbound) inbound(inb);
+      inb.where((handled) => handled
+        .whereIn('answered_by', ANSWERED_BY_SOMEONE)
+        .orWhereIn('call_outcome', AI_OUTCOMES)
+        .orWhereNotNull('recording_sid')
+        .orWhereNotNull('recording_url')
+        .orWhereNotNull('voicemail_callback_alerted_at'));
+    }));
+}
+
 // Contact since the missed call — checked before the lease work and again
 // at the provider boundary (owner: "only if nobody has called or texted
 // them by then"). 'contacted' when a customer record knows the number now,
@@ -359,15 +385,10 @@ async function contactState(phone, row, dbi = db) {
     .modify((q) => whereNotSandboxCall(q)) // a Sandy bake-off call is not contact
     .where('created_at', '>=', row.created_at)
     .whereNot('id', row.id)
-    .where((q) => q
-      .where((out) => out.where('direction', 'outbound').whereRaw(...phoneMatches('to_phone')).whereNotNull('bridged_at'))
-      .orWhere((inb) => inb.where('direction', 'inbound').whereRaw(...phoneMatches('from_phone'))
-        .where((handled) => handled
-          .whereIn('answered_by', ANSWERED_BY_SOMEONE)
-          .orWhereIn('call_outcome', AI_OUTCOMES)
-          .orWhereNotNull('recording_sid')
-          .orWhereNotNull('recording_url')
-          .orWhereNotNull('voicemail_callback_alerted_at'))))
+    .modify((q) => whereCompletedCall(q, {
+      outbound: (out) => out.whereRaw(...phoneMatches('to_phone')),
+      inbound: (inb) => inb.whereRaw(...phoneMatches('from_phone')),
+    }))
     .first('id');
   if (laterCall) return 'contacted';
   const bridgePending = await dbi('call_log')
@@ -783,6 +804,22 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
   return { outcome: 'error', reason: result.sent ? 'send_suppressed' : (result.code || 'provider_failed') };
 }
 
+// Measurement only (Codex #6392 r1 and r2): a robodialer block wave or burst is
+// never a reason to withhold the text, because a caller can prime a number block
+// or a line and length so a genuine prospect matches. The bell's classifiers
+// stamp missed_call_text_spam_shadow 'block' | 'burst' so the pattern stays
+// measurable, whichever spam gates are on. The classifiers fail open inside;
+// any error here changes nothing and the text goes as today.
+async function stampSpamShadow(row, stampShadow) {
+  try {
+    const flags = await classifySpamWave(row);
+    const shadow = (flags.block && 'block') || (flags.burst && 'burst') || null;
+    if (shadow) await stampShadow(shadow);
+  } catch (e) {
+    logger.warn(`[missed-call-text-back] spam shadow failed — texting as today: ${e.code || e.name || 'error'}`);
+  }
+}
+
 /**
  * Attempt (or skip) a text-back for one call_log row. Shared core for both
  * the post-call hook and the durable sweep so the two paths can never
@@ -860,6 +897,10 @@ async function attemptForRow(inputRow, now = Date.now()) {
     .catch((e) => logger.warn(`[missed-call-text-back] lease release failed: ${e.code || e.name || 'db_error'}`));
   const stampBody = (body) => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_text_body', ?::text)", [body]) })
     .catch((e) => logger.warn(`[missed-call-text-back] body stamp failed: ${e.code || e.name || 'db_error'}`));
+
+  const stampShadow = (kind) => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_text_spam_shadow', ?::text)", [kind]) })
+    .catch((e) => logger.warn(`[missed-call-text-back] spam shadow stamp failed: ${e.code || e.name || 'db_error'}`));
+  await stampSpamShadow(row, stampShadow);
 
   return sendWithLease(row, pre, releaseLease, settleFenced, stampBody);
 }
@@ -966,7 +1007,9 @@ module.exports = {
   VOICEMAIL_GRACE_MS,
   textBackIfMissed,
   sweepMissedCallTextBacks,
+  whereCompletedCall,
   _private: {
+    stampSpamShadow,
     textBackCoreEligible,
     emptyVoicemailOn,
     stampEmptyVoicemailSeen,

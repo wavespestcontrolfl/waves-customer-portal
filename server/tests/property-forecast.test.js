@@ -139,6 +139,18 @@ describe('fetchPropertyForecast', () => {
     expect(f.precipitationInTotal).toBeNull();
   });
 
+  test('exactTotal opts in to each hour\'s unrounded rain; without it the rows carry no such key', async () => {
+    global.fetch = okFetch(hourlyPayload({ rainAt: { '2026-10-03T13:00': 0.00949 } }));
+    const { fetchPropertyForecast } = load();
+    const args = { latitude: 27.1, longitude: -82.5, from: '2026-10-03T12:00', to: '2026-10-03T15:00', now: NOW };
+    const plain = await fetchPropertyForecast(args);
+    expect('precipitation_exact_in' in plain.hourly[0]).toBe(false);
+    const exact = await fetchPropertyForecast({ ...args, exactTotal: true });
+    const row = exact.hourly.find((r) => r.time === '2026-10-03T13:00');
+    expect(row.precipitation_in).toBe(0.009);
+    expect(row.precipitation_exact_in).toBe(0.00949);
+  });
+
   test('rain stamped exactly at `from` is excluded and rain stamped exactly at `to` is included', async () => {
     // 0.12 fell 11:00-12:00 (stamped 12:00); 0.07 fell 14:00-15:00 (stamped 15:00).
     global.fetch = okFetch(hourlyPayload({ rainAt: { '2026-10-03T12:00': 0.12, '2026-10-03T15:00': 0.07 } }));
