@@ -178,6 +178,30 @@ jest.setTimeout(30000);
     expect(await isRobodialerWave(row)).toBe(true);
   });
 
+  test('history with no outcome, or handled by the AI agent, is no wave member (Codex #6379 r4)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row,
+      call('+19415550101', 60, { answered_by: null, status: 'completed' }),
+      call('+19415550202', 60, { call_outcome: 'ai_handled' }),
+    ]);
+    expect(await isRobodialerWave(row)).toBe(false);
+  });
+
+  test('a wave check that errors rings the bell as usual (Codex #6379 r4)', async () => {
+    await earlierWave();
+    const row = call('+19415550303', 10);
+    await database('call_log').insert(row);
+    const numbers = require('../config/twilio-numbers');
+    const original = numbers.findByNumber.getMockImplementation();
+    numbers.findByNumber.mockImplementation(() => { throw new Error('config down'); });
+    try {
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    } finally {
+      numbers.findByNumber.mockImplementation(original);
+    }
+  });
+
   test('block calls older than 14 days do not count', async () => {
     const row = call('+19415550303', 10);
     await database('call_log').insert([row, call('+19415550101', 60 * 24 * 15), call('+19415550202', 60 * 24 * 16)]);

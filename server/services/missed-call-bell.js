@@ -110,7 +110,11 @@ async function isRobodialerWave(row) {
     .whereRaw(`${LAST10_SQL('to_phone')} IN (${gbpLines().map(() => '?').join(', ')})`, gbpLines())
     .where('duration_seconds', '<', WAVE_MAX_SECONDS)
     .whereNull('recording_sid').whereNull('recording_url')
-    .whereRaw("COALESCE(answered_by, '') NOT IN ('human', 'ai_agent')")
+    // The same "unanswered" rule as the current call (outcomeUnanswered +
+    // the AI-handled exclusion; Codex #6379 r4): a completed row with no
+    // outcome may have been handled by the flow, so it is no wave member.
+    .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
+    .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
     // An unlinked call from a number on any customer phone slot is no robodialer.
     // Full-country keys (Codex #6379 r3): +44 9415550303 on a slot is not +1 941-555-0303.
     .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE cu.deleted_at IS NULL AND ${phoneKeySql('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => phoneKeySql(`cu.${c}`)).join(', ')}))`)
@@ -319,7 +323,12 @@ function leaseStale(token, now = Date.now()) {
 // (true = settled). With it off the call rings as before, stamped so the
 // shadow can be read. `fenced` is the caller's lease-fenced update.
 async function settleRobodialerWave(row, fenced) {
-  if (!(await isRobodialerWave(row))) return false;
+  // Fail open (Codex #6379 r4): a classifier error never costs a bell, gate on or off.
+  const wave = await isRobodialerWave(row).catch((err) => {
+    logger.warn(`[missed-call-bell] wave check failed, ringing as usual: ${err.message}`);
+    return false;
+  });
+  if (!wave) return false;
   const { isEnabled } = require('../config/feature-gates');
   if (isEnabled('missedCallSpamWave')) {
     await fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_settled_at', ?::text, 'missed_call_spam_wave', true)", [new Date().toISOString()]) });
