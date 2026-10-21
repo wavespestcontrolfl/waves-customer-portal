@@ -108,6 +108,17 @@ describe('buildWebTop', () => {
     expect(buildWebTop(null)).toBeNull();
   });
 
+  test('lawn hold follows the frozen re-entry rule: dry, or watered in and dry again (granular)', () => {
+    const rule = (r) => lawn({ dynamicContext: { reentry: { condition: { rule: r } } } });
+    expect(buildWebTop(rule('dry')).hold).toBe('Keep pets off the lawn until it is dry.');
+    const granular = buildWebTop(rule('watered_in_and_dry')).hold;
+    expect(granular).toBe('Keep pets off the lawn until the treatment has dried, you have watered it in, and the grass is dry again.');
+    expect(granular).not.toMatch(/\d/);
+    // an unknown rule or no condition (a clock-path record) reads as the plain "dry" idiom
+    expect(buildWebTop(rule('somethingelse')).hold).toBe('Keep pets off the lawn until it is dry.');
+    expect(buildWebTop(lawn({ dynamicContext: { reentry: { targets: [] } } })).hold).toBe('Keep pets off the lawn until it is dry.');
+  });
+
   test('the hold is a fixed sentence: no hours, no product, whatever the re-entry text says', () => {
     const out = buildWebTop(lawn({ dynamicContext: { reentry: { petAdvisory: 'Keep pets off for 2 hours (Product X).' } } }));
     expect(out.hold).toBe('Keep pets off the lawn until it is dry.');

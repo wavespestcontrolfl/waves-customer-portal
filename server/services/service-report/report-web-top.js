@@ -15,6 +15,7 @@
  */
 
 const { dateOnlyString, etDateString, addETDays } = require('../../utils/datetime-et');
+const { reentryCondition } = require('./lawn-report-facts');
 
 const TREND_POINTS = 6;
 const RAIN_DAYS_EACH_SIDE = 3;
@@ -85,13 +86,20 @@ function actionLine(data) {
   return /^no (further )?action\b/i.test(step) ? NO_ACTION : step;
 }
 
+// The keep-off sentence for each frozen re-entry rule (lawn-report-facts RULES). It follows the document's re-entry
+// wording: "dry" is once dry; a granular "watered_in_and_dry" needs the watering in AND the grass dry again. No hours.
+const LAWN_HOLD = Object.freeze({
+  dry: 'Keep pets off the lawn until it is dry.',
+  watered_in_and_dry: 'Keep pets off the lawn until the treatment has dried, you have watered it in, and the grass is dry again.',
+});
+
 /** The one hold: a fixed sentence, only when something was applied and the report carries a re-entry context. */
 function holdLine(data) {
   const reentry = data.dynamicContext?.reentry;
   if (!treated(data) || !(reentry || data.advisory?.pet_advisory)) return null;
-  return data.serviceLine === 'lawn'
-    ? 'Keep pets off the lawn until it is dry.'
-    : 'Keep pets off treated areas until they are dry.';
+  if (data.serviceLine !== 'lawn') return 'Keep pets off treated areas until they are dry.';
+  const rule = reentryCondition(reentry?.condition)?.rule;
+  return LAWN_HOLD[rule] || LAWN_HOLD.dry;
 }
 
 function buildWebTop(data, rain = null) {
