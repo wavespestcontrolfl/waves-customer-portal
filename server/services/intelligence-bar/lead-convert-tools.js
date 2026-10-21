@@ -180,6 +180,17 @@ async function funnelEffect(leadId, customerId) {
 
 // The lead (unconverted) and the customer the call names, or the refusal. Without a customer_id the
 // answer is the list of customers that share the lead's contact, never a card.
+// A lead already linked to a customer converts to THAT customer: with none named it uses the link; a different
+// one would silently replace the link, so it is refused.
+async function linkedCustomerChoice(lead, leadName, input) {
+  const named = String(input?.customer_id || '').trim();
+  if (!lead.customer_id) return { rawCustomer: named };
+  const rawCustomer = named || String(lead.customer_id);
+  if (rawCustomer.toLowerCase() === String(lead.customer_id).toLowerCase()) return { rawCustomer };
+  const linked = await db('customers').where({ id: lead.customer_id }).first('first_name', 'last_name', 'company_name');
+  return { refused: refusal(`${leadName} is already linked to ${personName(linked) || 'another customer'}. Convert it to that customer, or change the link on the Leads page.`, 'lead_linked_elsewhere', { lead_id: lead.id, linked_customer_id: lead.customer_id }) };
+}
+
 async function resolveTargets(input) {
   const rawLead = String(input?.lead_id || '').trim();
   if (!UUID_RE.test(rawLead)) return refusal('A valid lead_id is required', 'invalid_target');
@@ -197,14 +208,9 @@ async function resolveTargets(input) {
   const badValue = [['monthly_value', 100000], ['initial_service_value', 1000000]]
     .find(([key, max]) => input[key] !== undefined && !(Number.isFinite(input[key]) && input[key] >= 0 && input[key] <= max));
   if (badValue) return refusal(`${badValue[0]} must be a dollar amount from 0 to ${badValue[1]}`, 'invalid_value');
-  // A lead already linked to a customer converts to THAT customer: with none named it uses the link; a different
-  // one would silently replace the link, so it is refused.
-  let rawCustomer = String(input?.customer_id || '').trim();
-  if (lead.customer_id && !rawCustomer) rawCustomer = String(lead.customer_id);
-  if (lead.customer_id && rawCustomer.toLowerCase() !== String(lead.customer_id).toLowerCase()) {
-    const linked = await db('customers').where({ id: lead.customer_id }).first('first_name', 'last_name', 'company_name');
-    return refusal(`${leadName} is already linked to ${personName(linked) || 'another customer'}. Convert it to that customer, or change the link on the Leads page.`, 'lead_linked_elsewhere', { lead_id: lead.id, linked_customer_id: lead.customer_id });
-  }
+  const linkedCheck = await linkedCustomerChoice(lead, leadName, input);
+  if (linkedCheck.refused) return linkedCheck.refused;
+  const rawCustomer = linkedCheck.rawCustomer;
   if (!rawCustomer) {
     const { matches: candidates, truncated } = await contactMatches(lead);
     return refusal(
