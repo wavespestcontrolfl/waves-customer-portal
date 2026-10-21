@@ -66,6 +66,7 @@ const seedWorld = () => ({
   scheduled_services: [{ id: ID, customer_id: CUSTOMER, scheduled_date: new Date('2026-10-14T00:00:00.000Z'), service_type: 'Pest Control', notes: 'Old visit note', updated_at: new Date(STAMP) }],
   service_product_usage: [{ id: ID, product_id: PRODUCT, service_type: 'General Pest Control', notes: 'Old use note', updated_at: STAMP }],
   products_catalog: [{ id: PRODUCT, name: 'Talstar P' }],
+  recipient_optin: [],
   time_weekly_summary: [],
   time_entry_daily_summary: [],
 });
@@ -99,10 +100,15 @@ let world;
 function makeDb() {
   return (table) => {
     const conds = [];
+    const set = [];
+    const unset = [];
     const builder = {
       where(cond) { conds.push(cond); return builder; },
+      whereNotNull(column) { set.push(column); return builder; },
+      whereNull(column) { unset.push(column); return builder; },
       async first() {
-        const found = (world[table] || []).find(row => conds.every(cond => Object.entries(cond).every(([k, v]) => String(row[k]) === String(v))));
+        const found = (world[table] || []).find(row => conds.every(cond => Object.entries(cond).every(([k, v]) => String(row[k]) === String(v)))
+          && set.every(column => row[column] !== null && row[column] !== undefined) && unset.every(column => row[column] === null || row[column] === undefined));
         return found ? { ...found } : undefined;
       },
     };
@@ -733,6 +739,51 @@ describe('the record snapshot: label, current values, version', () => {
     expect(callsOf()).toHaveLength(0);
   });
 
+  describe('appointmentNotifyPrimary after a caller demotion', () => {
+    const prefs = () => CUSTOMER_ENTRY;
+    const demoted = (extra = {}) => ({ customer_id: CUSTOMER, caller_demoted_at: new Date('2026-10-01T12:00:00.000Z'), caller_choice_at: null, ...extra });
+
+    test.each([['to the other value', false], ['to the value it already has (a no-op)', true]])('saving it %s is refused: the screen would also stamp the opt-in choice', async (_label, value) => {
+      world.recipient_optin = [demoted()];
+      const result = await propose({ ...inputFor(prefs()), body: { appointmentNotifyPrimary: value } });
+      expect(result).toMatchObject({ code: 'capability_unimplemented' });
+      expect(result.error).toMatch(/customer page/);
+      expect(callsOf()).toHaveLength(0);
+    });
+
+    test('other flags on the same customer are fine, and so is a customer not demoted or already past the choice', async () => {
+      world.recipient_optin = [demoted()];
+      expect(await propose({ ...inputFor(prefs()), body: { serviceReportNotifyBilling: true } })).toMatchObject({ preview: true });
+      world.recipient_optin = [demoted({ caller_choice_at: new Date('2026-10-02T12:00:00.000Z') })];
+      expect(await propose({ ...inputFor(prefs()), body: { appointmentNotifyPrimary: false } })).toMatchObject({ preview: true });
+      world.recipient_optin = [demoted({ caller_demoted_at: null })];
+      expect(await propose({ ...inputFor(prefs()), body: { appointmentNotifyPrimary: false } })).toMatchObject({ preview: true });
+      world.recipient_optin = [];
+      expect(await propose({ ...inputFor(prefs()), body: { appointmentNotifyPrimary: false } })).toMatchObject({ preview: true });
+    });
+
+    test('a demotion recorded after the card was shown refuses the Confirm', async () => {
+      const input = { ...inputFor(prefs()), body: { appointmentNotifyPrimary: false } };
+      const preview = await propose(input);
+      world.recipient_optin = [demoted()];
+      expect(await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'capability_unimplemented' });
+      expect(callsOf()).toHaveLength(0);
+    });
+  });
+
+  test('a long current value is shown whole (credentials removed) under Show more', async () => {
+    world.sms_templates[0].body = `${'b'.repeat(320)} TAIL password: hunter2hunter2`;
+    const preview = await propose(inputFor(ENTRY));
+    const lines = cardLines(preview);
+    expect(lines.find(line => /^body:/.test(line.text)).text).toMatch(/more characters\] → /);
+    const more = lines.find(line => line.more && /^Full current body/.test(line.text));
+    expect(more.text).toContain('TAIL');
+    expect(more.text).not.toContain('hunter2hunter2');
+    const contract = Contract.buildContract({ toolName: PROPOSE, params: inputFor(ENTRY), displayParams: displayParams(preview), preview, summary: 'x' });
+    expect(JSON.stringify(contract.more_effects)).toContain('Full current body');
+    expect(JSON.stringify(contract.more_effects)).not.toContain('hunter2hunter2');
+  });
+
   test('a value changed on the screen between the card and Confirm is a new card, and nothing is sent', async () => {
     for (const [key, change] of [
       ['PUT /admin/sms-templates/:id', () => { world.sms_templates[0].body = 'Someone else edited this'; }],
@@ -974,6 +1025,35 @@ describe('the save is read back', () => {
     const preview = await propose(input);
     global.fetch = savingFetch(undefined, { save: false });
     expect(await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'edit_not_verified' });
+  });
+
+  describe('the email version screen\'s variable check', () => {
+    const version = () => catalog.entries.find(e => e.endpoint === '/admin/email-templates/versions/:id');
+    const confirmAnswering = async (validation) => {
+      const input = inputFor(version());
+      const preview = await propose(input);
+      global.fetch = savingFetch(() => jsonResponse(200, { version: { id: ID }, validation }));
+      return propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
+    };
+
+    test('a draft saved with variable problems is a partial success that names them', async () => {
+      const result = await confirmAnswering({ ok: false, disallowed_variables: ['pet_name', 'api_key sk_live_abcdefghijklmnop'], missing_required_in_template: ['first_name'] });
+      expect(result.success).toBe(true);
+      expect(result.warning).toMatch(/^Saved as a draft, but the template has variable problems: variables this template does not allow: pet_name/);
+      expect(result.warning).toContain('required variables the draft no longer uses: first_name');
+      expect(result.warning).not.toContain('sk_live_abcdefghijklmnop');
+      expect(require('../services/intelligence-bar/outcomes').executionOutcome(result)).toBe('partially_completed');
+    });
+
+    test('a clean check, or one the screen did not send, adds no warning', async () => {
+      const clean = await confirmAnswering({ ok: true, disallowed_variables: [], missing_required_in_template: [] });
+      expect(clean.warning).toBeUndefined();
+      expect(require('../services/intelligence-bar/outcomes').executionOutcome(clean)).toBe('completed');
+      world = seedWorld();
+      expect((await confirmAnswering(undefined)).warning).toBeUndefined();
+      world = seedWorld();
+      expect((await confirmAnswering({ ok: false })).warning).toContain('the screen did not list them');
+    });
   });
 
   test('text is compared as the screen stores it (trimmed), and a date-time by instant', async () => {

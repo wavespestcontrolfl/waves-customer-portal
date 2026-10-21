@@ -94,6 +94,21 @@ test('every entry has a record snapshot (label, current values, version), and th
   expect(committed.entries.find(entry => entry.endpoint === '/admin/email-templates/versions/:id').requireState).toEqual({ status: 'draft' });
 });
 
+// The real column sizes (knex .string() with no length is varchar(255)); text columns have no limit but the tool's own.
+test('every string field is limited to its real column size', () => {
+  const LIMITS = {
+    'PUT /admin/sms-templates/:id': { name: 200 },
+    'PUT /admin/email-templates/:key': { name: 180 },
+    'PUT /admin/email-templates/versions/:id': { subject: 255, previewText: 255 },
+    'PUT /admin/email-templates/fixtures/:id': { name: 120 },
+    'PUT /admin/automations/steps/:id': { subject: 255, previewText: 255 },
+  };
+  for (const [key, fields] of Object.entries(LIMITS)) {
+    const entry = committed.entries.find(e => `${e.method} ${e.endpoint}` === key);
+    for (const [field, size] of Object.entries(fields)) expect({ key, field, max: entry.body[field].maxLength }).toEqual({ key, field, max: size });
+  }
+});
+
 test('the runtime reads the committed catalog only: a stale row cannot throw there', () => {
   const code = fs.readFileSync(require.resolve('../services/intelligence-bar/admin-write-tools.js'), 'utf8')
     .split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');

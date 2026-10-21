@@ -83,11 +83,11 @@
       "body": {
         "subject": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 255
         },
         "previewText": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 255
         },
         "textBody": {
           "type": "string",
@@ -128,7 +128,7 @@
       "body": {
         "name": {
           "type": "string",
-          "maxLength": 200,
+          "maxLength": 120,
           "minLength": 1
         },
         "payload": {
@@ -165,11 +165,11 @@
       "body": {
         "subject": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 255
         },
         "previewText": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 255
         },
         "htmlBody": {
           "type": "string",
@@ -290,7 +290,7 @@
         }
       },
       "required": [],
-      "reviewed": "Handler read end to end (admin-customers.js PUT /:id/notification-prefs) with adminNotificationPrefsDbUpdates, createDefaultCustomerRows (inserts the default property_preferences and notification_prefs rows only when missing, marketing flags NULL), lockAssignedCustomerEmails (advisory lock keys for the emails in the update; the allow-list carries none) and noteHolderSetNotifyPrimary (stamps caller_choice_at on the customer's recipient_optin row): one transaction, UPDATE of notification_prefs. Nothing is sent. The bar refuses a customer with no saved notification_prefs row: the handler would first seed the default rows (confirmations, reminders, en-route and completed texts, payment confirmations), a far larger change than the card could show. billingEmail and billingContactName are left off the allow-list: they change who receives invoices.",
+      "reviewed": "Handler read end to end (admin-customers.js PUT /:id/notification-prefs) with adminNotificationPrefsDbUpdates, createDefaultCustomerRows (inserts the default property_preferences and notification_prefs rows only when missing, marketing flags NULL), lockAssignedCustomerEmails (advisory lock keys for the emails in the update; the allow-list carries none) and noteHolderSetNotifyPrimary (stamps caller_choice_at on the customer's recipient_optin row): one transaction, UPDATE of notification_prefs. Nothing is sent. The bar refuses a customer with no saved notification_prefs row: the handler would first seed the default rows (confirmations, reminders, en-route and completed texts, payment confirmations), a far larger change than the card could show. It also refuses appointmentNotifyPrimary (even to its current value) while the customer's recipient_optin row has caller_demoted_at set and caller_choice_at unset, because noteHolderSetNotifyPrimary would then stamp the office's choice (a change in who gets visit texts the card cannot show). billingEmail and billingContactName are left off the allow-list: they change who receives invoices.",
       "reason": "Flips one customer's text and report preference flags. The handler only updates notification_prefs; a customer with no saved row is refused by the bar (the handler would seed the defaults first). It sends no confirmation and no text. Marketing flags and the billing recipient are not on the list.",
       "noSend": "Changes which texts and reports this customer gets later. Nothing is sent now, and no opt-in or opt-out message goes out.",
       "waive": {

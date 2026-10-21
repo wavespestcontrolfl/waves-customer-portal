@@ -340,6 +340,8 @@ function cardLines(preview) {
     const after = fullText(change.after);
     lines.push({ kind: 'operational', text: `${humanField(change.field)}: ${showValue(change.before)} → ${showValue(change.after)}` });
     if (after.length > CARD_VALUE_CHARS) lines.push({ kind: 'operational', text: `Full new ${humanField(change.field)}: ${after}`, more: true });
+    const before = change.before === null || change.before === undefined ? '' : fullText(change.before);
+    if (before.length > CARD_VALUE_CHARS) lines.push({ kind: 'operational', text: `Full current ${humanField(change.field)} (credentials removed): ${before}`, more: true });
   }
   lines.push({ kind: 'operational', text: preview.does_not });
   lines.push({ kind: 'operational', text: `Saved through the same screen endpoint (${preview.method} ${preview.endpoint}), so its own checks apply.` });
@@ -392,6 +394,20 @@ async function verifySaved(plan) {
   return wrong.length ? unverified(wrong.join(', ')) : null;
 }
 
+// The email version screen answers { version, validation } and saves a draft even when its variables are wrong:
+// say so, with the problems (a partial success, not a plain one).
+function validationWarning(parsed) {
+  const validation = parsed && typeof parsed === 'object' ? parsed.validation : null;
+  if (!validation || typeof validation !== 'object' || validation.ok !== false) return null;
+  const list = (value) => (Array.isArray(value) ? value.slice(0, 20).map(item => String(item).slice(0, 60)).join(', ') : '');
+  const parts = [
+    list(validation.disallowed_variables) ? `variables this template does not allow: ${list(validation.disallowed_variables)}` : '',
+    list(validation.missing_required_in_template) ? `required variables the draft no longer uses: ${list(validation.missing_required_in_template)}` : '',
+  ].filter(Boolean);
+  const detail = parts.length ? parts.join('; ') : 'the screen did not list them';
+  return redactSecrets(`Saved as a draft, but the template has variable problems: ${detail}. Fix them before the draft is published.`, newState());
+}
+
 async function replay(plan, authorization) {
   const origin = loopbackOrigin();
   if (!origin) return refusal('The edit could not find this server. Nothing was changed.', 'edit_connection_failed');
@@ -422,7 +438,9 @@ async function replay(plan, authorization) {
     const verified = await verifySaved(plan);
     if (verified) return verified;
     logger.info(`[admin-edit] ${row.method} ${row.endpoint} saved (fields: ${Object.keys(plan.body).sort().join(', ')})`);
+    const warning = validationWarning(parsed);
     return {
+      ...(warning ? { warning } : {}),
       success: true, status, edited: row.label, method: row.method, endpoint: row.endpoint,
       record: plan.pathParams, fields_changed: Object.keys(plan.body).sort(),
       record_label: plan.label,

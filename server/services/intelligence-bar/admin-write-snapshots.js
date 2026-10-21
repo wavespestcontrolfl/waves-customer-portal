@@ -136,9 +136,21 @@ const SNAPSHOTS = {
       autoFlipEnRoute: 'auto_flip_en_route', paymentConfirmationSms: 'payment_confirmation_sms', appointmentNotifyPrimary: 'appointment_notify_primary',
       serviceReportNotifyPrimary: 'service_report_notify_primary', serviceReportNotifyBilling: 'service_report_notify_billing',
     },
-    async load(p) {
+    async load(p, body = {}) {
       const customer = await customerOf(p.id);
       if (!customer || customer.deleted_at) return null;
+      // Saving appointmentNotifyPrimary (even to the value it already has) also stamps caller_choice_at on the customer's
+      // recipient_optin row after a caller demotion (noteHolderSetNotifyPrimary): a change in who gets visit texts that
+      // this card cannot show. Refused; it is set on the customer page.
+      if (body.appointmentNotifyPrimary !== undefined) {
+        const demoted = await db('recipient_optin').where({ customer_id: p.id }).whereNotNull('caller_demoted_at').whereNull('caller_choice_at').first('customer_id');
+        if (demoted) {
+          return { blocked: {
+            error: `${fullName(customer)}'s appointment texts were switched off for the caller after an on-site contact answered YES. Saving "texts to the account holder" would also record the office's choice on that opt-in, which changes who gets visit texts. Set it on the customer page. Nothing was proposed.`,
+            code: 'capability_unimplemented',
+          } };
+        }
+      }
       const row = await db('notification_prefs').where({ customer_id: p.id }).first();
       // With no saved row the screen's save first seeds the defaults (confirmations, reminders, en-route and
       // completed texts, SMS and email, payment confirmations) and then applies the patch: a much bigger change
