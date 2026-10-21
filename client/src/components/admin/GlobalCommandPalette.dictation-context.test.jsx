@@ -92,7 +92,7 @@ describe('Intelligence Bar dictated amounts', () => {
 
   it('sends the ambiguous amount with the question that still contains it', async () => {
     const body = await dictateAndAsk('charge 6133 a month');
-    expect(body.dictation_money).toEqual([AMBIGUOUS]);
+    expect(body.dictation_money).toEqual([{ heard: '6133' }]);
   });
 
   it('sends nothing when the operator edited the digits out', async () => {
@@ -110,13 +110,13 @@ describe('Intelligence Bar dictated amounts', () => {
     ['charge 6133 a month', 'charge 6133.5 a month', false],
   ])('dictated %j then edited to %j: flag kept=%s', async (spoken, edited, kept) => {
     const body = await dictateAndAsk(spoken, edited === spoken ? undefined : edited);
-    if (kept) expect(body.dictation_money).toEqual([AMBIGUOUS]);
+    if (kept) expect(body.dictation_money).toEqual([{ heard: '6133' }]);
     else expect(body.dictation_money).toBeUndefined();
   });
 
   it('a space after the dollar sign still counts as the same amount', async () => {
     const body = await dictateAndAsk('charge $ 6133 a month');
-    expect(body.dictation_money).toEqual([AMBIGUOUS]);
+    expect(body.dictation_money).toEqual([{ heard: '6133' }]);
   });
 
   it('keeps one entry per amount, so repeats cannot crowd out a fourth amount (cap is three)', async () => {
@@ -133,6 +133,57 @@ describe('Intelligence Bar dictated amounts', () => {
 
   it('an edit that keeps the digits keeps the flag', async () => {
     const body = await dictateAndAsk('charge 6133 a month', 'charge 6133 a month, as agreed', [AMBIGUOUS], ['charge 6133']);
-    expect(body.dictation_money).toEqual([AMBIGUOUS]);
+    expect(body.dictation_money).toEqual([{ heard: '6133' }]);
+  });
+
+  describe('clear readings ride along too', () => {
+    const CLEAR = { from: 'sixty-one thirty-three', to: '$61.33', kind: 'words-pair' };
+    async function dictateClear(spoken, { edits = [], typedAfter, changes = [CLEAR], ambiguous = [] } = {}) {
+      useIsMobile.mockReturnValue(false);
+      await openBar(null);
+      const mic = micProps.filter((props) => props.title === 'Dictate your question').at(-1);
+      act(() => mic.onAppend(spoken, { money: { changes, ambiguous } }));
+      const box = await screen.findByPlaceholderText(/Ask anything|Tell me|Ask/);
+      for (const value of [...edits, typedAfter].filter(Boolean)) fireEvent.change(box, { target: { value } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      await waitFor(() => expect(queryBody()).not.toBeNull());
+      return queryBody();
+    }
+
+    it('sends the heard words with the suggested amount', async () => {
+      const body = await dictateClear('charge sixty-one thirty-three a month');
+      expect(body.dictation_money).toEqual([{ heard: 'sixty-one thirty-three', suggested: '$61.33' }]);
+    });
+
+    it('sends a digit pair the same way', async () => {
+      const body = await dictateClear('charge 61 33 a month', { changes: [{ from: '61 33', to: '$61.33', kind: 'digits-pair' }] });
+      expect(body.dictation_money).toEqual([{ heard: '61 33', suggested: '$61.33' }]);
+    });
+
+    it('sends a clear reading and an unclear one together', async () => {
+      const body = await dictateClear('was sixty-one thirty-three, now 6133', { ambiguous: [AMBIGUOUS] });
+      expect(body.dictation_money).toEqual([{ heard: 'sixty-one thirty-three', suggested: '$61.33' }, { heard: '6133' }]);
+    });
+
+    it('drops it for good once the words are edited out; retyping them is not flagged', async () => {
+      const body = await dictateClear('charge sixty-one thirty-three a month', { edits: ['charge fifty a month'], typedAfter: 'charge sixty-one thirty-three a month' });
+      expect(body.dictation_money).toBeUndefined();
+    });
+
+    it('keeps it through an edit that leaves the words in', async () => {
+      const body = await dictateClear('charge sixty-one thirty-three a month', { typedAfter: 'Charge Sixty-One Thirty-Three a month please' });
+      expect(body.dictation_money).toEqual([{ heard: 'sixty-one thirty-three', suggested: '$61.33' }]);
+    });
+
+    it('does not match the words inside a longer phrase', async () => {
+      const body = await dictateClear('charge sixty-one thirty-three a month', { typedAfter: 'charge sixty-one thirty-three-ish a month' });
+      expect(body.dictation_money).toBeUndefined();
+    });
+
+    it('one entry per phrase, three at most', async () => {
+      const changes = ['twenty-five fifty', 'thirty-five fifty', 'forty-five fifty', 'fifty-five fifty'].map((from) => ({ from, to: '$1.00', kind: 'words-pair' }));
+      const body = await dictateClear('a twenty-five fifty b thirty-five fifty c forty-five fifty d fifty-five fifty a twenty-five fifty', { changes: [changes[0], ...changes] });
+      expect(body.dictation_money.map((x) => x.heard)).toEqual(['twenty-five fifty', 'thirty-five fifty', 'forty-five fifty']);
+    });
   });
 });

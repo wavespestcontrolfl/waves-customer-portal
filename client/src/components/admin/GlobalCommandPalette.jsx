@@ -59,21 +59,31 @@ function taskLoadReopens(loaded, held, operation) {
 }
 
 // The dictated amounts still in the message being sent, as the request's dictation_money field
-// (empty when none: nothing is added to the request).
+// (empty when none: nothing is added to the request). An entry is { heard } for an amount the mic could not
+// settle ("6133") or { heard, suggested } for a clear reading ("sixty-one thirty-three" -> "$61.33").
+// The server recomputes every amount from the question; `suggested` only says which words were dictated.
+
 // The digits as their own number: not inside a larger number, a decimal ("6133.00") or a comma group.
 // An optional "$" (with optional space, as the server reads it) belongs to the amount.
 function standaloneAmount(question, digits) {
   return new RegExp(`(?<![\\d.,$])(?:\\$\\s?)?${digits}(?![\\d]|[.,]\\d)`).test(String(question));
 }
 
-function dictationMoneyFor(question, ambiguous) {
+// Are an entry's heard words still in the message? Four digits stand alone; spoken words match as whole words.
+function heardStillIn(question, heard) {
+  if (/^\d{4}$/.test(heard)) return standaloneAmount(question, heard);
+  const escaped = heard.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(?<![\\w$.,-])${escaped}(?![\\w-])`, "i").test(String(question));
+}
+
+function dictationMoneyFor(question, entries) {
   const seen = new Set();
   const kept = [];
-  for (const item of ambiguous || []) {
+  for (const item of entries || []) {
     const heard = String(item?.heard || "");
-    if (!/^\d{4}$/.test(heard) || seen.has(heard) || !standaloneAmount(question, heard)) continue;
-    seen.add(heard); // one entry per amount, so a repeat cannot crowd out the next amount
-    kept.push({ heard, candidates: item.candidates });
+    if (!heard || seen.has(heard.toLowerCase()) || !heardStillIn(question, heard)) continue;
+    seen.add(heard.toLowerCase()); // one entry per amount, so a repeat cannot crowd out the next amount
+    kept.push(item.suggested ? { heard, suggested: String(item.suggested) } : { heard });
   }
   return kept.length ? { dictation_money: kept.slice(0, 3) } : {};
 }
@@ -954,20 +964,23 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
 
   // Merge each dictation transcript chunk into the input, space-separated.
   // An amount the server could not settle ("6133": $61.33 or $6,133) rides to the next question as
-  // dictation_money; the server decides whether it matters (GATE_DICTATION_MONEY_NORMALIZE).
+  // dictation_money, with clear readings too; the server decides what it says (GATE_DICTATION_MONEY_NORMALIZE).
   const appendTranscript = useCallback((text, extra) => {
     if (!text) return;
-    if (Array.isArray(extra?.money?.ambiguous) && extra.money.ambiguous.length) {
-      dictationMoneyRef.current = [...dictationMoneyRef.current, ...extra.money.ambiguous];
-    }
+    const money = extra?.money;
+    const fresh = [
+      ...(Array.isArray(money?.changes) ? money.changes.filter((c) => c?.from && c?.to).map((c) => ({ heard: String(c.from), suggested: String(c.to) })) : []),
+      ...(Array.isArray(money?.ambiguous) ? money.ambiguous.filter((a) => a?.heard).map((a) => ({ heard: String(a.heard) })) : []),
+    ];
+    if (fresh.length) dictationMoneyRef.current = [...dictationMoneyRef.current, ...fresh];
     setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
   }, []);
 
-  // A flagged amount stays only while its digits are in the message. Once an edit takes them out the flag
+  // A dictated amount stays only while its heard words are in the message. Once an edit takes them out the flag
   // is gone for good: digits typed in later are the operator's own, not a dictated guess.
   useEffect(() => {
     if (dictationMoneyRef.current.length) {
-      dictationMoneyRef.current = dictationMoneyRef.current.filter((item) => standaloneAmount(prompt, item.heard));
+      dictationMoneyRef.current = dictationMoneyRef.current.filter((item) => heardStillIn(prompt, item.heard));
     }
   }, [prompt]);
 

@@ -225,25 +225,47 @@ function normalizeSpokenMoney(input) {
   return { text, changes, ambiguous };
 }
 
-/**
- * The one system-prompt note the Intelligence Bar adds when the operator's dictation carried an
- * ambiguous amount (GATE_DICTATION_MONEY_NORMALIZE). Takes the client's `dictation_money` list;
- * keeps only well-formed entries whose digits really are four characters (the client is not trusted
- * with prompt text), at most three. Returns '' when there is nothing to say.
- */
-function ambiguousAmountNote(list) {
-  if (!Array.isArray(list)) return '';
-  const lines = [];
+/** What the client may send as dictation_money: up to three { heard, suggested? } with short strings. */
+function cleanDictationMoney(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
   for (const item of list) {
-    const heard = String(item?.heard || '').trim();
-    if (!/^\d{4}$/.test(heard)) continue;
-    const cents = fmtDollarsCents(Number(heard.slice(0, 2)), Number(heard.slice(2)));
-    const whole = fmtDollars(Number(heard));
-    const line = `The operator's dictated amount '${heard}' is ambiguous: ask with offer_choices between ${cents} and ${whole} before using it.`;
-    if (!lines.includes(line)) lines.push(line);
-    if (lines.length >= 3) break;
+    const heard = String(item?.heard ?? '').trim().slice(0, 80);
+    if (!heard || out.some((o) => o.heard === heard)) continue;
+    const suggested = typeof item?.suggested === 'string' ? item.suggested.trim().slice(0, 20) : '';
+    out.push(suggested ? { heard, suggested } : { heard });
+    if (out.length >= 3) break;
   }
-  return lines.length ? `\n\nDICTATED AMOUNTS:\n${lines.join('\n')}` : '';
+  return out;
 }
 
-module.exports = { normalizeSpokenMoney, ambiguousAmountNote, wordsToNumber };
+const squash = (v) => String(v).toLowerCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * The system-prompt note the Intelligence Bar adds when the operator's dictation carried amounts
+ * (GATE_DICTATION_MONEY_NORMALIZE). Takes the client's `dictation_money` list and the question.
+ * The client only says WHICH heard words are dictated; every amount in the note is recomputed here
+ * from the question (the client's `suggested` is never read), and a four-digit entry must really be
+ * four digits. At most three lines. Returns '' when there is nothing to say.
+ *   - a clear reading: 'The operator dictated "sixty-one thirty-three", which reads as $61.33; use $61.33 ...'
+ *   - an unclear one: ask with offer_choices between $61.33 and $6,133 before using it.
+ */
+function ambiguousAmountNote(list, question) {
+  const entries = cleanDictationMoney(list);
+  if (!entries.length) return '';
+  const parsed = typeof question === 'string' ? normalizeSpokenMoney(question) : { changes: [] };
+  const lines = [];
+  for (const { heard } of entries) {
+    if (/^\d{4}$/.test(heard)) {
+      const cents = fmtDollarsCents(Number(heard.slice(0, 2)), Number(heard.slice(2)));
+      lines.push(`The operator's dictated amount '${heard}' is ambiguous: ask with offer_choices between ${cents} and ${fmtDollars(Number(heard))} before using it.`);
+      continue;
+    }
+    const change = parsed.changes.find((c) => squash(c.from) === squash(heard));
+    if (change) lines.push(`The operator dictated "${change.from}", which reads as ${change.to}; use ${change.to} and show it on any card.`);
+  }
+  const unique = [...new Set(lines)].slice(0, 3);
+  return unique.length ? `\n\nDICTATED AMOUNTS:\n${unique.join('\n')}` : '';
+}
+
+module.exports = { normalizeSpokenMoney, ambiguousAmountNote, cleanDictationMoney, wordsToNumber };

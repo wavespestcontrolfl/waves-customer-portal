@@ -365,6 +365,22 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
       expect(prompt.split(NOTE)).toHaveLength(2);
     });
 
+    test('gate on: a clear reading is stated from the SERVER\'s own parse, never the client\'s amount', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      const prompt = await promptFor({
+        prompt: 'charge sixty-one thirty-three a month',
+        dictation_money: [{ heard: 'sixty-one thirty-three', suggested: '$1,000,000' }],
+      });
+      expect(prompt).toContain('The operator dictated "sixty-one thirty-three", which reads as $61.33; use $61.33 and show it on any card.');
+      expect(prompt).not.toContain('1,000,000');
+    });
+
+    test('gate on: heard words the server does not read as an amount add nothing', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      const prompt = await promptFor({ prompt: 'gate code sixty-one thirty-three', dictation_money: [{ heard: 'sixty-one thirty-three', suggested: '$61.33' }] });
+      expect(prompt).not.toContain('dictated');
+    });
+
     test('gate off: the same request adds nothing', async () => {
       const prompt = await promptFor({ dictation_money: [{ heard: '6133', candidates: ['$61.33', '$6,133'] }] });
       expect(prompt).not.toContain('dictated amount');
