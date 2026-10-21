@@ -332,6 +332,20 @@ describe('triggerNotification bell outcome', () => {
     ));
   });
 
+  test('pushOnly re-sends the push without writing a second bell row (missed-call push retry)', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' },
+      { pushOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(stats.bellWritten).toBe(false);
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').tag).toBe('waves-customer_missed_call-call-1');
+    // Without the option the same call writes its bell as before.
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('a keyed SMS replay reuses its committed bell and does not push again', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },

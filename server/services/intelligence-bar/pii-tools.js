@@ -41,6 +41,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'accept_estimate',
   // record_payment previews name the customer, the invoice and masked receipt recipients.
   'record_payment',
+  // void_invoice previews name the customer and the invoice.
+  'void_invoice',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

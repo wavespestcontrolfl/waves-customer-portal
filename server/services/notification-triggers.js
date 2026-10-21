@@ -1134,7 +1134,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1229,7 +1229,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
-      if (userPref.bell_enabled && !bellWritten) {
+      // pushOnly (missed-call push retry): the bell row already exists; only the push is re-sent.
+      if (!pushOnly && userPref.bell_enabled && !bellWritten) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
         try {
           // NotificationService.create catches insert errors and returns null

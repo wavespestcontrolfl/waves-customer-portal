@@ -355,6 +355,7 @@ const SCOPE_SNAPSHOT = {
     'send_invoice',
     // record_payment carries invoice_id (or invoice_number, bound like send_invoice's).
     'record_payment',
+    'void_invoice',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.
