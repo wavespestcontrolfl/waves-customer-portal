@@ -72,6 +72,7 @@ function unknownCallerAllowed(row, opts) {
 const WAVE_MAX_SECONDS = 30;
 const WAVE_MIN_NUMBERS = 3;
 const WAVE_DAYS = 14;
+const CUSTOMER_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
 const LAST10_SQL = (column) => `right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
 
 async function isRobodialerWave(row) {
@@ -87,13 +88,17 @@ async function isRobodialerWave(row) {
     .where('direction', 'inbound')
     .whereNull('customer_id')
     .where('created_at', '>=', new Date(at.getTime() - WAVE_DAYS * 86400 * 1000))
-    .where('created_at', '<=', at)
+    // The call itself always counts: a JS Date drops the microseconds of its
+    // stored created_at, so it is matched by id rather than by time.
+    .where((qb) => qb.where('created_at', '<', at).orWhere('id', row.id))
     .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
+    // An unlinked call from a number on any customer phone slot is no robodialer.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE ${LAST10_SQL('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => LAST10_SQL(`cu.${c}`)).join(', ')}))`)
     .countDistinct({ n: db.raw(LAST10_SQL('from_phone')) })
     .first();
   if (Number(found?.n || 0) < WAVE_MIN_NUMBERS) return false;
   const customer = await db('customers')
-    .whereRaw(`? IN (${['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'].map(LAST10_SQL).join(', ')})`, [digits])
+    .whereRaw(`? IN (${CUSTOMER_PHONE_COLS.map(LAST10_SQL).join(', ')})`, [digits])
     .first('id');
   return !customer;
 }

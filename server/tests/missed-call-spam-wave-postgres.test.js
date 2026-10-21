@@ -120,6 +120,22 @@ jest.setTimeout(30000);
     expect(await isRobodialerWave(third())).toBe(false);
   });
 
+  test('an earlier block number that is on a customer record does not count toward the wave (pre-push audit)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row, call('+19415550101', 60), call('+19415550202', 60)]);
+    expect(await isRobodialerWave(row)).toBe(true);
+    await database('customers').insert({ id: randomUUID(), first_name: 'Sample', last_name: 'Person', phone: '+19415550202' });
+    expect(await isRobodialerWave(row)).toBe(false);
+  });
+
+  test('the call counts itself even when its stored time carries microseconds (pre-push audit)', async () => {
+    const row = call('+19415550303', 0);
+    await database('call_log').insert([call('+19415550101', 60), call('+19415550202', 60)]);
+    await database.raw("INSERT INTO call_log (id, twilio_call_sid, direction, from_phone, to_phone, status, answered_by, duration_seconds, metadata, created_at, updated_at) VALUES (?, ?, 'inbound', ?, ?, 'completed', 'voicemail', 24, '{}', now(), now())", [row.id, row.twilio_call_sid, row.from_phone, row.to_phone]);
+    const stored = await database('call_log').where({ id: row.id }).first();
+    expect(await isRobodialerWave(stored)).toBe(true);
+  });
+
   test('block calls older than 14 days do not count', async () => {
     const row = call('+19415550303', 10);
     await database('call_log').insert([row, call('+19415550101', 60 * 24 * 15), call('+19415550202', 60 * 24 * 16)]);
