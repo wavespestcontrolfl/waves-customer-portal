@@ -716,6 +716,13 @@ async function assertVoidChargeFence(trx, id, expected) {
     throw err;
   }
 }
+// The bar's void only: a payment plan (any status but cancelled) created after the card refuses the void, read inside the
+// void transaction once the invoice row is held. The page's void cancels an active plan; the bar never does.
+async function assertVoidNoPaymentPlan(trx, id, expected) {
+  if (!expected) return;
+  const plan = await trx("payment_plans").where({ invoice_id: id }).whereNot("status", "cancelled").first("id");
+  if (plan) throw new Error("A payment plan exists on this invoice while voiding — cancel it on the Invoices page instead of voiding from the bar");
+}
 async function recheckVoidExpected(id, expected) {
   if (!expected) return;
   const row = await db("invoices").where({ id }).first();
@@ -11086,6 +11093,7 @@ const InvoiceService = {
       // Bar only (`expected`): the durable saved-card charge fence, re-read now that this transaction holds the invoice
       // row (the UPDATE above); a charge that started after the card refuses and rolls the void back.
       await assertVoidChargeFence(trx, id, expected);
+      await assertVoidNoPaymentPlan(trx, id, expected);
       // A voided standard invoice that billed the rodent bait-station setup
       // puts the obligation back on the living series (codex #3591 r44 P1).
       await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);

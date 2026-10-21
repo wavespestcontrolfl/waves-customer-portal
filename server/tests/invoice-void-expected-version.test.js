@@ -25,7 +25,7 @@ const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, cre
 
 function chain({ first, returning } = {}) {
   const q = { calls: [] };
-  for (const name of ['where', 'whereIn', 'whereRaw', 'whereNull', 'update']) {
+  for (const name of ['where', 'whereNot', 'whereIn', 'whereRaw', 'whereNull', 'update']) {
     q[name] = jest.fn((...args) => { q.calls.push([name, ...args]); return q; });
   }
   q.first = jest.fn(async () => first);
@@ -40,12 +40,15 @@ beforeEach(() => {
   db.transaction = jest.fn(async (fn) => fn(db));
 });
 
-function queueVoid({ current = row(), returning = [row({ status: 'void' })] } = {}) {
+function queueVoid({ current = row(), returning = [row({ status: 'void' })], plan, bar = true } = {}) {
   const update = chain({ returning });
   db
     .mockReturnValueOnce(chain({ first: current }))
     .mockReturnValueOnce(chain({ first: undefined })) // payments guard
-    .mockReturnValueOnce(update) // the void UPDATE
+    .mockReturnValueOnce(update); // the void UPDATE
+  // Bar only: the payment-plan fence read right after the UPDATE (the charge fence is mocked at the Stripe module).
+  if (bar) db.mockReturnValueOnce(chain({ first: plan }));
+  db
     .mockReturnValueOnce(chain({ first: undefined })) // payments guard under the lock
     .mockReturnValueOnce(chain()); // payment_plans cancel
   return update;
@@ -157,5 +160,25 @@ describe('the saved-card charge fence inside the void transaction (bar only)', (
     queueVoid();
     await InvoiceService.voidInvoice('inv-1');
     expect(mockFence).not.toHaveBeenCalled();
+  });
+});
+
+describe('the payment-plan fence inside the void transaction (bar only)', () => {
+  test('a plan created after the card refuses the void, restores nothing and stops nothing', async () => {
+    queueVoid({ plan: { id: 'plan-1' } });
+    await expect(InvoiceService.voidInvoice('inv-1', { expected: EXPECTED })).rejects.toThrow(/payment plan exists.*while voiding/);
+    expect(require('../services/estimate-deposits').restoreDepositCreditForVoidedInvoice).not.toHaveBeenCalled();
+    expect(require('../services/invoice-followups').stopSequence).not.toHaveBeenCalled();
+  });
+
+  test('no plan: the bar void proceeds', async () => {
+    queueVoid();
+    await expect(InvoiceService.voidInvoice('inv-1', { expected: EXPECTED })).resolves.toMatchObject({ status: 'void' });
+  });
+
+  test('the page path (no `expected`) reads no plan before the cancel (its own cancel is the next read)', async () => {
+    queueVoid({ bar: false });
+    await InvoiceService.voidInvoice('inv-1');
+    expect(db).toHaveBeenCalledTimes(5);
   });
 });
