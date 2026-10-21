@@ -59,19 +59,26 @@ function webExtraLive(simpleWeb, gates, reader) {
   return simpleWeb === true && typeof gates[reader] === 'function' && gates[reader]();
 }
 
-// Program line (idea 9). Recurring lawn plan visits only, judged from the frozen completion identity; best-effort.
-function attachProgramPromise(v1Data, service) {
+// Program line (idea 9). Recurring lawn plan visits only, judged from the frozen completion identity. The month is
+// counted from the first row of the PROPERTY-scoped history (lawn-assessment-history, with move resets), never from the
+// payload's trend: with GATE_LAWN_PROPERTY_HISTORY off that trend is customer-wide, so a moved customer's new home
+// would read months into the program. No verified property history = no line. Best-effort.
+async function attachProgramPromise(v1Data, service) {
   try {
-    if (v1Data.serviceLine !== 'lawn' || service.is_callback || !v1Data.lawnAssessment) return;
+    const assessment = v1Data.lawnAssessment;
+    if (v1Data.serviceLine !== 'lawn' || service.is_callback || !assessment || assessment.assessmentId == null) return;
     const { isRecurringLawnPlanKey } = require('../services/service-report/lawn-program-line');
     let serviceData = service.service_data;
     if (typeof serviceData === 'string') serviceData = JSON.parse(serviceData);
     if (!isRecurringLawnPlanKey(serviceData && serviceData.completedServiceKey)) return;
-    const assessment = v1Data.lawnAssessment;
+    const row = await db('lawn_assessments').where({ id: assessment.assessmentId }).first();
+    if (!row) return;
+    const history = await require('../services/lawn-assessment-history').historyForAssessment(row, { knex: db });
+    if (!history || !history.scope || !history.scope.propertyId || !history.current || !history.rows.length) return;
     const promise = require('../services/service-report/lawn-program-promise').buildProgramPromise({
       scores: assessment.scores,
-      firstDate: assessment.trend && assessment.trend[0] && assessment.trend[0].date,
-      visitDate: assessment.assessmentDate,
+      firstDate: history.rows[0].visit_date,
+      visitDate: history.current.visit_date,
     });
     if (promise) v1Data.programPromise = { monthLine: promise.monthLine, items: promise.items.map(({ key, label, state, sentence }) => ({ key, label, state, sentence })) };
   } catch { /* best-effort: the report renders without the line */ }
@@ -2680,7 +2687,7 @@ router.get('/:token/data', async (req, res, next) => {
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
       // GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): live simple-web view only, each its own
       // key. Absent key = byte-identical payload; the PDF build never reaches here.
-      if (programLive) attachProgramPromise(v1Data, service);
+      if (programLive) await attachProgramPromise(v1Data, service);
       if (liveChipOut) await attachLiveChip(v1Data, liveChipOut);
       return res.json(v1Data);
     }

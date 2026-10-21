@@ -24,6 +24,9 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/service-report/lawn-live-chip', () => ({
   resolveLiveChip: jest.fn(),
 }));
+jest.mock('../services/lawn-assessment-history', () => ({
+  historyForAssessment: jest.fn(),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -65,6 +68,7 @@ const db = require('../models/db');
 const gates = require('../config/feature-gates');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { resolveLiveChip } = require('../services/service-report/lawn-live-chip');
+const { historyForAssessment } = require('../services/lawn-assessment-history');
 const reportsRouter = require('../routes/reports-public');
 
 
@@ -126,6 +130,7 @@ function mockDb(overrides = {}) {
       where: jest.fn().mockResolvedValue([]),
     });
     if (table === 'activity_log') return chain();
+    if (table === 'lawn_assessments') return chain({ first: jest.fn().mockResolvedValue({ id: 'assess-1', customer_id: 'customer-1' }) });
     throw new Error(`Unexpected table query: ${table}`);
   });
   return { serviceRead };
@@ -154,6 +159,7 @@ function lawnPayload() {
     ...payload(),
     serviceLine: 'lawn',
     lawnAssessment: {
+      assessmentId: 'assess-1',
       assessmentDate: '2026-10-20',
       scores: { turfDensity: 60, colorHealth: 80, weedSuppression: 40 },
       trend: [{ date: '2026-07-10' }, { date: '2026-10-20' }],
@@ -170,6 +176,12 @@ describe('GET /reports/:token/data program line (GATE_REPORT_WEB_PROGRAM)', () =
     gates.reportWebProgramLive.mockReturnValue(true);
     gates.reportWebLiveChipLive.mockReturnValue(false);
     buildReportV1Data.mockImplementation(async () => lawnPayload());
+    // property-scoped history: first visit 2026-07-10, this visit 2026-10-20
+    historyForAssessment.mockResolvedValue({
+      scope: { propertyId: 'prop-1' },
+      rows: [{ visit_date: '2026-07-10' }, { visit_date: '2026-10-20' }],
+      current: { visit_date: '2026-10-20' },
+    });
   });
 
   test('gate on, recurring lawn plan visit: programPromise carries the fixed sentences', async () => {
@@ -207,6 +219,44 @@ describe('GET /reports/:token/data program line (GATE_REPORT_WEB_PROGRAM)', () =
         expect('programPromise' in body).toBe(false);
       });
     }
+  });
+
+  test('a moved customer: the month counts from the new home\'s first visit, not the customer-wide trend', async () => {
+    // the payload trend (customer-wide, GATE_LAWN_PROPERTY_HISTORY off) says July; the property history restarted at the move
+    historyForAssessment.mockResolvedValue({
+      scope: { propertyId: 'prop-2' },
+      rows: [{ visit_date: '2026-10-05' }, { visit_date: '2026-10-20' }],
+      current: { visit_date: '2026-10-20' },
+    });
+    mockDb(planKey);
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.programPromise.monthLine).toBe('Month 1 of 12 in your lawn program.');
+      expect(historyForAssessment.mock.calls[0][0]).toMatchObject({ id: 'assess-1' });
+    });
+  });
+
+  test('no verified property history (no property, no current row, empty rows, a failed read): no line', async () => {
+    for (const bad of [
+      { scope: { propertyId: null }, rows: [{ visit_date: '2026-07-10' }], current: { visit_date: '2026-10-20' } },
+      { scope: { propertyId: 'prop-1' }, rows: [{ visit_date: '2026-07-10' }], current: null },
+      { scope: { propertyId: 'prop-1' }, rows: [], current: { visit_date: '2026-10-20' } },
+    ]) {
+      historyForAssessment.mockResolvedValue(bad);
+      mockDb(planKey);
+      await withServer(async (baseUrl) => {
+        const { status, body } = await getData(baseUrl);
+        expect(status).toBe(200);
+        expect('programPromise' in body).toBe(false);
+      });
+    }
+    historyForAssessment.mockRejectedValue(new Error('boom'));
+    mockDb(planKey);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await getData(baseUrl);
+      expect(status).toBe(200);
+      expect('programPromise' in body).toBe(false);
+    });
   });
 
   test('gate on, simple web off or a print mode: no key', async () => {
