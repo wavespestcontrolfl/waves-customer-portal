@@ -333,3 +333,23 @@ describe('successful results and switched-off steps stay out of the gap list (Co
     expect(re.test("The bar can't bill this visit from here")).toBe(false);
   });
 });
+
+describe('a coded refusal is a gap only under a gap code (Codex #6371 r10)', () => {
+  test.each([
+    ['an ownership lookup outage', 'payer_owned', "The bar can't check who pays this invoice right now, so it can't send it from here."],
+    ['a public reply that failed the safety check', 'verifier_reject', "The bar can't post that reply from here: it failed the safety check."],
+    ['a send already scheduled', 'invoice_send_queued', "The bar can't send it again from here: a send is already scheduled."],
+    ['an armed dues retry', 'dues_retry_armed', "The bar can't change the billing lane from here while a dues retry is armed."],
+    ['a switched-off invoice text template', 'invoice_no_channel', "The bar can't text this invoice from here: the template is off."],
+    ['any other business code', 'some_new_refusal', "The bar can't do that from here."],
+  ])('%s is not recorded', (_label, code, error) => {
+    expect(BAR_DECLINE_RE.test(error)).toBe(true);
+    expect(recordableRefusalCode({ success: false, code, error })).toBeNull();
+  });
+
+  test('*_unsupported codes and the listed gap codes still record; an uncoded refused marker records as other_screen', () => {
+    expect(recordableRefusalCode({ success: false, code: 'free_visit_unsupported', error: "The bar can't book a free visit from here yet." })).toBe('free_visit_unsupported');
+    expect(recordableRefusalCode({ success: false, code: 'grouped_estimate', error: "The bar can't accept a grouped estimate from here yet." })).toBe('grouped_estimate');
+    expect(recordableRefusalCode({ success: false, refused: "Use the Billing Recovery page for this." })).toBe('other_screen');
+  });
+});

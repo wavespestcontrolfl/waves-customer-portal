@@ -56,6 +56,15 @@ const BY_DESIGN_REFUSAL_CODES = new Set([
 // never gap rows (a switch that is off, a provider-side limit, a gate flip that
 // is the owner's). Skipped by the text rule below so it adds no new build work.
 const GATE_OFF_CODE_RE = /(?:^|_)(?:not_enabled|gate_off)$/;
+// The coded refusals that ARE missing capabilities when their text declines: a
+// `*_unsupported` code, or one listed here. Any other code (an outage, a safety
+// check, a send already queued, a money fence, a switched-off template) is the
+// bar working as built, whatever its wording says (Codex #6371 r10: wording
+// alone kept turning ordinary refusals into build work).
+const UNSUPPORTED_CODE_RE = /_unsupported$/;
+const CAPABILITY_GAP_CODES = new Set([
+  'annual_plan_invoice', 'annual_prepay_customer', 'grouped_estimate', 'package_visit_two_linked', 'nothing_repairable',
+]);
 const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
 ]);
@@ -450,7 +459,8 @@ function recordableRefusalCode(result) {
   // A refusal that sends the operator to another screen, or that says plainly
   // the bar cannot do this from here (the wording every tool refusal uses).
   if (!OTHER_SCREEN_RE.test(text) && !BAR_DECLINE_RE.test(text)) return null;
-  return CODE_RE.test(code) ? code : OTHER_SCREEN_CODE;
+  if (!CODE_RE.test(code)) return OTHER_SCREEN_CODE;
+  return UNSUPPORTED_CODE_RE.test(code) || CAPABILITY_GAP_CODES.has(code) ? code : null;
 }
 
 // Fixed text only: the tool name and code, never the tool's input or message.
