@@ -21,6 +21,7 @@
 //   silent truncation that hides recent calls.
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
+import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle2, MessageSquare, PhoneCall, Voicemail, XCircle } from "lucide-react";
@@ -1292,7 +1293,7 @@ export default function CallLogTabV2() {
                     if (val.length >= 2) {
                       try {
                         const r = await fetch(
-                          `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8`,
+                          `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`,
                           {
                             headers: {
                               Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
@@ -1316,7 +1317,7 @@ export default function CallLogTabV2() {
               />
               {callToResults.length > 0 && (
                 <div className="mt-1 bg-white border-hairline rounded-md max-h-[180px] overflow-y-auto">
-                  {callToResults.map((c) => (
+                  {renderWithDidYouMean(callToResults, (c) => (
                     <button
                       key={c.id}
                       type="button"

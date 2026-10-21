@@ -6976,6 +6976,17 @@ function nameMatchV2Live() {
 }
 // GATE_NAME_MATCH_V2 reader, on its own line so gate PRs never conflict.
 module.exports.nameMatchV2Live = nameMatchV2Live;
+
+// GATE_CUSTOMER_SEARCH_FUZZY read at CALL time, strict `=== 'true'`, dark in every environment.
+// On, the admin customer pickers (GET /admin/customers?search=, GET /admin/schedule/list?search=) add up to 8
+// sound-alike / close-spelling rows after the exact rows when the exact search finds fewer than 3 and the search
+// looks like a name ("Orlan damp" finds "Orlan Stompf"). The rows carry `approximate: true`. Read only; it sends
+// nothing. Off = today's behavior, byte for byte.
+function customerSearchFuzzyLive() {
+  return process.env.GATE_CUSTOMER_SEARCH_FUZZY === 'true';
+}
+// GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
+module.exports.customerSearchFuzzyLive = customerSearchFuzzyLive;
 // GATE_DICTATION_CUSTOMER_NAMES read at CALL time, strict `=== 'true'`, dark in every environment. The one reader
 // for the customer-name section of the staff dictation word list (services/dictation-word-list.js) and the
 // surname keyword hints (routes/tech-dictation.js). Off = today's word list byte for byte.

@@ -1,3 +1,4 @@
+import { renderWithDidYouMean } from '../admin/DidYouMean';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
@@ -723,7 +724,7 @@ export default function CreateProjectModal({
     if (!customerQuery || customerQuery.length < 2) { setCustomerResults([]); return; }
     const t = setTimeout(async () => {
       try {
-        const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(customerQuery)}&limit=8`);
+        const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(customerQuery)}&limit=8&suggest=1`);
         const d = await r.json();
         const list = (d.customers || d || []).slice(0, 8);
         setCustomerResults(list);
@@ -2360,7 +2361,7 @@ export default function CreateProjectModal({
                     marginTop: 6, background: theme === 'light' ? P.card : P.bg, borderRadius: 8,
                     border: `1px solid ${P.border}`, overflow: 'hidden',
                   }}>
-                    {customerResults.map(c => (
+                    {renderWithDidYouMean(customerResults, c => (
                       <button
                         key={c.id}
                         type="button"

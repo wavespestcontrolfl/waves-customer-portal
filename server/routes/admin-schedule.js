@@ -9,6 +9,7 @@ const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = r
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
@@ -10334,6 +10335,9 @@ async function createScheduleBooking({ body, actor }) {
   });
 }
 
+// Most upcoming appointments the sound-alike customers add after the exact rows.
+const APPROXIMATE_APPOINTMENT_LIMIT = 25;
+
 // GET /api/admin/schedule/list — paginated list view with filters
 router.get('/list', async (req, res, next) => {
   try {
@@ -10394,6 +10398,9 @@ router.get('/list', async (req, res, next) => {
       });
     }
 
+    // Everything but the text search: the sound-alike rows below start from it.
+    const unsearchedQ = q.clone();
+
     // Search (customer name or service type)
     if (search) {
       const term = `%${search}%`;
@@ -10409,7 +10416,7 @@ router.get('/list', async (req, res, next) => {
     const total = parseInt(totalResult?.cnt || 0);
 
     // Select fields + paginate
-    const services = await q
+    const listColumns = (qb) => qb
       .select(
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
@@ -10447,11 +10454,46 @@ router.get('/list', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
-      )
+      );
+    const byDate = (qb) => qb
       .orderBy('scheduled_services.scheduled_date')
-      .orderByRaw('COALESCE(scheduled_services.route_order, 999)')
-      .limit(limit)
-      .offset(offset);
+      .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
+    const exactServices = await byDate(listColumns(q)).limit(limit).offset(offset);
+
+    // Sound-alike appointments (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found
+    // fewer than 3 appointments and reads as a name, the upcoming appointments of customers
+    // with a similar name follow the exact rows on page 1. `total` and the paging stay exact;
+    // `approximateCount` says how many rows at the end carry `approximate: true`. Only customers
+    // with a matching appointment under the same filters (and a technician's own assignments)
+    // are considered, so the scope never widens.
+    // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
+    // Opt-in per caller (`suggest=1`): the schedule list view's bulk actions never see suggestions.
+    const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive() && req.query.suggest === '1';
+    let approximateServices = [];
+    // All exact rows on this page, so no exact match also comes back as a suggestion (Codex r3).
+    if (customerSearchFuzzy && page === 1 && exactServices.length >= total && shouldSearchSoundAlike(search, total, exactServices)) {
+      const ranked = await findSoundAlikeCustomers(db, search, {
+        // Projects the id only (every consumer clears and re-selects its own columns).
+        scopeQuery: db('customers').select('customers.id').whereNull('customers.deleted_at').whereIn(
+          'customers.id',
+          unsearchedQ.clone().clearSelect().clearOrder().select('scheduled_services.customer_id'),
+        ),
+        exactIds: [...new Set(exactServices.map((s) => s.customer_id))],
+      });
+      if (ranked.length) {
+        const rank = new Map(ranked.map((entry, at) => [entry.id, at]));
+        // The best-ranked customer's visits come first IN THE QUERY, so the row cap can
+        // never hide the best match behind a lower-ranked customer's many visits.
+        const rankedIds = ranked.map((entry) => entry.id);
+        const found = await byDate(listColumns(unsearchedQ.clone())
+          .whereIn('scheduled_services.customer_id', rankedIds)
+          .orderByRaw('array_position(?::uuid[], scheduled_services.customer_id)', [rankedIds]))
+          .limit(APPROXIMATE_APPOINTMENT_LIMIT);
+        approximateServices = found
+          .map((row) => ({ ...row, _approximate: true, _matchReasons: ranked[rank.get(row.customer_id)].reasons || [] }));
+      }
+    }
+    const services = approximateServices.length ? [...exactServices, ...approximateServices] : exactServices;
 
     // Add-on lines so the Edit appointment modal opened from the list view
     // knows the full visit composition (primary + add-ons) and edits totals
@@ -10506,10 +10548,12 @@ router.get('/list', async (req, res, next) => {
       payerId: s.payer_id || null,
       poNumber: s.po_number || null,
       selfPayOverride: s.self_pay_override === true,
+      ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
     res.json({
       services: mapped,
+      ...(customerSearchFuzzy && search ? { approximateCount: approximateServices.length } : {}),
       total,
       page,
       pageSize: limit,

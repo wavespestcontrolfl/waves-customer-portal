@@ -15,6 +15,7 @@
  * safety flags (venomous / structural).
  */
 
+import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { useState, useEffect, useCallback } from "react";
 import {
   Sheet,
@@ -154,7 +155,7 @@ function LinkDialog({ open, onClose, type, id, onLinked, allowLead = true }) {
       try {
         const path = kind === "lead"
           ? `/admin/leads?search=${encodeURIComponent(query.trim())}&limit=8`
-          : `/admin/customers?search=${encodeURIComponent(query.trim())}&limit=8`;
+          : `/admin/customers?search=${encodeURIComponent(query.trim())}&limit=8&suggest=1`;
         const r = await adminFetch(path);
         if (!r.ok) return;
         const data = await r.json();
@@ -206,7 +207,7 @@ function LinkDialog({ open, onClose, type, id, onLinked, allowLead = true }) {
         <Input placeholder={`Search ${kind}s by name, phone, email…`} value={query} onChange={(e) => setQuery(e.target.value)} />
         {results.length ? (
           <div className="border border-hairline border-zinc-200 rounded-md divide-y divide-zinc-100">
-            {results.map((r) => (
+            {renderWithDidYouMean(results, (r) => (
               <button
                 key={r.id}
                 type="button"
