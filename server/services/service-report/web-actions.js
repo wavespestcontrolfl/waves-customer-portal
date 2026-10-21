@@ -16,48 +16,29 @@
 
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 
-// Finding text -> the service family that treats it. Ordered: the first kind
-// that matches a finding wins for that finding. Matching reads the finding's
-// title and detail only to classify; the text itself is never shown.
-const SPECIALTY_PEST_RE = /\b(rodents?|mice|mouse|rats?|bed ?bugs?|termites?|mosquito(es)?|fleas?|ticks?|wasps?|hornets?|yellow ?jackets?|bees?|fire ants?|carpenter ants?|mites?|wildlife|squirrels?|raccoons?|opossums?|snakes?|bats?|palm)\b/i;
-
-const FINDING_KINDS = [
-  { kind: 'weeds', family: 'lawn_care', sentence: 'We saw weeds on this visit.', re: /\b(weeds?|crabgrass|dollarweed|sedges?|spurge|beggarweed|torpedograss|kyllinga)\b/i },
-  { kind: 'turf', family: 'lawn_care', sentence: 'We saw lawn damage on this visit.', re: /\b(chinch|sod webworms?|armyworms?|grubs?|brown patch|take-?all|dollar spot|gray leaf spot|fungus|fungal|bare spots?|dead patches?|thinning turf)\b/i },
-  { kind: 'shrubs', family: 'tree_shrub', sentence: 'We saw plant pests on this visit.', re: /\b(whiteflies|whitefly|aphids?|mealybugs?|sooty mold|lace ?bugs?|spider mites?|(armored|soft) scale|scale insects?)\b/i },
-  // General household pests only: the offered program is recurring pest control (pest-quarterly). Specialty
-  // problems (rodents, bed bugs, termites, mosquitoes, fleas, ticks, stinging insects, wildlife) are separate
-  // programs the offer does not cover, so a finding that names one never makes this tile.
-  { kind: 'pests', family: 'pest_control', sentence: 'We saw pest activity on this visit.', re: /\b(ants?|roach(es)?|cockroaches?|spiders?|silverfish|earwigs?)\b/i, veto: SPECIALTY_PEST_RE },
+// The finding tile maps ONLY from structured identity the report already carries: the category of an
+// insight card (reportV2.insights[]) on a report of a specific service line, through this explicit table.
+// No free text (titles, details, labels) is ever read to decide a kind. A finding with no row here gets
+// no tile, which is the safe answer for everything the table does not name (fungal leaf spots on a
+// shrub, specialty pests, household pests with no structured category, unreviewed notes).
+//   line      the report's service line (data.serviceLine): lawn weeds only on a LAWN-line report
+//   category  the insight card's category
+//   family    the one service family that treats it (compared with the offer the cross-sell builder picks)
+const STRUCTURED_FINDING_TABLE = [
+  { line: 'lawn', category: 'weeds', family: 'lawn_care', kind: 'weeds', sentence: 'We saw weeds on this visit.' },
+  { line: 'tree_shrub', category: 'pest_pressure', family: 'tree_shrub', kind: 'shrub_pests', sentence: 'We noted signs of plant pests on this visit.' },
 ];
+// An insight is a finding only when it shows a concern (the same statuses the report's own issue lists use).
+const CONCERN_STATUSES = new Set(['watch', 'needs_attention', 'urgent']);
 
 // Metadata key the tile's tap carries so the events route can recheck the tile's own gates.
 const WEB_TILE_SOURCE = 'web_actions_finding_tile';
 
-// "No ants seen" is not a finding. Titles that deny the pest never classify.
-const NEGATED_RE = /\b(no|not|none|without|free of|clear of|negative)\b/i;
-
-function recordedFindingTexts(data) {
-  // Same provenance rule the document prints by: a finding counts only when it
-  // came through the findings pipeline (it carries detail or a recommendation),
-  // and the all-clear / raw-observation categories never count.
-  const rows = (Array.isArray(data?.findings) ? data.findings : [])
-    .filter((f) => f && String(f.title || '').trim())
-    .filter((f) => f.category !== 'no_activity' && f.category !== 'observation')
-    .filter((f) => String(f.detail || '').trim() || String(f.recommendation || '').trim())
-    .filter((f) => !NEGATED_RE.test(String(f.title)))
-    .map((f) => `${f.title} ${f.detail || ''}`);
-  // Technician-reviewed photo findings ("What the photos showed") count too.
-  const photoLabels = (Array.isArray(data?.reportV2?.photoFindings) ? data.reportV2.photoFindings : [])
-    .map((f) => String(f?.label || '').trim())
-    .filter((label) => label && !NEGATED_RE.test(label));
-  return [...rows, ...photoLabels];
-}
-
-// The finding kinds this visit recorded, in FINDING_KINDS order, no repeats.
+// The table rows this visit's structured insights match, in table order, no repeats.
 function findingKinds(data) {
-  const texts = recordedFindingTexts(data);
-  return FINDING_KINDS.filter((entry) => texts.some((text) => entry.re.test(text) && !(entry.veto && entry.veto.test(text))));
+  const insights = Array.isArray(data?.reportV2?.insights) ? data.reportV2.insights : [];
+  return STRUCTURED_FINDING_TABLE.filter((row) => row.line === data?.serviceLine
+    && insights.some((card) => card && card.category === row.category && CONCERN_STATUSES.has(card.status)));
 }
 
 // Payload for the finding tile, or null. `buildCrossSell` is injected so the
@@ -233,6 +214,6 @@ module.exports = {
   photoTypeForLine,
   visitIsAtPrimaryHome,
   photoAnswer,
-  FINDING_KINDS,
+  STRUCTURED_FINDING_TABLE,
   OUTCOME_COPY,
 };

@@ -111,13 +111,17 @@ function offer(overrides = {}) {
   };
 }
 
+// The tile maps only from structured identity: an insight card's category on a report of a specific service line.
+const insight = (category, status = 'watch') => ({ category, status, confidence: 'ai_supported', headline: 'x' });
+const LAWN_WEEDS = { serviceLine: 'lawn', reportV2: { insights: [insight('weeds')] } };
+const SHRUB_PESTS = { serviceLine: 'tree_shrub', reportV2: { insights: [insight('pest_pressure', 'needs_attention')] } };
 const WEED_FINDING = { id: 'f1', category: 'weed_pressure', title: 'Weeds along the driveway', detail: 'Broadleaf weeds in the edge.', recommendation: '' };
 
-describe('web-actions: finding tile', () => {
+describe('web-actions: finding tile (structured identity only)', () => {
   const run = (data, crossSell) => webActions.buildFindingTile(data, { buildCrossSell: async () => crossSell });
 
-  test('a weed finding and a lawn offer make one tile with a fixed sentence and no price text', async () => {
-    const tile = await run({ findings: [WEED_FINDING] }, offer());
+  test('a lawn-line weeds insight and a lawn offer make one tile with a fixed sentence and no price text', async () => {
+    const tile = await run(LAWN_WEEDS, offer());
     expect(tile.sentence).toBe('We saw weeds on this visit.');
     expect(tile.button).toBe('See your estimate');
     expect(tile.body).toBe('Lawn Care can take care of this. Tap below to see your estimate. Nothing is booked or charged.');
@@ -128,56 +132,72 @@ describe('web-actions: finding tile', () => {
     });
   });
 
-  test('no recorded finding: no tile, and the offer builder is never asked', async () => {
+  test('a tree & shrub pest-pressure insight and a tree & shrub offer make the shrub tile', async () => {
+    const tile = await run(SHRUB_PESTS, offer({ serviceKey: 'tree_shrub', label: 'Tree & Shrub Care' }));
+    expect(tile.sentence).toBe('We noted signs of plant pests on this visit.');
+    expect(tile.kind).toBe('shrub_pests');
+  });
+
+  test('the table is explicit: two rows, each tied to a service line and an insight category', () => {
+    expect(webActions.STRUCTURED_FINDING_TABLE.map((row) => `${row.line}:${row.category}:${row.family}`)).toEqual([
+      'lawn:weeds:lawn_care', 'tree_shrub:pest_pressure:tree_shrub',
+    ]);
+  });
+
+  test('no insight: no tile, and the offer builder is never asked', async () => {
     const buildCrossSell = jest.fn();
-    await expect(webActions.buildFindingTile({ findings: [] }, { buildCrossSell })).resolves.toBeNull();
+    await expect(webActions.buildFindingTile({ serviceLine: 'lawn', reportV2: { insights: [] } }, { buildCrossSell })).resolves.toBeNull();
+    await expect(webActions.buildFindingTile({ serviceLine: 'lawn' }, { buildCrossSell })).resolves.toBeNull();
     expect(buildCrossSell).not.toHaveBeenCalled();
   });
 
-  test.each([
-    ['an all-clear row', { category: 'no_activity', title: 'Weeds', detail: 'x' }],
-    ['a raw observation', { category: 'observation', title: 'Weeds seen', detail: 'x' }],
-    ['a bare title with no detail', { category: 'weed_pressure', title: 'Weeds', detail: '', recommendation: '' }],
-    ['a denied finding', { category: 'weed_pressure', title: 'No weeds found', detail: 'clean' }],
-  ])('%s never makes a tile', async (_name, finding) => {
-    await expect(run({ findings: [finding] }, offer())).resolves.toBeNull();
+  test('free text never decides a kind: finding titles, details and photo labels are ignored', async () => {
+    const buildCrossSell = jest.fn();
+    const texty = {
+      serviceLine: 'lawn',
+      findings: [WEED_FINDING, { category: 'pest_activity', title: 'Ghost ants at the kitchen window', detail: 'trail' }],
+      reportV2: { photoFindings: [{ label: 'Crabgrass in the front bed' }], insights: [] },
+    };
+    await expect(webActions.buildFindingTile(texty, { buildCrossSell })).resolves.toBeNull();
+    expect(buildCrossSell).not.toHaveBeenCalled();
   });
 
-  test('a finding for a family the customer is not being offered makes no tile', async () => {
-    await expect(run({ findings: [WEED_FINDING] }, offer({ serviceKey: 'pest_control', label: 'Pest Control' }))).resolves.toBeNull();
+  test('a fungal leaf spot finding on a shrub never makes a lawn tile (the old keyword bug)', async () => {
+    const data = {
+      serviceLine: 'tree_shrub',
+      findings: [{ category: 'observation', title: 'Fungal leaf spots on hibiscus', detail: 'fungal spotting on the leaves' }],
+      reportV2: { insights: [insight('disease_leaf_spot', 'needs_attention')] },
+    };
+    await expect(run(data, offer())).resolves.toBeNull(); // lawn offer
+    await expect(run(data, offer({ serviceKey: 'tree_shrub', label: 'Tree & Shrub Care' }))).resolves.toBeNull();
+  });
+
+  test('lawn weeds only count on a LAWN-line report, and shrub pests only on a tree & shrub one', async () => {
+    await expect(run({ serviceLine: 'pest', reportV2: { insights: [insight('weeds')] } }, offer())).resolves.toBeNull();
+    await expect(run({ serviceLine: 'tree_shrub', reportV2: { insights: [insight('weeds')] } }, offer())).resolves.toBeNull();
+    await expect(run({ serviceLine: 'lawn', reportV2: { insights: [insight('pest_pressure')] } }, offer({ serviceKey: 'tree_shrub', label: 'Tree & Shrub Care' }))).resolves.toBeNull();
+  });
+
+  test.each(['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''])('a clear insight (%s) is not a finding', async (status) => {
+    await expect(run({ serviceLine: 'lawn', reportV2: { insights: [insight('weeds', status)] } }, offer())).resolves.toBeNull();
+  });
+
+  test.each([
+    'rodent', 'bed_bug', 'termite', 'mosquito', 'flea', 'tick', 'wasp', 'carpenter_ant', 'spider_mites', 'pest_activity', 'household_pests',
+  ])('a specialty or unmapped pest category (%s) never makes a pest tile', async (category) => {
+    const pest = offer({ serviceKey: 'pest_control', label: 'Pest Control' });
+    for (const serviceLine of ['pest', 'lawn', 'tree_shrub', 'rodent', 'termite', 'mosquito']) {
+      await expect(run({ serviceLine, reportV2: { insights: [insight(category, 'needs_attention')] } }, pest)).resolves.toBeNull();
+    }
+  });
+
+  test('the offered family must match the finding: a weeds finding with a pest offer makes no tile', async () => {
+    await expect(run(LAWN_WEEDS, offer({ serviceKey: 'pest_control', label: 'Pest Control' }))).resolves.toBeNull();
   });
 
   test('a quote-only offer has no estimate page, so no tile', async () => {
-    await expect(run({ findings: [WEED_FINDING] }, offer({ mode: 'quote' }))).resolves.toBeNull();
-    await expect(run({ findings: [WEED_FINDING] }, null)).resolves.toBeNull();
-  });
-
-  test.each([
-    'Rodent droppings in the garage',
-    'Bed bugs in the guest room',
-    'Termite damage at the lanai',
-    'Mosquito breeding in the bird bath',
-    'Fleas in the dog run',
-    'Wasp nest under the eave',
-    'Spider mites on the hibiscus',
-    'Carpenter ants in the fascia',
-    'Ants near the rat traps',
-  ])('a specialty-pest finding never makes a pest tile: %s', async (title) => {
-    const finding = { category: 'pest_activity', title, detail: 'seen near the entry' };
-    await expect(run({ findings: [finding] }, offer({ serviceKey: 'pest_control', label: 'Pest Control' }))).resolves.toBeNull();
-  });
-
-  test('a general household pest finding still makes the pest tile', async () => {
-    const tile = await run({ findings: [{ category: 'pest_activity', title: 'Ghost ants at the kitchen window', detail: 'trail' }] }, offer({ serviceKey: 'pest_control', label: 'Pest Control' }));
-    expect(tile.sentence).toBe('We saw pest activity on this visit.');
-  });
-
-  test('a technician-reviewed photo finding counts; with two kinds the one matching the offer wins', async () => {
-    const data = { findings: [{ category: 'pest_activity', title: 'Ants at the lanai', detail: 'trail' }], reportV2: { photoFindings: [{ label: 'Crabgrass in the front bed' }] } };
-    const tile = await run(data, offer());
-    expect(tile.kind).toBe('weeds');
-    const pest = await run(data, offer({ serviceKey: 'pest_control', label: 'Pest Control' }));
-    expect(pest.sentence).toBe('We saw pest activity on this visit.');
+    await expect(run(LAWN_WEEDS, offer({ mode: 'quote' }))).resolves.toBeNull();
+    await expect(run(LAWN_WEEDS, null)).resolves.toBeNull();
   });
 });
 
@@ -190,7 +210,7 @@ describe('web-actions: callbacks never get a tile', () => {
         reportWebActionsLive: () => true, reportSimpleWebLive: () => true,
         isEnabled: (name) => ['reportCrossSell', 'reportClickToEstimate'].includes(name),
       };
-      const data = { isCallback: true, serviceLine: 'lawn', findings: [{ category: 'weeds', title: 'Weeds along the driveway', detail: 'broadleaf' }] };
+      const data = { ...structuredClone(LAWN_WEEDS), isCallback: true };
       const db = jest.fn(() => { throw new Error('no cross-sell read on a callback'); });
       await webActions.attachWebActions({ id: 's1' }, data, { db, gates, simpleWeb: true });
       expect(data.webActions?.finding).toBeUndefined();
@@ -324,7 +344,7 @@ describe('GET /reports/:token/data webActions', () => {
     setGates();
     buildReportV1Data.mockImplementation(async () => ({
       serviceLine: 'lawn',
-      findings: [WEED_FINDING],
+      reportV2: { insights: [insight('weeds')] },
       pdfUrl: `/api/reports/${VALID_TOKEN}`,
       applications: [],
     }));
@@ -592,7 +612,7 @@ describe('the finding tile tap rechecks its gates', () => {
   });
 
   test('the offer made for the tile carries the tile source in its tap metadata', async () => {
-    const tile = await webActions.buildFindingTile({ findings: [WEED_FINDING] }, { buildCrossSell: async () => offer() });
+    const tile = await webActions.buildFindingTile(LAWN_WEEDS, { buildCrossSell: async () => offer() });
     expect(tile.tap.source).toBe(webActions.WEB_TILE_SOURCE);
   });
 
