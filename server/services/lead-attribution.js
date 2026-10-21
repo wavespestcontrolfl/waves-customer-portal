@@ -176,8 +176,9 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // re-assigned or re-contacted since is no longer that opportunity, and the
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
+// `approvedEstimateIds` (the Intelligence Bar card only): the estimate backfill attaches exactly these.
 // Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId } = {}) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId, approvedEstimateIds } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -238,7 +239,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
     try {
       const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
       const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
-      await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer });
+      await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer, ...(approvedEstimateIds ? { approvedEstimateIds } : {}) });
     } catch (err) {
       logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
     }

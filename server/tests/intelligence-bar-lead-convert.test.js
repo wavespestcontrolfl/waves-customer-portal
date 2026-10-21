@@ -37,7 +37,7 @@ function freshState() {
       { id: CUST, first_name: 'Robin', last_name: 'Sample', phone: '(941) 555-0142', email: 'ROBIN@example.test', address_line1: '12 Sample Way', city: 'Venice', zip: '34285', deleted_at: null },
     ],
     estimates: [{ id: EST, status: 'sent', customer_id: null }],
-    ad_service_attribution: [{ lead_id: LEAD }],
+    ad_service_attribution: [{ lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }],
     // The customers that share the lead's phone or email (the contact-match read).
     contactMatches: [{ id: CUST, first_name: 'Robin', last_name: 'Sample', phone: '(941) 555-0142', email: 'ROBIN@example.test', city: 'Venice' }],
   };
@@ -47,9 +47,9 @@ function freshState() {
 // (customers with a limit) answers `contactMatches` minus the excluded id. Any write throws.
 function makeDb() {
   function builder(table) {
-    const q = { wheres: [], nulls: [], notId: null, single: false, limited: false, count: false };
+    const q = { wheres: [], nulls: [], notId: null, single: false, limited: null, count: false };
     const rows = () => {
-      if (table === 'customers' && q.limited) return state.contactMatches.filter((row) => row.id !== q.notId);
+      if (table === 'customers' && q.limited) return state.contactMatches.filter((row) => row.id !== q.notId).slice(0, q.limited);
       const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
         && q.nulls.every((k) => row[k] == null));
       if (q.count) return { n: String(found.length) };
@@ -62,7 +62,7 @@ function makeDb() {
         if (prop === 'whereNull') return (k) => { q.nulls.push(k); return b; };
         if (prop === 'whereNot') return (k, v) => { q.notId = v; return b; };
         if (prop === 'modify') return (fn) => { fn(b); return b; };
-        if (prop === 'limit') return () => { q.limited = true; return b; };
+        if (prop === 'limit') return (n) => { q.limited = n; return b; };
         if (prop === 'first') return () => { q.single = true; return b; };
         if (prop === 'count') return () => { q.count = true; return b; };
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
@@ -162,8 +162,8 @@ describe('the preview', () => {
     const text = card.effects.map((e) => e.text).join('\n');
     expect(text).toMatch(/status contacted → won; linked to customer Robin Sample; marked qualified/);
     expect(text).toMatch(/monthly value \$49\.00, first-service value \$129\.00, WaveGuard tier Gold/);
-    expect(text).toMatch(/ad funnel row moves to booked and is linked to the customer \(1 row/);
-    expect(text).toMatch(/estimate \(sent\) has no customer yet: it is attached to this customer/);
+    expect(text).toMatch(/An ad funnel row moves from contacted to booked and is linked to this customer/);
+    expect(text).toMatch(/estimate \(sent, 00000000-0000-4000-8000-0000000000e1\) has no customer yet: it is attached to this customer/);
     expect(text).toMatch(/"converted" entry is added/);
     expect(text).toMatch(/Nothing is sent: no text, email or call/);
     expect(text).toMatch(/No charge, invoice, deposit or estimate acceptance/);
@@ -236,7 +236,11 @@ describe('the confirmed run', () => {
       leadId: LEAD,
       body: { customer_id: CUST, monthly_value: 49, waveguard_tier: 'Gold', seen_status: 'contacted', seen_updated_at: '2099-01-01T12:00:00.123Z' },
       // The lead version the card showed: the handler's own UPDATE must still match it.
-      expected: { status: 'contacted', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), customerId: null },
+      expected: {
+        leadId: LEAD, status: 'contacted', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), customerId: null,
+        customer: { first_name: 'Robin', last_name: 'Sample', company_name: null, phone: '(941) 555-0142', email: 'ROBIN@example.test', address_line1: '12 Sample Way', city: 'Venice', zip: '34285' },
+        estimateIds: [EST], estimateLinked: true,
+      },
     });
     expect(res).toMatchObject({ success: true, status: 'won', sent_to_customer: false, lead_id: LEAD, customer_id: CUST });
     expect(res.note).toMatch(/Nothing was sent to anyone/);
@@ -303,5 +307,117 @@ describe('the confirmed run', () => {
   test('nothing in the tool reaches a message sender', () => {
     const source = require('fs').readFileSync(require.resolve('../services/intelligence-bar/lead-convert-tools.js'), 'utf8');
     expect(source).not.toMatch(/twilio|sendgrid|sendSms|sendEmail|stripe|notifyAdmin|messaging/i);
+  });
+});
+
+describe('estimates tagged with the lead (no linked estimate)', () => {
+  const E1 = '00000000-0000-4000-8000-0000000000e2';
+  const E2 = '00000000-0000-4000-8000-0000000000e3';
+  const tagged = (id, extra = {}) => ({ id, status: 'sent', customer_id: null, estimate_data: JSON.stringify({ lead_id: LEAD }), ...extra });
+  beforeEach(() => { state.leads[0].estimate_id = null; state.estimates = [tagged(E2), tagged(E1)]; });
+
+  test('lists every estimate it would attach, hands the approved ids to the shim, and pins them', async () => {
+    const card = await preview();
+    const text = card.effects.map((e) => e.text).join('\n');
+    expect(text).toContain(`Estimate ${E1} (sent) is tagged with this lead and has no customer yet`);
+    expect(text).toContain(`Estimate ${E2} (sent) is tagged with this lead`);
+    await confirm(card);
+    expect(Leads.convertLeadFromBar.mock.calls[0][0].expected).toMatchObject({ estimateLinked: false, estimateIds: [E1, E2], leadId: LEAD });
+  });
+
+  test.each([
+    ['another estimate gets tagged', (s) => { s.estimates.push(tagged('00000000-0000-4000-8000-0000000000e4')); }],
+    ['a listed estimate goes to another customer', (s) => { s.estimates[0].customer_id = OTHER; }],
+    ['a listed estimate is accepted', (s) => { s.estimates[1].status = 'accepted'; }],
+  ])('drift (%s) refuses with preview_changed', async (_n, mutate) => {
+    const card = await preview();
+    mutate(state);
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
+    expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
+  });
+
+  test('an estimate that only mentions the lead id cannot be listed exactly: refused, nothing offered', async () => {
+    state.estimates.push({ id: E1.replace(/2$/, '5'), status: 'sent', customer_id: null, estimate_data: JSON.stringify({ note: LEAD }) });
+    expect(await preview()).toMatchObject({ code: 'estimates_unclear' });
+  });
+
+  test('more estimates than the card lists is refused', async () => {
+    state.estimates = Array.from({ length: 11 }, (_x, i) => tagged(`00000000-0000-4000-8000-00000000f${String(i).padStart(3, '0')}`));
+    expect(await preview()).toMatchObject({ code: 'estimates_too_many' });
+  });
+
+  test('no tagged estimate: the card says none is attached', async () => {
+    state.estimates = [];
+    const card = await preview();
+    expect(card.effects.map((e) => e.text).join('\n')).toMatch(/no estimate is tagged with it, so none is attached/);
+  });
+});
+
+describe('the ad funnel row, as the bridge will really treat it', () => {
+  const effects = async () => (await preview()).effects.map((e) => e.text).join('\n');
+  test.each([
+    ['booked', null, /already booked: left as it is \(never moved backwards, not relinked\)/],
+    ['completed', OTHER, /already completed: left as it is/],
+    ['lost', null, /moves from lost to booked and is linked to this customer/],
+    ['estimate_sent', OTHER, /moves from estimate_sent to booked but stays linked to a different customer \(not relinked\)/],
+    ['contacted', CUST, /moves from contacted to booked \(already linked to this customer\)/],
+  ])('stage %s owned by %s', async (stage, owner, expected) => {
+    state.ad_service_attribution = [{ lead_id: LEAD, funnel_stage: stage, customer_id: owner }];
+    expect(await effects()).toMatch(expected);
+  });
+
+  test('the stage and the owner are pinned: a change after the card is drift', async () => {
+    const card = await preview();
+    state.ad_service_attribution[0].funnel_stage = 'booked';
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
+    const again = await preview();
+    state.ad_service_attribution[0].customer_id = OTHER;
+    expect(await confirm(again)).toMatchObject({ preview_changed: true });
+    expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a long list is summarized, with every row still pinned', async () => {
+    state.ad_service_attribution = Array.from({ length: 7 }, () => ({ lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }));
+    expect(await effects()).toMatch(/2 more ad funnel rows are handled the same way/);
+  });
+});
+
+describe('customers that share the contact: the list is never presented as complete', () => {
+  const many = (n) => Array.from({ length: n }, (_x, i) => ({
+    id: `00000000-0000-4000-8000-00000000a${String(i).padStart(3, '0')}`, first_name: `Other${i}`, last_name: 'Sample', phone: '(941) 555-0142', email: `o${i}@example.test`, city: 'Venice',
+  }));
+  test('more than six: the card says so and the flag is pinned', async () => {
+    state.contactMatches = [state.contactMatches[0], ...many(7)];
+    const card = await preview();
+    expect(card.other_matching_customers).toHaveLength(6);
+    expect(card.more_matching_customers_exist).toBe(true);
+    expect(card.warnings.join(' ')).toMatch(/More than 6 other customers share/);
+    // Fewer rows later flips the flag: drift.
+    state.contactMatches = [state.contactMatches[0], ...many(2)];
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
+  });
+  test('exactly six is complete; with no customer_id the candidate list reports truncation', async () => {
+    state.contactMatches = [state.contactMatches[0], ...many(5)];
+    expect((await preview()).more_matching_customers_exist).toBe(false);
+    state.contactMatches = many(7);
+    const res = await executeLeadConvertTool('convert_lead', { lead_id: LEAD }, ADMIN);
+    expect(res.candidates).toHaveLength(6);
+    expect(res.more_customers_exist).toBe(true);
+  });
+});
+
+describe('phone identity keeps the country code', () => {
+  test('an international lead matches the same international customer and not a NANP number with the same last ten digits', async () => {
+    state.leads[0].phone = '+442071838750';
+    state.customers[0].phone = '+44 20 7183 8750';
+    expect((await preview()).matched_on).toMatch(/phone/);
+    state.customers[0].phone = '(207) 183-8750';
+    state.customers[0].email = 'else@example.test';
+    expect((await preview()).matched_on).toBe('none');
+  });
+  test('NANP numbers still match across formats', async () => {
+    state.leads[0].phone = '9415550142';
+    state.customers[0].phone = '+1 (941) 555-0142';
+    expect((await preview()).matched_on).toMatch(/phone/);
   });
 });

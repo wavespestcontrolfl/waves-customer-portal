@@ -1275,9 +1275,30 @@ async function findCustomerLinkedLeadsByContact(database, phone, email) {
 // Always guarded to `customer_id IS NULL` so an estimate tied to another
 // customer is never re-homed. Best-effort: a failure here never breaks the
 // conversion. Returns the number of estimates attached.
-async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } = {}) {
+// The estimates that carry THIS lead's id in estimate_data and have no customer yet (the fallback
+// below), prefiltered in SQL by the id substring and confirmed on the parsed value. `loose` counts the
+// prefilter's rows, so a caller can tell when the substring matched an estimate the exact test rejects.
+async function taggedUnownedEstimates(database, leadId) {
+  const tagged = await database('estimates')
+    .whereNull('customer_id')
+    .whereRaw('estimate_data::text LIKE ?', [`%${leadId}%`])
+    .select('id', 'estimate_data', 'status');
+  return { loose: tagged.length, exact: tagged.filter((e) => parseEstimateData(e.estimate_data)?.lead_id === leadId) };
+}
+
+// `approvedEstimateIds` (the Intelligence Bar's convert_lead card, never the Leads page): attach ONLY
+// these ids, still guarded to unowned. The card lists exactly this set and the conversion's claim
+// refuses a changed set, so nothing the card did not show is re-homed.
+async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, approvedEstimateIds = null } = {}) {
   if (!customerId || !lead) return 0;
   try {
+    if (Array.isArray(approvedEstimateIds)) {
+      if (!approvedEstimateIds.length) return 0;
+      return await database('estimates')
+        .whereIn('id', approvedEstimateIds)
+        .whereNull('customer_id')
+        .update({ customer_id: customerId, updated_at: new Date() });
+    }
     // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
     if (lead.estimate_id) {
       return await database('estimates')
@@ -1290,13 +1311,7 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } =
     // estimate_data is stored as JSON text, so prefilter with a LIKE on the
     // lead-id substring (a UUID — no LIKE metacharacters) and confirm the exact
     // value in JS. No phone/email matching — precise lead-id only.
-    const tagged = await database('estimates')
-      .whereNull('customer_id')
-      .whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`])
-      .select('id', 'estimate_data');
-    const ids = tagged
-      .filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id)
-      .map((e) => e.id);
+    const ids = (await taggedUnownedEstimates(database, lead.id)).exact.map((e) => e.id);
     if (!ids.length) return 0;
     return await database('estimates')
       .whereIn('id', ids)
@@ -2258,6 +2273,7 @@ async function resolveLinkedLeadWon({ estimateId, customerId, database = db }) {
 }
 
 module.exports = {
+  taggedUnownedEstimates,
   invoiceSentConversionTargets,
   resolveConversionLeads,
   CONVERSION_STRATEGIES,

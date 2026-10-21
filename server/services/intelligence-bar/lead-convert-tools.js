@@ -14,7 +14,7 @@
  *
  * What the handler writes (leadAttribution.markConverted): the lead's status (won), converted date,
  * qualified flag, customer link and the value fields given; the ad funnel row (to booked, linked to the customer); the lead's own
- * estimate attached to the customer when it has none; a `converted` row on the lead's activity list. It
+ * estimates attached to the customer when they have none (listed by id, only that set); a `converted` row on the lead's activity list. It
  * sends no text, email or call, books nothing, charges nothing, accepts no estimate and changes no Auto
  * Pay. The card says so.
  *
@@ -32,6 +32,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
+const { phoneMatchDigits, phoneIdentityKey } = require('../../utils/phone');
 
 function leadConvertLive() {
   return require('../../config/feature-gates').ibLeadConvertLive() === true;
@@ -69,34 +70,42 @@ const maskPhone = (phone) => {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length >= 4 ? `***${digits.slice(-4)}` : null;
 };
-const phoneKey = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
 const emailKey = (email) => String(email || '').trim().toLowerCase();
+// The repo's phone identity (utils/phone.js): a NANP number collapses to its last 10 digits, any other
+// country keeps its country code, so an international number never matches an unrelated NANP one.
+const samePhone = (a, b) => phoneMatchDigits(a).length > 0 && phoneIdentityKey(a) !== null && phoneIdentityKey(a) === phoneIdentityKey(b);
 const personName = (row) => [row?.first_name, row?.last_name].filter(Boolean).join(' ').trim() || row?.company_name || null;
 const addressLine = (street, city, zip) => [street, city, zip].map((v) => String(v || '').trim()).filter(Boolean).join(', ') || null;
 
+const MATCH_LIMIT = 6;
 // The customers that share the lead's phone or email (the match the page leaves to the operator's eyes).
-async function contactMatches(lead, { excludeId = null, limit = 6 } = {}) {
-  const phone = phoneKey(lead.phone);
+// Asks for one row past the limit, so a longer list is reported as truncated, never as complete.
+async function contactMatches(lead, { excludeId = null } = {}) {
+  const phones = phoneMatchDigits(lead.phone);
   const email = emailKey(lead.email);
-  if (phone.length < 10 && !email) return [];
+  if (!phones.length && !email) return { matches: [], truncated: false };
   const rows = await db('customers').whereNull('deleted_at')
     .where(function sharesContact() {
-      if (phone.length >= 10) this.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone]);
+      if (phones.length) this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
       if (email) this.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [email]);
     })
     .modify((q) => { if (excludeId) q.whereNot('id', excludeId); })
     .orderBy('id')
-    .limit(limit)
+    .limit(MATCH_LIMIT + 1)
     .select('id', 'first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip');
-  return (rows || []).map((row) => ({
-    id: row.id,
-    name: personName(row),
-    city: row.city || null,
-    matched_on: [
-      phone.length >= 10 && phoneKey(row.phone) === phone ? 'phone' : null,
-      email && emailKey(row.email) === email ? 'email' : null,
-    ].filter(Boolean),
-  }));
+  const found = rows || [];
+  return {
+    truncated: found.length > MATCH_LIMIT,
+    matches: found.slice(0, MATCH_LIMIT).map((row) => ({
+      id: row.id,
+      name: personName(row),
+      city: row.city || null,
+      matched_on: [
+        samePhone(lead.phone, row.phone) ? 'phone' : null,
+        email && emailKey(row.email) === email ? 'email' : null,
+      ].filter(Boolean),
+    })),
+  };
 }
 
 // The exact body the Leads page sends, built from the call and the lead as the card read it.
@@ -111,27 +120,62 @@ function requestBody(lead, input, customerId) {
   };
 }
 
-// The lead's own estimate, as markConverted's backfill (linkLeadEstimatesToCustomer) will find it.
+const MAX_LISTED_ESTIMATES = 10;
+const MAX_LISTED_FUNNEL_ROWS = 5;
+
+// The estimates the backfill (linkLeadEstimatesToCustomer) will attach: the lead's linked estimate when it has
+// no customer yet, else every unowned estimate tagged with the lead's id (listed by the backfill's own selector,
+// taggedUnownedEstimates). Returns the approved id set (handed to the backfill, enforced by the claim), the card
+// lines and the pin; or a refusal when the set cannot be listed exactly.
 async function estimateEffect(lead, customerId) {
-  if (!lead.estimate_id) {
-    return {
-      state: { estimate_id: null },
-      line: 'Any estimate tagged with this lead that has no customer yet is attached to the customer. The lead has no linked estimate.',
-    };
+  if (lead.estimate_id) {
+    const estimate = await db('estimates').where({ id: lead.estimate_id }).first('id', 'status', 'customer_id');
+    if (!estimate) return { ids: [], linked: true, state: { estimate_id: lead.estimate_id, missing: true }, lines: ['The lead\u2019s linked estimate could not be found; none is attached.'] };
+    const state = { estimate_id: estimate.id, customer_id: estimate.customer_id || null, status: estimate.status || null };
+    let line;
+    if (!estimate.customer_id) line = `The lead\u2019s estimate (${estimate.status || 'no status'}, ${estimate.id}) has no customer yet: it is attached to this customer. It is not accepted or sent.`;
+    else if (estimate.customer_id === customerId) line = 'The lead\u2019s estimate is already on this customer.';
+    else line = 'The lead\u2019s estimate belongs to a different customer: it stays there.';
+    return { ids: estimate.customer_id ? [] : [estimate.id], linked: true, state, lines: [line] };
   }
-  const estimate = await db('estimates').where({ id: lead.estimate_id }).first('id', 'status', 'customer_id');
-  if (!estimate) return { state: { estimate_id: lead.estimate_id, missing: true }, line: 'The lead’s linked estimate could not be found; none is attached.' };
-  const state = { estimate_id: estimate.id, customer_id: estimate.customer_id || null, status: estimate.status || null };
-  let line;
-  if (!estimate.customer_id) line = `The lead’s estimate (${estimate.status || 'no status'}) has no customer yet: it is attached to this customer. It is not accepted or sent.`;
-  else if (estimate.customer_id === customerId) line = 'The lead’s estimate is already on this customer.';
-  else line = 'The lead’s estimate belongs to a different customer: it stays there.';
-  return { state, line };
+  const { loose, exact } = await require('../lead-estimate-link').taggedUnownedEstimates(db, lead.id);
+  if (loose !== exact.length) {
+    return refusal('An estimate mentions this lead\u2019s id without being tagged with it, so the estimates this conversion would attach cannot be listed exactly. Convert this lead from the Leads page.', 'estimates_unclear', { lead_id: lead.id });
+  }
+  if (exact.length > MAX_LISTED_ESTIMATES) {
+    return refusal(`${exact.length} estimates are tagged with this lead, more than the card lists (${MAX_LISTED_ESTIMATES}). Convert this lead from the Leads page.`, 'estimates_too_many', { lead_id: lead.id });
+  }
+  const sorted = [...exact].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return {
+    ids: sorted.map((e) => String(e.id)),
+    linked: false,
+    state: { tagged: sorted.map((e) => ({ id: String(e.id), status: e.status || null })) },
+    lines: sorted.length
+      ? sorted.map((e) => `Estimate ${e.id} (${e.status || 'no status'}) is tagged with this lead and has no customer yet: it is attached to this customer. It is not accepted or sent.`)
+      : ['The lead has no linked estimate and no estimate is tagged with it, so none is attached.'],
+  };
 }
 
-async function funnelRows(leadId) {
-  const row = await db('ad_service_attribution').where({ lead_id: leadId }).count('* as n').first();
-  return Number(row?.n) || 0;
+// The lead's ad funnel rows, and what the stage bridge will really do to each (lead-funnel-bridge.js: only a
+// row below booked advances to booked, a lost row recovers, booked and completed rows are left alone; a moved
+// row keeps a customer it already has and is stamped with this one only when it has none).
+async function funnelEffect(leadId, customerId) {
+  const rows = (await db('ad_service_attribution').where({ lead_id: leadId }).select('funnel_stage', 'customer_id')) || [];
+  const state = rows.map((r) => [r.funnel_stage || null, r.customer_id || null]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  if (!rows.length) {
+    return { state, lines: ['The lead has no ad funnel row, so none moves. The funnel settlement can still rebuild one for a repeat quote-wizard lead.'] };
+  }
+  const describe = (r) => {
+    const stage = r.funnel_stage || 'none';
+    if (stage === 'booked' || stage === 'completed') return `An ad funnel row is already ${stage}: left as it is (never moved backwards, not relinked).`;
+    const owner = !r.customer_id ? 'and is linked to this customer'
+      : String(r.customer_id) === String(customerId) ? '(already linked to this customer)'
+        : 'but stays linked to a different customer (not relinked)';
+    return `An ad funnel row moves from ${stage} to booked ${owner}.`;
+  };
+  const lines = rows.slice(0, MAX_LISTED_FUNNEL_ROWS).map(describe);
+  if (rows.length > MAX_LISTED_FUNNEL_ROWS) lines.push(`${rows.length - MAX_LISTED_FUNNEL_ROWS} more ad funnel rows are handled the same way.`);
+  return { state, lines };
 }
 
 // The lead (unconverted) and the customer the call names, or the refusal. Without a customer_id the
@@ -150,13 +194,13 @@ async function resolveTargets(input) {
   if (badValue) return refusal(`${badValue[0]} must be a dollar amount from 0 to ${badValue[1]}`, 'invalid_value');
   const rawCustomer = String(input?.customer_id || '').trim();
   if (!rawCustomer) {
-    const candidates = await contactMatches(lead);
+    const { matches: candidates, truncated } = await contactMatches(lead);
     return refusal(
       candidates.length
         ? 'Which customer is this lead? The Leads page links a lead to an existing customer. Ask the operator to pick one of these, or create the customer first.'
         : 'No customer shares this lead\u2019s phone or email. The Leads page links a lead to an existing customer: create the customer first (create_customer), then convert.',
       'customer_required',
-      { lead_id: lead.id, lead_name: leadName, candidates: candidates.map((c) => ({ customer_id: c.id, name: c.name, city: c.city, matched_on: c.matched_on })) },
+      { lead_id: lead.id, lead_name: leadName, more_customers_exist: truncated, candidates: candidates.map((c) => ({ customer_id: c.id, name: c.name, city: c.city, matched_on: c.matched_on })) },
     );
   }
   if (!UUID_RE.test(rawCustomer)) return refusal('A valid customer_id is required', 'invalid_target');
@@ -166,7 +210,7 @@ async function resolveTargets(input) {
 }
 
 const matchedOnOf = (lead, customer) => [
-  phoneKey(lead.phone).length >= 10 && phoneKey(lead.phone) === phoneKey(customer.phone) ? 'phone' : null,
+  samePhone(lead.phone, customer.phone) ? 'phone' : null,
   emailKey(lead.email) && emailKey(lead.email) === emailKey(customer.email) ? 'email' : null,
 ].filter(Boolean);
 
@@ -180,33 +224,31 @@ function valuesGiven(body) {
 
 // Every change the handler makes, and what it does not do (the sent / money lines are the promise on the card).
 function planEffects({ lead, leadName, customer, values, funnel, estimate }) {
-  const funnelText = funnel
-    ? `The lead\u2019s ad funnel row moves to booked and is linked to the customer (${funnel} row${funnel === 1 ? '' : 's'}; never moved backwards).`
-    : 'The lead has no ad funnel row, so none moves. The funnel settlement can still rebuild one for a repeat quote-wizard lead.';
   return [
     { kind: 'customer', text: `Lead ${leadName}: status ${lead.status} \u2192 won; linked to customer ${personName(customer) || customer.id}; marked qualified; conversion date set to now${values.length ? `; ${values.join(', ')}` : ''}` },
     ...(values.length === 0 ? [{ kind: 'operational', text: 'No monthly value, first-service value or tier was given: the lead\u2019s existing figures stay as they are.' }] : []),
-    { kind: 'operational', text: funnelText },
-    { kind: 'operational', text: estimate.line },
+    ...funnel.lines.map((text) => ({ kind: 'operational', text })),
+    ...estimate.lines.map((text) => ({ kind: 'operational', text })),
     { kind: 'operational', text: 'A "converted" entry is added to the lead\u2019s activity list.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or anyone else, and no portal invite or welcome message.' },
     { kind: 'billing', text: 'No charge, invoice, deposit or estimate acceptance, no visit is booked, and Auto Pay is not touched.' },
   ];
 }
 
-function planWarnings({ lead, matchedOn, others }) {
+function planWarnings({ lead, matchedOn, others, othersTruncated }) {
   const warnings = [];
   if (!matchedOn.length) warnings.push('This customer\u2019s phone and email do not match the lead\u2019s. Check it is the same person.');
   if (others.length) {
     const who = others.map((o) => `${o.name || o.id}${o.city ? ` (${o.city})` : ''} on ${o.matched_on.join(' and ')}`).join('; ');
     warnings.push(`${others.length === 1 ? 'Another customer shares' : `${others.length} other customers share`} the lead\u2019s phone or email: ${who}. Make sure this is the right account.`);
   }
+  if (othersTruncated) warnings.push(`More than ${MATCH_LIMIT} other customers share the lead\u2019s phone or email; only the first ${MATCH_LIMIT} are listed.`);
   if (lead.status === 'lost') warnings.push('This lead is marked lost; converting reopens it as won.');
   return warnings;
 }
 
 // Everything the card approves: a change in any of it is drift.
-function versionOf({ lead, customer, others, estimate, funnel, body }) {
+function versionOf({ lead, customer, others, othersTruncated, estimate, funnel, body }) {
   return {
     lead_id: lead.id,
     status: lead.status,
@@ -217,9 +259,9 @@ function versionOf({ lead, customer, others, estimate, funnel, body }) {
     lead_values: digest([lead.monthly_value, lead.initial_service_value, lead.waveguard_tier]),
     customer_id: customer.id,
     customer_contact: digest([customer.first_name, customer.last_name, customer.company_name, customer.phone, customer.email, customer.address_line1, customer.city, customer.zip]),
-    others: digest(others.map((o) => o.id)),
+    others: digest({ ids: others.map((o) => o.id), truncated: othersTruncated }),
     estimate: digest(estimate.state),
-    funnel_rows: funnel,
+    funnel: digest(funnel.state),
     body: digest(body),
   };
 }
@@ -230,9 +272,10 @@ async function buildPlan(input) {
   const { lead, leadName, customer } = targets;
   const body = requestBody(lead, input, customer.id);
   const matchedOn = matchedOnOf(lead, customer);
-  const others = await contactMatches(lead, { excludeId: customer.id });
+  const { matches: others, truncated: othersTruncated } = await contactMatches(lead, { excludeId: customer.id });
   const estimate = await estimateEffect(lead, customer.id);
-  const funnel = await funnelRows(lead.id);
+  if (estimate.error) return estimate;
+  const funnel = await funnelEffect(lead.id, customer.id);
   const values = valuesGiven(body);
   return {
     preview: true,
@@ -248,11 +291,22 @@ async function buildPlan(input) {
     other_matching_customers: others.map((o) => ({ customer_id: o.id, name: o.name, city: o.city, matched_on: o.matched_on.join(' and ') })),
     values_given: values,
     effects: planEffects({ lead, leadName, customer, values, funnel, estimate }),
-    warnings: planWarnings({ lead, matchedOn, others }),
+    more_matching_customers_exist: othersTruncated,
+    warnings: planWarnings({ lead, matchedOn, others, othersTruncated }),
     sends_to_customer: false,
-    _version: versionOf({ lead, customer, others, estimate, funnel, body }),
+    _version: versionOf({ lead, customer, others, othersTruncated, estimate, funnel, body }),
     _body: body,
-    _expected: { status: lead.status, updatedAt: msOf(lead.updated_at), customerId: lead.customer_id || null },
+    _expected: {
+      leadId: lead.id,
+      status: lead.status,
+      updatedAt: msOf(lead.updated_at),
+      customerId: lead.customer_id || null,
+      // The customer as the card showed it (the columns the claim re-reads).
+      customer: Object.fromEntries(['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip'].map((c) => [c, customer[c] ?? null])),
+      // The estimates the card listed: the only ones the backfill may attach.
+      estimateIds: estimate.ids,
+      estimateLinked: estimate.linked,
+    },
     note: 'PREVIEW ONLY \u2014 nothing was changed. Confirm converts exactly this; if anything changed it refuses.',
   };
 }

@@ -2924,6 +2924,22 @@ describe('linkLeadEstimatesToCustomer', () => {
     });
     expect(n).toBe(0);
   });
+
+  test('an approved id set (the Intelligence Bar card) attaches ONLY those ids, still guarded to unowned, and reads nothing else', async () => {
+    const { database, ops } = makeBackfillDb({ rowsUpdated: 1, taggedRows: [{ id: 'est-z', estimate_data: JSON.stringify({ lead_id: 'lead-6' }) }] });
+    const n = await linkLeadEstimatesToCustomer({
+      database, lead: { id: 'lead-6', estimate_id: null }, customerId: 'cust-6', approvedEstimateIds: ['est-a'],
+    });
+    expect(n).toBe(1);
+    expect(ops).toHaveLength(1);
+    expect(ops[0].selected).toBe(false);
+    expect(ops[0].wheres).toContainEqual(['whereIn', 'id', ['est-a']]);
+    expect(ops[0].wheres).toContainEqual(['whereNull', 'customer_id']);
+    // The lead's linked estimate is not attached unless it is in the approved set.
+    const linked = makeBackfillDb({ rowsUpdated: 1 });
+    expect(await linkLeadEstimatesToCustomer({ database: linked.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: [] })).toBe(0);
+    expect(linked.ops).toHaveLength(0);
+  });
 });
 
 describe('estimate sent/viewed — standalone-estimate contact rescue', () => {

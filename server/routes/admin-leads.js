@@ -1293,8 +1293,10 @@ router.post('/:id/activity', async (req, res, next) => {
 });
 
 // The card's pin as extra predicates on the win's own UPDATE: the lead is still unconverted, in the
-// status and at the edit time the card showed, with the customer link it showed, and its customer is live.
-// The carded customer must also still exist (not deleted or merged away) when the UPDATE runs.
+// status and at the edit time the card showed, with the customer link it showed; the carded customer is
+// live and unchanged (the columns the card showed); and the estimates the card listed are exactly the
+// unowned ones this conversion will attach.
+const CUSTOMER_SNAPSHOT_COLUMNS = ['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip'];
 function withExpectedLead(identity, expected, customerId) {
   if (!expected) return identity;
   return (q) => {
@@ -1303,7 +1305,17 @@ function withExpectedLead(identity, expected, customerId) {
       .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(expected.updatedAt).toISOString()]);
     if (expected.customerId) q.where('customer_id', expected.customerId);
     else q.whereNull('customer_id');
-    q.whereExists(db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at'));
+    const customer = db('customers').select(db.raw('1')).where('id', customerId).whereNull('deleted_at');
+    for (const column of CUSTOMER_SNAPSHOT_COLUMNS) customer.whereRaw(`COALESCE(${column}::text, '') = ?`, [String(expected.customer?.[column] ?? '')]);
+    q.whereExists(customer);
+    // The approved estimates are all still unowned, and (lead with no linked estimate) no other unowned
+    // estimate is tagged with this lead.
+    const ids = expected.estimateIds || [];
+    q.whereRaw("(SELECT COUNT(*) FROM estimates WHERE customer_id IS NULL AND id::text = ANY (?::text[])) = ?", [ids, ids.length]);
+    if (!expected.estimateLinked) {
+      q.whereNotExists(db('estimates').select(db.raw('1')).whereNull('customer_id')
+        .whereRaw('estimate_data::text LIKE ?', [`%${expected.leadId}%`]).whereRaw('id::text <> ALL (?::text[])', [ids]));
+    }
   };
 }
 
@@ -1343,6 +1355,7 @@ const leadConvertHandler = async (req, res, next) => {
       // lead version it showed (req.ibExpectedLead, set only by convertLeadFromBar; the page
       // never sets it, so the page's claim is unchanged).
       onlyIfIdentity: withExpectedLead(unlessHandledSince(seen, req.body.seen_updated_at), req.ibExpectedLead, customerId),
+      ...(req.ibExpectedLead ? { approvedEstimateIds: req.ibExpectedLead.estimateIds } : {}),
     });
     if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();

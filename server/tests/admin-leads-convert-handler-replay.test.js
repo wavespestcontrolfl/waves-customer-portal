@@ -25,16 +25,22 @@ const CUST = '00000000-0000-4000-8000-0000000000c1';
 const SEEN = '2099-01-01T12:00:00.123Z';
 
 let tables;
+const CUSTOMER_FIELDS = {
+  first_name: 'Robin', last_name: 'Sample', company_name: null, phone: '+19415550142', email: 'robin@example.test',
+  address_line1: '12 Sample Way', city: 'Venice', zip: '34285', deleted_at: null,
+};
 function seed() {
   tables = {
     leads: { id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null },
-    customers: { id: CUST },
+    customers: { id: CUST, ...CUSTOMER_FIELDS },
+    estimates: [],
   };
   db.raw = jest.fn((sql) => ({ raw: sql }));
   db.mockImplementation((table) => {
     const q = { table, conds: [] };
     q.where = jest.fn((...a) => { q.conds.push(['where', ...a]); return q; });
     q.whereNull = jest.fn((k) => { q.conds.push(['whereNull', k]); return q; });
+    q.whereRaw = jest.fn((sql, bindings) => { q.conds.push(['whereRaw', sql, bindings]); return q; });
     q.select = jest.fn(() => q);
     q.first = jest.fn(async () => (table === 'customers' && q.conds.some((c) => c[0] === 'whereNull' && c[1] === 'deleted_at') && tables.customers?.deleted_at ? undefined : tables[table]));
     for (const write of ['insert', 'update', 'del']) q[write] = jest.fn(() => { throw new Error(`unexpected ${write} on ${table}`); });
@@ -144,20 +150,50 @@ function claimOf(row) {
       if (prop === 'whereExists') return (sub) => {
         calls.push(['whereExists', sub.table]);
         existsSubs.push(sub);
-        list.push(() => Boolean(tables.customers) && !tables.customers.deleted_at);
+        // The carded customer: exists, not deleted, and each snapshot column equal.
+        list.push(() => {
+          const c = tables.customers;
+          if (!c || c.deleted_at) return false;
+          return sub.conds.filter((k) => k[0] === 'whereRaw').every(([, sql, [v]]) => String(c[/COALESCE\((\w+)::text/.exec(sql)[1]] ?? '') === v);
+        });
+        return builder(list, mode);
+      };
+      if (prop === 'whereNotExists') return (sub) => {
+        calls.push(['whereNotExists', sub.table]);
+        existsSubs.push(sub);
+        // No unowned estimate tagged with the lead that is outside the approved set.
+        list.push(() => {
+          const like = sub.conds.find((k) => k[0] === 'whereRaw' && /LIKE/.test(k[1]));
+          const approved = sub.conds.find((k) => k[0] === 'whereRaw' && /<> ALL/.test(k[1]))[2][0];
+          const needle = like[2][0].replace(/%/g, '');
+          return !(tables.estimates || []).some((e) => e.customer_id == null && String(e.estimate_data).includes(needle) && !approved.includes(e.id));
+        });
         return builder(list, mode);
       };
       if (prop === 'whereNull') return (k) => { calls.push(['whereNull', k]); list.push((r) => r[k] == null); return builder(list, mode); };
       if (prop === 'whereNot') return (k, v) => { if (mode === 'top') calls.push(['whereNot', k]); list.push((r) => r[k] !== v); return builder(list, mode); };
       if (prop === 'orWhereRaw') return (_sql, [iso]) => { const c = (r) => new Date(r.updated_at).getTime() === new Date(iso).getTime(); c.or = true; list.push(c); return builder(list, mode); };
-      if (prop === 'whereRaw') return (_sql, [iso]) => { calls.push(['whereRaw', 'updated_at']); list.push((r) => new Date(r.updated_at).getTime() === new Date(iso).getTime()); return builder(list, mode); };
+      if (prop === 'whereRaw') return (sql, [first, count]) => {
+        if (/^\(SELECT COUNT/.test(sql)) {
+          calls.push(['whereRaw', 'estimates']);
+          list.push(() => (tables.estimates || []).filter((e) => e.customer_id == null && first.includes(e.id)).length === count);
+        } else {
+          calls.push(['whereRaw', 'updated_at']);
+          list.push((r) => new Date(r.updated_at).getTime() === new Date(first).getTime());
+        }
+        return builder(list, mode);
+      };
       return undefined;
     },
   });
   return { q: builder(conds, 'top'), calls, existsSubs, wins: () => conds.every((c) => c(row)) };
 }
 const convertsRow = (row) => async (_id, opts) => { const claim = claimOf(row); opts.onlyIfIdentity(claim.q); return claim.wins(); };
-const EXPECTED = { status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null };
+const EXPECTED = {
+  leadId: LEAD, status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null,
+  customer: Object.fromEntries(Object.entries(CUSTOMER_FIELDS).filter(([k]) => k !== 'deleted_at')),
+  estimateIds: [], estimateLinked: true,
+};
 const FULL_LEAD = () => ({ id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null, converted_at: null, customer_id: null });
 
 test('the page path is unchanged: its claim carries only the handled rule, with or without a changed lead', async () => {
@@ -177,9 +213,12 @@ test('the bar adds the card\u2019s version to the same UPDATE and converts when 
   leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return claim.wins(); });
   const res = await leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected: EXPECTED });
   expect(res.status).toBe(200);
-  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id'], ['whereExists', 'customers']]);
+  expect(claim.calls).toEqual([['where', 'fn'], ['whereNull', 'converted_at'], ['where', 'status'], ['whereRaw', 'updated_at'], ['whereNull', 'customer_id'], ['whereExists', 'customers'], ['whereRaw', 'estimates']]);
   // The subquery asks for the carded customer, not deleted.
-  expect(claim.existsSubs[0].conds).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
+  expect(claim.existsSubs[0].conds.slice(0, 2)).toEqual([['where', 'id', CUST], ['whereNull', 'deleted_at']]);
+  // ...and the columns the card showed.
+  expect(claim.existsSubs[0].conds.slice(2).map((c) => /COALESCE\((\w+)::text/.exec(c[1])[1]))
+    .toEqual(['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip']);
 });
 
 test.each([
@@ -233,4 +272,67 @@ test('a customer deleted or merged away before the bar\u2019s write converts not
   leadAttribution.markConverted.mockImplementationOnce(async () => true);
   expect((await viaPage(BODY)).status).toBe(200);
   expect(customerReads[0].conds).toEqual([['where', 'id', CUST]]);
+});
+
+// ── the customer snapshot and the approved estimate set in the claim ───────────────────────────
+const run = (expected) => leadsRouter.convertLeadFromBar({ leadId: LEAD, body: BODY, expected });
+const winsOnRow = () => leadAttribution.markConverted.mockImplementation(convertsRow(FULL_LEAD()));
+
+test.each([
+  ['name', { last_name: 'Changed' }],
+  ['phone', { phone: '+19415550999' }],
+  ['email', { email: 'new@example.test' }],
+  ['street', { address_line1: '99 Other Way' }],
+  ['zip', { zip: '34202' }],
+])('a customer %s change between the check and the write answers 409; the page ignores it', async (_name, change) => {
+  winsOnRow();
+  tables.customers = { ...tables.customers, ...change };
+  const res = await run(EXPECTED);
+  expect(res.status).toBe(409);
+  expect((await viaPage(BODY)).status).toBe(200);
+});
+
+test('the bar passes the approved estimate ids to the backfill; the page passes none', async () => {
+  const withIds = { ...EXPECTED, estimateIds: ['est-a'] };
+  tables.estimates = [{ id: 'est-a', customer_id: null, estimate_data: '{}' }];
+  leadAttribution.markConverted.mockImplementation(convertsRow(FULL_LEAD()));
+  await run(withIds);
+  expect(leadAttribution.markConverted.mock.calls[0][1].approvedEstimateIds).toEqual(['est-a']);
+  leadAttribution.markConverted.mockClear();
+  await viaPage(BODY);
+  expect('approvedEstimateIds' in leadAttribution.markConverted.mock.calls[0][1]).toBe(false);
+});
+
+describe('estimates tagged with the lead (no linked estimate)', () => {
+  const TAGGED = { ...EXPECTED, estimateLinked: false, estimateIds: ['est-a'] };
+  const tagged = (extra = {}) => ({ id: 'est-a', customer_id: null, estimate_data: JSON.stringify({ lead_id: LEAD }), ...extra });
+  beforeEach(() => { tables.estimates = [tagged()]; winsOnRow(); });
+
+  test('the card\u2019s set converts; the claim also rejects any other unowned tagged estimate', async () => {
+    expect((await run(TAGGED)).status).toBe(200);
+    const claim = claimOf(FULL_LEAD());
+    leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return claim.wins(); });
+    await run(TAGGED);
+    expect(claim.calls.slice(-2)).toEqual([['whereRaw', 'estimates'], ['whereNotExists', 'estimates']]);
+  });
+
+  test('a tagged estimate added after the card answers 409', async () => {
+    tables.estimates.push(tagged({ id: 'est-b' }));
+    expect((await run(TAGGED)).status).toBe(409);
+  });
+
+  test('an approved estimate that another customer took, or that went away, answers 409', async () => {
+    tables.estimates = [tagged({ customer_id: 'someone-else' })];
+    expect((await run(TAGGED)).status).toBe(409);
+    tables.estimates = [];
+    expect((await run(TAGGED)).status).toBe(409);
+  });
+
+  test('the page path has no estimate predicate and never passes an id set', async () => {
+    tables.estimates.push(tagged({ id: 'est-b' }));
+    const claim = claimOf(FULL_LEAD());
+    leadAttribution.markConverted.mockImplementationOnce(async (_id, opts) => { opts.onlyIfIdentity(claim.q); return true; });
+    expect((await viaPage(BODY)).status).toBe(200);
+    expect(claim.calls).toEqual([['where', 'fn']]);
+  });
 });
