@@ -22,6 +22,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   reportSimpleWebLive: jest.fn(() => false),
   reportGlassWebLive: jest.fn(() => false),
+  reportWebSliderLive: jest.fn(() => false),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -255,5 +256,48 @@ describe('GET /reports/:token/data glass look (GATE_REPORT_GLASS_WEB)', () => {
       const { body } = await getData(baseUrl);
       expect('glassWeb' in body).toBe(false);
     });
+  });
+});
+
+describe('GET /reports/:token/data before/after slider (GATE_REPORT_WEB_SLIDER)', () => {
+  const asked = () => buildReportV1Data.mock.calls[0][3].lawnSlider;
+  const SLIDER = { pairs: [{ key: 'front', label: 'Front yard', before: { url: 'https://signed.test/a', date: '2026-09-20' }, after: { url: 'https://signed.test/b', date: '2026-10-21' } }] };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gates.reportSimpleWebLive.mockReturnValue(true);
+    gates.reportWebSliderLive.mockReturnValue(false);
+    buildReportV1Data.mockImplementation(async () => ({ ...payload(), lawnSlider: SLIDER }));
+  });
+
+  test('slider gate off: the builder is not asked for the slider', async () => {
+    mockDb();
+    await withServer(async (baseUrl) => { await getData(baseUrl); });
+    expect(asked()).toBe(false);
+  });
+
+  test('slider gate on beside the simple web view: the builder is asked, and its key reaches the payload', async () => {
+    gates.reportWebSliderLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.lawnSlider).toEqual(SLIDER);
+    });
+    expect(asked()).toBe(true);
+  });
+
+  test('slider gate on, simple web off: never asked', async () => {
+    gates.reportSimpleWebLive.mockReturnValue(false);
+    gates.reportWebSliderLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => { await getData(baseUrl); });
+    expect(asked()).toBeFalsy();
+  });
+
+  test.each(['pdf', 'static', 'sms_preview'])('slider gate on: mode=%s is never asked for the slider', async (mode) => {
+    gates.reportWebSliderLive.mockReturnValue(true);
+    mockDb();
+    await withServer(async (baseUrl) => { await getData(baseUrl, `?mode=${mode}`); });
+    expect(asked()).toBeFalsy();
   });
 });

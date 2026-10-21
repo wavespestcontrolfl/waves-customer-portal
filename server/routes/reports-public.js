@@ -527,6 +527,8 @@ async function buildServiceReportV1ResponseData(service, token, {
   // GATE_REPORT_WEB_LIVE_CHIP: an out-param the lawn report build fills with the chip's inputs (completion time,
   // coordinates, products, frozen watering instruction). Internal; never reaches the payload.
   liveChipOut,
+  // OPT-IN on the same terms (GATE_REPORT_WEB_SLIDER): only the live simple-web /data render shows the then-and-now slider.
+  lawnSlider = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -550,6 +552,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnRainfastWatch,
     lawnWaterInRain,
     liveChipOut,
+    lawnSlider,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2653,6 +2656,8 @@ router.get('/:token/data', async (req, res, next) => {
         lawnRainfastWatch: true,
         lawnWaterInRain: true,
         liveChipOut,
+        // GATE_REPORT_WEB_SLIDER: asked for only on a live simple-web view.
+        lawnSlider: simpleWeb && typeof reportGates.reportWebSliderLive === 'function' && reportGates.reportWebSliderLive(),
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
