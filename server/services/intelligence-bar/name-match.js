@@ -377,7 +377,7 @@ function parseSearchV2(search) {
 // Candidates that share at least one sound key with some search word (or
 // run-together pair), best by weight of shared keys, at most MAX_SURVIVORS.
 // `include` ids (the customer on screen) always ride along when indexed.
-function prefilterNameIndex(search, index, { include = [] } = {}) {
+function prefilterNameIndex(search, index, { include = [], cap = MAX_SURVIVORS } = {}) {
   const variants = parseSearchV2(search);
   if (!variants) return [];
   const memo = new Map();
@@ -395,7 +395,7 @@ function prefilterNameIndex(search, index, { include = [] } = {}) {
     const weight = (key.startsWith('d:') ? 0.25 : key.startsWith('f:') || key.startsWith('l:') ? 0.5 : 1) / (1 + Math.log2(list.length));
     for (const at of list) counts.set(at, (counts.get(at) || 0) + weight);
   }
-  const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, MAX_SURVIVORS).map(([at]) => index.entries[at]);
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, cap).map(([at]) => index.entries[at]);
   const chosen = new Set(best);
   for (const id of include) {
     const entry = index.byId.get(id);

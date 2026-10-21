@@ -590,6 +590,34 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
       expect(result.alternatives).toBeUndefined();
     });
 
+    test('filtered-out customers do not use up the survivor slots: the next chunk is checked (Codex #6367 r4)', async () => {
+      let allowCalls = 0;
+      let allowedId = null;
+      db.__rows = (q) => {
+        if (q.sql.includes('count(*)')) return [{ count: '1' }];
+        if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return [];
+        if (q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')) return everyone;
+        if (q.sql.startsWith('select "customers"."id" from "customers"')) {
+          allowCalls += 1;
+          if (allowCalls === 1) return []; // the filter excludes the whole first chunk
+          allowedId = q.bindings.find((b) => typeof b === 'string' && /^(b|r)\d+$|^stompf/.test(b));
+          return allowedId ? [{ id: allowedId }] : [];
+        }
+        return [{ id: allowedId || 'b00001', first_name: 'Richard', last_name: 'Allowed' }];
+      };
+      const result = await executeTool('query_customers', { search: 'richard', filters: { active: true } });
+      expect(allowCalls).toBeGreaterThanOrEqual(2);
+      expect(allowedId).toBeTruthy();
+      expect(JSON.stringify(result)).toContain(allowedId);
+    });
+
+    test('a recent text counts only when it went out (canceled and held rows hidden)', async () => {
+      mockBook();
+      await executeTool('query_customers', { search: 'richard dump' });
+      const sms = db.__queries.find((q) => q.sql.includes('from "sms_log"'));
+      expect(sms.sql).toMatch(/NOT \(/);
+    });
+
     test('a scoped task never uses the cache', async () => {
       mockBook();
       await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-1'] });

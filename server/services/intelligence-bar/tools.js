@@ -20,8 +20,9 @@ const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
 const {
   MAX_RESULTS: MAX_NAME_MATCHES, MAX_RESULTS_V2: MAX_NAME_MATCHES_V2, isNameLikeSearch, rankNameMatches,
-  buildNameIndex, prefilterNameIndex, cachedNameIndex,
+  buildNameIndex, prefilterNameIndex, cachedNameIndex, MAX_SURVIVORS: MAX_NAME_SURVIVORS,
 } = require('./name-match');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
@@ -666,7 +667,9 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
       db('scheduled_services').distinct('customer_id').whereIn('customer_id', candidateIds)
         .whereBetween('scheduled_date', [etDateString(now), etDateString(addETDays(now, 1))])
         .whereIn('status', NAME_MATCH_LIVE_VISIT_STATUSES),
-      db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since),
+      // Only texts that really went out: canceled rows and unresolved send
+      // reservations are hidden by the shared helper (Codex #6367 r4).
+      excludeUnresolvedSendReservations(db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since)),
       db('call_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since),
     ]);
     for (const row of visits) context.visitTodayIds.add(row.customer_id);
@@ -700,13 +703,32 @@ async function allowedByQuery(unsearched, survivors) {
   return survivors.filter(entry => allowed.has(entry.id));
 }
 
+// The global index is ranked before the query's filters (city, tag, active)
+// apply, so filtered-out customers must not use up the survivor slots (Codex
+// #6367 r4): walk the ranked list in MAX_SURVIVORS chunks (at most ten id-only
+// reads) until MAX_SURVIVORS allowed customers are found. The on-screen
+// customer is checked in the first chunk.
+const ALLOWED_SCAN_CHUNKS = 10;
+async function allowedSurvivors(unsearched, search, index, include) {
+  const ranked = prefilterNameIndex(search, index, { include, cap: MAX_NAME_SURVIVORS * ALLOWED_SCAN_CHUNKS });
+  const pinned = ranked.filter(entry => include.includes(entry.id));
+  const ordered = [...pinned, ...ranked.filter(entry => !include.includes(entry.id))];
+  const allowed = [];
+  for (let at = 0; at < ordered.length && allowed.length < MAX_NAME_SURVIVORS; at += MAX_NAME_SURVIVORS) {
+    allowed.push(...await allowedByQuery(unsearched, ordered.slice(at, at + MAX_NAME_SURVIVORS)));
+  }
+  return allowed.slice(0, MAX_NAME_SURVIVORS + pinned.length);
+}
+
 // v2 ranking: look up the few candidates that share a sound key with the
 // search (at most 500), keep the ones the query allows, read the context only
 // for them, then score only them.
 async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId, scoped) {
   const index = await scopedNameIndex(unsearched, scoped);
-  const found = prefilterNameIndex(search, index, { include: pageCustomerId ? [pageCustomerId] : [] });
-  const survivors = scoped ? found : await allowedByQuery(unsearched, found);
+  const include = pageCustomerId ? [pageCustomerId] : [];
+  const survivors = scoped
+    ? prefilterNameIndex(search, index, { include })
+    : await allowedSurvivors(unsearched, search, index, include);
   if (!survivors.length) return [];
   const context = await nameMatchContext(pageCustomerId, survivors.map(entry => entry.id));
   return rankNameMatches(search, survivors, { v2: true, limit, context, prefiltered: true });
