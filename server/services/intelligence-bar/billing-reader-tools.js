@@ -84,7 +84,7 @@ Select the customer with customer_id or customer_name.`,
   },
   {
     name: 'get_invoice_detail',
-    description: `Read ONE invoice by invoice_id: line items, discounts, amounts, and whether it is collectible (collectible true: balance_due is stated; false: balance_due is null with the reason, and "needs reconciliation — the bar can\'t settle it from here" when a charge state is unresolved). Also recorded_payments (the payments-table rows tied to the invoice: amount, status, date, method, refund amounts, and the payer when a third party funded it), dispute hold, payment plan and annual-prepay linkage.
+    description: `Read ONE invoice by invoice_id: line items, discounts, amounts, and whether it is collectible (collectible true: balance_due is stated; false: balance_due is null with the reason, and "needs reconciliation — settling it is a manual office step" when a charge state is unresolved). Also recorded_payments (the payments-table rows tied to the invoice: amount, status, date, method, refund amounts, and the payer when a third party funded it), dispute hold, payment plan and annual-prepay linkage.
 ${BALANCE_RULE} Admin-only; never changes anything and never charges, refunds, credits or sends.
 receipt_sent_at is the ET time a receipt email or text went out, or null when none is recorded as sent: state whether a receipt went out from it, never guess. To send or re-send a paid receipt, use resend_receipt (it shows a card; do not send the operator to the Invoices page).
 Takes the invoice_id from get_customer_invoices; there is no invoice-number lookup.
@@ -307,12 +307,12 @@ const optionalRead = (database, work) => database.transaction(work);
 
 // ─── the payment fences ─────────────────────────────────────────────
 
-const RECONCILE_POINTER = 'needs reconciliation — the bar can\'t settle it from here';
-const VISIT_DID_NOT_HAPPEN_REASON = 'the visit for this invoice did not happen (cancelled/skipped) — the bar can\'t settle it from here';
+const RECONCILE_POINTER = 'needs reconciliation — settling it is a manual office step';
+const VISIT_DID_NOT_HAPPEN_REASON = 'the visit for this invoice did not happen (cancelled/skipped) — settling it is a manual office step';
 const CUSTOMER_CHANGED_REASON = 'this customer record changed during the read; ask again';
 const RECORD_CHANGED_REASON = 'this record changed hands during the read; ask again';
-const CARD_INCOMPLETE_REASON = 'a card payment did not complete — the bar can\'t settle it from here';
-const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — the bar can\'t settle it from here';
+const CARD_INCOMPLETE_REASON = 'a card payment did not complete — settling it is a manual office step';
+const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — settling it is a manual office step';
 const CHARGE_FENCE_REASONS = {
   STRIPE_AMBIGUOUS_OUTCOME: 'a saved-card charge has an unconfirmed outcome (Stripe may have charged it)',
   STRIPE_CHARGE_IN_PROGRESS: 'a saved-card charge is in progress or awaiting reconciliation',

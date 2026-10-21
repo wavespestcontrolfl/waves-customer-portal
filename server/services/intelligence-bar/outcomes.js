@@ -90,6 +90,9 @@ const THROWN_MOVE_REFUSALS = {
 function moveRefusalFromThrown(err) {
   const mapped = err && THROWN_MOVE_REFUSALS[err.code];
   if (!mapped) return null;
+  // A frozen-state check that could not READ the visit fails closed with the
+  // same code; that is an outage, not a policy refusal, so it stays a fault.
+  if (err.reason === 'unreadable') return null;
   return { error: mapped.error || err.message, code: mapped.code };
 }
 

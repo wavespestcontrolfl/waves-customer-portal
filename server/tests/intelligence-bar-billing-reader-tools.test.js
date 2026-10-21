@@ -44,7 +44,7 @@ describe('billing reader definitions', () => {
     expect(BILLING_READER_TOOLS[1].description).toMatch(/there is no invoice-number lookup/);
     expect(BILLING_READER_TOOLS[1].description).toMatch(/amount_due_after_credit and a payment plan's amounts are null too/);
     expect(BILLING_READER_TOOLS[0].description).toMatch(/total_due adds up ONLY the invoices that are collectible/);
-    expect(BILLING_READER_TOOLS[1].description).toMatch(/needs reconciliation — the bar can\'t settle it from here/);
+    expect(BILLING_READER_TOOLS[1].description).toMatch(/needs reconciliation — settling it is a manual office step/);
   });
 
   test('both descriptions state the receipt fact from receipt_sent_at and point at resend_receipt, not the Invoices page', () => {

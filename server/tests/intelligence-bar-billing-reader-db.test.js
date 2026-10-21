@@ -315,7 +315,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     // The fence's three holds: an unresolved attempt, an ambiguous attempt, an unrecorded charge, a failed row flagged ambiguous.
     for (const key of ['open', 'amb', 'orphan', 'failamb']) {
       expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
-      expect(by(list, key).reason).toMatch(/needs reconciliation — the bar can\'t settle it from here/);
+      expect(by(list, key).reason).toMatch(/needs reconciliation — settling it is a manual office step/);
       expect(by(list, key).reason).not.toMatch(/pi_/);
     }
     expect(by(list, 'open')).toMatchObject({ has_active_payment_plan: true });
@@ -357,7 +357,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const stripeDown = jest.spyOn(stripe, 'assertNoInvoiceChargeReconciliationPending').mockRejectedValue(Object.assign(new Error('Invoice has an unresolved Stripe charge pi_secret123'), { code: 'STRIPE_CHARGED_DB_FAILED', reconciliationRequired: true }));
     try {
       const held = await read('get_invoice_detail', { invoice_id: inv.credited.id });
-      expect(held.invoice.reason).toMatch(/Stripe charged this invoice and the portal has not recorded it — needs reconciliation — the bar can\'t settle it from here/);
+      expect(held.invoice.reason).toMatch(/Stripe charged this invoice and the portal has not recorded it — needs reconciliation — settling it is a manual office step/);
       expect(json(held)).not.toContain('pi_secret123');
     } finally { stripeDown.mockRestore(); }
   });
@@ -381,7 +381,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const list = await read('get_customer_invoices', { customer_id: Y, limit: 50 });
     expect(by(list, 'y_ach')).toMatchObject({ collectible: false, needs_reconciliation: false, balance_due: null, amount_due_after_credit: null, reason: expect.stringMatching(/already processing/) });
     expect(by(list, 'y_parked')).toMatchObject({ collectible: false, needs_reconciliation: true, balance_due: null, amount_due_after_credit: null });
-    expect(by(list, 'y_parked').reason).toMatch(/saved-card charge is in progress or awaiting reconciliation — needs reconciliation — the bar can\'t settle it from here/);
+    expect(by(list, 'y_parked').reason).toMatch(/saved-card charge is in progress or awaiting reconciliation — needs reconciliation — settling it is a manual office step/);
     expect(list.account_summary.processing).toMatchObject({ count: 2, bank_payment_in_flight: 1, needs_reconciliation: 1 });
     expect(list.account_summary.needs_reconciliation_count).toBe(1);
     expect(list.account_summary.unknown).toMatch(/1 invoice\(s\) \(unpaid or processing\) need reconciliation/);
@@ -409,7 +409,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   test('a received estimate deposit not yet applied to its invoice holds the balance (the pay paths\' deposit-settlement fence)', async () => {
     const list = await read('get_customer_invoices', { customer_id: D2, limit: 50 });
     expect(by(list, 'd2_pending')).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, needs_reconciliation: true });
-    expect(by(list, 'd2_pending').reason).toMatch(/estimate deposit has been received and is not yet applied to this invoice — needs reconciliation — the bar can\'t settle it from here/);
+    expect(by(list, 'd2_pending').reason).toMatch(/estimate deposit has been received and is not yet applied to this invoice — needs reconciliation — settling it is a manual office step/);
     expect(by(list, 'd2_plain')).toMatchObject({ collectible: true, balance_due: 30 });
     expect(list.account_summary).toMatchObject({ total_due: 30, needs_reconciliation_count: 1 });
     const detail = await read('get_invoice_detail', { invoice_id: inv.d2_pending.id });
@@ -551,7 +551,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(paid.recorded_payments_note).toMatch(/no verdict/);
     const held = await read('get_invoice_detail', { invoice_id: inv.open.id });
     expect(held.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
-    expect(held.invoice.reason).toMatch(/needs reconciliation — the bar can\'t settle it from here/);
+    expect(held.invoice.reason).toMatch(/needs reconciliation — settling it is a manual office step/);
     expect(held.payment_plan.active).toMatchObject({ payment_amount: null, total_balance: null, payment_frequency: 'monthly' });
     expect(held.invoice).toMatchObject({ amount_due_after_credit: null, total: 200 });
     expect(paid.invoice).toMatchObject({ amount_due_after_credit: null, total: 120 });
@@ -589,7 +589,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const list = await read('get_customer_invoices', { customer_id: Z, limit: 50 });
     for (const key of ['z_attached', 'z_sibling']) {
       expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
-      expect(by(list, key).reason).toBe('a payment was started on this invoice and its outcome is not confirmed here — the bar can\'t settle it from here');
+      expect(by(list, key).reason).toBe('a payment was started on this invoice and its outcome is not confirmed here — settling it is a manual office step');
     }
     expect(by(list, 'z_plain')).toMatchObject({ collectible: true, balance_due: 15 });
     expect(list.account_summary).toMatchObject({ total_due: 15, needs_reconciliation_count: 2 });
@@ -785,7 +785,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const list = await read('get_customer_invoices', { customer_id: VISIT, limit: 50 });
     for (const key of ['vis_direct', 'vis_record']) {
       expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, needs_reconciliation: true,
-        reason: 'the visit for this invoice did not happen (cancelled/skipped) — the bar can\'t settle it from here' });
+        reason: 'the visit for this invoice did not happen (cancelled/skipped) — settling it is a manual office step' });
     }
     expect(by(list, 'vis_live')).toMatchObject({ collectible: true, balance_due: 50 });
     expect(list.account_summary).toMatchObject({ total_due: 120, needs_reconciliation_count: 2 });
@@ -977,9 +977,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   test('bank_payment_processing needs bank-tender evidence: a processing card intent, or an unknown tender, needs reconciliation ("a card payment did not complete")', async () => {
     const list = await read('get_customer_invoices', { customer_id: V, limit: 50 });
     // Fence clear and no bank tender (nothing recorded): the card-incomplete reason. With an unresolved attempt the fence's own reason leads.
-    expect(by(list, 'v_unknown')).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, bank_payment_processing: false, reason: 'a card payment did not complete — the bar can\'t settle it from here' });
+    expect(by(list, 'v_unknown')).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, bank_payment_processing: false, reason: 'a card payment did not complete — settling it is a manual office step' });
     expect(by(list, 'v_card')).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, bank_payment_processing: false });
-    expect(by(list, 'v_card').reason).toMatch(/unconfirmed outcome \(Stripe may have charged it\) — needs reconciliation — the bar can\'t settle it from here/);
+    expect(by(list, 'v_card').reason).toMatch(/unconfirmed outcome \(Stripe may have charged it\) — needs reconciliation — settling it is a manual office step/);
     // A non-processing invoice whose attempt and processing row are a card is no bank debit either.
     expect(by(list, 'v_sent_card')).toMatchObject({ collectible: false, needs_reconciliation: true, bank_payment_processing: false });
     expect(list.account_summary.processing).toMatchObject({ count: 2, bank_payment_in_flight: 0, needs_reconciliation: 2 });

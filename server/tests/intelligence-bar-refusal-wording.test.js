@@ -211,6 +211,19 @@ describe('refusal wording: a thrown move refusal is mapped at the bar side to a 
 
   test('any other thrown error is not mapped', () => {
     expect(moveRefusalFromThrown(Object.assign(new Error('boom'), { code: 'ECONNRESET' }))).toBeNull();
+    // A frozen check that could not read the visit stays a fault (Codex #6371 r3).
+    expect(moveRefusalFromThrown(Object.assign(new Error('x'), { code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'unreadable' }))).toBeNull();
+    expect(moveRefusalFromThrown(Object.assign(new Error('x'), { code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'has_records' }))).toMatchObject({ code: 'frozen_visit_move_unsupported' });
     expect(moveRefusalFromThrown(null)).toBeNull();
+  });
+});
+
+describe('informational read reasons are not capability declines (Codex #6371 r3)', () => {
+  test('the billing reader reconciliation reasons do not match BAR_DECLINE_RE', () => {
+    const { _private: { BAR_DECLINE_RE } } = require('../services/agent-gap-reports');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/billing-reader-tools.js'), 'utf8');
+    const reasons = [...src.matchAll(/^const [A-Z_]+_(?:REASON|POINTER) = '((?:[^'\\]|\\.)*)';$/gm)].map((m) => m[1]);
+    expect(reasons.length).toBeGreaterThan(3);
+    for (const reason of reasons) expect(BAR_DECLINE_RE.test(reason)).toBe(false);
   });
 });
