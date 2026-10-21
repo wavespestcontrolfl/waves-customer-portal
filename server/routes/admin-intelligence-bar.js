@@ -3870,7 +3870,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
                 if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint, directGrounding)) return null;
-                return directCapped.has(toolUse.name) || OwnerDirect.dynamicCapReached(directCommitsByTool, toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult() } } : { direct: true };
+                return directCapped.has(toolUse.name) || OwnerDirect.dynamicCapReached(directCommitsByTool, toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult(toolUse.name) } } : { direct: true };
               } : null,
             });
             result = proposed.modelResult;

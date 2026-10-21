@@ -170,6 +170,15 @@ describe('rule 3: five direct edits per tool', () => {
     expect(result.note).toBe(OwnerDirect.BULK_LIMIT_RESULT.note);
     expect(OwnerDirect.DIRECT_CAP).toBe(3);
   });
+
+  test('gate on: the refusal wording follows the tool: lead edits say three, grounded customer edits say five (Codex #6369 r3)', () => {
+    process.env[ON] = 'true';
+    expect(OwnerDirect.bulkLimitResult('update_lead_status').error).toMatch(/^Three or more/);
+    expect(OwnerDirect.bulkLimitResult('update_lead_contact').error).toMatch(/^Three or more/);
+    expect(OwnerDirect.bulkLimitResult('update_customer').error).toMatch(/^More than 5 edits/);
+    delete process.env[ON];
+    expect(OwnerDirect.bulkLimitResult('update_customer').error).toMatch(/^Three or more/);
+  });
 });
 
 describe('rule 2: same-name customers (11 to 25 rows)', () => {
@@ -204,7 +213,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
         orWhereRaw: () => q,
         limit: (n) => { limit = n; limitSeen.push(n); return q; },
         first: async () => undefined,
-        then: resolve => Promise.resolve(table === 'customers' ? customers.filter(row => filters.every(f => f(row))).slice(0, limit) : table === 'service_records' ? serviceRecords : []).then(resolve) };
+        then: resolve => Promise.resolve(table === 'customers' ? customers.filter(row => (!row.hiddenFromName || filters.length) && filters.every(f => f(row))).slice(0, limit) : table === 'service_records' ? serviceRecords : []).then(resolve) };
       return q;
     });
     db.raw = text => ({ text });
@@ -226,6 +235,8 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
   test('gate on: 15 same-name customers come back as rows with city and last visit, plus the choices note', async () => {
     process.env[ON] = 'true';
     serviceRecords = [{ customer_id: id(100), last_visit: new Date('2026-09-30T00:00:00Z') }, { customer_id: id(101), last_visit: '2026-08-02' }];
+    // Three distinct cities give three usable buttons; the rest have no city, so no button.
+    customers = sameName(15).map((c, i) => (i < 3 ? c : { ...c, city: null }));
     const resolved = await ask('update Pat Example notes');
     expect(resolved.code).toBeUndefined();
     expect(resolved.candidates).toHaveLength(15);
@@ -250,7 +261,13 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     customers = sameName(30);
     const over = await ask('update Pat Example notes');
     expect(over).toMatchObject({ code: 'target_clarification_required', candidates: [] });
-    expect(Context.ownerDirectContext(over).sameNameNote).toMatch(/More than 25 customers/);
+    const note = Context.ownerDirectContext(over).sameNameNote;
+    expect(note).toMatch(/More than 25 customers/);
+    // Name or city grounding is refused past the cap: only a phone, an email or the customer page works.
+    expect(note).toMatch(/phone number/);
+    expect(note).toMatch(/email/);
+    expect(note).toMatch(/open the customer's page/);
+    expect(note).not.toMatch(/(ask|asking) for[^.]*city/i);
     expect(limitSeen).toContain(26);
   });
 
@@ -310,10 +327,24 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     customers[0].phone = '9417770001';
     limitSeen.length = 0;
     const many = Array.from({ length: 6 }, (_, i) => `941-777-000${i + 1}`).join(' ');
-    expect(await Context.typedCustomerIds(`fix the notes on ${many}`, { matches: [], complete: true })).toEqual([]);
+    expect([...await Context.typedCustomerIds(`fix the notes on ${many}`, { matches: [], complete: true })]).toEqual([]);
     expect(limitSeen).toEqual([]);
     const five = Array.from({ length: 5 }, (_, i) => `941-777-000${i + 1}`).join(' ');
     expect(await Context.typedCustomerIds(`fix the notes on ${five}`, { matches: [], complete: true })).toEqual([id(100)]);
+  });
+
+  test('gate on: past the contact budget a unique name is not grounded either: conflict, so the edit keeps its card (Codex #6369 r3)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(1);
+    const many = Array.from({ length: 6 }, (_, i) => `941-777-000${i + 1}`).join(' ');
+    const named = { matches: customers, complete: true };
+    expect(await Context.typedCustomerIds('update Pat Example notes', named)).toEqual([id(100)]);
+    const over = await Context.typedCustomerIds(`update Pat Example notes ${many}`, named);
+    expect([...over]).toEqual([]);
+    expect(over.identityConflict).toBe(true);
+    const resolved = await ask(`update Pat Example notes ${many}`);
+    expect(resolved.typedCustomerIds).toEqual([]);
+    expect(resolved.identityConflict).toBe(true);
   });
 
   test('gate on: a choice-button reply ("Full Name, City") is the pick, so no second round of choices', async () => {
@@ -382,6 +413,30 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     customers = [long(0, 'Fort Myers Beach'), { ...long(1, 'Fort Myers Beach'), last_name: 'Fothergill' }];
     expect((await ask('Bartholomew F., Fort Myers Beach')).typedCustomerIds).toEqual([]);
     expect((await ask('Bartholomew F., Sarasota')).typedCustomerIds).toEqual([]);
+  });
+
+  test('gate on: a short label another customer outside the name rows would also fit gets no button (Codex #6369 r3)', async () => {
+    process.env[ON] = 'true';
+    const long = (i, city, extra = {}) => ({ ...sameName(1)[0], id: id(600 + i), first_name: 'Bartholomew', last_name: 'Featherstonehaugh', city, phone: `94155503${String(i).padStart(2, '0')}`, ...extra });
+    // The third customer has another last name, so the name lookup never lists it, but it fits "Bartholomew F., Fort Myers Beach" too.
+    customers = [long(0, 'Fort Myers Beach'), long(1, 'Port Charlotte'), long(2, 'Fort Myers Beach', { last_name: 'Fothergill', hiddenFromName: true })];
+    const resolved = await ask('update Bartholomew Featherstonehaugh notes');
+    expect(resolved.candidates.map(c => c.choice_label)).toEqual([null, 'Bartholomew F., Port Charlotte']);
+    expect((await ask('Bartholomew F., Fort Myers Beach')).typedCustomerIds).toEqual([]);
+  });
+
+  test('gate on: fewer than two usable choice labels: ask for a phone or email, no offer_choices (Codex #6369 r3)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(15).map((c, i) => (i === 0 ? c : { ...c, city: null }));
+    const resolved = await ask('update Pat Example notes');
+    expect(resolved.candidates.filter(c => c.choice_label)).toHaveLength(1);
+    const note = Context.ownerDirectContext(resolved).sameNameNote;
+    expect(note).toMatch(/15 customers share the name/);
+    expect(note).toMatch(/phone number or an email/);
+    expect(note).not.toMatch(/offer_choices/);
+    // Two usable labels bring the buttons back.
+    customers = sameName(15).map((c, i) => (i < 2 ? c : { ...c, city: null }));
+    expect(Context.ownerDirectContext(await ask('update Pat Example notes')).sameNameNote).toMatch(/offer_choices/);
   });
 
   test('gate on: a unique name names its customer; the bare phone alone does too', async () => {

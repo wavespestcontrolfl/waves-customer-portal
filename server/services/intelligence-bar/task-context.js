@@ -464,7 +464,9 @@ async function typedCustomerIds(prompt, namedResult) {
   // MAX_CONTACT_LITERALS phones or emails names nobody by contact (the edit
   // keeps its card), and runs no lookup at all.
   const contactLiterals = [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))];
-  if (contactLiterals.length > MAX_CONTACT_LITERALS) return [...ids];
+  // Fail closed (Codex #6369 r3): the contact check never ran, so the name-derived
+  // ids cannot be shown to agree with the typed contacts. Ground nobody.
+  if (contactLiterals.length > MAX_CONTACT_LITERALS) return Object.assign([], { identityConflict: true });
   const contactOwners = new Map();
   for (const literal of contactLiterals) {
     const found = await owners(literal);
@@ -492,16 +494,24 @@ async function typedCustomerIds(prompt, namedResult) {
 // holds: "First L., City" (first name, last initial, city). The reply is the whole message.
 // It names a customer only when exactly one customer fits all three parts.
 const INITIAL_FORM_RE = /^\s*([\p{L}'-]+)\s+([\p{L}])\.\s*,\s*([\p{L}][\p{L} .'-]*?)\s*$/u;
+// Customers that fit one "First L., City" reply, at most two (a second row proves the
+// label is shared). Normalized first name, last-name initial and city. One predicate for
+// both directions: initialFormIds resolves a tapped label with it and choiceLabels
+// offers a short label only when it passes it.
+async function initialFormRows(first, initial, city) {
+  return db('customers').whereNull('deleted_at')
+    .whereRaw('? = ?', [normalizedStoredName('first_name'), first])
+    .whereRaw('? LIKE ?', [normalizedStoredName('last_name'), `${initial}%`])
+    .whereRaw('? = ?', [normalizedStoredName('city'), city])
+    .limit(2).select('id');
+}
+
 async function initialFormIds(prompt) {
   const match = String(prompt || '').match(INITIAL_FORM_RE);
   if (!match) return [];
   const [, first, initial, city] = match.map(part => normalizeName(part));
   if (!first || !initial || !city) return [];
-  const rows = await db('customers').whereNull('deleted_at')
-    .whereRaw('? = ?', [normalizedStoredName('first_name'), first])
-    .whereRaw('? LIKE ?', [normalizedStoredName('last_name'), `${initial}%`])
-    .whereRaw('? = ?', [normalizedStoredName('city'), city])
-    .limit(2).select('id');
+  const rows = await initialFormRows(first, initial, city);
   return rows.length === 1 ? [String(rows[0].id)] : [];
 }
 
@@ -510,15 +520,25 @@ async function initialFormIds(prompt) {
 // "First L., City", which initialFormIds resolves back. null = no button can name this
 // customer (no city, still too long, or it looks like another same-name customer's):
 // the bar asks for a phone number or email instead.
-function choiceLabels(customers) {
+async function choiceLabels(customers) {
   const full = customer => `${[customer.first_name, customer.last_name].filter(Boolean).join(' ')}${customer.city ? `, ${customer.city}` : ''}`;
   const short = customer => `${customer.first_name} ${String(customer.last_name || '').trim().charAt(0)}., ${customer.city}`;
-  const labels = customers.map((customer) => {
+  // A short label is offered only when initialFormIds, on the whole customer table,
+  // resolves it back to this customer alone (Codex #6369 r3: another customer with
+  // the same first name, last initial and city outside this name's rows).
+  const shortResolvesAlone = async (customer) => {
+    const [first, initial, city] = [customer.first_name, String(customer.last_name || '').trim().charAt(0), customer.city].map(part => normalizeName(part));
+    if (!first || !initial || !city) return false;
+    const rows = await initialFormRows(first, initial, city);
+    return rows.length === 1 && String(rows[0].id) === String(customer.id);
+  };
+  const labels = await Promise.all(customers.map(async (customer) => {
     if (!customer.city) return null;
     const whole = full(customer);
     if (whole.length <= MAX_LABEL_CHARS) return whole;
-    return customer.last_name && !/\s/.test(String(customer.first_name || '').trim()) && short(customer).length <= MAX_LABEL_CHARS ? short(customer) : null;
-  });
+    if (!customer.last_name || /\s/.test(String(customer.first_name || '').trim()) || short(customer).length > MAX_LABEL_CHARS || !INITIAL_FORM_RE.test(short(customer))) return null;
+    return await shortResolvesAlone(customer) ? short(customer) : null;
+  }));
   // A label that two customers share (same city and name, or the same first name,
   // last initial and city) cannot pick one of them.
   const key = label => normalizeName(label);
@@ -538,7 +558,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   let candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
   const v2 = ibTargetRulesV2Live();
   if (v2 && candidates.length > 1) {
-    const labels = choiceLabels(named);
+    const labels = await choiceLabels(named);
     candidates = (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
   }
   // Whom this message names (GATE_IB_TARGET_RULES_V2): carried on the context so
@@ -1135,7 +1155,7 @@ function ownerDirectContext(context = {}) {
 function sameNameNote(context) {
   const rows = Array.isArray(context.candidates) ? context.candidates : [];
   if (context.code === 'target_clarification_required') {
-    return { sameNameNote: `More than ${CUSTOMER_LOOKUP_LISTED_V2} customers share the name the owner typed. Ask for one short detail: a phone number, an email or a city.` };
+    return { sameNameNote: `More than ${CUSTOMER_LOOKUP_LISTED_V2} customers share the name the owner typed. Ask for a phone number or an email, or ask the owner to open the customer's page. A name or a city cannot pick one customer from a list this long.` };
   }
   if (rows.length < 2 || context.target) return {};
   // A reply that already narrows the name to one (a choice button sends
@@ -1145,6 +1165,12 @@ function sameNameNote(context) {
   const picked = rows.filter(row => typed.has(String(row.customer_id)));
   if (picked.length === 1) {
     return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${picked[0].city ? `, ${picked[0].city}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
+  }
+  // offer_choices needs two buttons at least. With fewer than two usable labels, a
+  // button list cannot name the customer: ask for a phone number or email.
+  const usable = rows.filter(row => row.choice_label).length;
+  if (usable < 2) {
+    return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess. Ask the owner for a phone number or an email to tell them apart.` };
   }
   return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the choice_label of the best matches (4 at most), most recent last_visit first, each label exactly as written: it is the button text, and a tap sends it back as the owner's reply. A row whose choice_label is null (no city, or it looks like another row) cannot be a button: leave it out and ask for its phone number or email instead.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
 }

@@ -446,7 +446,9 @@ const BULK_LIMIT_RESULT_V2 = Object.freeze({
   ...BULK_LIMIT_RESULT,
   error: `More than ${DIRECT_EDITS_V2} edits with the same tool in one request need one bulk confirmation card. This call changed nothing.`,
 });
-const bulkLimitResult = () => (ibTargetRulesV2Live() ? BULK_LIMIT_RESULT_V2 : BULK_LIMIT_RESULT);
+// The wording follows the threshold that tool is held to: a lead edit keeps the
+// old cap of three even with the gate on (Codex #6369 r3).
+const bulkLimitResult = (toolName) => (directCapThreshold(toolName) === DIRECT_EDITS_V2 + 1 ? BULK_LIMIT_RESULT_V2 : BULK_LIMIT_RESULT);
 
 // The proposal-to-receipt step for one direct edit, kept out of the query
 // loop (Codex r2 P2 on runQuery's size). `commit` runs the one commit path;
