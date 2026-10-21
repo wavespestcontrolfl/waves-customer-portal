@@ -1819,6 +1819,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // the SAME id the commit-time recheck passes as its own confirming
       // actor in the common case (propose then immediately confirm), so
       // technician_notice reads the same at both points.
+      // The no-text option is carried only by the replay (GATE_IB_CANCEL_WITH_EFFECTS). The bare-visit path cannot
+      // suppress the shared notice hook, so an explicit "no text" is refused rather than silently ignored.
+      if (!ibCancelWithEffectsLive() && params.notify_customer === false) {
+        return { failed: true, modelResult: { error: "Cancelling without a customer text is not enabled (GATE_IB_CANCEL_WITH_EFFECTS), so the bar can't cancel this visit without a text from here yet. Nothing was changed.", code: 'gate_off' } };
+      }
       const { computeCancelAppointmentImpact, cancelWithEffectsRefusal } = require('../services/appointment-cancel-impact');
       // GATE_IB_CANCEL_WITH_EFFECTS: the card also carries the invoice, credit and linked-visit effects and the
       // customer text, and Confirm replays the Dispatch cancel. notify_customer (default true) is the card's choice.

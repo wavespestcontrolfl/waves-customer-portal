@@ -4413,7 +4413,8 @@ async function cancelWithEffects(input, actionContext, appt) {
         let inLock;
         try {
           await lockLinkedFollowUps(trx, appointment_id);
-          inLock = await recompute({ piCacheOnly: true });
+          // conn: the handler's cancel transaction, so the estimate deposit ledger lock is held to the commit.
+          inLock = await recompute({ piCacheOnly: true, conn: trx });
         } catch (err) {
           throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed', cause: err });
         }

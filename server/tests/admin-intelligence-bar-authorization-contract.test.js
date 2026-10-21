@@ -631,6 +631,34 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
     expect(result.code).toBe('cancel_with_effects_unsupported');
   });
 
+  test('GATE_IB_CANCEL_WITH_EFFECTS off: an explicit "cancel without a text" is refused at proposal, not silently ignored', async () => {
+    delete process.env.GATE_IB_CANCEL_WITH_EFFECTS;
+    mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, with_effects: undefined });
+    const result = await propose({ reason: 'x', notify_customer: false });
+    expect(mockComputeCancelImpact).not.toHaveBeenCalled();
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(result.code).toBe('gate_off');
+    expect(result.error).toMatch(/can't cancel this visit without a text from here yet/);
+  });
+
+  test('GATE_IB_CANCEL_WITH_EFFECTS off: notify_customer true or omitted proposes the bare-visit card as before', async () => {
+    delete process.env.GATE_IB_CANCEL_WITH_EFFECTS;
+    mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, with_effects: undefined, card_cancel_refusals: [] });
+    await propose({ reason: 'x', notify_customer: true });
+    expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+  });
+
+  test('a credit redeemed on the visit, an estimate deposit and money on a linked visit are refused by_owner_rule', async () => {
+    for (const code of ['inspection_credit_redeemed', 'estimate_money', 'linked_followup_money']) {
+      mockCreatePendingAction.mockClear();
+      mockMessagesCreate.mockReset();
+      mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, card_cancel_refusals: [code] });
+      const result = await propose({ reason: 'x' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(result.code).toBe('by_owner_rule');
+    }
+  });
+
   test('GATE_IB_CANCEL_WITH_EFFECTS off: an invoice refuses exactly as before', async () => {
     delete process.env.GATE_IB_CANCEL_WITH_EFFECTS;
     mockComputeCancelImpact.mockResolvedValue({ ...EFFECTS_IMPACT, with_effects: undefined, card_cancel_refusals: ['invoice_linked'] });

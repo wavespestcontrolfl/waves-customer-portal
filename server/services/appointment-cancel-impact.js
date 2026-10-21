@@ -435,11 +435,17 @@ function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyI
 // card lists each one and Confirm replays the Dispatch cancel handler, which voids the open invoices, restores the
 // credit and cancels the linked follow-up visits itself. Every other code in cardCancelRefusals keeps refusing.
 const EFFECTS_ALLOWED_REFUSALS = new Set([
-  'linked_followup', 'invoice_linked', 'card_payment_on_invoice', 'estimate_deposit', 'inspection_credit',
+  'linked_followup', 'invoice_linked', 'card_payment_on_invoice', 'inspection_credit',
+]);
+// Added to the blockers with effects (the card is for the plain case; anything with more money than an unpaid invoice
+// stays on the Dispatch screen): a credit REDEEMED on the visit (the hourly sweep would void unpinned if the pinned
+// follow-through failed), any estimate-level deposit or annual prepay, and money on a linked visit.
+const EFFECTS_MONEY_BLOCKERS = new Set([
+  'estimate_deposit', 'inspection_credit_redeemed', 'estimate_money', 'linked_followup_money',
 ]);
 
 const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
-const CANCEL_MONEY_RULE_MESSAGE = "This visit has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, or an invoice that holds a payment), and refunds and card charges stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
+const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
 const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit with its own invoice, so the bar can't cancel this visit from here yet. Nothing was changed.";
 
 // The refusal (error + code) for an impact computed WITH effects whose card_cancel_refusals is non-empty. Order: a fee
@@ -451,24 +457,50 @@ function cancelWithEffectsRefusal(impact) {
   if (has('card_fee_agreement', 'card_rail_present') && (impact.fee?.applies === true || impact.fee?.unresolved === true)) {
     return { error: CANCEL_FEE_DUE_MESSAGE, code: 'cancel_fee_due_unsupported' };
   }
-  if (has('card_fee_agreement', 'card_rail_present', 'prepaid_coverage', 'invoice_holds_money')) {
+  if (has('card_fee_agreement', 'card_rail_present', 'prepaid_coverage', 'invoice_holds_money', ...EFFECTS_MONEY_BLOCKERS)) {
     return { error: CANCEL_MONEY_RULE_MESSAGE, code: 'by_owner_rule', rule: 'cancel_money_or_card' };
   }
   return { error: CANCEL_STILL_UNSUPPORTED_MESSAGE, code: 'cancel_with_effects_unsupported' };
 }
 
-// What the Dispatch cancel replay does to the linked visits and invoices, read-only. A linked follow-up with an
-// invoice of its own is refused (the Dispatch handler cancels the child without running its invoice void).
-async function loadLinkedEffects(scheduledServiceId, actorId = null) {
+// Estimate-level money the visit-level checks cannot see: any deposit row (any status) or annual-prepay term tied to the
+// visit's source estimate. On the handler's cancel transaction it first takes the estimate deposit ledger lock (the one
+// receipt, mint, collection and void share), so a deposit cannot land between this check and the commit.
+async function estimateMoneyReason(conn, row) {
+  if (!row.source_estimate_id) return null;
+  if (conn.isTransaction) await require('./estimate-deposits').acquireEstimateDepositLedgerLock(conn, row.source_estimate_id);
+  if (await conn('estimate_deposits').where({ estimate_id: row.source_estimate_id }).first('id')) return 'estimate_deposit_on_record';
+  if (await conn('annual_prepay_terms').where({ source_estimate_id: row.source_estimate_id }).first('id')) return 'annual_prepay_on_record';
+  return null;
+}
+
+// The SAME money-rail checks the parent gets, on every linked visit the cancel takes along (the Dispatch cascade
+// cancels a child without running a child money follow-through): a prepayment or coverage, an estimate deposit or
+// annual prepay, a card request or hold, an inspection-credit offer, or an invoice of any kind. Any one refuses the card.
+async function linkedChildMoneyReason(conn, followUps) {
+  const ids = followUps.map((c) => c.id);
+  if (!ids.length) return null;
+  const InvoiceService = require('./invoice');
+  const InspectionCredit = require('./inspection-credit');
+  const rows = await conn('scheduled_services').whereIn('id', ids).select('*');
+  for (const row of rows || []) {
+    if (await prepaidCommitmentReason(conn, row)) return 'prepaid_or_coverage';
+    if (await estimateMoneyReason(conn, row)) return 'estimate_money';
+    if ((await cardRailRows(conn, row.id)).length) return 'card_rail';
+    if (await InvoiceService.anyInvoiceLinkedToVisit(conn, row.id).first('id')) return 'invoice';
+    if (await InspectionCredit.anyInspectionCreditOfferForVisit(conn, row.id).first('id')) return 'inspection_credit';
+  }
+  return null;
+}
+
+// What the Dispatch cancel replay does to the linked visits and invoices, read-only.
+async function loadLinkedEffects(scheduledServiceId, actorId = null, conn = db) {
   const InvoiceService = require('./invoice');
   const [invoiceRows, followUps] = await Promise.all([
     InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('id', 'invoice_number', 'status', 'total'),
     linkedFollowUpRows(db, scheduledServiceId),
   ]);
-  let followUpBilled = false;
-  for (const child of followUps) {
-    if (await InvoiceService.anyInvoiceLinkedToVisit(db, child.id).first('id')) followUpBilled = true;
-  }
+  const followUpMoney = await linkedChildMoneyReason(conn, followUps);
   // Cancelling a child also runs its own tech cancel notice (transitionJobStatus -> notifyVisitCancelled): the
   // child's assigned technician is pinned with the same rule technician_notice uses for the parent.
   const techIds = [...new Set(followUps.map((c) => c.technician_id).filter(Boolean))];
@@ -493,21 +525,23 @@ async function loadLinkedEffects(scheduledServiceId, actorId = null) {
         technician_notice: notifyGate && child.technician_id && String(child.technician_id) !== String(actorId || '') ? 'may_notify' : 'none',
       }))
       .sort((a, b) => String(a.id).localeCompare(String(b.id))),
-    followUpBilled,
+    followUpMoney,
   };
 }
 
 // The with-effects block of the impact: the linked invoices and visits, the customer text, and the refusal codes that
 // still block once the allowed ones (EFFECTS_ALLOWED_REFUSALS) are set aside.
-async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId }) {
-  const linked = await loadLinkedEffects(scheduledServiceId, actorId);
+async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn }) {
+  const linked = await loadLinkedEffects(scheduledServiceId, actorId, conn);
   const customerText = notifyCustomer === false
     ? { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' }
     : await require('./appointment-reminders').previewCancellationText(scheduledServiceId, ...(approvedText ? [{ approved: approvedText }] : []));
-  let blocking = refusals.filter((code) => !EFFECTS_ALLOWED_REFUSALS.has(code));
-  if (linked.followUpBilled) blocking = [...new Set([...blocking, 'linked_followup_billed'])].sort();
+  const blockers = refusals.filter((code) => !EFFECTS_ALLOWED_REFUSALS.has(code));
+  if (creditReversal) blockers.push('inspection_credit_redeemed');
+  if (await estimateMoneyReason(conn, row)) blockers.push('estimate_money');
+  if (linked.followUpMoney) blockers.push('linked_followup_money');
   return {
-    blocking,
+    blocking: [...new Set(blockers)].sort(),
     effects: {
       with_effects: true,
       notify_customer: notifyCustomer !== false,
@@ -531,6 +565,9 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   // Opt-in, with effects: the card's pinned customer_text (so a re-check renders the same wording), and a cache of
   // PaymentIntent lookups so the re-check under the visit lock makes no Stripe call (piCacheOnly throws instead).
   approvedText = null, piCache = null, piCacheOnly = false,
+  // Opt-in connection for the estimate-level and money-rail reads (the handler's cancel transaction, so the estimate
+  // deposit ledger lock is held from the check to the commit). Default db: Dispatch and the bare path are unchanged.
+  conn = db,
 } = {}) {
   const loaded = await loadAppointmentFacts(scheduledServiceId);
   if (!loaded) return null;
@@ -540,9 +577,9 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   const InspectionCredit = require('./inspection-credit');
   const { previewCancellationNoticeVerdict } = require('./job-status');
 
-  const prepaidCommitment = await prepaidCommitmentReason(db, row);
-  const anyCardRail = (await cardRailRows(db, scheduledServiceId)).length > 0;
-  const anyLinkedFollowUp = (await linkedFollowUpRows(db, scheduledServiceId)).length > 0;
+  const prepaidCommitment = await prepaidCommitmentReason(conn, row);
+  const anyCardRail = (await cardRailRows(conn, scheduledServiceId)).length > 0;
+  const anyLinkedFollowUp = (await linkedFollowUpRows(conn, scheduledServiceId)).length > 0;
   const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
     InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId, ...(piCache ? [{ piCache, piCacheOnly }] : [])),
@@ -622,7 +659,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   // with the gate on, so the impact of a gate-off proposal stays byte-identical to before. `notify_customer` is the
   // choice the card shows ("cancel without a text" sets it false) and Confirm sends to the Dispatch handler.
   const { effects, blocking } = withEffects
-    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId })
+    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn })
     : { effects: {}, blocking: refusals };
 
   return {

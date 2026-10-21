@@ -235,6 +235,9 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     const [before, inLock] = mockComputeImpact.mock.calls.map((c) => c[1]);
     expect(before.piCacheOnly).toBeUndefined();
     expect(inLock.piCacheOnly).toBe(true);
+    // The estimate-level reads run on the handler's cancel transaction (the deposit ledger lock is held to commit).
+    expect(inLock.conn).toBe(trx);
+    expect(before.conn).toBeUndefined();
     expect(inLock.piCache).toBe(before.piCache);
     expect(inLock.approvedText).toBe(FROZEN.customer_text);
   });

@@ -17,14 +17,17 @@ let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] 
 let mockOpenOverdueAlerts = 0;
 let mockLinkedFollowUps = [];
 let mockTechnicians = [];
+let mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null };
 jest.mock('../models/db', () => {
   const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
-  const railQb = (table) => ({ where: () => ({ select: async () => mockCardRailRows[table] }) });
+  const railQb = (table) => ({ where: (w) => ({ select: async () => mockCardRailRows[table].filter((r) => !r.scheduled_service_id || r.scheduled_service_id === w?.scheduled_service_id) }) });
   const alertsQb = { whereIn: () => alertsQb, where: () => alertsQb, whereNull: () => alertsQb, count: async () => [{ count: String(mockOpenOverdueAlerts) }] };
   const techniciansQb = { whereIn: () => techniciansQb, select: async () => mockTechnicians };
-  const db = jest.fn((table) => (table === 'technicians' ? techniciansQb : table === 'customers' ? customersQb : table === 'dispatch_alerts' ? alertsQb : (table in mockCardRailRows) ? railQb(table) : {
+  const estimateQb = (table) => ({ where: () => ({ first: async () => mockEstimateRows[table] }) });
+  const db = jest.fn((table) => (table in mockEstimateRows ? estimateQb(table) : table === 'technicians' ? techniciansQb : table === 'customers' ? customersQb : table === 'dispatch_alerts' ? alertsQb : (table in mockCardRailRows) ? railQb(table) : {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
+    whereIn: () => db.__qb,
     first: async () => mockAppointmentRow,
   }));
   db.__qb = {
@@ -32,6 +35,7 @@ jest.mock('../models/db', () => {
     where: () => db.__qb,
     // linkedFollowUpRows: .where().whereRaw().select('id')
     whereRaw: () => db.__qb,
+    whereIn: () => db.__qb,
     select: async () => mockLinkedFollowUps,
     first: async () => mockAppointmentRow,
   };
@@ -104,6 +108,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLinkedFollowUps = [];
   mockTechnicians = [];
+  mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null };
   mockAppointmentRow = {
     id: 'svc-synthetic-1',
     status: 'confirmed',
@@ -797,14 +802,22 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect(cancelWithEffectsRefusal(impact)).toBeNull();
   });
 
-  test('an invoice with a card payment attempt or a deposit credit is carded too', async () => {
+  test('an invoice with an open card payment attempt is carded too', async () => {
     noCard();
     mockInvoicePreview.mockResolvedValue([
-      { id: 'inv-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 25, payment_intent: false },
-      { id: 'inv-2', status: 'viewed', total: 20, credit_applied: 0, deposit_credit: 0, payment_intent: true },
+      { id: 'inv-2', status: 'viewed', total: 20, credit_applied: 0, deposit_credit: 0, payment_intent: true, payment_intent_id: 'pi_test' },
     ]);
     mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
     expect((await run()).card_cancel_refusals).toEqual([]);
+  });
+
+  test('an invoice carrying an estimate deposit credit is refused: restoring a deposit stays with the office', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([{ id: 'inv-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 25, payment_intent: false }]);
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual(['estimate_deposit']);
+    expect(cancelWithEffectsRefusal(impact).code).toBe('by_owner_rule');
   });
 
   test('the frozen invoice entry names the PaymentIntent the void would cancel (and only then), so Confirm approves exactly it', async () => {
@@ -827,13 +840,83 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect(impact.card_cancel_refusals).toEqual([]);
   });
 
-  test('a redeemed inspection credit is carded: the reversal rides inspection_credit_reversal', async () => {
+  test('a credit REDEEMED on the visit is refused (by_owner_rule): a failed pinned follow-through would leave the hourly sweep to void unpinned', async () => {
     noCard();
     mockCreditPreview.mockResolvedValue([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
     mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-1' }) });
     const impact = await run();
-    expect(impact.card_cancel_refusals).toEqual([]);
-    expect(impact.inspection_credit_reversal).toEqual([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
+    expect(impact.card_cancel_refusals).toEqual(['inspection_credit_redeemed']);
+    const refusal = cancelWithEffectsRefusal(impact);
+    expect(refusal.code).toBe('by_owner_rule');
+    expect(refusal.error).toMatch(/credit reversals stay closed/);
+  });
+
+  test('an inspection-credit offer this visit only PROMISED (nothing redeemed) is still carded', async () => {
+    noCard();
+    mockCreditPreview.mockResolvedValue(null);
+    mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-open' }) });
+    expect((await run()).card_cancel_refusals).toEqual([]);
+  });
+
+  describe('estimate-level money and money on linked visits', () => {
+    test.each([
+      ['a deposit row on the visit\'s estimate', { estimate_deposits: { id: 'dep-1' } }],
+      ['an annual-prepay term on the visit\'s estimate', { annual_prepay_terms: { id: 'term-1' } }],
+    ])('%s refuses the card (estimate_money)', async (_label, rows) => {
+      noCard();
+      mockAppointmentRow = { ...mockAppointmentRow, source_estimate_id: 'est-1' };
+      mockEstimateRows = { estimate_deposits: null, annual_prepay_terms: null, ...rows };
+      const impact = await run();
+      expect(impact.card_cancel_refusals).toEqual(['estimate_money']);
+      expect(cancelWithEffectsRefusal(impact).code).toBe('by_owner_rule');
+    });
+
+    test('an estimate with no deposit or prepay on record is fine', async () => {
+      noCard();
+      mockAppointmentRow = { ...mockAppointmentRow, source_estimate_id: 'est-1' };
+      expect((await run()).card_cancel_refusals).toEqual([]);
+    });
+
+    test('the estimate check runs on the supplied connection and takes the deposit ledger lock on a transaction', async () => {
+      noCard();
+      mockAppointmentRow = { ...mockAppointmentRow, source_estimate_id: 'est-1' };
+      const raw = jest.fn(async () => ({}));
+      const calls = [];
+      const chain = { first: async () => null, select: async () => [], whereRaw: () => chain, where: () => chain, orderBy: () => chain };
+      const trx = (table) => { calls.push(table); return chain; };
+      trx.isTransaction = true;
+      trx.raw = raw;
+      trx.schema = { hasTable: async () => true };
+      await run({ conn: trx });
+      expect(raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate.deposit.ledger', 'est-1']);
+      expect(calls).toEqual(expect.arrayContaining(['estimate_deposits', 'annual_prepay_terms']));
+    });
+
+    const child = { id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' };
+    afterEach(() => {
+      mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
+      mockCoveredReason.mockReset().mockReturnValue(null);
+      mockAnyCreditOffer.mockReset().mockReturnValue({ first: async () => null });
+    });
+    test.each([
+      ['a prepayment or coverage', () => mockCoveredReason.mockImplementation((v) => (v.id === 'svc-visit-2' ? 'already prepaid' : null))],
+      ['a card request or hold', () => { mockCardRailRows = { estimate_card_holds: [{ id: 'h1', status: 'held', scheduled_service_id: 'svc-visit-2' }], appointment_card_requests: [] }; }],
+      ['an inspection-credit offer', () => mockAnyCreditOffer.mockImplementation((_c, id) => ({ first: async () => (id === 'svc-visit-2' ? { id: 'offer-c' } : null) }))],
+      ['an invoice', () => mockAnyInvoiceLinked.mockImplementation((_c, id) => invoiceBuilder(id === 'svc-visit-2' ? [{ id: 'inv-child' }] : []))],
+    ])('a linked visit with %s refuses the whole card (linked_followup_money)', async (_label, arrange) => {
+      noCard();
+      mockLinkedFollowUps = [child];
+      arrange();
+      const impact = await run();
+      expect(impact.card_cancel_refusals).toEqual(['linked_followup_money']);
+      expect(cancelWithEffectsRefusal(impact).code).toBe('by_owner_rule');
+    });
+
+    test('a linked visit with no money on it is carded', async () => {
+      noCard();
+      mockLinkedFollowUps = [child];
+      expect((await run()).card_cancel_refusals).toEqual([]);
+    });
   });
 
   test('a linked follow-up visit is carded with its date and service', async () => {
@@ -882,15 +965,6 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     });
   });
 
-  test('a linked follow-up that has an invoice of its own is refused (linked_followup_billed)', async () => {
-    noCard();
-    mockLinkedFollowUps = [{ id: 'svc-visit-2', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
-    mockAnyInvoiceLinked.mockImplementation((_conn, id) => invoiceBuilder(id === 'svc-visit-2' ? [{ id: 'inv-child' }] : []));
-    const impact = await run();
-    expect(impact.card_cancel_refusals).toEqual(['linked_followup_billed']);
-    expect(cancelWithEffectsRefusal(impact).code).toBe('cancel_with_effects_unsupported');
-  });
-
   test('a fee due is refused with cancel_fee_due_unsupported and the fee-due wording', async () => {
     mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: true, feeAmount: 49, rule: { code: 'inside_window' } });
     const impact = await run();
@@ -910,7 +984,7 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect(impact.card_cancel_refusals.length).toBeGreaterThan(0);
     const refusal = cancelWithEffectsRefusal(impact);
     expect(refusal.code).toBe('by_owner_rule');
-    expect(refusal.error).toMatch(/refunds and card charges stay closed to the bar by the owner's rule/);
+    expect(refusal.error).toMatch(/stay closed to the bar by the owner's rule/);
   });
 
   test.each([
