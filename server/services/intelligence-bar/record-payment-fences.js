@@ -18,6 +18,7 @@
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
+ *       The function also carries `closeoutTarget`: the visit the card said the payment would complete, or 'none'.
  *
  *   receiptGuard { check, relabel }  the provider-boundary check for the inline receipt (beforeProviderHandoff on the receipt email
  *       and text). It allows a send only to the email / phone the card showed (digests, receipt-destination-digest.js); the App leg
@@ -55,15 +56,19 @@ async function annualTermExists(database, row) {
     && await database('annual_prepay_terms').where({ prepay_invoice_id: row.id }).first('id'));
 }
 
-// pin: { invoiceId, status, updatedAtMs, columns } as the card read the invoice.
+// pin: { invoiceId, status, updatedAtMs, columns, closeoutTarget } as the card read the invoice. closeoutTarget is the visit the card
+// said the payment's closeout would complete, or 'none': the settlement pins it in its transaction and hands it to the closeout
+// (invoice-issued-closeout.js approvedTarget), so a visit that became closable after the card is left open, on retries too.
 function settlementFenceFor(pin) {
-  return async (database, locked = null) => {
+  const fence = async (database, locked = null) => {
     const row = locked || await database('invoices').where({ id: pin.invoiceId }).first();
     if (!rowMatchesPin(row, pin, { editTime: !locked })) throw drift(DRIFT_TEXT);
     if (await heldReportExists(database, pin.invoiceId, { lock: Boolean(locked) })) throw drift(HELD_REPORT_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
     return true;
   };
+  fence.closeoutTarget = pin.closeoutTarget;
+  return fence;
 }
 
 // approved: { email, phone } digests the card showed (null = no such leg).

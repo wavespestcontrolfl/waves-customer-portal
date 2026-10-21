@@ -729,4 +729,38 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(InvoiceService.sendReceipt.mock.calls[0][1]).not.toHaveProperty('beforeProviderHandoff');
     });
   });
+
+  describe('closeoutTarget on the fence: the visit the card said the payment would complete', () => {
+    const Closeout = require('../services/invoice-issued-closeout');
+    afterEach(() => jest.restoreAllMocks());
+
+    test.each(['visit-live', 'none'])('target %s is pinned IN the settlement transaction and handed to the closeout as its approved target', async (target) => {
+      settle();
+      const pinned = jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: target });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence, recordedByTechnicianId: 'staff-1' });
+      expect(pinned).toHaveBeenCalledWith('inv-1', target, { conn: expect.any(Function), actorTechnicianId: 'staff-1' });
+      expect(closed).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'paid', actorTechnicianId: 'staff-1', approvedTarget: target });
+    });
+
+    test('a pin that cannot be written rolls the payment back: nothing is recorded', async () => {
+      const calls = settle();
+      jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockRejectedValue(new Error('audit write failed'));
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: 'none' });
+      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence })).rejects.toThrow('audit write failed');
+      expect(closed).not.toHaveBeenCalled();
+      // The pin throws before the ledger insert, inside the transaction: the throw rolls the paid flip back with it.
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('the page path (no fence, or the Zelle fence with no target) passes no approved target', async () => {
+      settle();
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
+      await recordManualPayment('inv-1', { method: 'zelle', sendReceipt: false, settlementFence: async () => true });
+      for (const [args] of closed.mock.calls) expect(args.approvedTarget).toBeUndefined();
+    });
+  });
 });

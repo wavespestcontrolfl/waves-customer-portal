@@ -419,6 +419,26 @@ async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = 
   });
 }
 
+// A payment's pin (the Intelligence Bar's record_payment card): the visit the card said the payment's closeout would complete, or
+// 'none'. Written IN the settlement transaction, so it commits with the payment or not at all, under the token `paid:<paid_at ms>`
+// (a settled invoice has no send claim). The retry sweep honors it for that payment only (approvedPaidCloseoutTargetFor), so a later
+// payment of a reopened invoice is judged as always. No target (the Invoices page) writes nothing.
+const paidPinToken = (paidAt) => `paid:${new Date(paidAt).getTime()}`;
+async function recordApprovedPaidCloseoutTarget(invoiceId, approvedTarget, { conn = db, actorTechnicianId = null } = {}) {
+  if (!approvedTarget) return;
+  const invoice = await conn('invoices').where({ id: invoiceId }).first('paid_at');
+  if (!invoice?.paid_at) throw new Error('the paid invoice has no paid_at to bind the closeout pin to');
+  await recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn, claimToken: paidPinToken(invoice.paid_at), actorTechnicianId });
+}
+async function approvedPaidCloseoutTargetFor(conn, invoiceId) {
+  const invoice = await conn('invoices').where({ id: invoiceId }).first('paid_at');
+  if (!invoice?.paid_at) return null;
+  const pin = await conn('audit_log').where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_ACTION })
+    .whereRaw("metadata->>'claimToken' = ?", [paidPinToken(invoice.paid_at)]).orderBy('created_at', 'desc').first('metadata');
+  const target = pin ? parseMeta(pin.metadata).approvedTarget : null;
+  return target ? { target } : null;
+}
+
 // The claim's delivery finalized: the pin written under this claim token is now the invoice's delivery episode.
 async function recordApprovedCloseoutDelivery(invoiceId, claimToken, { conn = db, actorTechnicianId = null } = {}) {
   const { recordAuditEvent } = require('./audit-log');
@@ -481,7 +501,7 @@ async function approvedCloseoutTargetFor(conn, invoiceId) {
     const target = pin ? parseMeta(pin.metadata).approvedTarget : null;
     return target ? { target } : null;
   }
-  const newest = await ofInvoice(CLOSEOUT_PIN_ACTION).orderBy('created_at', 'desc').first('metadata', 'created_at');
+  const newest = await ofInvoice(CLOSEOUT_PIN_ACTION).whereRaw("COALESCE(metadata->>'claimToken', '') NOT LIKE 'paid:%'").orderBy('created_at', 'desc').first('metadata', 'created_at');
   const token = newest ? parseMeta(newest.metadata).claimToken : null;
   if (!token) return null;
   const finished = (await ofInvoice(CLOSEOUT_PIN_DELIVERED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'))
@@ -603,17 +623,16 @@ async function skipByVisitState(conn, row, trigger) {
 }
 
 // What the invoice's closeout pin says the sweep may do. A bar send's card named the visit this closeout may close (or none):
-// the sweep keeps to it. The pin covers the send's closeout only, so a settled invoice (trigger 'paid') is retried as the
-// payment rails always do.
+// the sweep keeps to it. A settled invoice (trigger 'paid') keeps to the target its payment's pin names (a bar record_payment card),
+// and is retried as the payment rails always do when there is no such pin.
 //   { action: 'skip', reason }   close nothing (pin lookup failed, or a pin with no delivery marker and no retirement: the
 //                                sweep cannot tell what the card approved)
 //   { action: 'honor', target }  close only the visit the card named
 //   { action: 'unpinned' }       no pin: the ordinary retry
 async function pinDecisionFor(conn, row, trigger) {
-  if (trigger !== 'sent') return { action: 'unpinned' };
   let pinned;
   try {
-    pinned = await approvedCloseoutTargetFor(conn, row.invoice_id);
+    pinned = await (trigger === 'sent' ? approvedCloseoutTargetFor : approvedPaidCloseoutTargetFor)(conn, row.invoice_id);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: pin lookup failed for invoice ${row.invoice_id}: ${err.message}`);
     return { action: 'skip', reason: 'pin_lookup_failed' };
@@ -928,6 +947,7 @@ module.exports = {
   closeOutVisitForIssuedInvoice,
   issuedCloseoutTarget,
   recordApprovedCloseoutTarget,
+  recordApprovedPaidCloseoutTarget,
   recordApprovedCloseoutDelivery,
   recordApprovedCloseoutRetired,
   pinNoLongerHeld,

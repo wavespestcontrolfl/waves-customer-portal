@@ -361,7 +361,7 @@ async function buildPlan(input) {
     // the invoice lock (record-payment-fences.js), and the receipt's destination check. Functions: not part of any pin or display.
     _approved: {
       expectedAmountCents: dueCents,
-      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice) }),
+      settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none' }),
       ...(read.sendReceipt ? { receiptGuard: receiptGuardFor({ email: emailDigest(reach.email), phone: phoneDigest(reach.phone) }) } : {}),
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',

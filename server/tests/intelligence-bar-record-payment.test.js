@@ -392,6 +392,16 @@ describe('confirm', () => {
     delete db.schema;
   });
 
+  test('the fence carries the closeout target the card showed: the visit it named, or none', async () => {
+    const none = await preview();
+    await confirm(none);
+    expect(Invoices.recordPaymentFromBar.mock.calls[0][0].approvedPayment.settlementFence.closeoutTarget).toBe('none');
+    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-77', serviceType: 'Pest Control', date: '2099-01-01', resuming: false });
+    const named = await preview();
+    await confirm(named);
+    expect(Invoices.recordPaymentFromBar.mock.calls[1][0].approvedPayment.settlementFence.closeoutTarget).toBe('visit-77');
+  });
+
   test('the card’s customer label says a receipt is attempted by its channels, not that one will be sent', async () => {
     const card = await preview({ send_receipt: true });
     const contract = buildContract({ toolName: 'record_payment', params: { ...BASE, send_receipt: true }, preview: card, summary: 'x' });

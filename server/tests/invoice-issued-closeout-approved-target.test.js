@@ -77,12 +77,14 @@ describe('closeOutVisitForIssuedInvoice with an approved target', () => {
 // invoice read carries the invoice's current delivery stamp.
 const SENT_AT = '2021-03-01T15:00:00Z';
 const SENT_MS = new Date(SENT_AT).getTime();
+const PAID_AT = '2021-03-02T16:30:00Z';
+const PAID_TOKEN = `paid:${new Date(PAID_AT).getTime()}`;
 const PIN = 'invoice.send_closeout_target_approved';
 const DELIVERED = 'invoice.send_closeout_target_delivered';
 const RETIRED = 'invoice.send_closeout_target_retired';
-function sweepConn({ pins = [], deliveries = [], retired = [], sentAt = SENT_AT, pinReadFails = false, liveStatus = 'sent', liveClaimToken = null } = {}) {
-  const invoice = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: liveStatus, send_claim_token: liveClaimToken, scheduled_service_id: 'visit-live', sent_at: sentAt };
-  const candidate = { invoice_id: 'inv-1', invoice_status: 'sent', visit_id: 'visit-live', visit_status: 'pending', own_attempt_parked: false, issued_after_service_day: true };
+function sweepConn({ pins = [], deliveries = [], retired = [], sentAt = SENT_AT, pinReadFails = false, liveStatus = 'sent', liveClaimToken = null, candidateStatus = 'sent' } = {}) {
+  const invoice = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: liveStatus, send_claim_token: liveClaimToken, scheduled_service_id: 'visit-live', sent_at: sentAt, paid_at: PAID_AT };
+  const candidate = { invoice_id: 'inv-1', invoice_status: candidateStatus, visit_id: 'visit-live', visit_status: 'pending', own_attempt_parked: false, issued_after_service_day: true };
   const connFor = (table) => {
     const state = { action: null, token: null };
     const rowsOf = () => (state.action === DELIVERED ? deliveries : state.action === RETIRED ? retired.map((claimToken) => ({ claimToken })) : pins)
@@ -261,10 +263,18 @@ describe('an unbound pin heals once nothing holds it (round 11)', () => {
 
 describe('pinDecisionFor (round 12): the sweep\'s one decision about a pin', () => {
   const row = { invoice_id: 'inv-1', visit_id: 'visit-live' };
-  test('a settled invoice (trigger paid) is unpinned: the pin covers the send\'s closeout only, and no read is made', async () => {
-    const spy = jest.fn(() => { throw new Error('no read expected'); });
-    await expect(pinDecisionFor(spy, row, 'paid')).resolves.toEqual({ action: 'unpinned' });
-    expect(spy).not.toHaveBeenCalled();
+  test('a settled invoice (trigger paid) with no payment pin is unpinned', async () => {
+    await expect(pinDecisionFor(sweepConn(), row, 'paid')).resolves.toEqual({ action: 'unpinned' });
+  });
+  test('a settled invoice keeps to the target its payment pinned (a bar record_payment card), including "none"', async () => {
+    await expect(pinDecisionFor(sweepConn({ pins: [pin(PAID_TOKEN, 'visit-live')] }), row, 'paid')).resolves.toEqual({ action: 'honor', target: 'visit-live' });
+    await expect(pinDecisionFor(sweepConn({ pins: [pin(PAID_TOKEN, 'none')] }), row, 'paid')).resolves.toEqual({ action: 'honor', target: 'none' });
+  });
+  test('a pin written for an earlier payment of a reopened invoice (a different paid_at) is not this payment\'s', async () => {
+    await expect(pinDecisionFor(sweepConn({ pins: [pin('paid:1', 'none')] }), row, 'paid')).resolves.toEqual({ action: 'unpinned' });
+  });
+  test('an unreadable payment pin skips the row (fail closed)', async () => {
+    await expect(pinDecisionFor(sweepConn({ pinReadFails: true, pins: [pin(PAID_TOKEN, 'none')] }), row, 'paid')).resolves.toEqual({ action: 'skip', reason: 'pin_lookup_failed' });
   });
   test('a delivered pin is honored with its target; none pinned is honored as "none"; no pin is unpinned', async () => {
     await expect(pinDecisionFor(sweepConn({ pins: [pin('c', 'visit-live')], deliveries: [delivered('c')] }), row, 'sent')).resolves.toEqual({ action: 'honor', target: 'visit-live' });
@@ -274,5 +284,46 @@ describe('pinDecisionFor (round 12): the sweep\'s one decision about a pin', () 
   test('an unbound pin and an unreadable pin are skipped, each with its reason', async () => {
     await expect(pinDecisionFor(sweepConn({ pins: [pin('c', 'none')] }), row, 'sent')).resolves.toEqual({ action: 'skip', reason: 'pin_unbound' });
     await expect(pinDecisionFor(sweepConn({ pinReadFails: true, pins: [pin('c', 'none')], deliveries: [delivered('c')] }), row, 'sent')).resolves.toEqual({ action: 'skip', reason: 'pin_lookup_failed' });
+  });
+});
+
+describe('a payment recorded from the bar pins the closeout target it showed (record_payment, Codex r2b)', () => {
+  const { recordApprovedPaidCloseoutTarget } = require('../services/invoice-issued-closeout');
+  const trx = (table) => ({ where: () => ({ first: async () => (table === 'invoices' ? { paid_at: PAID_AT } : null) }) });
+
+  test('no target (the Invoices page) writes nothing', async () => {
+    await recordApprovedPaidCloseoutTarget('inv-1', undefined, { conn: trx });
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test.each(['visit-live', 'none'])('target %s is written in the given transaction under the payment\'s own token', async (target) => {
+    await recordApprovedPaidCloseoutTarget('inv-1', target, { conn: trx, actorTechnicianId: 'staff-1' });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: PIN, resource_id: 'inv-1', actor_id: 'staff-1', critical: true, trx,
+      metadata: expect.objectContaining({ approvedTarget: target, claimToken: PAID_TOKEN }),
+    }));
+  });
+
+  test('an invoice with no paid_at cannot bind the pin: it throws, so the settlement rolls back', async () => {
+    const noStamp = () => ({ where: () => ({ first: async () => ({ paid_at: null }) }) });
+    await expect(recordApprovedPaidCloseoutTarget('inv-1', 'none', { conn: noStamp })).rejects.toThrow(/paid_at/);
+  });
+
+  test('the retry sweep, a visit that became closable after a card that said none: nothing is completed', async () => {
+    const out = await sweep({ candidateStatus: 'paid', liveStatus: 'paid', pins: [pin(PAID_TOKEN, 'none')] });
+    expect(out).toMatchObject({ retried: 1, closed: 0 });
+    expect(completeScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ code: 'approved_target_mismatch' }) }));
+  });
+
+  test('the same sweep for a payment with no pin closes the visit, as every payment rail always did', async () => {
+    const out = await sweep({ candidateStatus: 'paid', liveStatus: 'paid' });
+    expect(out).toMatchObject({ retried: 1, closed: 1 });
+    expect(completeScheduledService).toHaveBeenCalledTimes(1);
+  });
+
+  test('a payment pin is not mistaken for an unbound send pin by the send lookup', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice-issued-closeout.js'), 'utf8');
+    expect(source).toMatch(/COALESCE\(metadata->>'claimToken', ''\) NOT LIKE 'paid:%'/);
   });
 });
