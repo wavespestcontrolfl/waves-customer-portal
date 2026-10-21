@@ -222,6 +222,9 @@ app.use((req, res, next) => {
     && require('./config/feature-gates').isEnabled('websiteQuoteBooking')) return websiteEstimateHelmet(req, res, next);
   return strictHelmet(req, res, next);
 });
+// Dark lawn-card photo (GATE_REPORT_WEB_SHARE): generic 404 before cors, the global limiter, the body parsers and
+// the token read, but AFTER helmet so the 404 carries the same security headers (Referrer-Policy, CSP) as any other.
+app.use('/api/reports', reportsPublicRoutes.reportSharePhotoPreGuard);
 
 // A dark web-report photo check (GATE_REPORT_WEB_ACTIONS) answers the generic 404 here: after helmet (so the 404
 // carries the helmet headers) and the privacy headers above, but ahead of the global cors(), the /api limiter

@@ -68,6 +68,7 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import TREATMENT_AREA_SCOPES from '../../../shared/treatment-area-scopes.json';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
+import ShareLawnCard from '../components/report/ShareLawnCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
@@ -10518,6 +10519,18 @@ function SimpleWebReport({ data, token }) {
         <div className="sr-shell" style={{ maxWidth: 760, margin: '0 auto', padding: '0 16px 24px' }}>
           <ReportWebActions actions={data.webActions} token={token} apiBase={API_BASE} submitEvent={submitReportEvent} readOnly={data.staffViewer === true} />
         </div>
+      ) : null}
+      {/* GATE_REPORT_WEB_SHARE: the server sends webShare only for a lawn score of 85+ (see ShareLawnCard). */}
+      {data.webShare?.score >= 85 ? (
+        <ShareLawnCard
+          token={token}
+          score={data.webShare.score}
+          assessmentId={data.webShare.assessmentId}
+          apiBase={API_BASE}
+          staffView={data.staffViewer === true}
+          glass={glass}
+          onTap={() => trackReportEvent(token, 'referral_cta_clicked', { source: 'lawn_card' })}
+        />
       ) : null}
     </div>
   );
