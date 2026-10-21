@@ -51,7 +51,8 @@ async function viaPage(body) {
   }
 }
 
-const APPROVED = { expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: 4070908800123 } };
+const FENCES = { refuseHeldReport: true, refuseAnnualTerm: true, approvedReceipt: { email: 'e-digest', phone: 'p-digest' } };
+const APPROVED = { expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: 4070908800123 }, cardFences: FENCES };
 const viaBar = (body = BODY, approvedPayment = APPROVED) => router.recordPaymentFromBar({
   invoiceId: INV, body, actor: { technicianId: 'admin-1', name: 'Ava Admin', email: 'ava@example.test' }, approvedPayment,
 });
@@ -75,6 +76,7 @@ describe('the page path is unchanged', () => {
     expect(Object.keys(args)).not.toEqual(expect.arrayContaining(['expectedAmountCents']));
     expect(Object.keys(args)).not.toContain('expectedInvoiceVersion');
     expect(Object.keys(args)).not.toContain('requireSelfPay');
+    expect(Object.keys(args)).not.toContain('cardFences');
   });
 
   test('a card pin sent in the HTTP body is ignored: only the bar shim can set it', async () => {
@@ -83,6 +85,7 @@ describe('the page path is unchanged', () => {
     expect(args).not.toHaveProperty('expectedAmountCents');
     expect(args).not.toHaveProperty('expectedInvoiceVersion');
     expect(args).not.toHaveProperty('requireSelfPay');
+    expect(args).not.toHaveProperty('cardFences');
   });
 
   test('a lost-race 409 answers as before, with no preview code', async () => {

@@ -2645,7 +2645,7 @@ function parseDateOnly(value, field) {
 // status / edit time the card showed, enforced inside the settlement on the locked row, and that the invoice is still the
 // customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
 const cardPinsOf = (req) => (req.ibApprovedPayment
-  ? { expectedAmountCents: req.ibApprovedPayment.expectedAmountCents, expectedInvoiceVersion: req.ibApprovedPayment.expectedInvoiceVersion, requireSelfPay: true }
+  ? { expectedAmountCents: req.ibApprovedPayment.expectedAmountCents, expectedInvoiceVersion: req.ibApprovedPayment.expectedInvoiceVersion, cardFences: req.ibApprovedPayment.cardFences, requireSelfPay: true }
   : {});
 
 // Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.

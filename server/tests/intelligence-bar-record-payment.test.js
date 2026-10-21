@@ -13,12 +13,15 @@ jest.mock('../services/invoice-manual-payment', () => ({
   VALID_PAYMENT_METHODS: ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'],
 }));
 jest.mock('../routes/admin-invoices', () => ({ recordPaymentFromBar: jest.fn(), getInvoiceDeliveryRecipients: jest.fn() }));
+jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn() }));
 jest.mock('../services/invoice-prepay', () => ({ resolveInvoiceTermId: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn() }));
 
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
+const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
+const { emailDigest, phoneDigest } = require('../services/receipt-destination-digest');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const { resolveInvoiceTermId } = require('../services/invoice-prepay');
 const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
@@ -34,7 +37,7 @@ const CUST = '00000000-0000-4000-8000-0000000000c1';
 const ADMIN = { isAdmin: true, technicianId: 'staff-1', operationId: 'op-1' };
 const EDITED = new Date('2099-01-01T12:00:00.123Z');
 const COLUMNS = {
-  scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0',
+  customer_id: CUST, scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0',
 };
 
 let state;
@@ -45,7 +48,7 @@ function freshState() {
       payer_id: null, payer_statement_id: null, scheduled_service_id: null, stripe_payment_intent_id: null,
       service_record_id: null, visit_completion_packet_id: null, updated_at: EDITED,
     }],
-    customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample' }],
+    customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample', phone: '(941) 555-0142' }],
     scheduled_services: [],
     projects: [],
     technicians: [{ id: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' }],
@@ -93,6 +96,7 @@ beforeEach(() => {
   rowIsSelfPayDue.mockResolvedValue(true);
   resolveInvoiceTermId.mockResolvedValue(null);
   issuedCloseoutTarget.mockResolvedValue(null);
+  resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Robin@Example.test' } });
   Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({
     payerBilled: false, emailRecipient: { email: 'robin@example.test' }, smsRecipient: { phone: '+19415550142' },
   });
@@ -185,7 +189,11 @@ describe('the preview', () => {
   test('the body is the page’s body: method, reference, note, an explicit sendReceipt false and no via', async () => {
     const card = await preview({ note: 'n' });
     expect(card._body).toEqual({ method: 'check', reference: '1042', note: 'n', sendReceipt: false });
-    expect(card._approved).toEqual({ expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS } });
+    expect(card._approved).toEqual({
+      expectedAmountCents: 11700,
+      expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS },
+      cardFences: { refuseHeldReport: true, refuseAnnualTerm: true },
+    });
   });
 
   test('a balance net of account credit is the amount due', async () => {
@@ -211,6 +219,16 @@ describe('the preview', () => {
     expect((await preview({ send_receipt: true }))._body.via).toBe('email');
     Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ payerBilled: false, emailRecipient: null, smsRecipient: { phone: '+19415550142' } });
     expect((await preview({ send_receipt: true }))._body.via).toBe('sms');
+  });
+
+  test('the card names and pins the senders’ own destinations, not the page’s: a page email the sender does not resolve is not promised', async () => {
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: false, error: 'No receipt recipient email' });
+    const card = await preview({ send_receipt: true });
+    const comms = card.effects.find((e) => e.kind === 'comms').text;
+    expect(comms).toMatch(/text to \*\*\*0142/);
+    expect(comms).not.toMatch(/email to/);
+    state.customers[0].phone = null;
+    expect(await preview({ send_receipt: true })).toMatchObject({ code: 'no_receipt_contact' });
   });
 
   test('a receipt with nobody to send it to is refused; without send_receipt the same invoice is fine', async () => {
@@ -353,7 +371,11 @@ describe('confirm', () => {
       invoiceId: INV,
       body: { method: 'check', reference: '1042', note: 'n', sendReceipt: true, via: 'both' },
       actor: { technicianId: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' },
-      approvedPayment: { expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS } },
+      approvedPayment: {
+        expectedAmountCents: 11700,
+        expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS },
+        cardFences: { refuseHeldReport: true, refuseAnnualTerm: true, approvedReceipt: { email: emailDigest('robin@example.test'), phone: phoneDigest('9415550142') } },
+      },
     });
   });
 
@@ -373,6 +395,7 @@ describe('confirm', () => {
     ['the invoice edited after the card', (s) => { s.invoices[0].updated_at = new Date('2099-01-01T12:05:00Z'); }],
     ['the invoice paid after the card', (s) => { s.invoices[0].status = 'paid'; }],
     ['the total changed', (s) => { s.invoices[0].total = '120.00'; }],
+    ['the invoice moved to another customer (a merge)', (s) => { s.invoices[0].customer_id = '00000000-0000-4000-8000-0000000000c9'; }],
     ['account credit applied', (s) => { s.invoices[0].credit_applied = '10.00'; }],
     ['a payer assigned', (s) => { s.invoices[0].payer_id = 'payer-1'; }],
     ['a card session minted', (s) => { s.invoices[0].stripe_payment_intent_id = 'pi_new'; }],
@@ -387,7 +410,10 @@ describe('confirm', () => {
 
   test('drift in the receipt recipients or the closeout visit refuses', async () => {
     const card = await preview({ send_receipt: true });
-    Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ payerBilled: false, emailRecipient: { email: 'other@example.test' }, smsRecipient: { phone: '+19415550142' } });
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'other@example.test' } });
+    expect(await confirm(card, { send_receipt: true })).toMatchObject({ preview_changed: true });
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Robin@Example.test' } });
+    state.customers[0].phone = '(941) 555-0999';
     expect(await confirm(card, { send_receipt: true })).toMatchObject({ preview_changed: true });
     const plain = await preview();
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'v1', serviceType: 'Pest', date: '2099-01-01', resuming: false });

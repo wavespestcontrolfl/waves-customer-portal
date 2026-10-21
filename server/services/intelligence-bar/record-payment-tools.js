@@ -49,6 +49,7 @@ const { UUID_RE } = require('./task-context');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { VALID_PAYMENT_METHODS } = require('../invoice-manual-payment');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus } = require('../invoice-helpers');
+const { emailDigest, phoneDigest } = require('../receipt-destination-digest');
 const { etDateString } = require('../../utils/datetime-et');
 
 function recordPaymentLive() {
@@ -218,13 +219,31 @@ async function heldReportRefusal(invoice) {
 
 // Who a receipt would reach, resolved exactly as the Invoices page does (GET /:id/recipients): email to the
 // invoice's email recipient, text to its SMS recipient; the channels follow what exists.
-async function receiptReach(invoiceId) {
-  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoiceId);
+// The channels (via) are the page's; the DESTINATIONS the card names and pins are the senders' own: the email the receipt email
+// sender resolves (resolveReceiptEmailRecipient, the manual send's resolver) and the customer's phone the receipt text uses.
+// The settlement hands those to the senders' provider-boundary check, so a changed destination skips the send.
+async function receiptReach(invoice) {
+  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
   if (!who) return null;
-  const email = who.emailRecipient?.email || '';
-  const phone = who.smsRecipient?.phone || '';
-  const via = email && phone ? 'both' : email ? 'email' : phone ? 'sms' : null;
+  const pageEmail = who.emailRecipient?.email || '';
+  const pagePhone = who.smsRecipient?.phone || '';
+  const via = pageEmail && pagePhone ? 'both' : pageEmail ? 'email' : pagePhone ? 'sms' : null;
+  const resolved = await require('../invoice-email').resolveReceiptEmailRecipient({ ...invoice }, {});
+  const customer = await db('customers').where({ id: invoice.customer_id }).first('phone');
+  const email = resolved.ok && resolved.recipient?.email ? String(resolved.recipient.email).trim().toLowerCase() : '';
+  const phone = String(customer?.phone || '').replace(/\D/g, '').slice(-10);
   return { email, phone, via, payerBilled: who.payerBilled === true };
+}
+
+// The receipt the operator asked for, or { reach: null } when none: who it reaches, or the refusal.
+async function receiptPlan(invoice, sendReceipt) {
+  if (!sendReceipt) return { reach: null };
+  const reach = await receiptReach(invoice);
+  const legs = !reach ? [] : [reach.via !== 'sms' && reach.email, reach.via !== 'email' && reach.phone].filter(Boolean);
+  if (!reach || reach.payerBilled || !reach.via || !legs.length) {
+    return refusal('A receipt cannot be sent: the customer has no email or phone on file. Record the payment without a receipt (send_receipt false).', 'no_receipt_contact', { invoice_id: invoice.id });
+  }
+  return { reach };
 }
 
 // The visit the paid closeout would complete (null = none); a probe that cannot read refuses (fail closed).
@@ -267,7 +286,7 @@ function planEffects({ invoice, dueCents, method, reference, note, sendReceipt, 
     effects.push({ kind: 'operational', text: 'This invoice came from a completed visit: the customer may be enrolled in the review-request follow-up under the standing review rules (no review text goes out from this step itself).' });
   }
   effects.push(sendReceipt
-    ? { kind: 'comms', text: `A receipt is sent now: ${[reach.email && `email to ${maskEmail(reach.email)}`, reach.phone && `text to ${maskPhone(reach.phone)}`].filter(Boolean).join(' and ')}. A leg is skipped if the customer's receipt settings or an opt-out say so.` }
+    ? { kind: 'comms', text: `A receipt is sent now: ${[reach.via !== 'sms' && reach.email && `email to ${maskEmail(reach.email)}`, reach.via !== 'email' && reach.phone && `text to ${maskPhone(reach.phone)}`].filter(Boolean).join(' and ')}. A leg is skipped if the customer's receipt settings or an opt-out say so, or if the address or phone changed since this card.` }
     : { kind: 'comms', text: 'Nothing is sent to the customer: no receipt, text or email.' });
   return effects;
 }
@@ -306,13 +325,9 @@ async function buildPlan(input) {
   if (refused) return refused;
   const held = await heldReportRefusal(invoice);
   if (held) return held;
-  let reach = null;
-  if (read.sendReceipt) {
-    reach = await receiptReach(invoice.id);
-    if (!reach || reach.payerBilled || !reach.via) {
-      return refusal('A receipt cannot be sent: the customer has no email or phone on file. Record the payment without a receipt (send_receipt false).', 'no_receipt_contact', { invoice_id: invoice.id });
-    }
-  }
+  const receipt = await receiptPlan(invoice, read.sendReceipt);
+  if (receipt.error) return receipt;
+  const { reach } = receipt;
   const probe = await closeoutProbe(invoice);
   if (probe.error) return probe.error;
   const { closeout } = probe;
@@ -342,11 +357,14 @@ async function buildPlan(input) {
     _body: body,
     _approved: {
       expectedAmountCents: dueCents,
+      // Re-proved inside the settlement under the invoice lock: no held report, no annual-prepay term, and a receipt only to the
+      // destinations the card showed.
+      cardFences: { refuseHeldReport: true, refuseAnnualTerm: true, ...(read.sendReceipt ? { approvedReceipt: { email: emailDigest(reach.email), phone: phoneDigest(reach.phone) } } : {}) },
       expectedInvoiceVersion: {
         status: invoice.status,
         updatedAtMs: msOf(invoice.updated_at),
         // What the settlement completes or records beyond the status: re-proved on the locked row.
-        columns: Object.fromEntries(['scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied']
+        columns: Object.fromEntries(['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied']
           .map((key) => [key, invoice[key] ?? null])),
       },
     },

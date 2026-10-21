@@ -24,10 +24,20 @@
  * pre-lock read (before any Stripe session is retired) and again at the start of the settlement
  * transaction, BEFORE the combined-session release (which rewrites the invoice's edit time itself when
  * it clears a stamp, so the locked row's edit time cannot be compared). The status is re-checked on the
- * LOCKED row right before the paid flip, with the optional `columns` (the visit link, service record,
+ * LOCKED row right before the paid flip, with the optional `columns` (the customer, visit link, service record,
  * completion packet, payer links, total and credit), beside the amount due (expectedAmountCents) and
  * self-pay (requireSelfPay). A difference writes nothing and a 409
  * says so. The Invoices page never sets it.
+ *
+ * cardFences (optional, the Intelligence Bar record_payment card only): { refuseHeldReport, refuseAnnualTerm, approvedReceipt }.
+ *   - refuseHeldReport: under the lock, the invoice's projects rows are locked FOR UPDATE and a report held for this payment
+ *     ('held' / 'releasing') refuses the settlement (paying would release it to the customer, which the card cannot disclose).
+ *   - refuseAnnualTerm: under the lock, an invoice an annual-prepay term resolves to (its tag, its visit's term as the anchor, or
+ *     a term whose prepay_invoice_id is this invoice) refuses; those settle a prepaid term and stay on the Invoices page.
+ *   - approvedReceipt: { email, phone } the card showed, as digests (receipt-destination-digest.js; null = no such leg). The inline receipt
+ *     is handed a provider-boundary check (beforeProviderHandoff on sendReceiptEmail / InvoiceService.sendReceipt) that skips a
+ *     leg whose live destination differs and reports it as "receipt not sent: contact changed". The App leg is never approved.
+ *   The Invoices page sends none of these.
  *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
  * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
@@ -112,7 +122,7 @@ const INVOICE_VERSION_DRIFT_TEXT = 'The invoice changed after the confirmation c
 // columns (optional): the invoice fields that decide what this settlement records or completes (the visit link, the
 // service record and completion packet, the payer links, total and credit), compared on every check. They are the
 // part of the pin the locked row can still prove after the release has rewritten the edit time.
-const PINNED_COLUMNS = ['scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied'];
+const PINNED_COLUMNS = ['customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied'];
 const MONEY_COLUMNS = new Set(['total', 'credit_applied']);
 const pinnedColumnValue = (row, key) => (MONEY_COLUMNS.has(key) ? String(Math.round((Number(row[key]) || 0) * 100)) : String(row[key] ?? ''));
 function invoiceMatchesVersion(row, { status, updatedAtMs, columns = null }, { editTime = true } = {}) {
@@ -121,6 +131,41 @@ function invoiceMatchesVersion(row, { status, updatedAtMs, columns = null }, { e
   if (editTime && at !== (updatedAtMs ?? null)) return false;
   return !columns || PINNED_COLUMNS.every((key) => pinnedColumnValue(row, key) === pinnedColumnValue(columns, key));
 }
+
+const HELD_REPORT_TEXT = 'Recording this payment releases a held report to the customer, which the bar can\'t do from here yet; record it on the Invoices page — nothing was recorded';
+
+// The card-only fences that need the locked invoice row (see cardFences above). Returns the flag object the transaction
+// returns, or null. A lookup that throws aborts the transaction: nothing is recorded (fail closed).
+async function cardFenceRefusal(trx, locked, { refuseHeldReport = false, refuseAnnualTerm = false } = {}) {
+  if (refuseHeldReport) {
+    const projects = await trx('projects').where({ invoice_id: locked.id }).forUpdate().select('id', 'report_hold_status');
+    if (projects.some((p) => ['held', 'releasing'].includes(String(p.report_hold_status || '').toLowerCase()))) return { heldReport: true };
+  }
+  if (refuseAnnualTerm) {
+    const termId = await require('./invoice-prepay').resolveInvoiceTermId(locked, trx, { strict: true });
+    if (termId) return { annualTerm: true };
+    const linked = (await trx.schema.hasTable('annual_prepay_terms'))
+      && await trx('annual_prepay_terms').where({ prepay_invoice_id: locked.id }).first('id');
+    if (linked) return { annualTerm: true };
+  }
+  return null;
+}
+
+// The receipt's last check at the provider boundary (the approvedReceipt fence): { email, phone } the card showed.
+function approvedReceiptGuard(approved) {
+  const refused = new Set();
+  const guard = async (facts) => {
+    const channel = facts?.channel;
+    const { emailDigest, phoneDigest } = require('./receipt-destination-digest');
+    const allowed = (channel === 'email' && Boolean(approved.email) && emailDigest(facts.to) === approved.email)
+      || (channel === 'sms' && Boolean(approved.phone) && phoneDigest(facts.to) === approved.phone);
+    if (!allowed) refused.add(channel);
+    return allowed;
+  };
+  guard.refused = refused;
+  return guard;
+}
+const CONTACT_CHANGED = 'receipt not sent: contact changed';
 
 async function recordManualPayment(id, {
   method,
@@ -131,6 +176,7 @@ async function recordManualPayment(id, {
   via = 'both',
   expectedAmountCents = null,
   expectedInvoiceVersion = null,
+  cardFences = null,
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
@@ -336,6 +382,10 @@ async function recordManualPayment(id, {
       const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
       if (neverRan) return { visitNeverRan: neverRan };
     }
+    if (cardFences) {
+      const fenced = await cardFenceRefusal(trx, locked, cardFences);
+      if (fenced) return fenced;
+    }
     if (settlementFence && !(await settlementFence(trx))) return { fenceLost: true };
     const [row] = await trx('invoices')
       .where({ id })
@@ -412,6 +462,12 @@ async function recordManualPayment(id, {
 
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
+  }
+  if (updatedInvoice?.heldReport) {
+    throw refusal(409, HELD_REPORT_TEXT, { drift: true });
+  }
+  if (updatedInvoice?.annualTerm) {
+    throw refusal(409, 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.', { drift: true });
   }
   if (updatedInvoice?.versionDrift) {
     throw refusal(409, INVOICE_VERSION_DRIFT_TEXT, { drift: true });
@@ -551,16 +607,19 @@ async function recordManualPayment(id, {
       emailResult = { ok: false, error: `receipt claim failed: ${claim.error}` };
     }
     const canSend = !claim.inFlight && !claim.alreadySent && !claim.error;
+    // The card's approved destinations (cardFences.approvedReceipt): the sends below get a provider-boundary check, and only then.
+    const guard = cardFences?.approvedReceipt ? approvedReceiptGuard(cardFences.approvedReceipt) : null;
+    const guardOptions = guard ? { beforeProviderHandoff: guard } : null;
     const emailLeg = via === 'email' || via === 'both';
     const smsLeg = via === 'sms' || via === 'both';
     if (canSend) {
       try {
         if (emailLeg) {
-          emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
+          emailResult = await (guardOptions ? sendReceiptEmail(id, guardOptions) : sendReceiptEmail(id)).catch((err) => ({ ok: false, error: err.message }));
           if (emailResult?.ok) await recordOperatorReceiptDelivered(claim, 'email');
         }
         const r = smsLeg
-          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true })
+          ? await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true, ...guardOptions })
             .catch((err) => ({ sent: false, reason: err.message }))
           : null;
         if (r) smsResult = r.sent ? { ok: true } : { ok: false, error: r.reason || r.code || 'not-sent' };
@@ -571,6 +630,9 @@ async function recordManualPayment(id, {
       } finally {
         await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsDelivered: smsResult?.ok === true, smsResult, emailResult });
       }
+      // A leg the card's provider-boundary check refused reads as the contact change it was, not as a provider failure.
+      if (guard?.refused.has('email') && emailResult && !emailResult.ok) emailResult = { ok: false, error: CONTACT_CHANGED };
+      if (guard?.refused.has('sms') && smsResult && !smsResult.ok) smsResult = { ok: false, error: CONTACT_CHANGED };
     }
     if (emailResult?.ok || smsResult?.ok) {
       await db('activity_log').insert({

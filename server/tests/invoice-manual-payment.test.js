@@ -328,10 +328,11 @@ describe('recordManualPayment — refusal contract', () => {
     test.each([
       ['the visit link', { scheduled_service_id: 'sv-other' }],
       ['the service record', { service_record_id: 'sr-other' }],
+      ['the customer (a customer merge repoints the invoice without touching updated_at)', { customer_id: 'cust-merged' }],
       ['the amount', { total: '120.00' }],
       ['the credit applied', { credit_applied: '5.00' }],
     ])('an edit to %s that lands while the release waits is caught on the LOCKED row (Codex pre-push P1, round 2)', async (_name, patch) => {
-      const columns = { scheduled_service_id: 'sv-1', service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
+      const columns = { customer_id: 'cust-1', scheduled_service_id: 'sv-1', service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
       const row = openInvoice({ updated_at: SEEN, ...columns });
       db.mockImplementation(() => recorder({ first: { ...row } }));
       const calls = trxOver(row, { onRelease: (r) => { Object.assign(r, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }); } });
@@ -611,5 +612,149 @@ describe('recordManualPayment — settlement', () => {
     expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt claim failed: db blip' }, sms: null });
     expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('recordManualPayment — cardFences (the Intelligence Bar record_payment card)', () => {
+  const { emailDigest, phoneDigest } = require('../services/receipt-destination-digest');
+  // A settlement fixture whose trx also answers projects / annual_prepay_terms.
+  function settleWith({ row = openInvoice(), projects = [], termLinked = false, hasTermTable = true } = {}) {
+    const paid = { ...row, status: 'paid' };
+    const calls = { update: null, paymentsInsert: null, projectsLocked: false };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return recorder({ first: row });
+      if (table === 'activity_log') return recorder();
+      if (table === 'notification_prefs') return recorder({ first: null });
+      throw new Error(`unexpected table ${table}`);
+    });
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') { const r = recorder({ first: row, returning: [paid] }); calls.update = r.update; return r; }
+        if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
+        if (table === 'projects') {
+          const r = recorder();
+          r.forUpdate = jest.fn(() => { calls.projectsLocked = true; return r; });
+          r.select = jest.fn(async () => projects);
+          return r;
+        }
+        if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      trx.schema = { hasTable: jest.fn(async () => hasTermTable) };
+      return fn(trx);
+    });
+    return calls;
+  }
+
+  test('no fences: the settlement never reads projects or terms (the page path)', async () => {
+    const calls = settleWith({ projects: [{ id: 'p1', report_hold_status: 'held' }], row: openInvoice({ annual_prepay_term_id: 'term-1' }) });
+    await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
+    expect(calls.projectsLocked).toBe(false);
+    expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['held', 'releasing'])('refuseHeldReport: a %s report that appeared by the lock refuses with drift and rolls back (nothing written)', async (status) => {
+    const calls = settleWith({ projects: [{ id: 'p1', report_hold_status: status }] });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseHeldReport: true } }));
+    expect(err.statusCode).toBe(409);
+    expect(err.drift).toBe(true);
+    expect(err.message).toMatch(/releases a held report to the customer/);
+    expect(calls.projectsLocked).toBe(true);
+    expect(calls.update).not.toHaveBeenCalled();
+    expect(calls.paymentsInsert).toBeNull();
+    expect(require('../services/project-report-hold').scheduleHoldReleaseSweep).not.toHaveBeenCalled();
+  });
+
+  test('refuseHeldReport: the project rows are locked FOR UPDATE, and a released or absent report records', async () => {
+    const calls = settleWith({ projects: [{ id: 'p1', report_hold_status: 'released' }, { id: 'p2', report_hold_status: null }] });
+    await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseHeldReport: true } });
+    expect(calls.projectsLocked).toBe(true);
+    expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+  });
+
+  test('refuseHeldReport: a lookup that throws aborts the transaction and records nothing (fail closed)', async () => {
+    const calls = settleWith();
+    const base = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation(async (fn) => base(async (trx) => {
+      const inner = trx.getMockImplementation();
+      trx.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return inner(table); });
+      return fn(trx);
+    }));
+    await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseHeldReport: true } })).rejects.toThrow(/report_hold_status/);
+    expect(calls.paymentsInsert).toBeNull();
+  });
+
+  test.each([
+    ['the invoice carries an annual-plan tag', { row: openInvoice({ annual_prepay_term_id: 'term-1' }) }],
+    ['a term lists this invoice as its prepay invoice', { termLinked: true }],
+  ])('refuseAnnualTerm: %s → drift, rolled back', async (_name, fixture) => {
+    const calls = settleWith(fixture);
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseAnnualTerm: true } }));
+    expect(err.statusCode).toBe(409);
+    expect(err.drift).toBe(true);
+    expect(err.message).toMatch(/annual-plan invoice/);
+    expect(calls.update).not.toHaveBeenCalled();
+    expect(calls.paymentsInsert).toBeNull();
+  });
+
+  test('refuseAnnualTerm: an invoice with no term records (and a missing terms table does not block)', async () => {
+    const calls = settleWith({ hasTermTable: false });
+    await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, cardFences: { refuseAnnualTerm: true } });
+    expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+  });
+
+  describe('approvedReceipt: the receipt sends hand the senders a provider-boundary check', () => {
+    const approvedReceipt = { email: emailDigest('pat@example.test'), phone: phoneDigest('(941) 555-0100') };
+    const fences = { approvedReceipt };
+    // Senders that call the check with the destination they are about to use, as the real ones do.
+    function senders({ emailTo, smsTo }) {
+      sendReceiptEmail.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'email', to: emailTo, amount: '117.00' })) === true ? { ok: true } : { ok: false, error: 'Receipt email handoff aborted by the caller' }));
+      InvoiceService.sendReceipt.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff({ channel: 'sms', to: smsTo, amount: '117.00' })) === true ? { sent: true } : { sent: false, reason: 'receipt handoff aborted by the caller' }));
+    }
+    afterEach(() => {
+      sendReceiptEmail.mockReset().mockResolvedValue({ ok: true });
+      InvoiceService.sendReceipt.mockReset().mockResolvedValue({ sent: true });
+    });
+
+    test('the approved destinations send (case and formatting do not matter)', async () => {
+      settleWith();
+      senders({ emailTo: 'Pat@Example.test ', smsTo: '+19415550100' });
+      const out = await recordManualPayment('inv-1', { method: 'check', cardFences: fences });
+      expect(out.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
+    });
+
+    test('a changed email or phone skips that leg and reports "receipt not sent: contact changed"', async () => {
+      settleWith();
+      senders({ emailTo: 'someone-else@example.test', smsTo: '+19415550199' });
+      const out = await recordManualPayment('inv-1', { method: 'check', cardFences: fences });
+      expect(out.invoice).toBeTruthy();
+      expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt not sent: contact changed' }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
+      settleWith();
+      senders({ emailTo: 'pat@example.test', smsTo: '+19415550199' });
+      const half = await recordManualPayment('inv-1', { method: 'check', cardFences: fences });
+      expect(half.receipt).toEqual({ email: { ok: true }, sms: { ok: false, error: 'receipt not sent: contact changed' } });
+    });
+
+    test('an App leg or a destination the card did not show is never approved', async () => {
+      const guardFor = async (facts, approved) => {
+        let seen;
+        settleWith();
+        sendReceiptEmail.mockImplementation(async (_id, opts) => { seen = await opts.beforeProviderHandoff(facts); return { ok: seen === true }; });
+        await recordManualPayment('inv-1', { method: 'check', via: 'email', cardFences: { approvedReceipt: approved } });
+        return seen;
+      };
+      expect(await guardFor({ channel: 'push', to: null }, approvedReceipt)).toBe(false);
+      expect(await guardFor({ channel: 'app', to: null }, approvedReceipt)).toBe(false);
+      expect(await guardFor({ channel: 'email', to: 'pat@example.test' }, { email: null, phone: null })).toBe(false);
+    });
+
+    test('without approvedReceipt the senders are called exactly as before (no check passed)', async () => {
+      settleWith();
+      await recordManualPayment('inv-1', { method: 'check', cardFences: { refuseHeldReport: false } });
+      expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1');
+      expect(InvoiceService.sendReceipt.mock.calls[0][1]).not.toHaveProperty('beforeProviderHandoff');
+    });
   });
 });
