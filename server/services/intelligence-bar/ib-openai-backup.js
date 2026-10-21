@@ -25,6 +25,7 @@ const { gapReportPromptLine } = require('../agent-gap-reports');
 const { ibOpenaiBackupLive } = require('../../config/feature-gates');
 const { callBackup } = require('./openai-tool-adapter');
 const logger = require('../logger');
+const ModelFailure = require('./model-failure');
 
 const BACKUP_PROVIDER = 'openai_backup';
 const ANSWER_LINE = '(answered by the backup model)';
@@ -160,7 +161,9 @@ function createModelCaller({ context, actionScope, task, read, apply, markTask, 
         messages: finalRound ? finalMessages(live.messages) : live.messages });
     } catch (backupErr) {
       logger.error(`[intelligence-bar] OpenAI backup failed (code=${errorCode(backupErr)})`);
-      throw origin || backupErr;
+      // A failed backup is a failed model call too (a resumed backup task has no
+      // Anthropic error to rethrow), so the model-failure notice covers it.
+      throw ModelFailure.tagModelCallError(origin || backupErr);
     }
   }
 

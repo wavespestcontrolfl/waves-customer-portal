@@ -22,7 +22,7 @@ function estimate(monthlyTotal, overrides = {}) {
 const data = (...lineItems) => ({ result: { lineItems, oneTime: { items: [], membershipFee: 0 } } });
 const render = (est, estData) => renderPage('ssr-avg-token', est, estData);
 const cents = (text) => Math.round(parseFloat(text.replace(/[^0-9.]/g, '')) * 100);
-const averageLines = (html) => [...html.matchAll(/<div class="day-price" data-monthly-average data-avg-pref-off="\d+">(about \$[\d.,]+ a month)<\/div>/g)].map((m) => m[1]);
+const averageLines = (html) => [...html.matchAll(/<div class="day-price" data-monthly-average data-avg-pref-off="\d+">(\$[\d.,]+ a month)<\/div>/g)].map((m) => m[1]);
 
 beforeEach(() => { mockGate.on = true; });
 
@@ -85,10 +85,10 @@ describe('legacy SSR page: monthly average', () => {
     expect(shown()).toBe(true);
   });
 
-  test('single service: the per-application card stays the price, "about $X a month" hangs under it, context prints once', () => {
+  test('single service: the per-application card stays the price, "$X a month" hangs under it, context prints once', () => {
     const html = render(estimate(66.75), data(tree));
     expect(html).toContain('$133.50');
-    expect(averageLines(html)).toEqual(['about $66.75 a month']);
+    expect(averageLines(html)).toEqual(['$66.75 a month']);
     expect(html.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
     expect(html).not.toContain('data-monthly-average-plan');
   });
@@ -108,8 +108,8 @@ describe('legacy SSR page: monthly average', () => {
   test('multi service: the lines add up to the plan line, which equals the stored monthly total', () => {
     const html = render(estimate(102.25), data(tree, lawn));
     const lines = averageLines(html);
-    expect([...lines].sort()).toEqual(['about $35.50 a month', 'about $66.75 a month']);
-    const plan = html.match(/data-monthly-average-plan[^>]*><span>([^<]*)<\/span><span[^>]*>(about \$[\d.,]+ a month)/);
+    expect([...lines].sort()).toEqual(['$35.50 a month', '$66.75 a month']);
+    const plan = html.match(/data-monthly-average-plan[^>]*><span>([^<]*)<\/span><span[^>]*>(\$[\d.,]+ a month)/);
     expect(plan[1]).toBe('Your plan averages');
     expect(cents(plan[2])).toBe(10225);
     expect(lines.reduce((sum, line) => sum + cents(line), 0)).toBe(10225);
@@ -121,7 +121,7 @@ describe('legacy SSR page: monthly average', () => {
     const lines = averageLines(html);
     expect(lines).toHaveLength(3);
     expect(lines.reduce((sum, line) => sum + cents(line), 0)).toBe(13280);
-    expect(cents(html.match(/data-monthly-average-plan[\s\S]*?(about \$[\d.,]+ a month)/)[1])).toBe(13280);
+    expect(cents(html.match(/data-monthly-average-plan[\s\S]*?(\$[\d.,]+ a month)/)[1])).toBe(13280);
   });
 
   test('the one-time notice follows an additive one-time row (flea), not an either/or option', () => {
@@ -146,10 +146,10 @@ describe('legacy SSR page: monthly average', () => {
     expect(html).toContain('data-monthly-average-plan');
     expect(html).toContain('Referral Credit');
     expect(html).toContain('&minus;$1.00 a month');
-    const rows = [...html.matchAll(/<span>([^<]+)<\/span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">(about \$[\d.,]+ a month)<\/span>/g)].map((m) => cents(m[2]));
+    const rows = [...html.matchAll(/<span>([^<]+)<\/span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">(\$[\d.,]+ a month)<\/span>/g)].map((m) => cents(m[2]));
     // The last match is the plan line; the service lines before it, less the $1.00 credit, add up to it.
     expect(rows.slice(0, -1).reduce((sum, c) => sum + c, 0) - 100).toBe(10125);
-    const plan = html.match(/data-monthly-average-plan[\s\S]*?(about \$[\d.,]+ a month)/);
+    const plan = html.match(/data-monthly-average-plan[\s\S]*?(\$[\d.,]+ a month)/);
     expect(cents(plan[1])).toBe(10125);
     expect(html.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
   });

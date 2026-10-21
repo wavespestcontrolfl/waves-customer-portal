@@ -174,6 +174,21 @@ describe('resume of a backup task after a tool round', () => {
     expect(JSON.stringify(live.messages)).not.toMatch(/_openai|"c1"/);
   });
 
+  test('a failed backup round is tagged as a failed model call, even on a resumed task with no Anthropic error', async () => {
+    process.env.GATE_IB_OPENAI_BACKUP = 'true';
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    const savedFetch = global.fetch;
+    global.fetch = jest.fn(async () => { throw new Error('network down'); });
+    try {
+      const { caller } = resumed(history(Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), call('fc_1', 'c1')] })));
+      await caller.startFromTask();
+      const err = await caller.call({ finalRound: false, ask: async () => { throw new Error('ask must not run on a backup task'); } }).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).not.toMatch(/ask must not run/);
+      expect(ModelFailure.isModelCallError(err)).toBe(true);
+    } finally { global.fetch = savedFetch; }
+  });
+
   test('with the gate off nothing is switched', async () => {
     const { caller, live } = resumed(history(Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), call('fc_1', 'c1')] })));
     await caller.startFromTask();

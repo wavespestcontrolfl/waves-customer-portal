@@ -1,0 +1,352 @@
+'use strict';
+
+/**
+ * Intelligence Bar model failure notice (GATE_IB_MODEL_FAILURE_NOTICE).
+ *
+ * When the AI model call itself fails (a provider 4xx/5xx, a timeout, an
+ * overload such as the Anthropic monthly spend limit on 2026-10-19), the bar
+ * used to end with a thrown error: the palette showed "Error: <message>", no
+ * gap row and no alert. This module gives the route what it needs to answer
+ * plainly instead:
+ *
+ *  - tag / recognise an error thrown by the model call (and only that call:
+ *    a tool error or a validation error never carries the tag);
+ *  - read what the task already did from its saved receipts, so the reply
+ *    never says "nothing was changed" after a write committed;
+ *  - record one gap row (source `ib-model`, no gap bell) and ring one admin
+ *    bell at most once an hour.
+ *
+ * Nothing here sends a customer message. Every write is best-effort and never
+ * throws: the caller is already in an error path.
+ */
+
+const logger = require('../logger');
+const PendingActions = require('./pending-actions');
+
+const GAP_SOURCE = 'ib-model';
+const BELL_CATEGORY = 'agents';
+const BELL_LINK = '/admin/agents';
+const BELL_DEDUPE_KEY = 'ib:model-failure';
+const BELL_WINDOW_MS = 60 * 60 * 1000;
+const MAX_SUMMARIES = 3;
+const MAX_SUMMARY_CHARS = 120;
+const CODE_RE = /^[a-z][a-z0-9_]{1,47}$/;
+
+// Receipt outcomes (pending-actions.js actionReceipt): a change that landed,
+// and one that may have.
+const SAVED_OUTCOMES = new Set(['completed', 'provider_accepted', 'partially_completed']);
+const UNKNOWN_OUTCOME = 'outcome_unknown';
+const WAITING_OUTCOME = 'awaiting_approval';
+
+const tagged = new WeakSet();
+
+/** Marks an error thrown by the model call. Returns the same value. */
+function tagModelCallError(err) {
+  if (err && typeof err === 'object') tagged.add(err);
+  return err;
+}
+
+function isModelCallError(err) {
+  return Boolean(err) && typeof err === 'object' && tagged.has(err);
+}
+
+/**
+ * The code the ledger records for this failure (`anthropic_400`,
+ * `anthropic_529`, `anthropic_timeout`), or `anthropic_error` when the error
+ * carries no status (a dropped connection).
+ */
+function modelFailureCode(err) {
+  try {
+    const reason = require('../llm/call').providerErrorReason('anthropic', err);
+    if (CODE_RE.test(reason) && reason.startsWith('anthropic_')) return reason;
+  } catch { /* fall through to the generic code */ }
+  return 'anthropic_error';
+}
+
+function failureSentence(code) {
+  if (code === 'anthropic_timeout') return 'The AI model took too long to answer';
+  if (code === 'anthropic_429' || code === 'anthropic_529' || code === 'anthropic_503') return 'The AI model is too busy to answer right now';
+  return 'The AI model did not answer this request';
+}
+
+function clip(text) {
+  const line = String(text || '').replace(/\s+/g, ' ').trim();
+  return line.length > MAX_SUMMARY_CHARS ? `${line.slice(0, MAX_SUMMARY_CHARS - 1)}…` : line;
+}
+
+function listSummaries(receipts) {
+  const names = receipts.map((r) => clip(r.summary) || r.tool).filter(Boolean);
+  const shown = names.slice(0, MAX_SUMMARIES).join('; ');
+  return names.length > MAX_SUMMARIES ? `${shown}; and ${names.length - MAX_SUMMARIES} more` : shown;
+}
+
+/**
+ * What the task has already done, from its saved receipts. `receipts: null`
+ * means the receipts could not be read, which is not the same as none.
+ * Pure: the route passes the receipts in.
+ */
+function classifyReceipts(receipts) {
+  if (!Array.isArray(receipts)) return { known: false, saved: [], unknown: [], waiting: [] };
+  return {
+    known: true,
+    saved: receipts.filter((r) => SAVED_OUTCOMES.has(r.outcome)),
+    unknown: receipts.filter((r) => r.outcome === UNKNOWN_OUTCOME),
+    waiting: receipts.filter((r) => r.outcome === WAITING_OUTCOME),
+  };
+}
+
+/** The task state that stays true after the failure. */
+function taskStateFor(status) {
+  if (!status.known) return 'outcome_unknown';
+  if (status.waiting.length) return 'awaiting_approval';
+  if (status.saved.length || status.unknown.length) return 'outcome_unknown';
+  return 'failed';
+}
+
+/** The plain answer for the operator. */
+function buildAnswer({ code, status, hadImages = false }) {
+  const parts = [`${failureSentence(code)} (error ${code}).`];
+  if (!status.known) {
+    parts.push('I could not check whether any change was saved. Look at the customer record or recent activity before you repeat the request.');
+  } else if (status.saved.length || status.unknown.length) {
+    if (status.saved.length) parts.push(`Before the error, this was already saved: ${listSummaries(status.saved)}.`);
+    if (status.unknown.length) parts.push(`I cannot confirm whether this ran: ${listSummaries(status.unknown)}. Check it before you repeat it.`);
+    parts.push('Do not repeat what was saved.');
+  } else if (status.waiting.length) {
+    parts.push('Nothing was changed. A confirmation card is still waiting for you, and nothing runs until you confirm it.');
+  } else {
+    // No saved receipt of any kind. Without a saved task (platform off) a write
+    // only ever waits on a card, so this stays true there too.
+    parts.push('Nothing was changed.');
+  }
+  // The palette clears attachments on any answered request, so say it plainly.
+  parts.push(hadImages ? 'Try again in a few minutes, and attach the photos again.' : 'Try again in a few minutes.');
+  return parts.join(' ');
+}
+
+/** Receipts for a saved task, or null when they cannot be read. */
+async function readReceipts(taskId, actorId) {
+  try {
+    const rows = await PendingActions.forTask(taskId, actorId);
+    return rows.map((row) => PendingActions.actionReceipt(row));
+  } catch (err) {
+    logger.warn(`[intelligence-bar] model failure receipts unreadable (code=${err?.code || 'unknown'})`);
+    return null;
+  }
+}
+
+/** One quiet gap row per error code. Returns { id, occurrences } or null. */
+async function recordFailureGap(code) {
+  try {
+    const { writeGapRows } = require('../agent-gap-reports');
+    const [saved] = await writeGapRows([{
+      source: GAP_SOURCE,
+      kind: 'blocked',
+      code,
+      summary: `The Intelligence Bar could not get an answer from the AI model (${code})`,
+      attempted: 'The model call failed, so the operator got a plain notice. No request text is kept',
+    }], undefined, { quiet: true });
+    return saved ? { id: saved.id, occurrences: saved.occurrences } : null;
+  } catch (err) {
+    logger.warn(`[intelligence-bar] model failure gap not recorded (code=${err?.code || err?.name || 'error'})`);
+    return null;
+  }
+}
+
+/**
+ * One admin bell, at most once an hour: a stable key with a rolling one-hour
+ * window, so a second failure inside the hour finds the standing row and adds
+ * nothing. Raised through raiseAdminAlert (docs/admin-notifications.md); the
+ * error code is machine text, so it rides in `detail`, not the headline or why.
+ * Admin-only; never a customer message.
+ */
+// One standing bell per model lane: the admin and technician bars can run
+// different models, so one lane's recovery must not close the other's alert.
+const laneKey = (lane) => `${BELL_DEDUPE_KEY}:${lane === 'tech' ? 'tech' : 'admin'}`;
+
+// Ringing and recovery take the same per-lane transaction lock, and a recovery
+// records when its answering attempt began (system_settings, shared by every
+// replica). A first failure that finds a recovery newer than itself does not
+// ring: the model already answered again (Codex #6368 r4).
+const recoveredKey = (lane) => `ib.model_failure.recovered_at.${lane === 'tech' ? 'tech' : 'admin'}`;
+const lockLane = (trx, lane) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [laneKey(lane)]);
+async function recoveredAt(trx, lane) {
+  const row = await trx('system_settings').where({ key: recoveredKey(lane) }).first('value');
+  const at = row && Date.parse(row.value);
+  return Number.isFinite(at) ? at : 0;
+}
+async function noteRecovery(trx, lane, answeredSince) {
+  const at = new Date(answeredSince || Date.now()).toISOString();
+  await trx('system_settings')
+    .insert({ key: recoveredKey(lane), value: at, category: 'intelligence-bar', description: 'When the bar model last answered after a failure check' })
+    .onConflict('key')
+    .merge({ value: trx.raw('GREATEST(system_settings.value::timestamptz, EXCLUDED.value::timestamptz)::text'), updated_at: trx.fn.now() });
+}
+
+// Every failure stamps the open lane bell with its time (a deduped failure
+// does not touch the row otherwise), so a recovery that started before this
+// failure cannot close it (Codex #6368 r4).
+// Monotonic: the stamp only moves forward, so an older failure that lands
+// later never replaces a newer time (Codex #6368 r5). Returns rows stamped (null on error).
+async function stampLastFailure(lane, now = new Date()) {
+  try {
+    const db = require('../../models/db');
+    return await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
+      .update({ metadata: db.raw(
+        "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('lastFailureAt', GREATEST(COALESCE((metadata->>'lastFailureAt')::timestamptz, ?::timestamptz), ?::timestamptz)::text)",
+        [now.toISOString(), now.toISOString()],
+      ) });
+  } catch (err) {
+    logger.warn(`[intelligence-bar] model failure time not stamped (code=${err?.code || err?.name || 'error'})`);
+    return null;
+  }
+}
+
+async function ringFailureBell({ code, gap, lane, failedAt = Date.now() }) {
+  try {
+    const { raiseAdminAlert } = require('../admin-alert-compose');
+    const failures = gap?.occurrences
+      ? `Questions fail until the AI model answers again; ${gap.occurrences} failure${gap.occurrences === 1 ? '' : 's'} recorded for this error.`
+      : 'Questions fail until the AI model answers again.';
+    const result = await raiseAdminAlert(BELL_CATEGORY, {
+      area: 'System',
+      action: 'check why the AI model is not answering',
+      why: failures,
+      severity: 'needs-you',
+      link: BELL_LINK,
+      subject: { type: 'check', id: `ib-model-failure-${lane === 'tech' ? 'tech' : 'admin'}` },
+      doneWhen: 'model_answers',
+      who: 'person',
+    }, {
+      detail: `The Intelligence Bar model call failed with error ${code}. A spending limit, an expired key or a provider outage can cause this. `
+        + `${gap?.id ? `Gap row ${gap.id} counts every failure with this code. ` : ''}This alert rings at most once an hour.`,
+      bell: true,
+      dedupeKey: laneKey(lane),
+      dedupeWindowMs: BELL_WINDOW_MS,
+      // A row a recovery marked done does not hide a new outage in the same hour.
+      dedupeOpenOnly: true,
+      // The failure time rides on a NEW bell too, so a recovery whose answer
+      // began after this failure (but before the row existed) can close it.
+      metadata: { source: 'ib-model-failure', lane: lane === 'tech' ? 'tech' : 'admin', code, lastFailureAt: new Date(failedAt).toISOString(), ...(gap?.id ? { gapId: gap.id } : {}) },
+    });
+    return Boolean(result) && !result.suppressed;
+  } catch (err) {
+    logger.warn(`[intelligence-bar] model failure bell not written (code=${err?.code || err?.name || 'error'})`);
+    return false;
+  }
+}
+
+/**
+ * Everything the route needs after a model call failed. Never throws.
+ * Returns { answer, taskState, code } (taskState null without a saved task).
+ */
+// Ring on the pool (no held transaction), then re-check under the lane lock on
+// ONE connection: a recovery whose answer began after this failure, and that
+// ran before the bell existed, is caught here and the bell is closed at once.
+// Holding a transaction while other writes wait for pool connections could
+// exhaust the pool under a burst of failures (pre-push audit).
+async function ringUnlessRecovered({ code, gap, lane, failedAt }) {
+  await stampLastFailure(lane, new Date(failedAt));
+  await ringFailureBell({ code, gap, lane, failedAt });
+  // Stamp again after the ring: when another failure's insert won the dedupe,
+  // this failure's newer time still reaches the open bell. If no open bell is
+  // left (a recovery closed it in between), this failure rings once more.
+  // Only a definite zero re-rings; an unreadable stamp (null) does not.
+  if (await stampLastFailure(lane, new Date(failedAt)) === 0) await ringFailureBell({ code, gap, lane, failedAt });
+  try {
+    const db = require('../../models/db');
+    return await db.transaction(async (trx) => {
+      await lockLane(trx, lane);
+      const recovered = await recoveredAt(trx, lane);
+      if (!(recovered > failedAt)) return 0;
+      return closeOpenBells(trx, lane, recovered);
+    });
+  } catch (err) {
+    logger.warn(`[intelligence-bar] model failure recovery re-check failed (code=${err?.code || err?.name || 'error'})`);
+    return 0;
+  }
+}
+
+async function handleModelFailure({ err, activeTask, actorId, lane = 'admin', hadImages = false }) {
+  const failedAt = Date.now();
+  const code = modelFailureCode(err);
+  const receipts = activeTask ? await readReceipts(activeTask.id, actorId) : [];
+  const status = classifyReceipts(receipts);
+  const gap = await recordFailureGap(code);
+  // Stamp the open bell first, then ring, under the lane lock: a recovery that
+  // locks the row after this stamp skips it; one that ran first closed it, and
+  // this failure then rings a new bell (dedupe ignores done rows) unless that
+  // recovery's answer began after this failure.
+  await ringUnlessRecovered({ code, gap, lane, failedAt });
+  laneState(lane).mayBeOpen = true;
+  return {
+    code,
+    answer: buildAnswer({ code, status, hadImages }),
+    taskState: activeTask ? taskStateFor(status) : null,
+    receiptsKnown: status.known,
+  };
+}
+
+// The standing bell says "done when the model answers". A request that ends on
+// a model answer marks any open ib:model-failure row done. The bell row is
+// shared by every replica, so this checks it directly: right away after this
+// process saw a failure, otherwise at most once a minute per process.
+const RECOVERY_CHECK_MS = 60 * 1000;
+const lanes = new Map();
+function laneState(lane) {
+  const key = lane === 'tech' ? 'tech' : 'admin';
+  if (!lanes.has(key)) lanes.set(key, { mayBeOpen: true, lastCheckAt: 0 });
+  return lanes.get(key);
+}
+// Close the lane's open bells whose last failure came before `answeredSince`,
+// under row locks, inside the caller's transaction.
+async function closeOpenBells(trx, lane, answeredSince) {
+  const NotificationService = require('../notification-service');
+  const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
+    // Only a bell whose last failure came before this answer's attempt began.
+    .modify((q) => { if (answeredSince) q.whereRaw("COALESCE((metadata->>'lastFailureAt')::timestamptz, created_at) < ?", [new Date(answeredSince)]); })
+    .forUpdate()
+    .select('id');
+  if (!rows.length) return 0;
+  return NotificationService.markAdminDone(rows.map((r) => r.id), {
+    by: 'ib-model-recovered',
+    resolution: 'The AI model answered again.',
+  }, trx);
+}
+
+async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin', answeredSince = null } = {}) {
+  const state = laneState(lane);
+  if (!state.mayBeOpen && now - state.lastCheckAt < RECOVERY_CHECK_MS) return 0;
+  state.mayBeOpen = false;
+  state.lastCheckAt = now;
+  try {
+    const db = require('../../models/db');
+    // Select and close under the same row locks, so a failure stamp cannot land
+    // between them (stampLastFailure waits for the lock, then finds the row done).
+    return await db.transaction(async (trx) => {
+      await lockLane(trx, lane);
+      await noteRecovery(trx, lane, answeredSince);
+      return closeOpenBells(trx, lane, answeredSince);
+    });
+  } catch (err) {
+    state.mayBeOpen = true;
+    logger.warn(`[intelligence-bar] model failure bell not closed (code=${err?.code || err?.name || 'error'})`);
+    return 0;
+  }
+}
+
+module.exports = {
+  tagModelCallError,
+  isModelCallError,
+  modelFailureCode,
+  classifyReceipts,
+  taskStateFor,
+  buildAnswer,
+  handleModelFailure,
+  closeFailureBellOnRecovery,
+  ringUnlessRecovered,
+  GAP_SOURCE,
+  BELL_DEDUPE_KEY,
+};
