@@ -831,6 +831,21 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect(impact.invoices[1]).not.toHaveProperty('payment_intent_id');
   });
 
+  test('an invoice whose card payment is a combined payment covering other visits is refused (combined_payment, by_owner_rule)', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([
+      { id: 'inv-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 0, payment_intent: true, payment_intent_id: 'pi_shared', combined_payment: true },
+    ]);
+    mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([SENT_INVOICE]));
+    const impact = await run();
+    expect(impact.card_cancel_refusals).toEqual(['combined_payment']);
+    expect(impact.invoices[0].combined_payment).toBe(true);
+    const refusal = cancelWithEffectsRefusal(impact);
+    expect(refusal.code).toBe('by_owner_rule');
+    expect(refusal.error).toMatch(/combined card payment .* covers other visits/);
+    expect(refusal.error).toMatch(/cancel it from Dispatch/);
+  });
+
   test('an invoice already void or refunded is listed as kept and does not block', async () => {
     noCard();
     mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([{ id: 'inv-9', invoice_number: 'INV-9', status: 'void', total: '10.00' }]));

@@ -441,11 +441,12 @@ const EFFECTS_ALLOWED_REFUSALS = new Set([
 // stays on the Dispatch screen): a credit REDEEMED on the visit (the hourly sweep would void unpinned if the pinned
 // follow-through failed), any estimate-level deposit or annual prepay, and money on a linked visit.
 const EFFECTS_MONEY_BLOCKERS = new Set([
-  'estimate_deposit', 'inspection_credit_redeemed', 'estimate_money', 'linked_followup_money',
+  'estimate_deposit', 'inspection_credit_redeemed', 'estimate_money', 'linked_followup_money', 'combined_payment',
 ]);
 
 const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
 const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
+const CANCEL_COMBINED_PAYMENT_MESSAGE = "A combined card payment on this visit's invoice also covers other visits, and combined payments stay with the office by the owner's rule, so the bar can't cancel it; cancel it from Dispatch. Nothing was changed.";
 const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit with its own invoice, so the bar can't cancel this visit from here yet. Nothing was changed.";
 
 // The refusal (error + code) for an impact computed WITH effects whose card_cancel_refusals is non-empty. Order: a fee
@@ -457,6 +458,7 @@ function cancelWithEffectsRefusal(impact) {
   if (has('card_fee_agreement', 'card_rail_present') && (impact.fee?.applies === true || impact.fee?.unresolved === true)) {
     return { error: CANCEL_FEE_DUE_MESSAGE, code: 'cancel_fee_due_unsupported' };
   }
+  if (has('combined_payment')) return { error: CANCEL_COMBINED_PAYMENT_MESSAGE, code: 'by_owner_rule', rule: 'cancel_combined_payment' };
   if (has('card_fee_agreement', 'card_rail_present', 'prepaid_coverage', 'invoice_holds_money', ...EFFECTS_MONEY_BLOCKERS)) {
     return { error: CANCEL_MONEY_RULE_MESSAGE, code: 'by_owner_rule', rule: 'cancel_money_or_card' };
   }
@@ -531,7 +533,7 @@ async function loadLinkedEffects(scheduledServiceId, actorId = null, conn = db) 
 
 // The with-effects block of the impact: the linked invoices and visits, the customer text, and the refusal codes that
 // still block once the allowed ones (EFFECTS_ALLOWED_REFUSALS) are set aside.
-async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn }) {
+async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn, invoices }) {
   const linked = await loadLinkedEffects(scheduledServiceId, actorId, conn);
   const customerText = notifyCustomer === false
     ? { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' }
@@ -540,6 +542,7 @@ async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, a
   if (creditReversal) blockers.push('inspection_credit_redeemed');
   if (await estimateMoneyReason(conn, row)) blockers.push('estimate_money');
   if (linked.followUpMoney) blockers.push('linked_followup_money');
+  if (invoices.some((inv) => inv.combined_payment)) blockers.push('combined_payment');
   return {
     blocking: [...new Set(blockers)].sort(),
     effects: {
@@ -629,6 +632,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
     deposit_credit: inv.deposit_credit,
     payment_intent: inv.payment_intent === true,
     ...(inv.payment_intent_id ? { payment_intent_id: inv.payment_intent_id } : {}),
+    ...(inv.combined_payment ? { combined_payment: true } : {}),
   }));
 
   // Tech-facing cancel notice (tech-visit-notifications.js#notifyVisitCancelled,
@@ -659,7 +663,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
   // with the gate on, so the impact of a gate-off proposal stays byte-identical to before. `notify_customer` is the
   // choice the card shows ("cancel without a text" sets it false) and Confirm sends to the Dispatch handler.
   const { effects, blocking } = withEffects
-    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn })
+    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn, invoices })
     : { effects: {}, blocking: refusals };
 
   return {

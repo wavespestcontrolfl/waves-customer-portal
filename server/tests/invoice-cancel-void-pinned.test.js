@@ -14,7 +14,8 @@ jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const state = { whereObj: null, idIn: null };
     const chain = {};
-    for (const m of ['whereNot', 'whereNotIn', 'whereRaw', 'orderBy', 'forUpdate', 'whereNull', 'orWhereIn']) chain[m] = jest.fn(() => chain);
+    for (const m of ['whereNotIn', 'whereRaw', 'orderBy', 'forUpdate', 'whereNull', 'orWhereIn']) chain[m] = jest.fn(() => chain);
+    chain.whereNot = jest.fn((col, val) => { if (col === 'id') state.notId = String(val); return chain; });
     chain.where = jest.fn((arg) => {
       if (arg && typeof arg === 'object') state.whereObj = { ...(state.whereObj || {}), ...arg };
       return chain;
@@ -29,6 +30,8 @@ jest.mock('../models/db', () => {
       let r = mockInvoiceRows;
       if (state.idIn) r = r.filter((x) => state.idIn.includes(String(x.id)));
       if (state.whereObj?.id) r = r.filter((x) => String(x.id) === String(state.whereObj.id));
+      if (state.whereObj?.stripe_payment_intent_id) r = r.filter((x) => x.stripe_payment_intent_id === state.whereObj.stripe_payment_intent_id);
+      if (state.notId) r = r.filter((x) => String(x.id) !== state.notId);
       return r;
     };
     chain.then = (res, rej) => Promise.resolve(rows()).then(res, rej);
@@ -217,5 +220,45 @@ describe('pinned sweep and an approved PaymentIntent', () => {
     const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
     expect([...voided]).toEqual(['inv-b']);
     expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+  });
+});
+
+// A PaymentIntent that also covers another invoice (a combined payment) is never cancelled by a card-confirmed cancel:
+// cancelling it would clear the stamps on invoices the card did not list.
+describe('combined payments', () => {
+  const stripe = require('../services/stripe');
+  const combined = () => { mockInvoiceRows = [{ ...INV_A, stripe_payment_intent_id: 'pi_shared' }, { ...INV_B, stripe_payment_intent_id: 'pi_shared', scheduled_service_id: 'svc-other' }]; };
+
+  test('the preview flags the invoice whose PaymentIntent also rides another invoice (combined_payment), and no other', async () => {
+    mockInvoiceRows = [{ ...INV_A, stripe_payment_intent_id: 'pi_solo' }, INV_B];
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const solo = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    expect(solo.find((i) => i.id === 'inv-a')).not.toHaveProperty('combined_payment');
+    combined();
+    mockInvoiceRows[1].scheduled_service_id = 'svc-1';
+    const shared = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    expect(shared.find((i) => i.id === 'inv-a')).toMatchObject({ payment_intent_id: 'pi_shared', combined_payment: true });
+  });
+
+  test('the pinned sweep leaves a combined payment alone: no Stripe call, no void, no stamp cleared', async () => {
+    mockInvoiceRows = [{ ...INV_A, stripe_payment_intent_id: 'pi_shared' }];
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    stripe.retrievePaymentIntent.mockClear();
+    stripe.cancelPaymentIntent.mockClear();
+    // A sibling invoice (another visit) now rides the same PaymentIntent.
+    mockInvoiceRows = [{ ...INV_A, stripe_payment_intent_id: 'pi_shared' }, { ...INV_B, id: 'inv-sibling', stripe_payment_intent_id: 'pi_shared', scheduled_service_id: 'svc-other' }];
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect([...voided]).toEqual([]);
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(voidedIds()).toEqual([]);
+  });
+
+  test('an UNPINNED sweep (Dispatch) is unchanged by the combined-payment check', async () => {
+    combined();
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
+    expect(stripe.retrievePaymentIntent).toHaveBeenCalled();
   });
 });

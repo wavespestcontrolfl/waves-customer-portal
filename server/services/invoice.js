@@ -5331,6 +5331,23 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
 // its deposit_credit lines carry (restoreDepositCreditForVoidedInvoice sums
 // the same lines the same way). Cents-rounded so a pg numeric string and a
 // pinned JSON number compare equal.
+// True when another invoice rides the same PaymentIntent (a combined payment covering other visits). Cancelling that
+// PaymentIntent would also clear the stamps on those invoices, which a single visit's card never lists.
+async function paymentIntentSharedWithOtherInvoice(conn, paymentIntentId, invoiceId) {
+  if (!paymentIntentId) return false;
+  const other = await conn("invoices")
+    .where({ stripe_payment_intent_id: paymentIntentId })
+    .whereNot("id", invoiceId)
+    .first("id");
+  return Boolean(other);
+}
+
+// { combined_payment: true } when the invoice's PaymentIntent also rides another invoice, else {} (preview entry key).
+async function combinedPaymentFlag(candidate) {
+  if (!candidate.stripe_payment_intent_id) return {};
+  return await paymentIntentSharedWithOtherInvoice(db, candidate.stripe_payment_intent_id, candidate.id) ? { combined_payment: true } : {};
+}
+
 function cancelVoidInvoiceAmounts(row) {
   const cents = (v) => Math.round(Number(v || 0) * 100);
   const depositCents = invoiceDepositCreditCents(row);
@@ -13301,6 +13318,15 @@ const InvoiceService = {
             );
             continue;
           }
+          // A pinned (card-confirmed) cancel never cancels a combined payment: the PaymentIntent also covers invoices the
+          // card did not list, and cancelling it clears their stamps. Left open for the office.
+          if (pinnedById && candidate.stripe_payment_intent_id
+            && await paymentIntentSharedWithOtherInvoice(db, candidate.stripe_payment_intent_id, candidate.id)) {
+            logger.warn(
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — its PaymentIntent is a combined payment covering other invoices; needs office review`,
+            );
+            continue;
+          }
           // ── Stripe PI triage (pre-lock) ────────────────────────────────
           const triagedPiId = candidate.stripe_payment_intent_id || null;
           // The refused-send cleanup runs after provider preparation. Never
@@ -13604,6 +13630,8 @@ const InvoiceService = {
         payment_intent: Boolean(candidate.stripe_payment_intent_id),
         // The PaymentIntent the void would cancel, so a card-confirmed cancel can approve exactly that one.
         ...(candidate.stripe_payment_intent_id ? { payment_intent_id: candidate.stripe_payment_intent_id } : {}),
+        // The PaymentIntent also covers another invoice (a combined payment): a card refuses it (combined_payment).
+        ...(await combinedPaymentFlag(candidate)),
         ...cancelVoidInvoiceAmounts(candidate),
       });
     }
