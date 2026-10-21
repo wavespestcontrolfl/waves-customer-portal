@@ -371,14 +371,15 @@ describe('the standing bell closes when the model answers again', () => {
   test('closeFailureBellOnRecovery marks open ib:model-failure rows done once, then is a no-op', async () => {
     const db = require('../models/db');
     const select = jest.fn(async () => [{ id: 11 }, { id: 12 }]);
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), select };
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
     db.mockImplementation(() => chain);
+    db.transaction = async (fn) => fn(() => chain);
     mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     try {
       await expect(ModelFailure.closeFailureBellOnRecovery()).resolves.toBe(2);
       expect(chain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['ib:model-failure:admin']);
-      expect(mockMarkAdminDone).toHaveBeenCalledWith([11, 12], expect.objectContaining({ by: 'ib-model-recovered' }));
+      expect(mockMarkAdminDone).toHaveBeenCalledWith([11, 12], expect.objectContaining({ by: 'ib-model-recovered' }), expect.anything());
       // Inside a minute this process does not ask again; after a minute it does
       // (another replica may have rung), and it finds the row with no rows left.
       await expect(ModelFailure.closeFailureBellOnRecovery({ now: Date.now() + 1000 })).resolves.toBe(0);
@@ -438,8 +439,9 @@ describe('round 3 fixes (#6368)', () => {
   test('lanes are separate: a technician recovery does not close the admin bell', async () => {
     const db = require('../models/db');
     const select = jest.fn(async () => []);
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), select };
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
     db.mockImplementation(() => chain);
+    db.transaction = async (fn) => fn(() => chain);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     try {
       await ModelFailure.closeFailureBellOnRecovery({ lane: 'tech', now: Date.now() + 10 * 60000 });
@@ -454,10 +456,11 @@ describe('round 4 fixes (#6368)', () => {
   test('a recovery closes only bells whose last failure came before the answered request began', async () => {
     const db = require('../models/db');
     const select = jest.fn(async () => []);
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), select };
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
     db.mockImplementation(() => chain);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     const since = new Date('2026-10-21T00:00:00Z');
+    db.transaction = async (fn) => fn(() => chain);
     try {
       await ModelFailure.closeFailureBellOnRecovery({ lane: 'admin', now: Date.now() + 20 * 60000, answeredSince: since });
       expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining("metadata->>'lastFailureAt'"), [since]);
@@ -477,5 +480,30 @@ describe('round 4 fixes (#6368)', () => {
       const { body } = await postQuery(baseUrl, { prompt: 'what bug is this', context: 'customers', images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=' }] });
       expect(body.response).toMatch(/attach the photos again\.$/);
     });
+  });
+});
+
+describe('round 4 audit fixes (#6368)', () => {
+  test('the close locks the rows it selects and closes them in the same transaction', async () => {
+    const db = require('../models/db');
+    const select = jest.fn(async () => [{ id: 21 }]);
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select };
+    const trx = jest.fn(() => chain);
+    db.mockImplementation(() => chain);
+    db.transaction = async (fn) => fn(trx);
+    mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    try {
+      await expect(ModelFailure.closeFailureBellOnRecovery({ lane: 'admin', now: Date.now() + 30 * 60000, answeredSince: new Date() })).resolves.toBe(1);
+      expect(chain.forUpdate).toHaveBeenCalled();
+      expect(mockMarkAdminDone.mock.calls.at(-1)[2]).toBe(trx);
+    } finally {
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
+  });
+
+  test('recovery is judged against this attempt, not a resumed task\'s first start', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
+    expect(src).toContain('answeredSince: attemptStartedAt');
   });
 });

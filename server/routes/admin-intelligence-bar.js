@@ -3407,6 +3407,9 @@ function isValidConversationHistory(history) {
 async function runQuery(req, res, next) {
   // A resumed task keeps its original start, so a late card is not ordered as the newest.
   const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
+  // This attempt's own start (a resume keeps the task's first start above for
+  // card ordering); a model-failure recovery is judged against this one.
+  const attemptStartedAt = new Date();
   let activeTask = null;
   let requestPendingProposals = []; // the catch keeps cards minted before a model failure
   let failureTurn = null; // the catch keeps the asked turn in the returned history
@@ -4230,7 +4233,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // bell is cleared here, never after a middle round a later round may still fail.
     // Only a real model answer (not the too-many-steps or empty-reply fallback) clears it.
     if (ibModelFailureNoticeLive() && !noReply) {
-      ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: requestStartedAt }).catch(() => {});
+      ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: attemptStartedAt }).catch(() => {});
     }
     if (activeTask) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,

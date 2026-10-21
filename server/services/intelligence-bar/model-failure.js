@@ -203,7 +203,6 @@ async function ringFailureBell({ code, gap, lane }) {
       dedupeOpenOnly: true,
       metadata: { source: 'ib-model-failure', lane: lane === 'tech' ? 'tech' : 'admin', code, ...(gap?.id ? { gapId: gap.id } : {}) },
     });
-    await stampLastFailure(lane);
     return Boolean(result) && !result.suppressed;
   } catch (err) {
     logger.warn(`[intelligence-bar] model failure bell not written (code=${err?.code || err?.name || 'error'})`);
@@ -220,6 +219,10 @@ async function handleModelFailure({ err, activeTask, actorId, lane = 'admin', ha
   const receipts = activeTask ? await readReceipts(activeTask.id, actorId) : [];
   const status = classifyReceipts(receipts);
   const gap = await recordFailureGap(code);
+  // Stamp the open bell first, then ring: a recovery that locks the row after
+  // this stamp skips it; one that locked it first closes it, and this failure
+  // then rings a new bell (dedupe ignores done rows).
+  await stampLastFailure(lane);
   await ringFailureBell({ code, gap, lane });
   laneState(lane).mayBeOpen = true;
   return {
@@ -248,16 +251,21 @@ async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin', an
   state.lastCheckAt = now;
   try {
     const db = require('../../models/db');
-    const rows = await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-      .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
-      // Only a bell whose last failure came before this answer's request began.
-      .modify((q) => { if (answeredSince) q.whereRaw("COALESCE((metadata->>'lastFailureAt')::timestamptz, created_at) < ?", [new Date(answeredSince)]); })
-      .select('id');
-    if (!rows.length) return 0;
     const NotificationService = require('../notification-service');
-    return await NotificationService.markAdminDone(rows.map((r) => r.id), {
-      by: 'ib-model-recovered',
-      resolution: 'The AI model answered again.',
+    // Select and close under the same row locks, so a failure stamp cannot land
+    // between them (stampLastFailure waits for the lock, then finds the row done).
+    return await db.transaction(async (trx) => {
+      const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+        .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
+        // Only a bell whose last failure came before this answer's attempt began.
+        .modify((q) => { if (answeredSince) q.whereRaw("COALESCE((metadata->>'lastFailureAt')::timestamptz, created_at) < ?", [new Date(answeredSince)]); })
+        .forUpdate()
+        .select('id');
+      if (!rows.length) return 0;
+      return NotificationService.markAdminDone(rows.map((r) => r.id), {
+        by: 'ib-model-recovered',
+        resolution: 'The AI model answered again.',
+      }, trx);
     });
   } catch (err) {
     state.mayBeOpen = true;
