@@ -326,8 +326,11 @@ const DIRECT_EDITS_V2 = 5;
 // Lead edits are not grounded to a named customer and lead text can come from
 // the public lead form (a prompt-injection path), so they keep the old cap
 // even with the gate on (Codex #6369 security P2).
-const UNGROUNDED_CAP_TOOLS = new Set(['update_lead_contact', 'update_lead_status']);
-const directCapThreshold = (toolName) => (ibTargetRulesV2Live() && !UNGROUNDED_CAP_TOOLS.has(toolName) ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
+// Only a tool whose target is proven named or on screen (rule 1) gets the
+// five-edit limit; every other direct tool (lead edits, create_customer) keeps
+// the old cap, so text the model read cannot steer more writes (Codex security r6).
+const isGroundedCapTool = (toolName) => CUSTOMER_ID_EDIT_TOOLS.has(toolName) || toolName === 'reschedule_appointment' || toolName === 'assign_technician';
+const directCapThreshold = (toolName) => (ibTargetRulesV2Live() && isGroundedCapTool(toolName) ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
 const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
@@ -448,7 +451,11 @@ const BULK_LIMIT_RESULT_V2 = Object.freeze({
 });
 // The wording follows the threshold that tool is held to: a lead edit keeps the
 // old cap of three even with the gate on (Codex #6369 r3).
-const bulkLimitResult = (toolName) => (directCapThreshold(toolName) === DIRECT_EDITS_V2 + 1 ? BULK_LIMIT_RESULT_V2 : BULK_LIMIT_RESULT);
+// No tool named: the gate-wide wording, as before; a named tool gets its own limit.
+const bulkLimitResult = (toolName) => {
+  const v2 = toolName === undefined ? ibTargetRulesV2Live() : directCapThreshold(toolName) === DIRECT_EDITS_V2 + 1;
+  return v2 ? BULK_LIMIT_RESULT_V2 : BULK_LIMIT_RESULT;
+};
 
 // The proposal-to-receipt step for one direct edit, kept out of the query
 // loop (Codex r2 P2 on runQuery's size). `commit` runs the one commit path;
@@ -528,7 +535,7 @@ You are talking to the owner. Do what they ask.
 // The owner prompt states exactly one direct-edit limit: today's (three or more
 // refused) while GATE_IB_TARGET_RULES_V2 is off, the new one (more than 5) while on.
 const LIMIT_SENTENCE_OFF = 'Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.';
-const LIMIT_SENTENCE_ON = `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card. Lead edits (update_lead_contact, update_lead_status) keep the stricter limit: three or more in one request are refused.`;
+const LIMIT_SENTENCE_ON = `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card. Lead edits (update_lead_contact, update_lead_status) and create_customer keep the stricter limit: three or more in one request are refused.`;
 function ownerDirectPrompt() {
   return ibTargetRulesV2Live() ? OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_OFF, LIMIT_SENTENCE_ON) : OWNER_DIRECT_PROMPT;
 }

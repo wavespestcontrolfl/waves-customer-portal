@@ -510,7 +510,7 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
     expect(limits(full)).toMatchObject({ old: false, v2: true });
     // The only "three or more" left is the lead-edit exception.
     expect(full.match(/three or more/gi)).toEqual(['three or more']);
-    expect(full).toMatch(/Lead edits \(update_lead_contact, update_lead_status\) keep the stricter limit/);
+    expect(full).toMatch(/Lead edits \(update_lead_contact, update_lead_status\) and create_customer keep the stricter limit/);
     expect(full).toMatch(/Up to 5 edits with the same tool/);
     expect(full).toMatch(/for more than 5 records use the bulk tool/);
   });
@@ -546,6 +546,20 @@ describe('preview-dependent batch counts earlier commits (pre-push audit)', () =
       expect([...OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan([call(1), call(2)]))]).toEqual(['reschedule_appointment']);
       const three = new Map([['reschedule_appointment', 3]]);
       expect(OwnerDirect.cappedTools(three, OwnerDirect.messageDirectPlan([call(1), call(2)])).size).toBe(0);
+    } finally {
+      delete process.env.GATE_IB_TARGET_RULES_V2;
+    }
+  });
+});
+
+describe('ungrounded direct tools keep the old cap (Codex security r6)', () => {
+  test('create_customer: the 3rd in one request is refused with the gate on', () => {
+    process.env.GATE_IB_TARGET_RULES_V2 = 'true';
+    try {
+      const committed = new Map([['create_customer', 2]]);
+      const call = { type: 'tool_use', name: 'create_customer', input: { first_name: 'Pat', last_name: 'Tester', phone: '941-555-0100' } };
+      expect(OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan([call])).has('create_customer')).toBe(true);
+      expect(OwnerDirect.cappedTools(new Map([['create_customer', 1]]), OwnerDirect.messageDirectPlan([call])).has('create_customer')).toBe(false);
     } finally {
       delete process.env.GATE_IB_TARGET_RULES_V2;
     }
