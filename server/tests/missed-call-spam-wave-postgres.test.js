@@ -202,6 +202,19 @@ jest.setTimeout(30000);
     }
   });
 
+  test('a block member whose caller later got through does not count (Codex #6379 r6)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row, call('+19415550101', 120), call('+19415550202', 120),
+      call('+19415550202', 90, { answered_by: 'human', status: 'completed', duration_seconds: 140 })]);
+    expect(await isRobodialerWave(row)).toBe(false);
+  });
+
+  test('a plus-prefixed international number with ten digits is not North American (Codex #6379 r6)', async () => {
+    const row = call('+4922123456', 10);
+    await database('call_log').insert([row, call('+4922123457', 60), call('+4922123458', 60)]);
+    expect(await isRobodialerWave(row)).toBe(false);
+  });
+
   test('block calls older than 14 days do not count', async () => {
     const row = call('+19415550303', 10);
     await database('call_log').insert([row, call('+19415550101', 60 * 24 * 15), call('+19415550202', 60 * 24 * 16)]);

@@ -75,7 +75,8 @@ const WAVE_DAYS = 14;
 // The canonical known-caller slots (secondary_phone included; Codex #6379 r1).
 const { KNOWN_CALLER_PHONE_COLS: CUSTOMER_PHONE_COLS } = require('../utils/known-caller-phone');
 // North American numbers only: a 10-digit block means nothing across countries.
-const NANP_DIGITS_SQL = (column) => `regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') ~ '^1{0,1}[2-9][0-9]{9}$'`; // {0,1}, never ?: knex reads ? as a binding
+// A '+'-prefixed value must be +1 (Codex #6379 r6: '+4922123456' has ten digits too).
+const NANP_DIGITS_SQL = (column) => `(CASE WHEN LEFT(BTRIM(COALESCE(${column}, '')), 1) = '+' THEN regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') ~ '^1[2-9][0-9]{9}$' ELSE regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') ~ '^1{0,1}[2-9][0-9]{9}$' END)`; // {0,1}, never ?: knex reads ? as a binding
 const LAST10_SQL = (column) => `right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
 
 // The last 10 digits of every Google Business Profile tracking line.
@@ -91,7 +92,8 @@ async function isRobodialerWave(row) {
   if (line?.type !== 'gbp_tracking') return false;
   // North American callers only (Codex #6379 r1): +44 9415550303 is not in the 941-555 block.
   const raw = String(row.from_phone || '').replace(/\D/g, '');
-  if (!/^1?[2-9]\d{9}$/.test(raw)) return false;
+  const plus = String(row.from_phone || '').trim().startsWith('+');
+  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
   const digits = raw.slice(-10);
   const at = new Date(row.created_at || Date.now());
   const found = await db('call_log')
@@ -115,6 +117,9 @@ async function isRobodialerWave(row) {
     // outcome may have been handled by the flow, so it is no wave member.
     .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
     .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
+    // A member whose caller later got through is a real caller (Codex #6379 r6):
+    // the bell's own answered-proof called-back check, per historical row.
+    .whereRaw(calledBackSql({ retire: true }))
     // An unlinked call from a number on any customer phone slot is no robodialer.
     // Full-country keys (Codex #6379 r3): +44 9415550303 on a slot is not +1 941-555-0303.
     .whereRaw(`NOT EXISTS (SELECT 1 FROM customers cu WHERE cu.deleted_at IS NULL AND ${phoneKeySql('call_log.from_phone')} IN (${CUSTOMER_PHONE_COLS.map((c) => phoneKeySql(`cu.${c}`)).join(', ')}))`)
