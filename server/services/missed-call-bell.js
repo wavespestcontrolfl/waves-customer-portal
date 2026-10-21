@@ -15,6 +15,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
 const { whereNotBlockedCall, phoneKeySql } = require('../middleware/spam-block');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -59,6 +60,42 @@ function unknownCallerAllowed(row, opts) {
     if (nomo?.status === 'successful' && Number(nomo.result?.score) === 1) return false;
   } catch (_e) { /* fail open — an unparseable envelope is not a spam verdict */ }
   return true;
+}
+
+// A robodialer wave (owner 2026-10-20 "yes", after the call audit): from
+// 2026-09-30, 18 different 941-236-xxxx numbers called only the Google Business
+// Profile lines, each hanging up near 24 s with no voicemail, and rang 11
+// missed-call bells. A wave = an unknown caller on a GBP tracking line, under
+// WAVE_MAX_SECONDS, whose 6-digit number block (area code + exchange) sent
+// WAVE_MIN_NUMBERS or more different unknown numbers in WAVE_DAYS. A number
+// on any customer phone slot is never a wave. Customers on file never reach this.
+const WAVE_MAX_SECONDS = 30;
+const WAVE_MIN_NUMBERS = 3;
+const WAVE_DAYS = 14;
+const LAST10_SQL = (column) => `right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
+
+async function isRobodialerWave(row) {
+  if (!row || row.customer_id) return false;
+  if (!(Number(row.duration_seconds) < WAVE_MAX_SECONDS)) return false;
+  const line = require('../config/twilio-numbers').findByNumber(row.to_phone);
+  if (line?.type !== 'gbp_tracking') return false;
+  const digits = String(row.from_phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length !== 10) return false;
+  const at = new Date(row.created_at || Date.now());
+  const found = await db('call_log')
+    .modify((qb) => whereNotSandboxCall(qb))
+    .where('direction', 'inbound')
+    .whereNull('customer_id')
+    .where('created_at', '>=', new Date(at.getTime() - WAVE_DAYS * 86400 * 1000))
+    .where('created_at', '<=', at)
+    .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
+    .countDistinct({ n: db.raw(LAST10_SQL('from_phone')) })
+    .first();
+  if (Number(found?.n || 0) < WAVE_MIN_NUMBERS) return false;
+  const customer = await db('customers')
+    .whereRaw(`? IN (${['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'].map(LAST10_SQL).join(', ')})`, [digits])
+    .first('id');
+  return !customer;
 }
 
 // What the recording processor writes when a recording holds no speech: the
@@ -140,6 +177,20 @@ function leaseStale(token, now = Date.now()) {
   return !Number.isFinite(t) || now - t > LEASE_MS;
 }
 
+// A wave call settles without a bell when GATE_MISSED_CALL_SPAM_WAVE is on
+// (true = settled). With it off the call rings as before, stamped so the
+// shadow can be read. `fenced` is the caller's lease-fenced update.
+async function settleRobodialerWave(row, fenced) {
+  if (!(await isRobodialerWave(row))) return false;
+  const { isEnabled } = require('../config/feature-gates');
+  if (isEnabled('missedCallSpamWave')) {
+    await fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_settled_at', ?::text, 'missed_call_spam_wave', true)", [new Date().toISOString()]) });
+    return true;
+  }
+  await fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_spam_wave_shadow', true)") }).catch(() => {});
+  return false;
+}
+
 async function ringMissedCallIfUnanswered(callSid) {
   if (!callSid) return false;
   try {
@@ -180,6 +231,7 @@ async function ringMissedCallIfUnanswered(callSid) {
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
       if (prior) { await settle(); return false; }
     }
+    if (await settleRobodialerWave(row, fenced)) return false;
     const customer = row.customer_id
       ? await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone')
       : null;
@@ -343,6 +395,7 @@ module.exports = {
   missedCallShapeEligible,
   isEmptyVoicemailRecording,
   ringMissedCallIfUnanswered,
+  isRobodialerWave,
   sweepMissedCalls,
   outcomeUnanswered,
   UNKNOWN_CALLER_MIN_SECONDS,

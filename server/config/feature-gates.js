@@ -1977,6 +1977,11 @@ const gates = {
   // hung up at the voicemail greeting). Bell only — no customer comms. Ships
   // dark; the bell stays customers-only until the owner flips it.
   missedCallUnknownCallers: process.env.GATE_MISSED_CALL_UNKNOWN_CALLERS === 'true',
+  // Silence the unknown-caller missed-call bell for a robodialer wave (owner
+  // 2026-10-20 "yes"): a Google Business Profile line, under 30 s, no voicemail,
+  // and 3+ unknown numbers from the same 6-digit block in 14 days. Off = shadow:
+  // the call still rings and is stamped missed_call_spam_wave_shadow. Bell only.
+  missedCallSpamWave: process.env.GATE_MISSED_CALL_SPAM_WAVE === 'true',
   // Admin bell when one number places 3+ inbound calls inside 3 hours
   // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
   repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
