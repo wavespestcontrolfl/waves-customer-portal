@@ -79,7 +79,7 @@ function RainBar({ rain, glass }) {
   const summary = days.map((d) => `${dayName(d.date)} ${d.inches == null ? 'no reading' : `${inches(d.inches)} inch`}${d.isVisit ? ', day of your visit' : ''}`).join('; ');
   return (
     <Card glass={glass} aria-label="Rain at your home">
-      <h2 style={{ ...label, textTransform: 'none', letterSpacing: 0, fontSize: 17 }}>{afterVisit ? 'Rain since your visit' : 'Rain around your visit'}</h2>
+      <h2 style={{ ...label, textTransform: 'none', letterSpacing: 0, fontSize: 17 }}>{afterVisit ? 'Rain after your visit' : 'Rain around your visit'}</h2>
       <p style={{ fontSize: 14, color: MUTED, margin: '2px 0 0' }}>{`Measured at your home, ${dayDate(first)} to ${dayDate(last)}.`}</p>
       <div role="img" aria-label={summary} style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 118, marginTop: 8 }}>
         {days.map((d) => (
@@ -91,7 +91,7 @@ function RainBar({ rain, glass }) {
           </div>
         ))}
       </div>
-      {since != null ? <p style={body}>{since > 0 ? `Since your visit: ${inches(since)} in of rain.` : 'Since your visit: no measurable rain.'}</p> : null}
+      {since != null ? <p style={body}>{since > 0 ? `In the 3 days after your visit: ${inches(since)} in of rain.` : 'In the 3 days after your visit: no measurable rain.'}</p> : null}
       <p style={{ fontSize: 14, lineHeight: 1.45, color: MUTED, margin: '6px 0 0', fontStyle: 'italic' }}>Based on NOAA radar and rain-gauge data — local totals may vary.</p>
     </Card>
   );

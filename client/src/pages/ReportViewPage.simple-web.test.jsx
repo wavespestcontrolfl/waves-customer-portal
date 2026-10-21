@@ -256,11 +256,11 @@ describe('the first screen of the simple web report', () => {
     renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
     await screen.findByText(/This report is provided for your records/);
     const rain = screen.getByLabelText('Rain at your home');
-    expect(rain.textContent).toMatch(/Rain since your visit/);
+    expect(rain.textContent).toMatch(/Rain after your visit/);
     expect(rain.textContent).toMatch(/Measured at your home, Oct 9 to Oct 11\./);
     expect(rain.textContent).toMatch(/Visit/);
     expect(within(rain).getByRole('img').getAttribute('aria-label')).toMatch(/Sat 0.2 inch, day of your visit.*Mon no reading/);
-    expect(rain.textContent).not.toMatch(/Since your visit:/);
+    expect(rain.textContent).not.toMatch(/In the 3 days after your visit:/);
   });
 
   it('a total since the visit prints when every later day is measured', async () => {
@@ -268,7 +268,7 @@ describe('the first screen of the simple web report', () => {
     t.rain = { days: t.rain.days.slice(0, 3), sinceVisitInches: 0.5 };
     renderReport(payload({ simpleWebReport: true, webTop: t }));
     await screen.findByText(/This report is provided for your records/);
-    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/Since your visit: 0.5 in of rain\./);
+    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/In the 3 days after your visit: 0\.5 in of rain\./);
   });
 
   it('a first visit has no strip; a pest card has no score', async () => {
