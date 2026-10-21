@@ -45,6 +45,8 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
+  // the canonical lawn assessment the tile's evidence stamp re-resolves (tests set what it returns)
+  loadLinkedLawnAssessment: jest.fn(async () => null),
   stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
   stripLiveOnlyReportProductCopy: jest.requireActual('../services/service-report/report-data').stripLiveOnlyReportProductCopy,
 }));
@@ -714,87 +716,112 @@ describe('the finding tile tap rechecks its gates', () => {
     expect(writes).toEqual([]);
   });
 
-  test('the finding changes between the preflight and the write: the in-transaction recheck refuses with 409 and no request or estimate', async () => {
-    jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
-    const txWrites = [];
-    const txTouched = [];
-    const makeTrx = () => {
-      const trx = (table) => {
-        txTouched.push(table);
+  // The atomic revision check: the preflight rebuilds and stamps the evidence (service record identity + the canonical
+  // lawn assessment); the write transaction re-reads the same evidence under row locks, never rebuilding.
+  describe('atomic revision check in the write transaction', () => {
+    const { loadLinkedLawnAssessment } = require('../services/service-report/report-data');
+    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
+    let state;
+    let tx;
+
+    beforeEach(() => {
+      jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
+      state = {
+        rec: { id: 'service-1', customer_id: 'customer-1', report_template_version: 'service_report_v1', structured_notes: null, is_callback: false, service_line: 'lawn', service_type: 'Lawn Care', first_name: 'Pat', last_name: 'Tester' },
+        canonical: 'a1',
+        assessments: { a1: { id: 'a1', turf_density: 80, updated_at: '2026-10-20T10:00:00Z' }, a2: { id: 'a2', turf_density: 70, updated_at: '2026-10-21T10:00:00Z' } },
+        onCustomerLock: () => {},
+      };
+      tx = { writes: [], touched: [], locks: [] };
+      loadLinkedLawnAssessment.mockImplementation(async () => (state.canonical ? { id: state.canonical } : null));
+      // the pool (preflight) reads the same state
+      db.mockImplementation((table) => {
         const q = {
-          where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
-          first: async () => (table === 'customers' || table === 'service_records' ? { id: 'x' } : undefined),
-          update: async () => { txWrites.push(`update:${table}`); return 1; },
-          insert: (row) => { txWrites.push(`insert:${table}`); return { returning: async () => [{ id: 'req-1', ...row }] }; },
+          where() { return q; }, leftJoin() { return q; }, select() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
+          first: async () => (table === 'lawn_assessments' ? state.assessments[state.canonical] : state.rec),
+          then: undefined,
         };
+        if (table === 'service_products') return { where: async () => [] };
+        if (table === 'activity_log') return { insert: async () => 1 };
         return q;
+      });
+      db.transaction = async (callback) => {
+        const trx = (table) => {
+          tx.touched.push(table);
+          const q = {
+            where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; },
+            forUpdate() { tx.locks.push(table); return q; },
+            first: async () => {
+              if (table === 'customers') { state.onCustomerLock(); return { id: 'customer-1' }; }
+              if (table === 'service_records') return state.rec;
+              if (table === 'lawn_assessments') return state.assessments[state.canonical];
+              return undefined;
+            },
+            update: async () => { tx.writes.push(`update:${table}`); return 1; },
+            insert: (row) => { tx.writes.push(`insert:${table}`); return { returning: async () => [{ id: 'req-1', ...row }] }; },
+          };
+          return q;
+        };
+        trx.raw = async () => {};
+        return callback(trx);
       };
-      trx.raw = async () => {};
-      return trx;
-    };
-    db.transaction = async (callback) => callback(makeTrx());
-    // first build (the preflight) shows the weeds insight; the next (inside the transaction) no longer does
-    let builds = 0;
-    buildReportV1Data.mockImplementation(async () => {
-      builds += 1;
-      return { serviceLine: 'lawn', reportV2: { insights: builds === 1 ? [insight('weeds')] : [insight('weeds', 'healthy')] }, pdfUrl: '/x', applications: [] };
     });
-    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
-    await withServer(async (baseUrl) => {
+
+    const attempt = (expected) => withServer(async (baseUrl) => {
       const res = await tap(baseUrl, matching);
-      expect(res.status).toBe(409);
-      expect((await res.json()).error).toMatch(/no longer available/);
+      expect(res.status).toBe(expected);
+      if (expected === 409) expect((await res.json()).error).toMatch(/no longer available/);
     });
-    expect(builds).toBe(2); // preflight + the recheck under the lock
-    expect(txTouched).toContain('customers'); // it did reach the write transaction
-    expect(txTouched).not.toContain('service_records'); // no self-held lock the rebuild could wait on
-    expect(txWrites).toEqual([]); // no service request, no event, no estimate
-    expect(txTouched).not.toContain('service_requests');
-    expect(txTouched).not.toContain('estimates');
-  });
-
-  test('the actions gate turns off between the preflight and the write: the in-transaction recheck refuses with 409', async () => {
-    jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
-    const txWrites = [];
-    const trx = (table) => {
-      const q = {
-        where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
-        first: async () => {
-          // The variable flips once the write transaction has the customer lock.
-          if (table === 'customers') gates.reportWebActionsLive.mockReturnValue(false);
-          return table === 'customers' || table === 'service_records' ? { id: 'x' } : undefined;
-        },
-        update: async () => { txWrites.push(`update:${table}`); return 1; },
-        insert: (row) => { txWrites.push(`insert:${table}`); return { returning: async () => [{ id: 'req-1', ...row }] }; },
-      };
-      return q;
+    const noWrites = () => {
+      expect(tx.writes).toEqual([]); // no service request, no event, no estimate
+      expect(tx.touched).not.toContain('service_requests');
+      expect(tx.touched).not.toContain('estimates');
     };
-    trx.raw = async () => {};
-    db.transaction = async (callback) => callback(trx);
-    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
-    await withServer(async (baseUrl) => {
-      expect((await tap(baseUrl, matching)).status).toBe(409);
+
+    test('unchanged evidence: the write goes ahead, with the service row then the assessment row locked, and no rebuild in the transaction', async () => {
+      buildReportV1Data.mockClear();
+      await attempt(200);
+      expect(tx.writes).toContain('insert:service_requests');
+      expect(tx.locks).toEqual(['customers', 'service_records', 'lawn_assessments']); // lock order: customer, service record, assessment
+      expect(buildReportV1Data).toHaveBeenCalledTimes(1); // the preflight only
     });
-    expect(txWrites).toEqual([]);
-  });
 
-  test('the finding still stands at the recheck: the write goes ahead (control for the refusal above)', async () => {
-    jest.doMock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => {}) }));
-    const txWrites = [];
-    const trx = (table) => {
-      const q = {
-        where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, orderBy() { return q; }, forUpdate() { return q; },
-        first: async () => (table === 'customers' || table === 'service_records' ? { id: 'x' } : undefined),
-        update: async () => 1,
-        insert: (row) => { txWrites.push(table); return { returning: async () => [{ id: 'req-1', ...row }] }; },
-      };
-      return q;
-    };
-    trx.raw = async () => {};
-    db.transaction = async (callback) => callback(trx);
-    const matching = { ...TILE_META, optionId: 'lawn-enhanced', perApplication: 61.5, fingerprint: 'fp-1' };
-    await withServer(async (baseUrl) => { await tap(baseUrl, matching); });
-    expect(txWrites).toContain('service_requests');
+    test('the assessment row changed (updated_at bumped) between the preflight and the write: 409, no writes', async () => {
+      state.onCustomerLock = () => { state.assessments.a1 = { ...state.assessments.a1, updated_at: '2026-10-21T12:00:00Z' }; };
+      await attempt(409);
+      expect(tx.touched).toContain('customers'); // it did reach the transaction
+      noWrites();
+    });
+
+    test('a redo made a new canonical assessment (re-resolved inside the transaction): 409, no writes', async () => {
+      state.onCustomerLock = () => { state.canonical = 'a2'; };
+      await attempt(409);
+      noWrites();
+    });
+
+    test('the assessment vanished: 409, no writes', async () => {
+      state.onCustomerLock = () => { state.canonical = null; };
+      await attempt(409);
+      noWrites();
+    });
+
+    test('the visit became a callback inside the transaction: 409, no writes', async () => {
+      state.onCustomerLock = () => { state.rec = { ...state.rec, is_callback: true }; };
+      await attempt(409);
+      noWrites();
+    });
+
+    test('the report went internal-only inside the transaction: 409, no writes', async () => {
+      state.onCustomerLock = () => { state.rec = { ...state.rec, structured_notes: { typedReportDelivery: 'shadow' } }; };
+      await attempt(409);
+      noWrites();
+    });
+
+    test('the actions gate turns off inside the transaction: 409, no writes', async () => {
+      state.onCustomerLock = () => { gates.reportWebActionsLive.mockReturnValue(false); };
+      await attempt(409);
+      noWrites();
+    });
   });
 
   test('a tap whose kind or service the table does not pair is refused even while the finding stands', async () => {

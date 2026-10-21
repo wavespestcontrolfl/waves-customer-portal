@@ -119,6 +119,62 @@ function webTileTapAllowed(metadata, gates) {
   return webActionsLive(gates) === true && gates.isEnabled('reportClickToEstimate') === true;
 }
 
+// ── Atomic revision check for the tile's tap ───────────────────────────────────────────────────────────────────
+// The tap re-derives the finding by rebuilding the report, which runs on the pool and may write rows itself, so the
+// rebuild cannot run inside the write transaction. Instead the preflight stamps the EVIDENCE the decision rests on
+// (right after the rebuild, so its own snapshot writes are done) and the write transaction re-reads the same evidence
+// under row locks and refuses unless every part of the stamp is unchanged. The evidence is the service record's
+// suppression and callback identity, and the canonical assessment the insight cards derive from (lawn_assessments on
+// a lawn report, tree_shrub_assessments on a tree & shrub report), re-resolved each time so a redo that inserts a new
+// canonical assessment changes the stamp. Rows are hashed whole, which needs no updated_at to be trustworthy.
+const ASSESSMENT_TABLE_BY_LINE = { lawn: 'lawn_assessments', tree_shrub: 'tree_shrub_assessments' };
+
+function stampOf(value) {
+  return require('crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
+}
+
+function typedDeliveryOf(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  return notes && typeof notes === 'object' ? notes.typedReportDelivery || null : null;
+}
+
+async function loadCanonicalAssessment(service, line, knex) {
+  if (line === 'lawn') return require('./report-data').loadLinkedLawnAssessment(service, knex, { failClosed: true });
+  return require('../tree-shrub-assessment').loadLinkedTreeShrubAssessment(service, knex, { strict: true });
+}
+
+// Reads the evidence with `knex` (the pool for the preflight, the write transaction for the recheck). lock:true takes
+// SELECT ... FOR UPDATE on the service record row and then on the canonical assessment row, in that order. Returns
+// { stamp, callback, internalOnly } or null when the record is gone. A failed read throws (the caller refuses).
+async function tileEvidence(service, line, knex, { lock = false } = {}) {
+  const table = ASSESSMENT_TABLE_BY_LINE[line];
+  if (!table) return null;
+  const locked = (query) => (lock ? query.forUpdate() : query);
+  const row = await locked(knex('service_records').where({ id: service.id }))
+    .first('id', 'is_callback', 'structured_notes', 'report_template_version', 'service_line', 'service_type');
+  if (!row) return null;
+  const delivery = typedDeliveryOf(row.structured_notes);
+  const assessment = await loadCanonicalAssessment(service, line, knex);
+  let assessmentStamp = 'none';
+  if (assessment) {
+    const full = await locked(knex(table).where({ id: assessment.id })).first();
+    assessmentStamp = full ? `${assessment.id}:${stampOf(full)}` : 'gone';
+  }
+  return {
+    callback: row.is_callback === true,
+    internalOnly: Boolean(delivery) && delivery !== 'auto_send',
+    stamp: stampOf([row.id, row.report_template_version, row.service_line, row.service_type, row.is_callback === true, delivery, line, assessmentStamp]),
+  };
+}
+
+// True only when the evidence is unchanged since the preflight and the visit is still neither a callback nor internal-only.
+function tileEvidenceUnchanged(before, after) {
+  return Boolean(before && after) && before.stamp === after.stamp && !after.callback && !after.internalOnly;
+}
+
 // Photo ID handler type for the report's service line.
 function photoTypeForLine(serviceLine) {
   if (serviceLine === 'lawn') return 'lawn';
@@ -222,6 +278,8 @@ module.exports = {
   photoTypeForLine,
   photoSubjectForLine,
   visitIsAtPrimaryHome,
+  tileEvidence,
+  tileEvidenceUnchanged,
   photoAnswer,
   STRUCTURED_FINDING_TABLE,
   OUTCOME_COPY,

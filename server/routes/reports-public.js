@@ -1444,34 +1444,39 @@ function loadReportServiceRow(token) {
 }
 
 // Re-derives the web tile's structured decision from a fresh build of the CURRENT report (PDF mode, as /data builds a
-// simple web view). true = the same kind of finding still stands for the same service; false = it does not (or the
-// report is a callback or internal-only now); null = no such service_report_v1 record (the caller's own 404 applies).
+// simple web view). { stands: true, service, line } = the same kind of finding still stands for the same service;
+// { stands: false } = it does not (or the report is a callback or internal-only now); null = no such service_report_v1
+// record (the caller's own 404 applies).
 // The build asks for none of the /data render's live-only opt-ins (offers, plan card, lawn lighting, ...): the table's
 // categories do not depend on them, and each of those stays opted into by the render alone.
 async function webTileStillStands(token, metadata) {
   const service = await loadReportServiceRow(token);
   if (!service || service.report_template_version !== 'service_report_v1') return null;
   const current = await buildServiceReportV1ResponseData(service, token, { mode: 'pdf', staffViewer: false });
-  return !current.internalOnly && current.isCallback !== true
-    && require('../services/service-report/web-actions').findingKinds(current)
-      .some((row) => row.kind === metadata.kind && row.family === metadata.serviceKey);
+  const match = current.internalOnly || current.isCallback === true ? null
+    : require('../services/service-report/web-actions').findingKinds(current)
+      .find((row) => row.kind === metadata.kind && row.family === metadata.serviceKey);
+  return { stands: Boolean(match), service, line: match?.line || null };
 }
 
 // The web tile's tap re-checks, INSIDE the write transaction and under the service row's lock, that the finding still
 // stands (webTileTapGate's preflight is only the cheap early refusal). A stale tab then creates no request and no
 // estimate; the drift error maps to the same 409 as a stale offer. Other taps get no options.
-function webTileWriteOptions(service, token, metadata) {
-  if (metadata.source !== require('../services/service-report/web-actions').WEB_TILE_SOURCE) return {};
+function webTileWriteOptions(req, metadata) {
+  const webActions = require('../services/service-report/web-actions');
+  if (metadata.source !== webActions.WEB_TILE_SOURCE) return {};
   return {
+    // The atomic revision check. No rebuild runs in the transaction (it runs on the pool and may write rows itself): the
+    // gates are re-read live, then the evidence the preflight stamped is re-read under SELECT ... FOR UPDATE (the
+    // service record row, then the canonical assessment row, re-resolved here) and must be unchanged and still not a
+    // callback or internal-only.
     revalidate: async (trx) => {
-      // Gates and the finding are re-read at the commit boundary: a flip or a changed report after the preflight refuses
-      // the write. No service-record lock is taken here: the rebuild runs on the pool and may write that row itself
-      // (frozen weather snapshots), so holding its lock in this transaction would deadlock the tap.
-      const webActions = require('../services/service-report/web-actions');
-      if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))
-        || (await webTileStillStands(token, metadata)) !== true) {
-        throw Object.assign(new Error('web tile no longer stands'), { clickEstimateDrift: true });
-      }
+      const before = req.webTileEvidence;
+      const line = req.webTileLine;
+      const refuse = () => Object.assign(new Error('web tile no longer stands'), { clickEstimateDrift: true });
+      if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates')) || !before || !req.webTileService) throw refuse();
+      const after = await webActions.tileEvidence(req.webTileService, line, trx, { lock: true });
+      if (!webActions.tileEvidenceUnchanged(before, after)) throw refuse();
     },
   };
 }
@@ -1504,7 +1509,17 @@ async function webTileTapGate(req, res, next) {
       return res.status(503).json({ error: 'Could not record the request — please try again' });
     }
     if (stands === null) return next();
-    return stands ? next() : stale();
+    if (!stands.stands) return stale();
+    // Stamp the evidence AFTER the rebuild (its own snapshot writes are done): the write transaction compares against this.
+    try {
+      req.webTileService = stands.service;
+      req.webTileLine = stands.line;
+      req.webTileEvidence = await webActions.tileEvidence(stands.service, stands.line, db);
+    } catch (err) {
+      logger.warn(`[reports-public] tile tap evidence read failed: ${err.message}`);
+      return res.status(503).json({ error: 'Could not record the request — please try again' });
+    }
+    return req.webTileEvidence ? next() : stale();
   } catch (err) { return next(err); }
 }
 
@@ -1717,7 +1732,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, webTil
             subject: requestSubject,
             description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
             revisionSnapshot,
-            ...webTileWriteOptions(service, req.params.token, metadata),
+            ...webTileWriteOptions(req, metadata),
             onWrite: async (trx) => {
               const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata, trx);
               if (!recorded) throw new Error('event insert failed');

@@ -29,7 +29,7 @@
         "USE /api/reports (reportPhotoCheckPreGuard#40c6f997)",
         "USE /api/ops/digest (inline function#4a372dfc)",
         "USE /api/pay/statement (inline function#cf970c43)",
-        "USE /api/reports (reportSharePhotoPreGuard#4b01ef88)",
+        "USE /api/reports (reportSharePhotoPreGuard#60791c0f)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/appointment (inline function#e6220f30)",
         "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
@@ -651,7 +651,7 @@
         "POST /api/reports/:token/photo-check",
         "POST /api/reports/:token/referral-link",
         "POST /api/reports/project/:token/ask",
-        "USE /api/reports (reportSharePhotoPreGuard#4b01ef88)"
+        "USE /api/reports (reportSharePhotoPreGuard#60791c0f)"
       ]
     },
     {
