@@ -1,11 +1,11 @@
 {
-  "_note": "PROPOSED targets for the web service report line 'Month N of 12 in your lawn program' (GATE_REPORT_WEB_PROGRAM). No approved per-month target table existed in the repo (lawn-protocol-v13.json and lawn-expectations hold products and timing, not score targets), so these are conservative placeholders for the owner to approve or change. byMonth[0] is program month 1, counted from the first lawn assessment at this property (property-scoped history, reset by a move); byMonth[11] is month 12 and also the bar for every later year. A score is on track from the target up to the target plus the band, ahead from the target plus the band, behind below the target minus the band. band is 8 points, the same per-category band lawn-progress.js and lawn-since-last use. Scores are the 0-100 category scores the report already prints: coverage = turfDensity, color = colorHealth, weeds = weedSuppression.",
+  "_note": "PROPOSED targets for the web service report line 'Month N of 12 in your lawn program' (GATE_REPORT_WEB_PROGRAM). No approved per-month target table existed in the repo (lawn-protocol-v13.json and lawn-expectations hold products and timing, not score targets), so these are conservative placeholders for the owner to approve or change. byMonth[0] is program month 1, counted from the first lawn assessment at this property (property-scoped history, reset by a move); byMonth[11] is month 12 and also the bar for every later year. A score is on track from the target up to the target plus the band, ahead from the target plus the band, behind below the target minus the band. band is 8 points, the same per-category band lawn-progress.js and lawn-since-last use. A category gets no verdict (it is left out) when the assessment's photo confidence is below moderate or unknown, or when the two vision models disagreed on that category (divergenceMetric, the lawn-progress.js 'unclear' rule). Scores are the 0-100 category scores the report already prints: coverage = turfDensity, color = colorHealth, weeds = weedSuppression.",
   "approvedByOwner": false,
   "band": 8,
   "categories": {
-    "coverage": { "label": "Coverage", "verb": "is", "scoreKey": "turfDensity", "byMonth": [50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72] },
-    "color": { "label": "Color", "verb": "is", "scoreKey": "colorHealth", "byMonth": [55, 57, 59, 61, 63, 65, 67, 69, 70, 71, 72, 73] },
-    "weeds": { "label": "Weeds", "verb": "are", "scoreKey": "weedSuppression", "byMonth": [50, 53, 56, 59, 62, 65, 68, 70, 72, 74, 75, 76] }
+    "coverage": { "label": "Coverage", "verb": "is", "scoreKey": "turfDensity", "divergenceMetric": "turf_density", "byMonth": [50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72] },
+    "color": { "label": "Color", "verb": "is", "scoreKey": "colorHealth", "divergenceMetric": "color_health", "byMonth": [55, 57, 59, 61, 63, 65, 67, 69, 70, 71, 72, 73] },
+    "weeds": { "label": "Weeds", "verb": "are", "scoreKey": "weedSuppression", "divergenceMetric": "weed_suppression", "byMonth": [50, 53, 56, 59, 62, 65, 68, 70, 72, 74, 75, 76] }
   },
   "coolSeasonMonths": [11, 12, 1, 2],
   "sentences": {

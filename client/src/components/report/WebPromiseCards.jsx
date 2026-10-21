@@ -61,10 +61,15 @@ export function ReportProgramCard({ promise, glass = false }) {
   );
 }
 
+// Live-only, like the floating Ask Waves bar and the action bar: the PDF has neither card, so a customer pressing
+// Print on the live view must not get them on paper either.
+const PRINT_SHEET = '@media print { .web-live-only { display: none !important; } }';
+
 export default function WebPromiseCards({ data, glass = false }) {
   if (!data || (!data.liveChip && !data.programPromise)) return null;
   return (
-    <div className="sr-shell" style={{ maxWidth: 760, margin: '0 auto', padding: '0 16px' }}>
+    <div className="sr-shell web-live-only" data-live-only="true" style={{ maxWidth: 760, margin: '0 auto', padding: '0 16px' }}>
+      <style>{PRINT_SHEET}</style>
       <ReportLiveChip chip={data.liveChip} glass={glass} />
       <ReportProgramCard promise={data.programPromise} glass={glass} />
     </div>

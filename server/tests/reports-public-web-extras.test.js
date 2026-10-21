@@ -1,6 +1,6 @@
 /**
- * GATE_REPORT_WEB_PROGRAM and GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20) on the report /data payload: each adds its own
- * key to a live simple-web lawn payload only (own file: the report limiter allows 20 requests a minute per client).
+ * GATE_REPORT_WEB_PROGRAM (owner 2026-10-20) on the report /data payload: adds programPromise to a live simple-web lawn
+ * payload only (own file: the report limiter allows 20 requests a minute per client).
  */
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -67,7 +67,6 @@ const express = require('express');
 const db = require('../models/db');
 const gates = require('../config/feature-gates');
 const { buildReportV1Data } = require('../services/service-report/report-data');
-const { resolveLiveChip } = require('../services/service-report/lawn-live-chip');
 const { historyForAssessment } = require('../services/lawn-assessment-history');
 const reportsRouter = require('../routes/reports-public');
 
@@ -108,6 +107,9 @@ async function withServer(fn) {
 
 const VALID_TOKEN = '0123456789abcdef0123456789abcdef';
 
+let photoRows = [{ quality_score: 90 }, { quality_score: 85 }];
+let assessmentRow = { id: 'assess-1', customer_id: 'customer-1' };
+
 function mockDb(overrides = {}) {
   const fullRecord = {
     id: 'service-1',
@@ -130,7 +132,8 @@ function mockDb(overrides = {}) {
       where: jest.fn().mockResolvedValue([]),
     });
     if (table === 'activity_log') return chain();
-    if (table === 'lawn_assessments') return chain({ first: jest.fn().mockResolvedValue({ id: 'assess-1', customer_id: 'customer-1' }) });
+    if (table === 'lawn_assessment_photos') return chain({ where: jest.fn().mockResolvedValue(photoRows) });
+    if (table === 'lawn_assessments') return chain({ first: jest.fn().mockResolvedValue(assessmentRow) });
     throw new Error(`Unexpected table query: ${table}`);
   });
   return { serviceRead };
@@ -171,6 +174,8 @@ describe('GET /reports/:token/data program line (GATE_REPORT_WEB_PROGRAM)', () =
   const planKey = { service_data: { completedServiceKey: 'lawn_care_recurring' } };
   beforeEach(() => {
     jest.clearAllMocks();
+    photoRows = [{ quality_score: 90 }, { quality_score: 85 }];
+    assessmentRow = { id: 'assess-1', customer_id: 'customer-1' };
     gates.reportSimpleWebLive.mockReturnValue(true);
     gates.reportGlassWebLive.mockReturnValue(false);
     gates.reportWebProgramLive.mockReturnValue(true);
@@ -236,6 +241,27 @@ describe('GET /reports/:token/data program line (GATE_REPORT_WEB_PROGRAM)', () =
     });
   });
 
+  test('low or insufficient photo confidence withholds the whole card (the progress engine\'s unclear rule)', async () => {
+    for (const photos of [[{ quality_score: 90 }], [], [{ quality_score: 10 }, { quality_score: 5 }]]) {
+      photoRows = photos;
+      mockDb(planKey);
+      await withServer(async (baseUrl) => {
+        const { status, body } = await getData(baseUrl);
+        expect(status).toBe(200);
+        expect('programPromise' in body).toBe(false);
+      });
+    }
+  });
+
+  test('a category the two vision models disagreed on is left out; the others stay', async () => {
+    assessmentRow = { id: 'assess-1', customer_id: 'customer-1', divergence_flags: JSON.stringify([{ metric: 'weed_suppression' }]) };
+    mockDb(planKey);
+    await withServer(async (baseUrl) => {
+      const { body } = await getData(baseUrl);
+      expect(body.programPromise.items.map((i) => i.key)).toEqual(['coverage', 'color']);
+    });
+  });
+
   test('no verified property history (no property, no current row, empty rows, a failed read): no line', async () => {
     for (const bad of [
       { scope: { propertyId: null }, rows: [{ visit_date: '2026-07-10' }], current: { visit_date: '2026-10-20' } },
@@ -270,69 +296,6 @@ describe('GET /reports/:token/data program line (GATE_REPORT_WEB_PROGRAM)', () =
     await withServer(async (baseUrl) => {
       const { body } = await getData(baseUrl);
       expect('programPromise' in body).toBe(false);
-    });
-  });
-});
-
-describe('GET /reports/:token/data live chip (GATE_REPORT_WEB_LIVE_CHIP)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    gates.reportSimpleWebLive.mockReturnValue(true);
-    gates.reportGlassWebLive.mockReturnValue(false);
-    gates.reportWebProgramLive.mockReturnValue(false);
-    gates.reportWebLiveChipLive.mockReturnValue(true);
-    buildReportV1Data.mockImplementation(async (_s, _t, _k, opts) => {
-      if (opts.liveChipOut) Object.assign(opts.liveChipOut, { completedAt: '2026-10-20T14:00:00Z', latitude: 27.1, longitude: -82.4, products: [], instruction: null });
-      return lawnPayload();
-    });
-    resolveLiveChip.mockResolvedValue({ state: 'no_rain', text: 'No rain since your treatment.' });
-  });
-
-  test('gate on: the payload carries the sentence and a state, never coordinates', async () => {
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const { body } = await getData(baseUrl);
-      expect(body.liveChip).toEqual({ state: 'no_rain', text: 'No rain since your treatment.' });
-      expect(JSON.stringify(body)).not.toMatch(/27\.1|-82\.4|latitude|longitude/);
-      expect(resolveLiveChip.mock.calls[0][0]).toMatchObject({ completedAt: '2026-10-20T14:00:00Z' });
-      expect('programPromise' in body).toBe(false);
-    });
-  });
-
-  test('gate off: no chip read at all', async () => {
-    gates.reportWebLiveChipLive.mockReturnValue(false);
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const { body } = await getData(baseUrl);
-      expect('liveChip' in body).toBe(false);
-      expect(resolveLiveChip).not.toHaveBeenCalled();
-      expect(buildReportV1Data.mock.calls[0][3].liveChipOut).toBeUndefined();
-    });
-  });
-
-  test.each(['pdf', 'static', 'sms_preview'])('mode=%s: no chip read', async (mode) => {
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const { body } = await getData(baseUrl, `?mode=${mode}`);
-      expect('liveChip' in body).toBe(false);
-      expect(resolveLiveChip).not.toHaveBeenCalled();
-    });
-  });
-
-  test('an unknown read hides the chip (no key) and a failed read never breaks the report', async () => {
-    resolveLiveChip.mockResolvedValue(null);
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const { status, body } = await getData(baseUrl);
-      expect(status).toBe(200);
-      expect('liveChip' in body).toBe(false);
-    });
-    resolveLiveChip.mockRejectedValue(new Error('boom'));
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const { status, body } = await getData(baseUrl);
-      expect(status).toBe(200);
-      expect('liveChip' in body).toBe(false);
     });
   });
 });

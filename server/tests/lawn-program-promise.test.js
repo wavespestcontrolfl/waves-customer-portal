@@ -3,6 +3,8 @@
 const { buildProgramPromise, programMonth, judge, TARGETS } = require('../services/service-report/lawn-program-promise');
 
 // GATE_REPORT_WEB_PROGRAM: fixed sentences against the proposed per-month targets. Synthetic scores only.
+const OK = { level: 'moderate', divergentMetrics: [] };
+
 describe('lawn program promise', () => {
   test('programMonth counts whole months from the first assessment, starting at 1', () => {
     expect(programMonth('2026-07-10', '2026-07-10')).toBe(1);
@@ -25,7 +27,7 @@ describe('lawn program promise', () => {
     const out = buildProgramPromise({
       scores: { turfDensity: 59, colorHealth: 80, weedSuppression: 40 },
       firstDate: '2026-07-10',
-      visitDate: '2026-10-20',
+      visitDate: '2026-10-20', confidence: OK,
     });
     // month 4: targets 56 / 61 / 59
     expect(out.monthLine).toBe('Month 4 of 12 in your lawn program.');
@@ -38,22 +40,34 @@ describe('lawn program promise', () => {
   });
 
   test('a category with no score is left out; nothing scored means no card', () => {
-    const out = buildProgramPromise({ scores: { turfDensity: 60, colorHealth: null }, firstDate: '2026-07-10', visitDate: '2026-10-20' });
+    const out = buildProgramPromise({ scores: { turfDensity: 60, colorHealth: null }, firstDate: '2026-07-10', visitDate: '2026-10-20', confidence: OK });
     expect(out.items.map((i) => i.key)).toEqual(['coverage']);
-    expect(buildProgramPromise({ scores: {}, firstDate: '2026-07-10', visitDate: '2026-10-20' })).toBeNull();
-    expect(buildProgramPromise({ scores: { turfDensity: 60 }, firstDate: null, visitDate: '2026-10-20' })).toBeNull();
-    expect(buildProgramPromise({ firstDate: '2026-07-10', visitDate: '2026-10-20' })).toBeNull();
+    expect(buildProgramPromise({ scores: {}, firstDate: '2026-07-10', visitDate: '2026-10-20', confidence: OK })).toBeNull();
+    expect(buildProgramPromise({ scores: { turfDensity: 60 }, firstDate: null, visitDate: '2026-10-20', confidence: OK })).toBeNull();
+    expect(buildProgramPromise({ firstDate: '2026-07-10', visitDate: '2026-10-20', confidence: OK })).toBeNull();
+  });
+
+  test('confidence below moderate (or none) withholds every verdict; divergent categories are left out', () => {
+    const base = { scores: { turfDensity: 60, colorHealth: 80, weedSuppression: 40 }, firstDate: '2026-07-10', visitDate: '2026-10-20' };
+    for (const confidence of [{ level: 'low' }, { level: 'insufficient' }, { level: 'unknown' }, null, undefined, 'high']) {
+      expect(buildProgramPromise({ ...base, confidence })).toBeNull();
+    }
+    expect(buildProgramPromise({ ...base, confidence: { level: 'high', divergentMetrics: [] } }).items).toHaveLength(3);
+    const part = buildProgramPromise({ ...base, confidence: { level: 'moderate', divergentMetrics: ['color_health'] } });
+    expect(part.items.map((i) => i.key)).toEqual(['coverage', 'weeds']);
+    // every category divergent: no card
+    expect(buildProgramPromise({ ...base, confidence: { level: 'high', divergentMetrics: ['turf_density', 'color_health', 'weed_suppression'] } })).toBeNull();
   });
 
   test('color is never called behind in a cool-season month; other states stay', () => {
-    const cool = buildProgramPromise({ scores: { turfDensity: 60, colorHealth: 20, weedSuppression: 60 }, firstDate: '2026-07-10', visitDate: '2026-12-20' });
+    const cool = buildProgramPromise({ scores: { turfDensity: 60, colorHealth: 20, weedSuppression: 60 }, firstDate: '2026-07-10', visitDate: '2026-12-20', confidence: OK });
     expect(cool.items.map((i) => i.key)).toEqual(['coverage', 'weeds']);
-    const warm = buildProgramPromise({ scores: { colorHealth: 20 }, firstDate: '2026-02-10', visitDate: '2026-06-20' });
+    const warm = buildProgramPromise({ scores: { colorHealth: 20 }, firstDate: '2026-02-10', visitDate: '2026-06-20', confidence: OK });
     expect(warm.items[0].state).toBe('behind');
   });
 
   test('after month 12 the line reads as a year and month 12 targets apply', () => {
-    const out = buildProgramPromise({ scores: { turfDensity: 72 }, firstDate: '2025-06-01', visitDate: '2026-10-20' });
+    const out = buildProgramPromise({ scores: { turfDensity: 72 }, firstDate: '2025-06-01', visitDate: '2026-10-20', confidence: OK });
     expect(out.monthLine).toBe('Year 2 of your lawn program.');
     expect(out.items[0].state).toBe('on_track');
   });

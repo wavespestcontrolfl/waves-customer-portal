@@ -91,6 +91,39 @@ describe('live lawn status chip', () => {
     expect(out.text).toBe('Rain since your visit has watered the treatment in.');
   });
 
+  test('trace rain: 56 hours of 0.009 in is never "No rain since your treatment."; many trace hours still water a treatment in', async () => {
+    const now = new Date('2026-10-21T18:30:00Z');
+    const completedAt = '2026-10-19T09:00:00Z'; // 57 hours earlier
+    const hourly = [];
+    for (let stamp = Date.parse('2026-10-19T10:00:00Z'); stamp <= now.getTime(); stamp += HOUR) {
+      // the forecast rounds the hour to 0.01; the unrounded reading is 0.009
+      hourly.push({ at: new Date(stamp).toISOString(), precipitation_in: 0.01, precipitation_exact_in: 0.009 });
+    }
+    const total = hourly.length * 0.009;
+    expect(total).toBeGreaterThan(0.5);
+    const forecast = { status: 'ok', hourly, precipitationInTotalExact: total };
+    expect(await run(forecast, { completedAt, now })).toBeNull();
+    // the same trace total reaches a half-inch water-in: covered through resolveRainCoverage on the total
+    const instruction = {
+      state: 'water_in', lines: ['Water in with about 1/2 inch within 24 hours.'], completedAt, waterInBy: '2026-10-30T10:00:00Z',
+    };
+    expect(await run(forecast, { completedAt, now, instruction })).toEqual({ state: 'watered_in', text: COPY.wateredIn });
+    // a short dry spell of true zeros is still dry
+    expect(await run(forecastWith())).toEqual({ state: 'no_rain', text: COPY.noRain });
+  });
+
+  test('one weather read per view, water-in coverage included', async () => {
+    const instruction = {
+      state: 'water_in', lines: ['Water in with about 1/2 inch within 24 hours.'], completedAt: COMPLETED, waterInBy: '2026-10-22T10:15:00Z',
+    };
+    const fetchForecast = jest.fn(async () => forecastWith({ '2026-10-21T12:00:00.000Z': 0.6 }));
+    const out = await resolveLiveChip({
+      completedAt: COMPLETED, instruction, products: [], latitude: 27.1, longitude: -82.4, now: NOW, fetchForecast,
+    });
+    expect(out.state).toBe('watered_in');
+    expect(fetchForecast).toHaveBeenCalledTimes(1);
+  });
+
   test('a visit older than 7 days, an unusable forecast and a throwing fetch all hide the chip', async () => {
     const old = new Date('2026-10-29T10:00:00Z');
     expect(await run(forecastWith({}, { now: old }), { now: old })).toBeNull();

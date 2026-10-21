@@ -75,10 +75,21 @@ async function attachProgramPromise(v1Data, service) {
     if (!row) return;
     const history = await require('../services/lawn-assessment-history').historyForAssessment(row, { knex: db });
     if (!history || !history.scope || !history.scope.propertyId || !history.current || !history.rows.length) return;
+    // The scores are photo reads: the same confidence the progress engine uses decides whether they can be judged.
+    const photos = await db('lawn_assessment_photos').where({ assessment_id: row.id, customer_visible: true });
+    const { deriveAssessmentConfidence, photoQualityForConfidence } = require('../services/service-report/lawn-progress');
+    let divergenceFlags = row.divergence_flags;
+    if (typeof divergenceFlags === 'string') {
+      try { divergenceFlags = JSON.parse(divergenceFlags); } catch { divergenceFlags = []; }
+    }
     const promise = require('../services/service-report/lawn-program-promise').buildProgramPromise({
       scores: assessment.scores,
       firstDate: history.rows[0].visit_date,
       visitDate: history.current.visit_date,
+      confidence: deriveAssessmentConfidence({
+        photos: photos.map(photoQualityForConfidence),
+        divergenceFlags,
+      }),
     });
     if (promise) v1Data.programPromise = { monthLine: promise.monthLine, items: promise.items.map(({ key, label, state, sentence }) => ({ key, label, state, sentence })) };
   } catch { /* best-effort: the report renders without the line */ }

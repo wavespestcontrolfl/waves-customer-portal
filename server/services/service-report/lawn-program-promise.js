@@ -10,9 +10,14 @@
  * PROPOSED values the owner approves (see the file's _note); a category with no score is left out, and when no
  * category can be judged there is no card. Color is never called "behind" in the cool-season months: the
  * grass loses color for the season, not for the program (lawn-progress.js treats it the same way).
+ *
+ * Confidence (mirrors lawn-progress.js's `unclear`): the scores are photo reads, so a verdict needs the assessment's
+ * confidence to be moderate or high, and a category the two vision models disagreed on has no verdict. Missing
+ * confidence compares nothing (fail closed). Items that cannot be judged are left out, and so is the card.
  */
 
 const TARGETS = require('../../../shared/lawn-program-targets.json');
+const { COMPARABLE_LEVELS } = require('./lawn-progress');
 
 const STATES = Object.freeze(['on_track', 'ahead', 'behind']);
 
@@ -42,19 +47,21 @@ function judge(score, target, band = TARGETS.band) {
 const fill = (template, values) => template.replace(/\{(\w+)\}/g, (_, key) => String(values[key]));
 
 /**
- * @param {{ scores?: object, firstDate?: string|Date, visitDate?: string|Date }} input
+ * @param {{ scores?: object, firstDate?: string|Date, visitDate?: string|Date, confidence?: { level?: string, divergentMetrics?: string[] } }} input
  * @returns {{ monthLine: string, month: number, items: Array<{key: string, label: string, state: string, sentence: string}> }|null}
  */
-function buildProgramPromise({ scores, firstDate, visitDate } = {}) {
+function buildProgramPromise({ scores, firstDate, visitDate, confidence } = {}) {
   const month = programMonth(firstDate, visitDate);
   if (!month || !scores || typeof scores !== 'object') return null;
+  if (!confidence || !COMPARABLE_LEVELS.has(confidence.level)) return null;
+  const divergent = new Set(Array.isArray(confidence.divergentMetrics) ? confidence.divergentMetrics : []);
   const row = Math.min(month, 12) - 1;
   const visitMonth = ymdParts(visitDate).m;
   const cool = TARGETS.coolSeasonMonths.includes(visitMonth);
   const items = [];
   for (const [key, def] of Object.entries(TARGETS.categories)) {
     const raw = scores[def.scoreKey];
-    if (raw == null || raw === '' || !Number.isFinite(Number(raw))) continue;
+    if (raw == null || raw === '' || !Number.isFinite(Number(raw)) || divergent.has(def.divergenceMetric)) continue;
     const state = judge(Number(raw), def.byMonth[row]);
     if (key === 'color' && cool && state === 'behind') continue;
     items.push({ key, label: def.label, state, sentence: fill(TARGETS.sentences[state], def) });

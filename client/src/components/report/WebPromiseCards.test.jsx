@@ -47,6 +47,17 @@ describe('web promise cards (GATE_REPORT_WEB_PROGRAM, GATE_REPORT_WEB_LIVE_CHIP)
     expect(render(<ReportProgramCard promise={null} />).container).toBeEmptyDOMElement();
   });
 
+  it('is live-only: the wrapper carries the live-only class and a print rule hides it', () => {
+    const { container } = render(<WebPromiseCards data={{ liveChip: { state: 'no_rain', text: 'No rain since your treatment.' }, programPromise: promise }} />);
+    const wrapper = container.querySelector('[data-live-only="true"]');
+    expect(wrapper).not.toBeNull();
+    expect(wrapper.classList.contains('web-live-only')).toBe(true);
+    expect(wrapper.contains(screen.getByTestId('report-live-chip'))).toBe(true);
+    expect(wrapper.contains(screen.getByTestId('report-program-card'))).toBe(true);
+    const css = container.querySelector('style').textContent;
+    expect(css).toMatch(/@media print\s*\{[^}]*\.web-live-only[^}]*display:\s*none\s*!important/);
+  });
+
   it('keeps every font size at the 14px web floor', () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), 'src/components/report/WebPromiseCards.jsx'), 'utf8');
     const sizes = [...source.matchAll(/fontSize: ([\d.]+)/g)].map((m) => Number(m[1]));

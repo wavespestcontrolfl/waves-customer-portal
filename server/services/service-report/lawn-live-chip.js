@@ -36,6 +36,11 @@ function rainLine(hoursAgo) {
   return hoursAgo === 1 ? COPY.rainHoursAgoOne : COPY.rainHoursAgo.replace('{n}', String(hoursAgo));
 }
 
+const exactInches = (row) => {
+  const v = row && (row.precipitation_exact_in ?? row.precipitation_in);
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+};
+
 /**
  * What the forecast's past-hour rows say about the time since the visit. Hour rows are stamped at the END of their hour:
  * row S holds the rain of the bucket S-1h..S. The window runs from the bucket that CONTAINS the completion (10:15 reads
@@ -43,32 +48,60 @@ function rainLine(hoursAgo) {
  *
  * The completion bucket is PARTLY before the visit, so a reading in it cannot say when the rain fell: it never supports
  * a "rain fell" claim (only buckets that start at or after the completion do), and rain in it blocks the dry state.
- * Returns `last`, the latest rainy bucket that starts at or after the completion ({ start }), or null, and `dry`: true
- * only when every bucket of the window, the completion bucket included, is read and none is rainy. A window with no
- * closed bucket yet is never dry.
+ * Two cutoffs, on purpose. `last` (the "rain fell about N hours ago" wording) uses the per-hour cutoff on hours that
+ * start at or after the completion. `dry` ("No rain since your treatment.") needs every bucket of the window read, no
+ * rainy hour AND a cumulative total under the same cutoff, so many trace hours (56 x 0.009 in) are never "dry". A
+ * window with no closed bucket yet is never dry.
  */
 function rainSince(forecast, fromMs, nowMs) {
   const firstStamp = Math.floor(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS;
   const lastStamp = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
-  const byStamp = new Map((Array.isArray(forecast && forecast.hourly) ? forecast.hourly : []).map((r) => [toMs(r.at), r.precipitation_in]));
+  const byStamp = new Map((Array.isArray(forecast && forecast.hourly) ? forecast.hourly : []).map((r) => [toMs(r.at), exactInches(r)]));
   const buckets = [];
   for (let stamp = firstStamp; stamp <= lastStamp; stamp += HOUR_MS) buckets.push({ start: stamp - HOUR_MS, inches: byStamp.get(stamp) });
   const rainy = (b) => typeof b.inches === 'number' && b.inches >= RAIN_HOUR_INCHES;
   const after = buckets.filter((b) => b.start >= fromMs && rainy(b));
+  const allRead = buckets.length > 0 && buckets.every((b) => typeof b.inches === 'number');
+  const total = allRead ? buckets.reduce((sum, b) => sum + b.inches, 0) : null;
   return {
     last: after.length ? after[after.length - 1] : null,
-    dry: buckets.length > 0 && buckets.every((b) => typeof b.inches === 'number' && !rainy(b)),
+    dry: allRead && !buckets.some(rainy) && total < RAIN_HOUR_INCHES,
+  };
+}
+
+/**
+ * A fetchForecast for resolveRainCoverage that answers from the series already read, so one view makes ONE weather read.
+ * It returns the unrounded total of the whole-hour slots inside the asked window (the forecast's own rule: a slot
+ * stamped S counts when S-1h >= from and S <= to), or null when any needed slot is missing.
+ */
+function seriesReader(forecast) {
+  const byStamp = new Map((Array.isArray(forecast.hourly) ? forecast.hourly : []).map((r) => [toMs(r.at), exactInches(r)]));
+  return async ({ from, to }) => {
+    const fromMs = toMs(from);
+    const toMsValue = toMs(to);
+    let total = 0;
+    let complete = false;
+    for (let slot = Math.ceil(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS; slot <= toMsValue; slot += HOUR_MS) {
+      const v = byStamp.get(slot);
+      if (typeof v !== 'number') { complete = false; break; }
+      complete = true;
+      total += v;
+    }
+    return { status: 'ok', precipitationInTotalExact: complete ? total : null };
   };
 }
 
 /**
  * Did rain do the water-in? True when the banner already says so (GATE_LAWN_WATER_IN_RAIN replay), or rain measured since
- * the visit reaches the amount the products ask for (the same reader the banner uses). Needs a rainy hour to look at.
+ * the visit reaches the amount the products ask for (the same reader the banner uses, on the TOTAL, so a long run of
+ * trace hours counts). It reads the series the chip already holds: no second weather read.
  */
-async function rainWateredIn({ instruction, products, last, nowMs, latitude, longitude, fetchForecast }) {
+async function rainWateredIn({ instruction, products, forecast, nowMs, latitude, longitude }) {
   if (instruction && instruction.state === COVERED_STATE) return true;
-  if (!last || !appliesTo(instruction)) return false;
-  const coverage = await resolveRainCoverage({ instruction, products, now: new Date(nowMs), latitude, longitude, fetchForecast });
+  if (!appliesTo(instruction)) return false;
+  const coverage = await resolveRainCoverage({
+    instruction, products, now: new Date(nowMs), latitude, longitude, fetchForecast: seriesReader(forecast),
+  });
   return !!coverage && coverage.covered === true;
 }
 
@@ -93,7 +126,7 @@ async function resolveLiveChip({
     if (nowMs <= fromMs || nowMs - fromMs > COPY.visitWindowDays * DAY_MS) return null;
 
     const forecast = await fetchForecast({
-      latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs),
+      latitude, longitude, from: new Date(fromMs), to: new Date(nowMs), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs), exactTotal: true,
     });
     if (!forecast || forecast.status !== 'ok') return null;
     const { last, dry } = rainSince(forecast, fromMs, nowMs);
@@ -102,7 +135,7 @@ async function resolveLiveChip({
     const hoursAgo = last ? Math.floor((nowMs - last.start) / HOUR_MS) : null;
     if (hoursAgo !== null && hoursAgo <= COPY.recentHours) return { state: 'recent_rain', text: rainLine(hoursAgo) };
 
-    if (await rainWateredIn({ instruction, products, last, nowMs, latitude, longitude, fetchForecast })) {
+    if (await rainWateredIn({ instruction, products, forecast, nowMs, latitude, longitude })) {
       return { state: 'watered_in', text: COPY.wateredIn };
     }
 
