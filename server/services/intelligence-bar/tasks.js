@@ -9,7 +9,11 @@ const PendingActions = require('./pending-actions');
 const { UUID_RE } = require('./task-context');
 const REQUEST_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const STATES = new Set(['running', 'responded', 'awaiting_approval', 'needs_information', 'failed', 'outcome_unknown', 'canceled']);
-const leaseExpiry = () => new Date(Date.now() + 120000);
+// One lease for every round: it outlasts the longest model call (the OpenAI
+// backup's 150 s timeout) plus margin, so a still-running round is never
+// resumable mid-call, on either provider (Codex #6373 r5).
+const LEASE_MS = 180 * 1000;
+const leaseExpiry = () => new Date(Date.now() + LEASE_MS);
 // Open for the operator: the receipt-derived states that still need attention.
 const OPEN_STATES = new Set(['running', 'awaiting_approval', 'needs_information', 'outcome_unknown', 'partially_completed', 'ready_to_continue']);
 const ATTACHMENTS_LOST = 'Attached images are not kept with a saved request, so it cannot continue without them. Reattach them in a new request.';
@@ -59,6 +63,21 @@ async function checkpoint(id, actorId, { messages, target, state = 'running', re
   if (!(await query.update(updates))) throw new Error('Task execution was superseded');
 }
 
+// Which provider's reply history this task holds. Written when a request
+// switches to the OpenAI backup (ib-openai-backup.js); a task never mixes providers.
+// The switch also renews the lease (a full backup call fits in it).
+async function markModelProvider(id, actorId, runnerToken, provider) {
+  // A runner that lost its lease (another resume took the task) stops here,
+  // as checkpoint() does, so two runners never both run the tool loop (Codex r7).
+  const marked = await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken })
+    .update({
+      request: db.raw('request || ?::jsonb', [JSON.stringify({ model_provider: provider })]),
+      lease_expires_at: leaseExpiry(),
+      updated_at: db.fn.now(),
+    });
+  if (!marked) throw new Error('Task execution was superseded');
+}
+
 async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
   const task = await get(id, actorId, sessionId);
   if (!task) return { error: 'Task not found', code: 'not_found' };
@@ -99,6 +118,11 @@ function continuationError(task, receipts, { selectedTarget } = {}) {
   // a resume (a model change between the request and the resume): refuse it.
   if (require('./tool-search').hasSearchAndThinking(task.checkpoint)) {
     return { error: 'This saved request cannot be continued after a model change. Start the request again.', code: 'not_resumable' };
+  }
+  // A task that switched to the OpenAI backup continues only while that gate is
+  // on; with it off the history is not sent to Anthropic half-way through.
+  if (task.request?.model_provider === 'openai_backup' && !require('../../config/feature-gates').ibOpenaiBackupLive()) {
+    return { error: 'This saved request was answered by the backup model, which is off. Start the request again.', code: 'not_resumable' };
   }
   if (task.state === 'running' && new Date(task.lease_expires_at).getTime() >= Date.now()) {
     return { error: 'This task is already running', code: 'already_running' };
@@ -171,16 +195,16 @@ async function list(actorId, sessionId) {
   // query and the receipt-derived filter below decides.
   const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled']))
     .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at',
-      db.raw("(request->>'had_images')::boolean AS had_images"));
+      db.raw("(request->>'had_images')::boolean AS had_images"), db.raw("request->>'model_provider' AS model_provider"));
   if (!tasks.length) return tasks;
   const actions = PendingActions.taskSteps(await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id)));
   const recent = new Set(latest);
   return tasks.map(task => {
     const receipts = actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt);
-    const resumableFailure = task.state === 'failed' && !continuationError({ ...task, request: { had_images: task.had_images === true } }, receipts);
+    const resumableFailure = task.state === 'failed' && !continuationError({ ...task, request: { had_images: task.had_images === true, model_provider: task.model_provider || undefined } }, receipts);
     return { ...task, state: exposedTaskState(task, receipts), resumableFailure };
   }).filter(task => recent.has(task.id) || OPEN_STATES.has(task.state) || task.resumableFailure)
-    .map(({ resumableFailure, had_images, ...task }) => task);
+    .map(({ resumableFailure, had_images, model_provider, ...task }) => task);
 }
 
 // Run from the existing IB retention sweep even while the platform gate is off.
@@ -198,4 +222,4 @@ async function purgeExpiredTasks() {
     .where('lease_expires_at', '<=', db.fn.now()).del();
 }
 
-module.exports = { continuationError, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };
+module.exports = { continuationError, REQUEST_KEY_RE, begin, checkpoint, markModelProvider, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };

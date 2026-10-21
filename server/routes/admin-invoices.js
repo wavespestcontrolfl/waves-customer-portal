@@ -1979,9 +1979,14 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
 });
 
 // POST /:id/void — void invoice
-router.post('/:id/void', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's void_invoice card (voidInvoiceFromBar, below) runs this very handler.
+const invoiceVoidHandler = async (req, res, next) => {
   try {
-    const invoice = await InvoiceService.voidInvoice(req.params.id);
+    // req.ibExpectedVoid is set only by voidInvoiceFromBar (never an HTTP field): the invoice version the card
+    // showed, enforced inside voidInvoice. The page's call is unchanged.
+    const invoice = req.ibExpectedVoid
+      ? await InvoiceService.voidInvoice(req.params.id, { expected: req.ibExpectedVoid })
+      : await InvoiceService.voidInvoice(req.params.id);
     res.json(invoice);
   } catch (err) {
     if (/Invoice not found/i.test(err.message)) {
@@ -1997,7 +2002,8 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+};
+router.post('/:id/void', requireAdmin, invoiceVoidHandler);
 
 // POST /:id/unvoid — restore an accidentally-voided invoice to an editable,
 // collectible draft. InvoiceService.unvoidInvoice fails closed on any void
@@ -3775,6 +3781,12 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
   return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
 }
 
+// expected: the invoice version the void_invoice card showed (voidInvoice's `expected` option).
+function voidInvoiceFromBar({ invoiceId, expected }) {
+  return runInvoiceHandler(invoiceVoidHandler, { params: { id: invoiceId }, body: {}, ibExpectedVoid: expected });
+}
+
 module.exports = router;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
+module.exports.voidInvoiceFromBar = voidInvoiceFromBar;
 module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;

@@ -30,6 +30,8 @@ const path = require('path');
 const crypto = require('crypto');
 const parser = require('@babel/parser');
 const rules = require('../server/utils/admin-read-rules');
+const { omitProblem, keepProblem } = require('../server/utils/response-projection');
+const { isFreeTextName } = require('../server/utils/signed-link-redaction');
 const { isCredentialName, isStrongCredentialName } = require('../server/utils/credential-fields');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -358,7 +360,7 @@ function middlewareFor(route, uses) {
 }
 
 // Every GET (or catch-all) registration in a router file, by receiver.
-function routerRoutes(file) {
+function routerRoutes(file, methods = ['get', 'all']) {
   const info = parseFile(file);
   const routes = [];
   const opaque = [];
@@ -368,15 +370,15 @@ function routerRoutes(file) {
     const callee = node.callee;
     const method = callee.property.name;
     if (['use', 'param'].includes(method)) collectRouterMiddleware(node, info, uses);
-    if (callee.object.type === 'Identifier' && info.routers.has(callee.object.name) && ['get', 'all'].includes(method)) {
+    if (callee.object.type === 'Identifier' && info.routers.has(callee.object.name) && methods.includes(method)) {
       const paths = routePaths(node.arguments[0]);
       if (!paths) { opaque.push({ line: node.loc.start.line, why: 'dynamic route path' }); return; }
-      for (const p of paths) routes.push({ recv: callee.object.name, path: p, args: node.arguments.slice(1), all: method === 'all', line: node.loc.start.line, info });
+      for (const p of paths) routes.push({ recv: callee.object.name, path: p, method, args: node.arguments.slice(1), all: method === 'all', line: node.loc.start.line, info });
     }
-    if (method === 'get' && callee.object.type === 'CallExpression' && callee.object.callee.property?.name === 'route' && info.routers.has(callee.object.callee.object.name)) {
+    if (methods.includes(method) && callee.object.type === 'CallExpression' && callee.object.callee.property?.name === 'route' && info.routers.has(callee.object.callee.object.name)) {
       const paths = routePaths(callee.object.arguments[0]);
       if (!paths) { opaque.push({ line: node.loc.start.line, why: 'dynamic route path' }); return; }
-      for (const p of paths) routes.push({ recv: callee.object.callee.object.name, path: p, args: node.arguments, all: false, line: node.loc.start.line, info });
+      for (const p of paths) routes.push({ recv: callee.object.callee.object.name, path: p, method, args: node.arguments, all: false, line: node.loc.start.line, info });
     }
   });
   routes.forEach((route) => { route.middleware = middlewareFor(route, uses); });
@@ -388,12 +390,12 @@ function joinPath(prefix, routePath) {
   return `/${parts.map(part => part.replace(/\(.*\)$/, '')).join('/')}`;
 }
 
-function routeTable() {
+function routeTable(methods = ['get', 'all']) {
   const { mounts, inline } = mountedRouters();
   const table = [];
   const opaqueMounts = [];
   for (const mount of mounts) {
-    const { routes, opaque } = routerRoutes(mount.file);
+    const { routes, opaque } = routerRoutes(mount.file, methods);
     const info = parseFile(mount.file);
     const receivers = mount.member ? receiversFor(info, mount.member) : null;
     for (const route of routes) {
@@ -403,7 +405,7 @@ function routeTable() {
     }
     if (opaque.length) opaqueMounts.push(mount.prefix);
   }
-  for (const route of inline) {
+  for (const route of methods.includes('get') ? inline : []) {
     table.push({ full: joinPath(route.path, ''), file: 'server/index.js', line: route.line, mountLine: route.line, route: { args: route.args, info: route.info, path: '' } });
   }
   return { table, opaqueMounts };
@@ -1006,11 +1008,41 @@ function queryProblem(row, names) {
   return null;
 }
 
+// acceptSignals: the scan signals this row's reviewer read and accepts, by exact name.
+function acceptSignalsProblem(row) {
+  if (row.acceptSignals === undefined) return null;
+  const list = row.acceptSignals;
+  if (!Array.isArray(list) || !list.length || new Set(list).size !== list.length) return 'acceptSignals must be a non-empty list of distinct signal names';
+  const bad = list.find(signal => typeof signal !== 'string' || !ACCEPTABLE_SIGNAL_RE.test(signal));
+  return bad === undefined ? null : `acceptSignals may hold only credential_*, signed_url:* and write:transaction signals (got ${JSON.stringify(bad)})`;
+}
+
+// keywords: plain-language phrases find_admin_reads matches (what the owner would say).
+function keywordsProblem(row) {
+  if (row.keywords === undefined) return null;
+  const list = row.keywords;
+  const ok = Array.isArray(list) && list.length > 0 && list.length <= 16 && new Set(list).size === list.length
+    && list.every(phrase => typeof phrase === 'string' && /^[a-z0-9][a-z0-9 '-]{1,60}$/.test(phrase));
+  return ok ? null : 'keywords must be 1 to 16 distinct lower-case phrases of up to 60 letters, digits, spaces and dashes';
+}
+
+// keep: the allow-list mode of the projection (a row that returns a whole table row or a broad object lists the
+// response keys it keeps; every other key is dropped). A kept key must not look like free text unless the row declares it content.
+function keepRowProblem(row) {
+  if (row.keep === undefined) return null;
+  const content = Object.entries(row.freeText || {}).filter(([, kind]) => kind === 'content').map(([key]) => key);
+  return keepProblem(row.keep, { isFreeText: isFreeTextName, content });
+}
+
+// What a row hands the run-time reader beyond scope and query: the response projection and the finder phrases.
+const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keep ? { keep: row.keep } : {}), ...(row.keywords ? { keywords: row.keywords } : {}) });
+
 function validateReviewedRow(row) {
   const fail = message => { throw new Error(`admin-read-reviewed.json ${row.endpoint}: ${message}`); };
   if (!Object.hasOwn(ROW_SCOPES, row.scope)) fail(`scope must be one of ${Object.keys(ROW_SCOPES).join(', ')}`);
   const names = rules.patternParams(row.endpoint);
-  const problem = idParamProblem(row) || scopeParamProblem(row) || paramKindProblem(row, names) || queryProblem(row, names);
+  const problem = idParamProblem(row) || scopeParamProblem(row) || paramKindProblem(row, names) || queryProblem(row, names)
+    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit)) || keepRowProblem(row);
   if (problem) fail(problem);
 }
 
@@ -1082,6 +1114,17 @@ function appLabel({ arg, info }) {
 // answers with a file stays out.
 const HARD_SIGNAL_RE = /^(write:|outside|signed_url|credential_|response:|writes_process_state|no_json_response)/;
 
+// A reviewer may accept, per row and by exact name, only the signals that say
+// "this chain reads a table or field that can hold a credential / a signed
+// link" or "this chain opens a transaction": credential_*, signed_url:* and
+// write:transaction. The run-time passes (credential-field removal, signed and
+// private link redaction, the secret scrubber, the row's `omit` projection)
+// are what make such a response safe, and any real write inside a transaction
+// raises its own write:insert / update / delete signal, which stays hard.
+// Never acceptable: write:* other than transaction, outside*, response:*,
+// writes_process_state, no_json_response.
+const ACCEPTABLE_SIGNAL_RE = /^(credential_[a-z]+:.+|signed_url:.+|write:transaction)$/;
+
 // A handler that takes the customer from the query string (req.query.customerId,
 // const { customer_id } = req.query) needs a customer-scoped row even though
 // no path parameter says so.
@@ -1136,7 +1179,8 @@ function judgeRoute(entry, reviewed, opaqueMounts) {
     analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
   });
   const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), constants: [...followedConstants].sort(), largeConstants: largeConstants(), hash: chainHash(), queryCustomer: readsCustomerFromQuery(), queryKeys: followedQueryKeys() };
-  const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal));
+  const accepted = new Set(reviewed.reviewed?.get(key)?.acceptSignals || []);
+  const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal) && !(accepted.has(signal) && ACCEPTABLE_SIGNAL_RE.test(signal)));
   if (hard.length) return { safe: false, kind: 'review', reason: `scan: ${hard.join(', ')}`, ...scan };
   return { safe: true, ...scan };
 }
@@ -1277,6 +1321,7 @@ function buildCatalog({ census, reviewed = loadReviewed(), routes } = {}) {
       ...(row.params && Object.keys(row.params).length ? { paramKinds: row.params } : {}),
       query: [...(row.query || [])],
       ...freeTextOf(row),
+      ...readerFields(row),
     });
   }
   const unique = new Map();
@@ -1391,4 +1436,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { validateReviewedRow, resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };
+module.exports = { followedSources, blockedFor, matchRoutes, nameParams, uniqueParamNames, censusGets, labelFor, validateReviewedRow, resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };
