@@ -134,6 +134,11 @@ function runStageUpdate(db, target, scopeRows) {
 // missing row below, so the funnels count every lead the lead reports count.
 const isProspectStatus = (status) => !!status && !NON_ENGAGED_LEAD_STATUSES.includes(status);
 
+// Would winning this lead make restampMissingPreferredRows create its funnel row? (A preferred-time request with
+// none: the same lead type and prospect test the restamp applies; `funnelRowCount` is how many rows the lead has.)
+const wouldRestampOnWin = (lead, funnelRowCount) => lead?.lead_type === 'book_preferred_time' && !lead.deleted_at
+  && isProspectStatus('won') && funnelRowCount === 0;
+
 /**
  * A /book preferred-time request that closed itself as 'handled' gives up its
  * funnel row once its booking has its own (booking-preferred-time.js). If staff
@@ -352,6 +357,7 @@ module.exports = {
   bridgeLeadFunnelStage,
   bridgeLeadsFunnelStage,
   restampMissingPreferredRows,
+  wouldRestampOnWin,
   stampLeadFunnelRow,
   // exported for unit tests
   FUNNEL_STAGE_RANK,

@@ -49,6 +49,7 @@ function makeDb() {
   function builder(table) {
     const q = { wheres: [], nulls: [], notId: null, single: false, limited: null, count: false };
     const rows = () => {
+      if (state.throwOn === table) throw new Error('read failed');
       if (table === 'customers' && q.limited) return state.contactMatches.filter((row) => row.id !== q.notId).slice(0, q.limited);
       const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
         && q.nulls.every((k) => row[k] == null));
@@ -88,7 +89,15 @@ beforeEach(() => {
   state = freshState();
   db.mockImplementation(makeDb());
   envGate(true);
-  Leads.convertLeadFromBar.mockResolvedValue({ status: 200, json: { lead: { id: LEAD, status: 'won', customer_id: CUST } } });
+  // The handler, as far as the read-back sees it: unowned estimates get the customer; funnel rows below booked move to
+  // booked and take the customer when they had none (the bridge leaves booked / completed rows alone).
+  Leads.convertLeadFromBar.mockImplementation(async () => {
+    state.estimates.forEach((e) => { if (e.customer_id == null) e.customer_id = CUST; });
+    state.ad_service_attribution.forEach((r) => {
+      if (!['booked', 'completed'].includes(r.funnel_stage)) { r.funnel_stage = 'booked'; if (!r.customer_id) r.customer_id = CUST; }
+    });
+    return { status: 200, json: { lead: { id: LEAD, status: 'won', customer_id: CUST } } };
+  });
 });
 afterEach(() => envGate(false));
 
@@ -444,3 +453,79 @@ describe('a quote-wizard repeat lead stays on the Leads page', () => {
     expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
   });
 });
+
+describe('the read-back after the commit', () => {
+  const stage = (impl) => Leads.convertLeadFromBar.mockImplementationOnce(impl);
+  const wonJson = { status: 200, json: { lead: { id: LEAD, status: 'won', customer_id: CUST } } };
+  const movesFunnel = () => state.ad_service_attribution.forEach((r) => { r.funnel_stage = 'booked'; r.customer_id = r.customer_id || CUST; });
+
+  test('everything the card promised happened: success', async () => {
+    const card = await preview();
+    expect(await confirm(card)).toMatchObject({ success: true });
+  });
+
+  test('an estimate the backfill did not attach: partial, never success', async () => {
+    const card = await preview();
+    stage(async () => { movesFunnel(); return wonJson; });
+    const res = await confirm(card);
+    expect(res).toMatchObject({ partial: true, converted: true, problems: ['0 of 1 estimates attached'] });
+    expect(res.success).toBeUndefined();
+    expect(res.error).toBeUndefined();
+    expect(res.note).toMatch(/Lead converted; 0 of 1 estimates attached .* check the Leads page/);
+    expect(require('../services/intelligence-bar/outcomes').executionOutcome(res)).toBe('partially_completed');
+  });
+
+  test('some of several tagged estimates attached: the count says so', async () => {
+    state.leads[0].estimate_id = null;
+    state.estimates = ['2', '3'].map((n) => ({ id: `00000000-0000-4000-8000-0000000000e${n}`, status: 'sent', customer_id: null, estimate_data: JSON.stringify({ lead_id: LEAD }) }));
+    const card = await preview();
+    stage(async () => { state.estimates[0].customer_id = CUST; movesFunnel(); return wonJson; });
+    expect((await confirm(card)).problems).toEqual(['1 of 2 estimates attached']);
+  });
+
+  test('a funnel row that did not move, or moved without taking the customer, is reported', async () => {
+    let card = await preview();
+    stage(async () => { state.estimates[0].customer_id = CUST; return wonJson; });
+    expect((await confirm(card)).problems).toEqual(['funnel row not moved to booked', 'funnel row not linked to the customer']);
+    state.estimates[0].customer_id = null;
+    state.ad_service_attribution = [{ lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }];
+    card = await preview();
+    stage(async () => { state.estimates[0].customer_id = CUST; state.ad_service_attribution[0].funnel_stage = 'booked'; return wonJson; });
+    expect((await confirm(card)).problems).toEqual(['funnel row not linked to the customer']);
+  });
+
+  test('rows the bridge leaves alone are not reported (booked, another customer\u2019s)', async () => {
+    state.ad_service_attribution = [{ lead_id: LEAD, funnel_stage: 'booked', customer_id: null }, { lead_id: LEAD, funnel_stage: 'lost', customer_id: OTHER }];
+    const card = await preview();
+    expect(await confirm(card)).toMatchObject({ success: true });
+  });
+
+  test('a read-back that fails says what could not be checked, not success', async () => {
+    const card = await preview();
+    stage(async () => { state.throwOn = 'estimates'; return wonJson; });
+    expect(await confirm(card)).toMatchObject({ partial: true, problems: ['what was attached and moved could not be read back'] });
+  });
+});
+
+describe('a preferred-time request with no funnel row stays on the Leads page', () => {
+  test('refused (the bridge would create the row); with a row it is fine', async () => {
+    state.leads[0].lead_type = 'book_preferred_time';
+    state.ad_service_attribution = [];
+    const res = await preview();
+    expect(res).toMatchObject({ code: 'preferred_time_row_unsupported', lead_id: LEAD });
+    expect(res.error).toMatch(/Convert it from the Leads page/);
+    state.ad_service_attribution = [{ lead_id: LEAD, funnel_stage: 'contacted', customer_id: null }];
+    expect((await preview()).preview).toBe(true);
+    state.leads[0].lead_type = 'phone';
+    state.ad_service_attribution = [];
+    expect((await preview()).preview).toBe(true);
+  });
+  test('the predicate is the restamp\u2019s own (type, not deleted, prospect, no row)', () => {
+    const { wouldRestampOnWin } = require('../services/lead-funnel-bridge');
+    expect(wouldRestampOnWin({ lead_type: 'book_preferred_time' }, 0)).toBe(true);
+    expect(wouldRestampOnWin({ lead_type: 'book_preferred_time' }, 1)).toBe(false);
+    expect(wouldRestampOnWin({ lead_type: 'book_preferred_time', deleted_at: new Date() }, 0)).toBe(false);
+    expect(wouldRestampOnWin({ lead_type: 'phone' }, 0)).toBe(false);
+  });
+});
+

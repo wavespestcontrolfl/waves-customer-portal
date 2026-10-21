@@ -281,6 +281,11 @@ async function buildPlan(input) {
   const estimate = await estimateEffect(lead, customer.id);
   if (estimate.error) return estimate;
   const funnel = await funnelEffect(lead.id, customer.id);
+  // A preferred-time request with no funnel row gets one created when it is won (the stage bridge's restamp): an
+  // attribution write the card cannot show, so it stays on the Leads page.
+  if (require('../lead-funnel-bridge').wouldRestampOnWin(lead, funnel.state.length)) {
+    return refusal(`${leadName} is a preferred-time booking request with no ad funnel row: converting it also creates one, which the bar cannot show. Convert it from the Leads page.`, 'preferred_time_row_unsupported', { lead_id: lead.id });
+  }
   const values = valuesGiven(body);
   return {
     preview: true,
@@ -301,6 +306,7 @@ async function buildPlan(input) {
     sends_to_customer: false,
     _version: versionOf({ lead, customer, others, othersTruncated, estimate, funnel, body }),
     _body: body,
+    _funnel_before: funnel.state,
     _expected: {
       leadId: lead.id,
       status: lead.status,
@@ -327,6 +333,32 @@ async function verifiedPlan(input, pinned) {
   return { plan };
 }
 
+// What the card promised and the conversion's best-effort steps may have missed, read back after the commit.
+async function unmetPromises(plan) {
+  const problems = [];
+  try {
+    const approved = plan._expected.estimateIds || [];
+    if (approved.length) {
+      const rows = (await db('estimates').whereIn('id', approved).select('id', 'customer_id')) || [];
+      const attached = rows.filter((r) => String(r.customer_id) === String(plan.customer_id)).length;
+      if (attached < approved.length) problems.push(`${attached} of ${approved.length} estimates attached`);
+    }
+    const before = plan._funnel_before || [];
+    if (before.length) {
+      const after = (await db('ad_service_attribution').where({ lead_id: plan.lead_id }).select('funnel_stage', 'customer_id')) || [];
+      const settled = ['booked', 'completed'];
+      if (after.length < before.length || after.some((r) => !settled.includes(r.funnel_stage))) problems.push('funnel row not moved to booked');
+      // A row that moved and had no owner is now this customer's; a row already this customer's stays.
+      const expectedOwned = before.filter(([stage, owner]) => owner === plan.customer_id || (!owner && !settled.includes(stage))).length;
+      const owned = after.filter((r) => String(r.customer_id) === String(plan.customer_id)).length;
+      if (owned < expectedOwned) problems.push('funnel row not linked to the customer');
+    }
+  } catch {
+    problems.push('what was attached and moved could not be read back');
+  }
+  return problems;
+}
+
 async function commitConvert(input) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_lead_convert_version);
   if (refused) return refused;
@@ -343,6 +375,13 @@ async function commitConvert(input) {
       error: 'The Leads page answered, but the lead does not read as won and linked to this customer. Check the lead before trying again.' };
   }
   logger.info(`[intelligence-bar:lead-convert] converted lead ${plan.lead_id} to customer ${plan.customer_id}`);
+  // The handler's estimate backfill and funnel settlement are best-effort after the commit: read back what the
+  // card promised and say so when any of it did not happen.
+  const problems = await unmetPromises(plan);
+  if (problems.length) {
+    return { ...base, partial: true, converted: true, status: 'won', sent_to_customer: false, problems,
+      note: `Lead converted; ${problems.join('; ')} \u2014 check the Leads page. Nothing was sent to anyone.` };
+  }
   return { ...base, success: true, status: 'won', sent_to_customer: false,
     note: `${plan.lead_name} is converted and linked to ${plan.customer_name}. Nothing was sent to anyone.` };
 }
