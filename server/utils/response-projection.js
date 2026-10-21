@@ -137,6 +137,9 @@ function buildTrie(paths) {
 const DROPPED = Symbol('dropped');
 
 function keepNode(value, node) {
+  // An allow-listed optional object that is absent stays null, so "no record"
+  // is not mistaken for a field the projection removed (Codex #6366 r3).
+  if (value === null && !node.leaf && node.children.size) return null;
   if (isScalar(value)) return node.leaf ? value : DROPPED;
   if (Array.isArray(value)) {
     const star = node.children.get('*');

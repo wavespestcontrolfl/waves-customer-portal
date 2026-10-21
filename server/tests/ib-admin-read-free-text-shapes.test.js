@@ -761,3 +761,18 @@ describe('keep mode: only the listed fields reach the model, and a new column ne
     expect(result.data.service.status).toBe('confirmed');
   });
 });
+
+describe('keep mode round 3 fixes (Codex #6366 r3)', () => {
+  const { keepPaths } = require('../utils/response-projection');
+  test('an absent allow-listed object stays null instead of disappearing', () => {
+    expect(keepPaths({ service: null }, ['service.id', 'service.status'])).toEqual({ service: null });
+    expect(keepPaths({ service: { id: 1, status: 'pending', notes: 'x' } }, ['service.id', 'service.status'])).toEqual({ service: { id: 1, status: 'pending' } });
+  });
+  test('invoice line categories and the raw page size are not offered', () => {
+    const rows = require('../services/intelligence-bar/admin-read-reviewed.json').reviewed;
+    const detail = rows.find((r) => r.endpoint === '/admin/invoices/:id');
+    const list = rows.find((r) => r.endpoint === '/admin/invoices');
+    expect(detail.keep).not.toContain('line_items.*.category');
+    expect(list.query).not.toContain('limit');
+  });
+});

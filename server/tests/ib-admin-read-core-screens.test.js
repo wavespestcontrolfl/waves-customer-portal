@@ -60,9 +60,12 @@ describe('the core screens are in the catalog with the right scope', () => {
     expect(query).not.toContain('customerId');
   });
   test('list endpoints are bounded by the handler (a limit key) or are a single day', () => {
-    for (const endpoint of ['/admin/customers', '/admin/schedule/list', '/admin/estimates', '/admin/invoices', '/admin/dispatch/alerts', '/admin/leads']) {
+    for (const endpoint of ['/admin/customers', '/admin/schedule/list', '/admin/estimates', '/admin/dispatch/alerts', '/admin/leads']) {
       expect(entryOf(endpoint).query).toContain('limit');
     }
+    // Invoices: the handler's default page (50, capped at 100) bounds it; a raw limit is not offered (Codex #6366 r3).
+    expect(entryOf('/admin/invoices').query).not.toContain('limit');
+    expect(entryOf('/admin/invoices').query).toContain('page');
   });
 });
 
