@@ -117,6 +117,42 @@ jest.setTimeout(30000);
     expect(await run()).toBe(1);
   });
 
+  // A missed call as the bell leaves it, with `meta` as call_log.metadata.
+  async function missedCallFor(row, meta = {}) {
+    const missedAt = minutesBefore(50);
+    await database('call_log').insert({ id: row.callLogId, twilio_call_sid: `CA_${row.callLogId}`, direction: 'inbound', from_phone: '+19415550100', to_phone: '+19412975749', status: 'no-answer', answered_by: 'missed', duration_seconds: 53, metadata: meta, created_at: missedAt, updated_at: missedAt });
+  }
+
+  test.each(['burst_quiet', 'block_quiet'])('a quiet robodialer call (%s) is never re-pushed, and does not fill the batch ahead of a real bell', async (kind) => {
+    const quiet = await bell(120);
+    const ordinary = await bell(45);
+    await missedCallFor(quiet, { missed_call_spam_wave: kind });
+    await missedCallFor(ordinary);
+    // limit 1: the older quiet bell would be picked first if it were a candidate.
+    expect(await run({ limit: 1 })).toBe(1);
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect((await stored(quiet)).metadata.repushed_at).toBeUndefined();
+    expect((await stored(ordinary)).metadata.repushed_at).toBeDefined();
+  });
+
+  test('a call that turns block_quiet between the read and the claim is not re-pushed (callStillMissed)', async () => {
+    const row = await bell(45);
+    await missedCallFor(row);
+    const real = PushService.sendToAdminUsers.getMockImplementation();
+    PushService.sendToAdminUsers.mockImplementationOnce(async (...args) => {
+      await database('call_log').where({ id: row.callLogId }).update({ metadata: { missed_call_spam_wave: 'block_quiet' } });
+      return real(...args);
+    });
+    expect(await run()).toBe(0);
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
+  });
+
+  test('other spam stamps do not stop a re-push: a block-wave shadow or a burst shadow call still buzzes', async () => {
+    const row = await bell(45);
+    await missedCallFor(row, { missed_call_spam_wave_shadow: true, missed_call_spam_burst_shadow: true });
+    expect(await run()).toBe(1);
+  });
+
   test('re-pushes once after 30 minutes in office hours: same tag, renotify, no new bell row', async () => {
     const row = await bell(31);
     expect(await run()).toBe(1);
