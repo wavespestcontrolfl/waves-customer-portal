@@ -354,6 +354,35 @@ describe('review round 1 fixes (#6368)', () => {
     });
   });
 
+  test('a snapshot that fails keeps the cards this request minted (r3)', async () => {
+    const { sendModelFailureTask } = require('../routes/admin-intelligence-bar');
+    IbTasks.snapshot.mockRejectedValueOnce(new Error('malformed receipt json'));
+    const res = { json: jest.fn() };
+    const card = { id: 'pa-1', tool_name: 'update_customer' };
+    await sendModelFailureTask(res, {
+      activeTask: { id: 'task-1', runner_token: 'rt', session_id: 's1' },
+      actorId: 'admin-1',
+      handled: { taskState: 'awaiting_approval', receiptsKnown: true },
+      payload: { response: 'The AI model did not answer this request.', pendingActions: [] },
+      pendingProposals: [card],
+    });
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'task-1', taskState: 'awaiting_approval', pendingActions: [card] }));
+  });
+
+  test('a readable snapshot answers from the snapshot (it rebuilds the cards)', async () => {
+    const { sendModelFailureTask } = require('../routes/admin-intelligence-bar');
+    IbTasks.snapshot.mockResolvedValueOnce({ taskId: 'task-1', pendingActions: [{ id: 'pa-2' }] });
+    const res = { json: jest.fn() };
+    await sendModelFailureTask(res, {
+      activeTask: { id: 'task-1', runner_token: 'rt', session_id: 's1' },
+      actorId: 'admin-1',
+      handled: { taskState: 'awaiting_approval', receiptsKnown: true },
+      payload: { response: 'x', pendingActions: [] },
+      pendingProposals: [{ id: 'pa-1' }],
+    });
+    expect(res.json).toHaveBeenCalledWith({ taskId: 'task-1', pendingActions: [{ id: 'pa-2' }] });
+  });
+
   test('unreadable receipts answer the cautious payload without a second receipt read', async () => {
     mockForTask.mockRejectedValue(new Error('db down'));
     mockMessagesCreate.mockRejectedValueOnce(limitError());

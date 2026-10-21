@@ -4246,7 +4246,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // bell is cleared here, never after a middle round a later round may still fail.
     // Only a real model answer (not the too-many-steps or empty-reply fallback) clears it.
     if (ibModelFailureNoticeLive() && !noReply) {
-      ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: attemptStartedAt }).catch(() => {});
+      // Deliberate fire-and-forget: the answer never waits on the bell close.
+      void ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: attemptStartedAt })
+        .catch(closeErr => logger.error(`[intelligence-bar] model failure bell close failed (code=${closeErr?.code || closeErr?.name || 'error'})`));
     }
     if (activeTask) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
@@ -4277,29 +4279,52 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 // waits, outcome_unknown when a change was saved or may have run (its receipts
 // stay the authority). Returns false, having answered nothing, when it could
 // not finish; the caller then takes the ordinary error path.
+// The asked turn and this answer join the history, as on a normal reply.
+function modelFailureHistory(body, activeTask, failureTurn, answer) {
+  const prior = Array.isArray(body.conversationHistory) ? body.conversationHistory.slice(-8) : [];
+  const userTurn = String((failureTurn && failureTurn.userTurn) || '').trim() ? failureTurn.userTurn : null;
+  if (!userTurn) return (activeTask && activeTask.response && activeTask.response.conversationHistory) || prior;
+  const base = Array.isArray(failureTurn.historyBase) ? failureTurn.historyBase : prior;
+  const tainted = appendTaintMarker(appendTaintMarker(answer, failureTurn.imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER);
+  return [...base.slice(-8), { role: 'user', content: userTurn }, { role: 'assistant', content: tainted }];
+}
+
+// A saved task answers from its snapshot (which rebuilds its cards); when the
+// snapshot cannot be read, the cautious payload keeps this request's cards.
+async function sendModelFailureTask(res, { activeTask, actorId, handled, payload, pendingProposals }) {
+  await IbTasks.checkpoint(activeTask.id, actorId, { runnerToken: activeTask.runner_token, state: handled.taskState, response: payload });
+  const fallback = { ...payload, taskId: activeTask.id, taskState: handled.taskState };
+  // Unreadable receipts would fail the snapshot the same way: answer the
+  // cautious payload already built ("I could not check ...").
+  if (!handled.receiptsKnown) return res.json(fallback);
+  try {
+    const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
+    const snapshot = await IbTasks.snapshot(savedTask, actorId);
+    if (snapshot) return res.json(snapshot);
+  } catch (snapshotErr) {
+    logger.warn(`[intelligence-bar] model failure snapshot unavailable (code=${snapshotErr?.code || snapshotErr?.name || 'error'})`);
+  }
+  return res.json({ ...fallback, pendingActions: pendingProposals });
+}
+
 async function answerModelFailure(req, res, { err, activeTask, pendingProposals = [], failureTurn = null }) {
+  const body = req.body || {};
   try {
     const actorId = getAdminActorId(req);
-    const lane = req.techRole !== 'admin' || req.body?.context === 'tech' ? 'tech' : 'admin';
-    const hadImages = Array.isArray(req.body?.images) && req.body.images.length > 0;
+    const lane = req.techRole !== 'admin' || body.context === 'tech' ? 'tech' : 'admin';
+    const hadImages = Array.isArray(body.images) && body.images.length > 0;
     const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId, lane, hadImages });
     logger.error(`[intelligence-bar] Query failed, model call (code=${handled.code})`);
-    const priorHistory = Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-8) : [];
     const payload = {
-      ...(activeTask?.response || {}),
-      // The asked turn and this answer join the history, as on a normal reply.
-      conversationHistory: failureTurn && typeof failureTurn.userTurn === 'string' && failureTurn.userTurn.trim()
-        ? [...(Array.isArray(failureTurn.historyBase) ? failureTurn.historyBase : priorHistory).slice(-8),
-          { role: 'user', content: failureTurn.userTurn },
-          { role: 'assistant', content: appendTaintMarker(appendTaintMarker(handled.answer, failureTurn.imageTainted, IMAGE_TAINT_MARKER), true, PII_TAINT_MARKER) }]
-        : (activeTask?.response?.conversationHistory || priorHistory),
+      ...((activeTask && activeTask.response) || {}),
+      conversationHistory: modelFailureHistory(body, activeTask, failureTurn, handled.answer),
       response: handled.answer,
       // The failed exchange is not appended to a server thread, so the client
       // drops its thread: the next ask starts without one and the no-thread
       // follow-up guards apply (fails closed), never a stale thread id.
       // Report the real availability (as the append-failure path does); with no
       // threadId the palette drops its current thread, and History stays.
-      threadsEnabled: IbThreads.threadsEnabled() && lane === 'admin' && req.body?.context !== 'agent_estimate',
+      threadsEnabled: IbThreads.threadsEnabled() && lane === 'admin' && body.context !== 'agent_estimate',
       threadId: undefined,
       threadSeq: undefined,
       toolCalls: [],
@@ -4308,25 +4333,8 @@ async function answerModelFailure(req, res, { err, activeTask, pendingProposals 
       pendingActions: activeTask ? [] : pendingProposals,
       modelFailure: { code: handled.code },
     };
-    if (!activeTask) {
-      res.json(payload);
-      return true;
-    }
-    await IbTasks.checkpoint(activeTask.id, actorId, { runnerToken: activeTask.runner_token, state: handled.taskState, response: payload });
-    // Unreadable receipts would fail the snapshot the same way: answer the
-    // cautious payload already built ("I could not check ...").
-    if (!handled.receiptsKnown) {
-      res.json({ ...payload, taskId: activeTask.id, taskState: handled.taskState });
-      return true;
-    }
-    let snapshot = null;
-    try {
-      const savedTask = await IbTasks.get(activeTask.id, actorId, activeTask.session_id);
-      snapshot = await IbTasks.snapshot(savedTask, actorId);
-    } catch (snapshotErr) {
-      logger.warn(`[intelligence-bar] model failure snapshot unavailable (code=${snapshotErr?.code || snapshotErr?.name || 'error'})`);
-    }
-    res.json(snapshot || { ...payload, taskId: activeTask.id, taskState: handled.taskState });
+    if (activeTask) await sendModelFailureTask(res, { activeTask, actorId, handled, payload, pendingProposals });
+    else res.json(payload);
     return true;
   } catch (failure) {
     logger.warn(`[intelligence-bar] model failure notice not delivered (code=${failure?.code || failure?.name || 'error'})`);
@@ -5364,3 +5372,4 @@ module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((too
 // re-implementation of it.
 module.exports.getToolsForContext = getToolsForContext;
 module.exports.confirmationDisplayParams = confirmationDisplayParams;
+module.exports.sendModelFailureTask = sendModelFailureTask;
