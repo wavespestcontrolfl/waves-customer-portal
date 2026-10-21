@@ -24,8 +24,9 @@
  * pre-lock read (before any Stripe session is retired) and again at the start of the settlement
  * transaction, BEFORE the combined-session release (which rewrites the invoice's edit time itself when
  * it clears a stamp, so the locked row's edit time cannot be compared). The status is re-checked on the
- * LOCKED row right before the paid flip, beside the amount due (expectedAmountCents) and self-pay
- * (requireSelfPay), which are the money facts an edit could move. A difference writes nothing and a 409
+ * LOCKED row right before the paid flip, with the optional `columns` (the visit link, service record,
+ * completion packet, payer links, total and credit), beside the amount due (expectedAmountCents) and
+ * self-pay (requireSelfPay). A difference writes nothing and a 409
  * says so. The Invoices page never sets it.
  *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
@@ -108,9 +109,17 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
 
 const INVOICE_VERSION_DRIFT_TEXT = 'The invoice changed after the confirmation card was shown — nothing was recorded';
 // status and edit time (ms) as the card read them.
-function invoiceMatchesVersion(row, { status, updatedAtMs }, { editTime = true } = {}) {
+// columns (optional): the invoice fields that decide what this settlement records or completes (the visit link, the
+// service record and completion packet, the payer links, total and credit), compared on every check. They are the
+// part of the pin the locked row can still prove after the release has rewritten the edit time.
+const PINNED_COLUMNS = ['scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied'];
+const MONEY_COLUMNS = new Set(['total', 'credit_applied']);
+const pinnedColumnValue = (row, key) => (MONEY_COLUMNS.has(key) ? String(Math.round((Number(row[key]) || 0) * 100)) : String(row[key] ?? ''));
+function invoiceMatchesVersion(row, { status, updatedAtMs, columns = null }, { editTime = true } = {}) {
   const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
-  return String(row.status || '').toLowerCase() === String(status || '').toLowerCase() && (!editTime || at === (updatedAtMs ?? null));
+  if (String(row.status || '').toLowerCase() !== String(status || '').toLowerCase()) return false;
+  if (editTime && at !== (updatedAtMs ?? null)) return false;
+  return !columns || PINNED_COLUMNS.every((key) => pinnedColumnValue(row, key) === pinnedColumnValue(columns, key));
 }
 
 async function recordManualPayment(id, {
@@ -237,7 +246,7 @@ async function recordManualPayment(id, {
     // The card's edit-time pin, read in this transaction BEFORE the release below (which rewrites updated_at when it clears
     // a combined stamp, so the locked row's edit time can no longer be compared).
     if (expectedInvoiceVersion) {
-      const seen = await trx('invoices').where({ id }).first('status', 'updated_at');
+      const seen = await trx('invoices').where({ id }).first('status', 'updated_at', ...PINNED_COLUMNS);
       if (!seen || !invoiceMatchesVersion(seen, expectedInvoiceVersion)) return { versionDrift: true };
     }
     await require('./pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
@@ -251,7 +260,9 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
-    // The card's status pin, on the LOCKED row, in the same transaction as the paid flip (the edit time was compared above).
+    // The card's status and pinned columns, on the LOCKED row, in the same transaction as the paid flip (the edit time was
+    // compared above, before the release rewrote it): an edit that landed while the release waited on its lock or Stripe
+    // and moved the visit link, the payer links or the amount is caught here.
     if (expectedInvoiceVersion && !invoiceMatchesVersion(locked, expectedInvoiceVersion, { editTime: false })) return { versionDrift: true };
     // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
     // read at the top of this function can be overtaken by a Bill-To

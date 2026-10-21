@@ -325,6 +325,23 @@ describe('recordManualPayment — refusal contract', () => {
       expect(calls.paymentsInsert).toBeNull();
     });
 
+    test.each([
+      ['the visit link', { scheduled_service_id: 'sv-other' }],
+      ['the service record', { service_record_id: 'sr-other' }],
+      ['the amount', { total: '120.00' }],
+      ['the credit applied', { credit_applied: '5.00' }],
+    ])('an edit to %s that lands while the release waits is caught on the LOCKED row (Codex pre-push P1, round 2)', async (_name, patch) => {
+      const columns = { scheduled_service_id: 'sv-1', service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
+      const row = openInvoice({ updated_at: SEEN, ...columns });
+      db.mockImplementation(() => recorder({ first: { ...row } }));
+      const calls = trxOver(row, { onRelease: (r) => { Object.assign(r, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }); } });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: { ...version, columns } }));
+      expect(err.statusCode).toBe(409);
+      expect(err.drift).toBe(true);
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
     test('the combined-session release rewriting the invoice edit time is NOT drift: the approved payment still records (Codex pre-push P1)', async () => {
       db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
       const calls = trxOver(openInvoice({ updated_at: SEEN }), { onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });

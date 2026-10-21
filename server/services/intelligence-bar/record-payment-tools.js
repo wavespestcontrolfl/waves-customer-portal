@@ -322,7 +322,13 @@ async function buildPlan(input) {
     _body: body,
     _approved: {
       expectedAmountCents: dueCents,
-      expectedInvoiceVersion: { status: invoice.status, updatedAtMs: msOf(invoice.updated_at) },
+      expectedInvoiceVersion: {
+        status: invoice.status,
+        updatedAtMs: msOf(invoice.updated_at),
+        // What the settlement completes or records beyond the status: re-proved on the locked row.
+        columns: Object.fromEntries(['scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'payer_id', 'payer_statement_id', 'total', 'credit_applied']
+          .map((key) => [key, invoice[key] ?? null])),
+      },
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',
   };

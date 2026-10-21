@@ -33,6 +33,9 @@ const INV = '00000000-0000-4000-8000-0000000000a1';
 const CUST = '00000000-0000-4000-8000-0000000000c1';
 const ADMIN = { isAdmin: true, technicianId: 'staff-1', operationId: 'op-1' };
 const EDITED = new Date('2099-01-01T12:00:00.123Z');
+const COLUMNS = {
+  scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0',
+};
 
 let state;
 function freshState() {
@@ -179,7 +182,7 @@ describe('the preview', () => {
   test('the body is the page’s body: method, reference, note, an explicit sendReceipt false and no via', async () => {
     const card = await preview({ note: 'n' });
     expect(card._body).toEqual({ method: 'check', reference: '1042', note: 'n', sendReceipt: false });
-    expect(card._approved).toEqual({ expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime() } });
+    expect(card._approved).toEqual({ expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS } });
   });
 
   test('a balance net of account credit is the amount due', async () => {
@@ -324,7 +327,7 @@ describe('confirm', () => {
       invoiceId: INV,
       body: { method: 'check', reference: '1042', note: 'n', sendReceipt: true, via: 'both' },
       actor: { technicianId: 'staff-1', name: 'Ava Admin', email: 'ava@example.test' },
-      approvedPayment: { expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime() } },
+      approvedPayment: { expectedAmountCents: 11700, expectedInvoiceVersion: { status: 'sent', updatedAtMs: EDITED.getTime(), columns: COLUMNS } },
     });
   });
 
