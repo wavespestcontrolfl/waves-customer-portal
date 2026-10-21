@@ -501,7 +501,10 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
+      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
+      // next visit to the payload only with the gate on; without them this is
+      // the original sentence, character for character.
+      body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
@@ -1134,7 +1137,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1229,7 +1232,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
-      if (userPref.bell_enabled && !bellWritten) {
+      // pushOnly (missed-call push retry): the bell row already exists; only the push is re-sent.
+      if (!pushOnly && userPref.bell_enabled && !bellWritten) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
         try {
           // NotificationService.create catches insert errors and returns null
@@ -1444,6 +1448,7 @@ module.exports = {
     maskEmail,
     maskPhone,
     pushTagFor,
+    PRIORITY_VIBRATE,
     redactSensitiveText,
     sanitizeBuiltNotification,
     sanitizeNotificationPayload,

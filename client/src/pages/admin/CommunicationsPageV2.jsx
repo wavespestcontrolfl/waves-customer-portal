@@ -53,6 +53,7 @@
 //   messages. This is the untrusted-input boundary — flag any
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
+import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { isAcceptedSms, unansweredSmsReply } from "../../utils/sms-delivery";
 import React, {
   useState,
@@ -3368,7 +3369,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               if (val.length >= 2) {
                 try {
                   const r = await fetch(
-                    `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8`,
+                    `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`,
                     {
                       headers: {
                         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
@@ -3396,7 +3397,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         </Field>
         {toResults.length > 0 && (
           <div className="bg-white border-hairline border-zinc-300 border-t-0 rounded-b-sm max-h-[180px] overflow-y-auto mb-3">
-            {toResults.map((c) => (
+            {renderWithDidYouMean(toResults, (c) => (
               <div
                 key={c.id}
                 onClick={() => {

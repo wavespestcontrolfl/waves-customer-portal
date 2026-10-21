@@ -13,6 +13,55 @@ writer or an arbitrary HTTP/SQL executor for writes. Call the same authoritative
 operation as the corresponding portal action, including its route-owned
 validation and effects where those need extraction.
 
+Writes have one exception, narrower than the read one (owner ruling 2026-10-12: "a
+general EDIT tool is allowed for a reviewed allow-list of small internal edits only
+... owner login only, ALWAYS a confirm card, its own gate"). `find_admin_edits` and
+`propose_admin_edit` (`admin-write-tools.js`, `GATE_IB_GENERAL_EDIT`, which needs
+`GATE_IB_PLATFORM`; owner login only, never owner-direct) edit through
+`admin-write-catalog.json`, a **hand-reviewed list that grows by review**, built by
+`npm run ib:write-catalog` from `admin-write-reviewed.json`. This is still no
+arbitrary executor: the model passes a catalog method and pattern, the path
+parameter values and a body, never a URL, and every field of the body must be on
+the row's allow-list (a field the row does not list is refused, not dropped). A row
+exists only after a person read the PUT or PATCH handler and every function it
+calls; it carries the scan fingerprint (signals, unresolved callees, the tables the
+chain writes, a content hash of the chain), so a changed handler drops the endpoint
+until it is reviewed again, and the byte-for-byte catalog test fails in the PR that
+changed it. The generator's rules for a write (`server/utils/admin-write-rules.js`)
+are stricter than the read ones and a reviewer cannot override them: PUT or PATCH
+only; no delete, bulk, send, money, settings, user or credential word in the path;
+no outside call, no messaging, payment or alerting module, no signed or
+customer-facing link, no delete, DDL, raw SQL write or bulk insert in the chain; no
+money, message or queue table written (a call named like a sender, a charge or a
+delete, and a credential field, need a waiver with a reason in the row). To add an
+edit: read the handler chain end to end, run `npm run ib:write-catalog --
+--fingerprint PUT /admin/...`, write the row (body allow-list, scope, `writes`,
+`noSend` line, `reason`) and regenerate; list a candidate you read and kept out in
+`rejected`. The card is the contract: a small read-only snapshot per edit
+(`admin-write-snapshots.js`, one entry per catalog row; a row without one cannot
+be edited) supplies the record's human label (who or what it is about, never just
+an id), the current value of every carded field, the row's `updated_at` and its
+state. The card shows the label, each field's current value (credentials
+scrubbed) and the new value, an ADDRESS CHANGE line when a field looks like
+address text, and a row's `requireState` (for example an email version must be a
+`draft`) is checked at the card and again at Confirm. The pin (`_version`, stored
+as `_approved_edit_pin`) covers the reviewed row's digest, the filled path, the
+exact normalized body (email blocks are shown and sent in the screen's canonical
+form), the customer binding, the label, the raw current values and the version. On
+Confirm the route re-runs the preview (it must equal the card), the executor
+re-reads the record, rebuilds the plan and refuses with `preview_changed` unless it
+still equals the pin (a value changed on the screen since the card is a new card),
+then sends exactly the carded body as a loopback PUT or PATCH with the
+confirming request's own bearer token and the `X-IB-Admin-Read` log-redaction
+marker, so every middleware and the handler's own checks apply as on the screen. The
+token is carried only on the action context. The handler's response body is never
+returned (a receipt of endpoint, record ids and field names): a 4xx answer is a
+refusal, a 5xx, timeout or transport error is `outcome_unknown`. A 2xx is not
+trusted alone: the record is read again and every carded field must hold its new
+value, else the result is `outcome_unknown` (`edit_not_verified`). The handlers take no
+expected version, so the one remaining window is the milliseconds between the
+Confirm's re-read and the handler's own write.
+
 Reads have one exception (owner ruling 2026-10-12: "The Intelligence Bar may read
 what any admin screen reads, on the owner login, behind a gate"). `find_admin_reads`
 and `read_admin_data` (`admin-read-tools.js`, `GATE_IB_GENERAL_READ`, which needs `GATE_IB_PLATFORM`; owner login
@@ -61,6 +110,44 @@ that no tool can prove: when a response has a free-text field, the row must decl
 fields (`utils/credential-fields.js`); `code` is left out on purpose because it is too common.
 
 **Returned notes (`GATE_IB_READ_NOTES`, owner ruling 2026-10-13, needs `GATE_IB_GENERAL_READ`).** With the gate on, the owner login gets the text of the free-text keys that the rule above withholds, instead of `[note withheld: N characters]` (the same keys: a `note` declaration or a name-matched key not declared `content`; `notes_returned` counts them). The text passes the structural link redaction every string gets (signed and private links become markers) and ONE fixed-format scrubber (`utils/note-secret-scrubber.js`: key and token shapes, Bearer tokens, JWTs, PEM blocks, credential query parameters in URLs, card numbers, SSN pattern, runs of 32+ base64/hex characters) and is cut at 1,000 characters (`[cut]`). It has no prose rules on purpose: gate codes, lockbox instructions and a password written as plain words come back as written (known limit). The answer is still a data answer, so the untrusted-read taint below applies and later writes show cards. Gate off = the withholding above, unchanged. Do not add label-and-value rules to the note scrubber.
+
+**Core screens, projections and accepted signals (owner 2026-10-13: "access to everything").** The reviewed list
+includes the record screens the owner uses most: the customer list, a customer's timeline, texts and calls, estimates,
+cards on file, collection holds and deposit credit; the schedule list (one day is `from=to=date`, a week is a seven-day
+range), the dispatch board, one visit, one technician and the dispatch alerts; the estimate list; and the invoice list
+(by `customer_id`), one invoice and its recipients; and the leads list, one lead (with its activities and calls) and the
+lead overview and by-source aggregates (the leads router no longer runs DDL on a request since #6325, e457629744; the
+consultation-link read mints a link and stays out). Three row fields make that safe, none of them touches a route handler:
+- `acceptSignals`: the scan locks a route that reads a table or field that can hold a credential, a signed link, or opens a
+  transaction. A row may accept such a signal by exact name, only `credential_*`, `signed_url:*` and `write:transaction`
+  (the generator rejects any other name, and a real write inside a transaction raises its own `write:*` signal, which stays
+  a hard lock). The accepted names are part of the row's fingerprint (`signals`), so a new signal in the chain makes the
+  row stale. The reviewer accepts a signal only after reading what the response carries.
+- `omit`: response key paths that never reach the model (`customer.stripe_customer_id`, `estimates.token` through an
+  array, `payments.*.card_token`, `**.stripe_charge_id` at any depth; `utils/response-projection.js`). Applied to the parsed
+  answer before the credential and secret passes and before truncation, validated by the generator, copied into the catalog
+  entry; the answer's note lists the key names left out. It is covered by the review: the row is only admitted while its
+  handler-chain hash matches. Used for pay and claim tokens, Stripe payment and charge ids, receipt links, signed photo URLs
+  and duplicate or internal fields. Gate codes in their own field are returned (earlier owner decision).
+- `keep` (an allow-list, owner ruling 2026-10-20 after Codex #6366 rounds 1 to 3): a row that returns a whole table row or a
+  broad object lists the response key paths it keeps (`invoices.*.status`; `*` is an array item; a list of plain values or a
+  map of numbers is kept whole; `utils/response-projection.js`). Every key not listed is DROPPED (not withheld), so a column
+  added next month never reaches the model until a person reviews it. The kept keys still pass the free-text withholding and
+  the secret scrubber. The generator refuses a kept key that looks like free text (unless the row declares it `content`) and
+  a fixed list of operator-entered fields (payment_reference, profileLabel, tags, competitorName, title, metadata ...).
+  Every row added with the core screens and leads is in keep mode; the rows already on main are not.
+- `keywords`: plain-language phrases `find_admin_reads` matches ("texts with this customer", "unpaid invoices"); they weigh
+  like path words.
+Left out, with the reason: the Customer 360 payload (`GET /admin/customers/:id`: its chain reaches the estimate pricing
+engine, 150 unresolved callees and effect-named calls), `GET /admin/customers/:id/properties` (it creates the primary property on read), the
+schedule day and week views (an outside weather call and writes), the invoice followup, the all-customer communications log
+(applicant threads) and unbounded lists. A long list is cut by the existing truncation, and the note names the endpoint's own
+query filters. The timeline and texts reads do not offer a paging cursor, because a query value is cut at 200 characters;
+narrow with `type`, `search`, `channel` and `limit`.
+Free text on these rows is withheld exactly as on every other row: a note-like key name by the default, plus the keys a name
+would not catch declared as `note` in the row's `freeText` (`leadSourceDetail`, the lead `service_interest` and `extracted_data`,
+the newest-message `preview`, the estimate agent draft `reasoning`, `assumptions` and `uncertainty`). A row never opts into
+`content`, so invoice line item descriptions, message bodies and call transcripts show only their length.
 
 **Read taint.** After a general read, owner-direct edits need cards for the rest of the thread. The
 server's thread record is authoritative: whenever owner-direct is on and the request has a thread id, one

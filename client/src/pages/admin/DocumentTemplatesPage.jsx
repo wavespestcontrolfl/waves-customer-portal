@@ -1,3 +1,4 @@
+import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
@@ -348,7 +349,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     setCustomerLoading(true);
     const timeout = setTimeout(async () => {
       try {
-        const data = await api(`/admin/customers?search=${encodeURIComponent(term)}&limit=8&sort=name`);
+        const data = await api(`/admin/customers?search=${encodeURIComponent(term)}&limit=8&sort=name&suggest=1`);
         if (!cancelled) setCustomerResults(data.customers || []);
       } catch {
         if (!cancelled) setCustomerResults([]);
@@ -914,7 +915,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                       )}
                       {!selectedCustomer && (customerResults.length > 0 || customerLoading) && (
                         <div className="rounded-xs border-hairline border-zinc-200 bg-white">
-                          {customerResults.map((customer) => (
+                          {renderWithDidYouMean(customerResults, (customer) => (
                             <Button variant="ghost"
                               key={customer.id}
                               type="button"
