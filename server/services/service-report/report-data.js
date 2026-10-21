@@ -6228,6 +6228,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // retreat-check on the frozen visit memory and hands one fixed Watching
       // sentence to the lead, the same non-enumerable way as sinceLastCopy.
       // Fail closed and best-effort: any miss leaves the report as it was.
+      // GATE_REPORT_WEB_LIVE_CHIP: hand the route the inputs the live chip reads (an out-param; nothing joins the payload).
+      if (opts.liveChipOut && typeof opts.liveChipOut === 'object') {
+        Object.assign(opts.liveChipOut, {
+          completedAt: completionTime,
+          instruction: wateringInstruction,
+          products,
+          latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+          longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+        });
+      }
       if (reportV2 && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
         try {
           const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({

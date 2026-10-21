@@ -53,6 +53,41 @@ function glassWebLive(simpleWeb, gates) {
   return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
 }
 
+// GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): each key rides only a live simple-web view
+// of a lawn record; a partial gates module reads as off.
+function webExtraLive(simpleWeb, gates, reader) {
+  return simpleWeb === true && typeof gates[reader] === 'function' && gates[reader]();
+}
+
+// Program line (idea 9). Recurring lawn plan visits only, judged from the frozen completion identity; best-effort.
+function attachProgramPromise(v1Data, service) {
+  try {
+    if (v1Data.serviceLine !== 'lawn' || service.is_callback || !v1Data.lawnAssessment) return;
+    const { isRecurringLawnPlanKey } = require('../services/service-report/lawn-program-line');
+    let serviceData = service.service_data;
+    if (typeof serviceData === 'string') serviceData = JSON.parse(serviceData);
+    if (!isRecurringLawnPlanKey(serviceData && serviceData.completedServiceKey)) return;
+    const assessment = v1Data.lawnAssessment;
+    const promise = require('../services/service-report/lawn-program-promise').buildProgramPromise({
+      scores: assessment.scores,
+      firstDate: assessment.trend && assessment.trend[0] && assessment.trend[0].date,
+      visitDate: assessment.assessmentDate,
+    });
+    if (promise) v1Data.programPromise = { monthLine: promise.monthLine, items: promise.items.map(({ key, label, state, sentence }) => ({ key, label, state, sentence })) };
+  } catch { /* best-effort: the report renders without the line */ }
+}
+
+// Live chip (idea 10). Built from this request's own rain read, never stored; only the sentence and a state word leave.
+async function attachLiveChip(v1Data, chipInputs) {
+  try {
+    if (v1Data.serviceLine !== 'lawn' || !chipInputs || !chipInputs.completedAt) return;
+    const chip = await require('../services/service-report/lawn-live-chip').resolveLiveChip({
+      ...chipInputs, fetchForecast: require('../services/service-report/application-conditions').fetchPropertyForecast,
+    });
+    if (chip) v1Data.liveChip = { state: chip.state, text: chip.text };
+  } catch { /* best-effort: no chip */ }
+}
+
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
 // solely when the request carries a valid staff JWT — the report page
@@ -471,6 +506,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   // OPT-IN on the same terms (GATE_LAWN_WATER_IN_RAIN): only the /data render and the PDF render print the
   // lawn watering banner, so only they pay for the rain lookup. /ask and /map.svg never do.
   lawnWaterInRain = false,
+  // GATE_REPORT_WEB_LIVE_CHIP: an out-param the lawn report build fills with the chip's inputs (completion time,
+  // coordinates, products, frozen watering instruction). Internal; never reaches the payload.
+  liveChipOut,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -493,6 +531,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnPhotoFindings,
     lawnRainfastWatch,
     lawnWaterInRain,
+    liveChipOut,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2585,6 +2624,8 @@ router.get('/:token/data', async (req, res, next) => {
       const simpleWeb = mode === 'live' && !suppressedTypedReport(service)
         && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
       const buildMode = simpleWeb ? 'pdf' : mode;
+      const programLive = webExtraLive(simpleWeb, reportGates, 'reportWebProgramLive');
+      const liveChipOut = webExtraLive(simpleWeb, reportGates, 'reportWebLiveChipLive') ? {} : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
@@ -2593,6 +2634,7 @@ router.get('/:token/data', async (req, res, next) => {
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
         lawnWaterInRain: true,
+        liveChipOut,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2636,6 +2678,10 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
+      // GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): live simple-web view only, each its own
+      // key. Absent key = byte-identical payload; the PDF build never reaches here.
+      if (programLive) attachProgramPromise(v1Data, service);
+      if (liveChipOut) await attachLiveChip(v1Data, liveChipOut);
       return res.json(v1Data);
     }
 
