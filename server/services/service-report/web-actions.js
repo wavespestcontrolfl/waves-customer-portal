@@ -209,9 +209,9 @@ async function attachWebActions(service, data, { db, gates, simpleWeb }) {
   if (service?.customer_id && gates.isEnabled('customerPhotoId')) {
     out.photo = { type: photoTypeForLine(data?.serviceLine) };
   }
-  const { reserviceReportCopyGateOn } = require('./reservice-report');
-  const callback = reserviceReportCopyGateOn() && data?.isCallback === true;
-  if (!callback && gates.isEnabled('reportCrossSell') && gates.isEnabled('reportClickToEstimate')) {
+  // A callback visit never gets a sales tile, whatever GATE_RESERVICE_REPORT_COPY says (the payload carries isCallback
+  // on its own).
+  if (data?.isCallback !== true && gates.isEnabled('reportCrossSell') && gates.isEnabled('reportClickToEstimate')) {
     try {
       const { buildReportCrossSell } = require('./cross-sell');
       const finding = await buildFindingTile(data, { buildCrossSell: () => buildReportCrossSell(service, db) });

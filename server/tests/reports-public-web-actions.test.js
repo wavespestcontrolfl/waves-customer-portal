@@ -181,6 +181,25 @@ describe('web-actions: finding tile', () => {
   });
 });
 
+describe('web-actions: callbacks never get a tile', () => {
+  test('a callback gets no finding tile even with GATE_RESERVICE_REPORT_COPY off', async () => {
+    const prev = process.env.GATE_RESERVICE_REPORT_COPY;
+    delete process.env.GATE_RESERVICE_REPORT_COPY;
+    try {
+      const gates = {
+        reportWebActionsLive: () => true, reportSimpleWebLive: () => true,
+        isEnabled: (name) => ['reportCrossSell', 'reportClickToEstimate'].includes(name),
+      };
+      const data = { isCallback: true, serviceLine: 'lawn', findings: [{ category: 'weeds', title: 'Weeds along the driveway', detail: 'broadleaf' }] };
+      const db = jest.fn(() => { throw new Error('no cross-sell read on a callback'); });
+      await webActions.attachWebActions({ id: 's1' }, data, { db, gates, simpleWeb: true });
+      expect(data.webActions?.finding).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_RESERVICE_REPORT_COPY; else process.env.GATE_RESERVICE_REPORT_COPY = prev;
+    }
+  });
+});
+
 describe('web-actions: photo answers', () => {
   const reply = (kind, extra = {}) => ({ status: 200, body: { result: { label: 'Likely a German cockroach' }, next_step: { kind, url: '/reservice/standing-token-123' }, ...extra } });
 
