@@ -293,7 +293,7 @@ describe('GET /reports/:token/data first screen (GATE_REPORT_WEB_TOP)', () => {
       const { body } = await getData(baseUrl);
       expect(body.webTop.score).toEqual({ value: 74, previous: 70 });
       expect(body.webTop.trend).toHaveLength(2);
-      expect(body.webTop.hold).toBe('Keep pets off the lawn until it is dry.');
+      expect(body.webTop.hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
       expect('rain' in body.webTop).toBe(false);
     });
   });

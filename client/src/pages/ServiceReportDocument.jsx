@@ -9,6 +9,7 @@ import {
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
+import { FooterIdentity, PrintOnly, webCutView } from '../components/report/WebCutParts';
 import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
 
 // Work-order style service report document (owner direction 2026-08-03,
@@ -445,7 +446,8 @@ function ProductFacts({ app, product, hideAreas, data }) {
 
 // GATE_REPORT_WEB_TOP (owner 2026-10-20), web only: each product is one tap-to-open row. The name shows; the EPA
 // number, rate, total and the label lines open under it.
-function WebProductList({ apps, hideAreas, data, reportCleanup }) {
+function WebProductList({ on, apps, hideAreas, data, reportCleanup }) {
+  if (!on) return null;
   return (
     <div className="doc-screen-only">
       {apps.map((app, index) => {
@@ -468,7 +470,8 @@ function WebProductList({ apps, hideAreas, data, reportCleanup }) {
 }
 
 // GATE_REPORT_WEB_TOP, web only: the visit's conditions in one line instead of a card of rows.
-function ConditionsLine({ conditions, rainLabel, rainValue, gc }) {
+function ConditionsLine({ on, conditions, rainLabel, rainValue, gc }) {
+  if (!on) return null;
   const parts = conditions ? [
     conditions.temp_f != null && `${conditions.temp_f} °F`,
     conditions.humidity_pct != null && `${conditions.humidity_pct}% humidity`,
@@ -495,15 +498,8 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // GATE_REPORT_WEB_TOP (owner 2026-10-20): the server sends `webTop` (an object, even an empty one) only to the
   // web view while the gate is live. It also trims the web page: tap-to-open products, no letterhead, conditions on
   // one line, one footer identity. The PDF never carries it.
-  // The trims are SCREEN-ONLY: the cut parts stay in the markup, hidden on screen (`doc-print-only`), and the screen
-  // replacements are hidden in print (`doc-screen-only`), so a browser Print of the live page is the full document.
-  const webCut = web && Boolean(data.webTop);
-  const footerIdentity = (
-    <>
-      <br />
-      Waves Pest Control, LLC · Family-owned pest control and lawn care in Southwest Florida · Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}
-    </>
-  );
+  // The trims are screen-only; see components/report/WebCutParts.jsx.
+  const cut = webCutView(web, data);
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -1157,7 +1153,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   return (
     <GlassDressing.Provider value={glassOn}>
     <div
-      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}${webCut ? ' is-cut' : ''}${glassClass}`}
+      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}${cut.rootClass}${glassClass}`}
       style={{ background: rootBackground, color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
@@ -1241,7 +1237,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {/* Letterhead and title: one glass card on the web view, plain otherwise */}
         <GlassBlock>
         {/* Letterhead */}
-        <div className={`doc-keep doc-letterhead${webCut ? ' doc-print-only' : ''}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        <div className={`doc-keep doc-letterhead${cut.printOnly}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
             <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
@@ -1288,7 +1284,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             <InfoRow label="Time out">{fmtTime(data.visitTiming?.exitedAt)}</InfoRow>
             <InfoRow label="Contact">{interaction}</InfoRow>
           </div>
-          <div {...gc} className={webCut ? 'doc-print-only' : undefined}>
+          <PrintOnly cut={cut} {...gc}>
             <SectionHeader>Conditions</SectionHeader>
             {conditions ? (
               <>
@@ -1301,9 +1297,9 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             ) : (
               <div style={{ fontSize: 11, color: MUTED, padding: '2px 0' }}>Not recorded for this visit.</div>
             )}
-          </div>
+          </PrintOnly>
         </div>
-        {webCut && <ConditionsLine conditions={conditions} rainLabel={rainLabel} rainValue={rainValue} gc={gc} />}
+        <ConditionsLine on={cut.on} conditions={conditions} rainLabel={rainLabel} rainValue={rainValue} gc={gc} />
 
         {/* Summary */}
         {summaryParagraphs.length > 0 && (
@@ -1615,8 +1611,8 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {appliedProducts.length > 0 && (
           <div {...gc}>
             <SectionHeader>Products applied</SectionHeader>
-            {webCut && <WebProductList apps={appliedProducts} hideAreas={hideAreas} data={data} reportCleanup={reportCleanup} />}
-            <table className={`doc-products${webCut ? ' doc-print-only' : ''}`} style={{ fontSize: 11 }}>
+            <WebProductList on={cut.on} apps={appliedProducts} hideAreas={hideAreas} data={data} reportCleanup={reportCleanup} />
+            <table className={`doc-products${cut.printOnly}`} style={{ fontSize: 11 }}>
               <thead className="doc-keep-with-next">
                 <tr>
                   {['Product', 'EPA Reg. No.', 'Rate', 'Total applied'].map((heading, i) => (
@@ -2103,7 +2099,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
                  correctly defeats the claim rather than over-claiming */
               ? ' Photos hash-chained and tamper-evident.' : ''}
             {/* The web page's own footer already names Waves, the service area and the license: screen-only trim. */}
-            {webCut ? <span className="doc-print-only">{footerIdentity}</span> : footerIdentity}
+            <FooterIdentity cut={cut} />
           </div>
         </div>
 

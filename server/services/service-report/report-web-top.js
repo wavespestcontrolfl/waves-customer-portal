@@ -15,7 +15,7 @@
  */
 
 const { dateOnlyString, etDateString, addETDays } = require('../../utils/datetime-et');
-const { reentryCondition } = require('./lawn-report-facts');
+const { reentryCondition, TECHNICIAN_CONFIRMS } = require('./lawn-report-facts');
 const logger = require('../logger');
 
 const TREND_POINTS = 6;
@@ -36,8 +36,10 @@ const sentence = (value, max = 160) => {
   return text && text.length <= max ? text : null;
 };
 
+// Something was applied, or the evidence is unknown (applicationMade null): fail closed like the document's
+// hasActualTreatment, so a hold is never dropped on a visit that may have treated.
 function treated(data) {
-  return data.applicationMade === true || data.treatmentPerformed === true;
+  return data.applicationMade === true || data.treatmentPerformed === true || data.applicationMade === null;
 }
 
 /** Lawn only: { score: { value, previous }, trend } from the V2 snapshot and its score history. */
@@ -63,16 +65,6 @@ function lawnWatering(v2) {
   return sentence((Array.isArray(banner.lines) ? banner.lines : []).find((line) => sentence(line)));
 }
 
-// The next step as ServiceReportDocument picks it for "What we recommend": a PRIMARY termite dashboard owns the
-// commitment (station evidence can replace a frozen "No action needed"), unless a re-service visit applied nothing.
-// The document runs this inline on the client, so the same three checks are mirrored here.
-function nextStepText(data) {
-  const termite = data.termiteReportV2;
-  const outcome = data.reserviceReport?.outcome;
-  const primary = Boolean(termite) && termite.source !== 'companion' && !['inspection_only', 'customer_declined'].includes(outcome);
-  return primary ? (termite.nextStep || data.typedReport?.todaysResult?.nextStep) : data.typedReport?.todaysResult?.nextStep;
-}
-
 // Rain that watered the treatment in completes the watering task only: a hold on the sprinklers the visit set stays
 // (the banner keeps that line), and the report may still hold another customer task.
 const KEPT_HOLD_LINE = /^Skip your turf watering until /;
@@ -91,31 +83,64 @@ function lawnAction(data) {
   return treated(data) ? lawnWatering(v2) : null;
 }
 
+// The non-lawn next step, read in the order ServiceReportDocument builds "What we recommend" (that selector runs inline
+// on the client, so the order is mirrored here): the typed step (a PRIMARY termite dashboard owns it unless a
+// re-service visit applied nothing), the report's own recommendations, a pest or mosquito primary move, then the V2
+// snapshot's customer action (tree & shrub). The first real action wins; if every candidate says "no action", so does
+// the card.
+const NO_ACTION_RX = /^no (further )?action\b/i;
+const moveText = (move) => sentence(move?.title ? [move.title, move.why, move.impact].filter(Boolean).join(' ') + (move.dueLabel ? ` (${move.dueLabel})` : '') : null, 240)
+  || sentence(move?.title);
+
+function nextStepCandidates(data) {
+  const termite = data.termiteReportV2;
+  const outcome = data.reserviceReport?.outcome;
+  const primary = Boolean(termite) && termite.source !== 'companion' && !['inspection_only', 'customer_declined'].includes(outcome);
+  const typed = data.typedReport?.todaysResult?.nextStep;
+  const ownFindings = new Set((data.findings || []).map((f) => String(f?.recommendation || '').trim()).filter(Boolean));
+  return [
+    primary ? (termite.nextStep || typed) : typed,
+    ...(Array.isArray(data.recommendations) ? data.recommendations : []).filter((r) => !ownFindings.has(String(r || '').trim())),
+    moveText(data.pestReportV2?.primaryMove),
+    moveText(data.mosquitoReportV2?.primaryMove),
+    data.reportV2?.snapshot?.customerAction,
+  ].map((text) => sentence(text, 240)).filter(Boolean);
+}
+
 /**
  * The one action. Lawn: the watering line the page already recommends, so it is worded one way (a neutral "no special
  * watering" line is not an action). Other lines: the report's own next step.
  */
 function actionLine(data) {
   if (data.serviceLine === 'lawn') return lawnAction(data);
-  const step = sentence(nextStepText(data));
-  if (!step) return null;
-  return /^no (further )?action\b/i.test(step) ? NO_ACTION : step;
+  const steps = nextStepCandidates(data);
+  const real = steps.find((step) => !NO_ACTION_RX.test(step));
+  return real || (steps.length ? NO_ACTION : null);
 }
 
-// The keep-off sentence for each frozen re-entry rule (lawn-report-facts RULES). It follows the document's re-entry
-// wording: "dry" is once dry; a granular "watered_in_and_dry" needs the watering in AND the grass dry again. No hours.
+// The keep-off sentences, with the approved clause every re-entry line carries ("your technician confirms timing",
+// lawn-report-facts). "dry" is once dry; a granular "watered_in_and_dry" needs the watering in AND the grass dry again.
+// No hours.
+const holdWith = (text) => `${text} \u2014 ${TECHNICIAN_CONFIRMS}.`;
 const LAWN_HOLD = Object.freeze({
-  dry: 'Keep pets off the lawn until it is dry.',
-  watered_in_and_dry: 'Keep pets off the lawn until the treatment has dried, you have watered it in, and the grass is dry again.',
+  dry: holdWith('Keep pets off the lawn until it is dry'),
+  watered_in_and_dry: holdWith('Keep pets off the lawn until the treatment has dried, you have watered it in, and the grass is dry again'),
 });
+const OTHER_HOLD = holdWith('Keep pets off treated areas until they are dry');
+
+// A clock-based re-entry whose every target had already passed its ready time when the report was built has nothing
+// left to hold. A condition-based (frozen lawn) re-entry has no targets and always holds.
+function clockElapsed(reentry) {
+  const targets = Array.isArray(reentry?.targets) ? reentry.targets : [];
+  return !reentry?.condition && targets.length > 0 && targets.every((t) => t?.statusAtGeneratedAt === 'ready');
+}
 
 /** The one hold: a fixed sentence, only when something was applied and the report carries a re-entry context. */
 function holdLine(data) {
   const reentry = data.dynamicContext?.reentry;
-  if (!treated(data) || !(reentry || data.advisory?.pet_advisory)) return null;
-  if (data.serviceLine !== 'lawn') return 'Keep pets off treated areas until they are dry.';
-  const rule = reentryCondition(reentry?.condition)?.rule;
-  return LAWN_HOLD[rule] || LAWN_HOLD.dry;
+  if (!treated(data) || !(reentry || data.advisory?.pet_advisory) || clockElapsed(reentry)) return null;
+  if (data.serviceLine !== 'lawn') return OTHER_HOLD;
+  return LAWN_HOLD[reentryCondition(reentry?.condition)?.rule] || LAWN_HOLD.dry;
 }
 
 function buildWebTop(data, rain = null) {
