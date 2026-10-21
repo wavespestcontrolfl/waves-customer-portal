@@ -3349,6 +3349,9 @@ async function serviceStatusHandler(req, res, next) {
         source: 'admin-dispatch',
         // Set only by cancelServiceFromBar: the linked visits the card approved (each re-checked under its lock).
         ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
+        // Set only by cancelServiceFromBar: the money effects the card showed (invoices to void at those amounts and
+        // PaymentIntents, credits to reverse, no card rail). The follow-through acts on these only.
+        ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),
       });
       // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
       // inside a 9-application plan adds one back at the end of the series.
@@ -3478,6 +3481,7 @@ async function serviceStatusHandler(req, res, next) {
           }
         : {}),
       ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
+      ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
     });
   } catch (err) { next(err); }
 }
@@ -3490,7 +3494,7 @@ async function serviceStatusHandler(req, res, next) {
 // and no coordinates. `beforeCommit(trx)` runs inside the handler's cancel transaction right after it locks the visit.
 // `approvedNotice` and `linkedChildren` carry what the card showed: the send uses exactly that text, and the linked
 // visits not on the card (or changed since) are left alone and reported as `linkedVisitsSkipped`.
-function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit, approvedNotice, linkedChildren }) {
+function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit, approvedNotice, linkedChildren, approvedMoney }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -3508,6 +3512,9 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
       ibApprovedCancelNotice: approvedNotice || null,
       ibApprovedLinkedChildren: Array.isArray(linkedChildren) ? linkedChildren : null,
       ibLinkedChildReport: Array.isArray(linkedChildren) ? { skipped: [] } : null,
+      // The card's money effects ({ invoices, creditReversalOfferIds }); anything that changed is skipped and reported.
+      ibApprovedMoney: approvedMoney || null,
+      ibMoneyReport: approvedMoney ? { skipped: [] } : null,
     };
     Promise.resolve(serviceStatusHandler(req, res, reject)).catch(reject);
   });

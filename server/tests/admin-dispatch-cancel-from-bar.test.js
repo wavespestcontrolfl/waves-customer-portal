@@ -134,10 +134,23 @@ describe('cancelServiceFromBar hands the card\'s approvals to the handler', () =
     expect(json.linkedVisitsSkipped).toEqual([{ id: 'child-1', reason: 'date_changed' }]);
   });
 
+  test('the card\'s money effects reach the follow-through as pinnedEffects with a report; skipped effects come back in the reply', async () => {
+    const approvedMoney = { invoices: [{ id: 'inv-1', total: 120, credit_applied: 0, deposit_credit: 0 }], creditReversalOfferIds: ['offer-1'] };
+    mockRunFollowThrough.mockImplementationOnce(async ({ moneyReport }) => { moneyReport.skipped.push({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }); });
+    const { json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR, approvedMoney });
+    const call = mockRunFollowThrough.mock.calls[0][0];
+    expect(call.pinnedEffects).toEqual({ 'svc-bar-1': approvedMoney });
+    expect(call.waiveFee).toBe(false);
+    expect(json.moneySkipped).toEqual([{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }]);
+  });
+
   test('with no approvals the handler\'s calls carry none of the opt-in keys (a Dispatch cancel is unchanged)', async () => {
     const { json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR });
     expect(Object.keys(mockHandleCancellation.mock.calls[0][1])).not.toContain('approvedNotice');
     expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('linkedChildren');
+    expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('pinnedEffects');
+    expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('moneyReport');
+    expect(json.moneySkipped).toBeUndefined();
     expect(json.linkedVisitsSkipped).toBeUndefined();
   });
 });

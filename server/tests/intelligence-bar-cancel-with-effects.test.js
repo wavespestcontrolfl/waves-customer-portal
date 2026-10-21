@@ -260,6 +260,25 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.warning).toBeUndefined();
   });
 
+  test('the card\'s invoices (with PaymentIntent ids) and reversible credits are forwarded as the approved money', async () => {
+    const withMoney = {
+      ...FROZEN,
+      invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 10, deposit_credit: 0, payment_intent: true, payment_intent_id: 'pi_test' }],
+      inspection_credit_reversal: [{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }, { id: 'offer-2', amount: 75, would_reverse: false, deferred: false }],
+    };
+    mockComputeImpact.mockResolvedValue(withMoney);
+    await executeTool('cancel_appointment', input({ _frozen_cancellation_impact: withMoney }), ADMIN);
+    expect(mockCancelFromBar.mock.calls[0][0].approvedMoney).toEqual({ invoices: withMoney.invoices, creditReversalOfferIds: ['offer-1'] });
+  });
+
+  test('a billing effect the follow-through skipped (changed since the card) is reported, not hidden', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, moneySkipped: [{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }] } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.money_skipped).toEqual([{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }]);
+    expect(result.warning).toMatch(/1 billing effect\(s\) changed since the card and were NOT carried out \(invoice inv-1: not_voided_changed_since_card\)/);
+  });
+
   test('a linked visit the cascade left alone (it changed after the card) is reported, not hidden', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, linkedVisitsSkipped: [{ id: 'svc-visit-2', reason: 'date_changed' }] } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

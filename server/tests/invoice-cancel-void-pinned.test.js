@@ -172,3 +172,50 @@ describe('previewInvoiceVoidForCancelledService piCache', () => {
     expect(set.map((i) => i.id)).toEqual(['inv-b']);
   });
 });
+
+// A card that approved cancelling an invoice's open card payment attempt names that exact PaymentIntent
+// (payment_intent_id). The pinned sweep cancels and voids only that one, re-checked under the invoice row lock.
+describe('pinned sweep and an approved PaymentIntent', () => {
+  const stripe = require('../services/stripe');
+  const withPi = (id = 'pi_test') => { mockInvoiceRows = [{ ...INV_A, stripe_payment_intent_id: id }, INV_B]; };
+
+  test('the preview names the PaymentIntent the void would cancel (only when there is one)', async () => {
+    withPi();
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const preview = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    expect(preview.find((i) => i.id === 'inv-a')).toMatchObject({ payment_intent: true, payment_intent_id: 'pi_test' });
+    expect(preview.find((i) => i.id === 'inv-b')).not.toHaveProperty('payment_intent_id');
+  });
+
+  test('the approved PaymentIntent is cancelled at Stripe and its invoice voided', async () => {
+    withPi();
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect([...voided]).toEqual(['inv-a', 'inv-b']);
+    expect(stripe.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+    expect(stripe.cancelPaymentIntent).toHaveBeenCalledWith('pi_test', expect.anything());
+  });
+
+  test('a DIFFERENT PaymentIntent attached since the card is left alone: no Stripe call, no void', async () => {
+    withPi();
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    stripe.retrievePaymentIntent.mockClear();
+    withPi('pi_other');
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect([...voided]).toEqual(['inv-b']);
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  test('a PaymentIntent that went in flight after the card is NOT cancelled and the invoice is left open', async () => {
+    withPi();
+    stripe.retrievePaymentIntent.mockResolvedValueOnce({ status: 'requires_payment_method' });
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    stripe.retrievePaymentIntent.mockResolvedValue({ status: 'processing' });
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+    expect([...voided]).toEqual(['inv-b']);
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+  });
+});

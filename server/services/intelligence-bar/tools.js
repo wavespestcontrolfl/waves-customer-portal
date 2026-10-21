@@ -4399,6 +4399,12 @@ async function cancelWithEffects(input, actionContext, appt) {
       notifyCustomer: sendText,
       approvedNotice: sendText ? (text.recipients || []).map(({ recipient_key, body }) => ({ recipient_key, body })) : null,
       linkedChildren: frozen.linked_visits || [],
+      // The money the card showed: only these invoices (at these amounts and PaymentIntents) are voided and only
+      // these credit reversals run; no card fee rail is run. Anything that changed is skipped and reported.
+      approvedMoney: {
+        invoices: frozen.invoices || [],
+        creditReversalOfferIds: (frozen.inspection_credit_reversal || []).filter((o) => o.would_reverse).map((o) => o.id),
+      },
       notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
       actor: { technicianId: actionContext.technicianId || null },
       // Under the visit lock: lock the linked visits too, then compare cheap DB fields only (PaymentIntents were
@@ -4436,6 +4442,11 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
   if (sendText && json.notificationSent === false) {
     warnings.push(`The visit is cancelled, but the customer text did not go out (${json.notificationError || 'no reason given'}) and will not be retried automatically — send it by hand.`);
   }
+  // A money effect that changed since the card (an invoice, a payment attempt, a credit) was NOT acted on.
+  const moneySkipped = json.moneySkipped || [];
+  if (moneySkipped.length) {
+    warnings.push(`${moneySkipped.length} billing effect(s) changed since the card and were NOT carried out (${moneySkipped.map((m) => `${m.kind}${m.id ? ` ${m.id}` : ''}: ${m.reason}`).join('; ')}) — the office reviews them.`);
+  }
   // A linked visit that changed since the card (or was not on it) is left alone, never cancelled unseen.
   const skipped = json.linkedVisitsSkipped || [];
   if (skipped.length) {
@@ -4450,6 +4461,7 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
     ran_dispatch_cancel: true,
     customer_text_sent: sendText && json.notificationSent === true,
     ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
+    ...(moneySkipped.length ? { money_skipped: moneySkipped } : {}),
     ...(warnings.length ? { warning: warnings.join(' ') } : {}),
   };
 }

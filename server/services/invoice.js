@@ -13291,7 +13291,11 @@ const InvoiceService = {
           // A card-confirmed cancel never pins an invoice carrying a
           // PaymentIntent (the card refuses that shape), so one attached
           // since the card is left alone: no Stripe cancel, no void.
-          if (pinnedById && (pinnedMismatch(candidate) || candidate.stripe_payment_intent_id)) {
+          // A pinned invoice that carries a PaymentIntent is voided only when the card named that exact PaymentIntent
+          // (payment_intent_id); a pin without it (every older card) still leaves a PaymentIntent-bearing invoice alone.
+          const pinnedPi = pinnedById ? pinnedById.get(String(candidate.id))?.payment_intent_id : null;
+          if (pinnedById && (pinnedMismatch(candidate)
+            || (candidate.stripe_payment_intent_id && String(candidate.stripe_payment_intent_id) !== String(pinnedPi || '')))) {
             logger.warn(
               `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — changed since the confirmed card; needs office review`,
             );
@@ -13598,6 +13602,8 @@ const InvoiceService = {
         // The void would CANCEL this PaymentIntent (and unbind it from
         // combined siblings) — a card-confirmed cancel refuses that shape.
         payment_intent: Boolean(candidate.stripe_payment_intent_id),
+        // The PaymentIntent the void would cancel, so a card-confirmed cancel can approve exactly that one.
+        ...(candidate.stripe_payment_intent_id ? { payment_intent_id: candidate.stripe_payment_intent_id } : {}),
         ...cancelVoidInvoiceAmounts(candidate),
       });
     }

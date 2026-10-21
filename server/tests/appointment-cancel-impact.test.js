@@ -807,6 +807,17 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
     expect((await run()).card_cancel_refusals).toEqual([]);
   });
 
+  test('the frozen invoice entry names the PaymentIntent the void would cancel (and only then), so Confirm approves exactly it', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([
+      { id: 'inv-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 0, payment_intent: true, payment_intent_id: 'pi_test' },
+      { id: 'inv-2', status: 'sent', total: 20, credit_applied: 0, deposit_credit: 0, payment_intent: false },
+    ]);
+    const impact = await run();
+    expect(impact.invoices[0]).toMatchObject({ payment_intent: true, payment_intent_id: 'pi_test' });
+    expect(impact.invoices[1]).not.toHaveProperty('payment_intent_id');
+  });
+
   test('an invoice already void or refunded is listed as kept and does not block', async () => {
     noCard();
     mockAnyInvoiceLinked.mockReturnValue(invoiceBuilder([{ id: 'inv-9', invoice_number: 'INV-9', status: 'void', total: '10.00' }]));

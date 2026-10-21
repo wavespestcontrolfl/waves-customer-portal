@@ -103,6 +103,13 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     expect(report.skipped).toEqual([{ id: 'child-1', reason: 'no_longer_linked' }]);
   });
 
+  test('an approved child that fails for a reason other than drift (a database or transition error) is reported, not just logged', async () => {
+    transitionJobStatus.mockRejectedValueOnce(new Error('deadlock detected'));
+    const { cancelled, report } = await run();
+    expect(cancelled).toBe(0);
+    expect(report.skipped).toEqual([{ id: 'child-1', reason: 'cancel_failed' }]);
+  });
+
   test('an approved child that no longer appears in the live set at all is reported', async () => {
     const { cancelled, report } = await run({ children: [] });
     expect(cancelled).toBe(0);

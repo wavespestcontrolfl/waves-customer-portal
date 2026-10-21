@@ -37,6 +37,27 @@ const {
   recordTrackTransitionResultFailure,
 } = require('./track-transition-alerts');
 
+// Opt-in (pinnedEffects): which approved money effects were not acted on. An approved invoice that was not voided
+// changed since the card (amounts, a payment in flight, a different PaymentIntent) and is left for the office; an
+// approved credit reversal that did not run was rebound, deferred or lost a race.
+function reportUnactedMoney(moneyReport, pinned, voided) {
+  if (!moneyReport || !Array.isArray(moneyReport.skipped)) return;
+  const done = new Set((voided || []).map(String));
+  for (const inv of pinned.invoices || []) {
+    if (!done.has(String(inv.id))) moneyReport.skipped.push({ kind: 'invoice', id: inv.id, reason: 'not_voided_changed_since_card' });
+  }
+  const wanted = (pinned.creditReversalOfferIds || []).length;
+  const reversed = voided?.inspectionCreditReversal?.reversed ?? 0;
+  if (reversed < wanted) moneyReport.skipped.push({ kind: 'inspection_credit', reason: 'not_reversed' });
+}
+
+// Opt-in (linkedChildren): the tracker cancel, which runs the linked-visit cascade, did not finish, so no approved
+// linked visit was cancelled by it.
+function reportLinkedCascadeNotRun(linkedChildren, linkedChildReport) {
+  if (!Array.isArray(linkedChildren) || !linkedChildReport || !Array.isArray(linkedChildReport.skipped)) return;
+  for (const child of linkedChildren) linkedChildReport.skipped.push({ id: child.id, reason: 'cascade_not_run' });
+}
+
 /**
  * @param {object}   opts
  * @param {string[]} opts.targetIds  Committed-cancelled scheduled_service ids.
@@ -52,6 +73,8 @@ const {
  * @param {object[]} [opts.linkedChildren] Opt-in (the Intelligence Bar cancel card): the linked follow-up visits the
  *   operator approved ({ id, status, scheduled_date, service_type }). The cascade then cancels only those, each
  *   re-checked under its own lock; the rest are listed in opts.linkedChildReport.skipped.
+ * @param {object} [opts.moneyReport] Out-param with pinnedEffects: `{ skipped: [] }` collects each approved money
+ *   effect that was NOT acted on ({ kind, id?, reason }) because it changed since the card, so the receipt can say so.
  * @param {object} [opts.pinnedEffects] Per-target effects a confirmation
  *   card showed, keyed by target id: `{ invoices, fee,
  *   creditReversalOfferIds }` (from appointment-cancel-impact.js). A pinned
@@ -70,6 +93,7 @@ async function runVisitCancellationFollowThrough({
   pinnedEffects = null,
   linkedChildren = null,
   linkedChildReport = null,
+  moneyReport = null,
 } = {}) {
   const ids = targetIds.filter(Boolean);
   const CardHolds = require('./estimate-card-holds');
@@ -84,10 +108,11 @@ async function runVisitCancellationFollowThrough({
       // A failed cleanup skips the fee and alerts, but tracker cleanup and
       // the other cancelled visits still proceed.
       if (pinned) {
-        await InvoiceService.voidOpenInvoicesForCancelledService(id, {
+        const voided = await InvoiceService.voidOpenInvoicesForCancelledService(id, {
           pinnedInvoices: pinned.invoices || [],
           pinnedCreditReversalOfferIds: pinned.creditReversalOfferIds || [],
         });
+        reportUnactedMoney(moneyReport, pinned, voided);
       } else {
         await InvoiceService.voidOpenInvoicesForCancelledService(id);
       }
@@ -143,6 +168,7 @@ async function runVisitCancellationFollowThrough({
       }
     } catch (e) {
       logger.error(`[${source}] cancellation money handling failed (target ${id}): ${e.message}`);
+      if (pinned && moneyReport && Array.isArray(moneyReport.skipped)) moneyReport.skipped.push({ kind: 'follow_through', reason: e.message });
       feeOutcome = { released: false, reason: 'fee_step_error' };
     }
     // One normalized outcome for BOTH rails and thrown failures. The alert
@@ -155,8 +181,10 @@ async function runVisitCancellationFollowThrough({
         actorId,
         ...(Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : {}),
       });
+      if (!result?.ok) reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
       await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result });
     } catch (e) {
+      reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
       logger.error(`[${source}] cancel track transition failed for ${id}: ${e.message}`);
       await recordTrackTransitionFailure({ jobId: id, action: 'cancel', actorId, error: e });
     }

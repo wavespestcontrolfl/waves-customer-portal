@@ -967,6 +967,8 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
     } catch (childErr) {
       if (childErr && childErr.code === 'LINKED_CHILD_CHANGED') { skip(child.id, childErr.reason); continue; }
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
+      // Opt-in report: an approved linked visit that failed to cancel stays active, and the receipt must say so.
+      if (approved && report && Array.isArray(report.skipped)) report.skipped.push({ id: child.id, reason: 'cancel_failed' });
     }
   }
   return cancelled;

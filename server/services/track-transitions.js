@@ -1526,6 +1526,9 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = n
     });
   } catch (err) {
     logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
+    if (approval && approval.linkedChildReport && Array.isArray(approval.linkedChildReport.skipped)) {
+      for (const child of approval.linkedChildren) approval.linkedChildReport.skipped.push({ id: child.id, reason: 'cascade_failed' });
+    }
   }
 }
 

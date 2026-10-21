@@ -330,3 +330,86 @@ describe('pinned effects (a card-confirmed cancel)', () => {
     expect(mockHoldCancel).toHaveBeenCalled();
   });
 });
+
+// GATE_IB_CANCEL_WITH_EFFECTS: the Intelligence Bar cancel card forwards its frozen money effects as pinnedEffects.
+// The follow-through then acts on those only, runs NO card rail, and reports every approved effect that was not
+// carried out (moneyReport.skipped) so the receipt can say so. Without pinnedEffects nothing here changes.
+describe('approved money effects (pinnedEffects + moneyReport)', () => {
+  const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+  const InvoiceService = require('../services/invoice');
+  const PINNED = {
+    invoices: [{ id: 'inv-1', total: 120, credit_applied: 20, deposit_credit: 0, payment_intent: true, payment_intent_id: 'pi_test' }],
+    creditReversalOfferIds: ['offer-1'],
+  };
+  const run = async (voided, extra = {}) => {
+    InvoiceService.voidOpenInvoicesForCancelledService.mockResolvedValueOnce(voided);
+    const moneyReport = { skipped: [] };
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': PINNED }, moneyReport, ...extra });
+    return moneyReport;
+  };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCancellationTime = '2030-01-09T18:00:00Z';
+    mockPreviewCancelFee.mockResolvedValue({ applies: false, amount: null, unresolved: false, rail: 'none' });
+  });
+
+  const voidedWithCredit = (ids, reversed) => Object.assign(ids, { inspectionCreditReversal: { reversed } });
+
+  it('hands the approved invoices (with the PaymentIntent id) and credit offers to the void, and runs no card rail', async () => {
+    const report = await run(voidedWithCredit(['inv-1'], 1));
+    expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('svc-1', {
+      pinnedInvoices: PINNED.invoices, pinnedCreditReversalOfferIds: ['offer-1'],
+    });
+    expect(report.skipped).toEqual([]);
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+  });
+
+  it('an approved invoice that was NOT voided (it changed since the card) is reported', async () => {
+    const report = await run(voidedWithCredit([], 1));
+    expect(report.skipped).toContainEqual({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' });
+  });
+
+  it('an approved credit reversal that did not run is reported', async () => {
+    const report = await run(voidedWithCredit(['inv-1'], 0));
+    expect(report.skipped).toContainEqual({ kind: 'inspection_credit', reason: 'not_reversed' });
+  });
+
+  it('a card fee rail that appeared since the card is NEVER run: alert, nothing charged or released, reported', async () => {
+    mockPreviewCancelFee.mockResolvedValue({ applies: true, amount: 49, unresolved: false, rail: 'card_hold' });
+    const report = await run(voidedWithCredit(['inv-1'], 1));
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith(expect.objectContaining({ outcome: { released: false, reason: 'fee_step_error' } }));
+    expect(report.skipped).toContainEqual({ kind: 'follow_through', reason: expect.stringMatching(/card fee agreement appeared/) });
+  });
+
+  it('an invoice still holding money after the pinned void is reported and the fee step is skipped', async () => {
+    mockInvoices = [{ scheduled_service_id: 'svc-1', status: 'paid' }];
+    const report = await run(voidedWithCredit(['inv-1'], 1));
+    expect(report.skipped).toContainEqual({ kind: 'follow_through', reason: expect.stringMatching(/still needs money handling/) });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+  });
+
+  it('tracker cancel that fails or returns not-ok reports the approved linked visits as not run', async () => {
+    const tracker = require('../services/track-transitions').cancel;
+    const linkedChildren = [{ id: 'child-1' }, { id: 'child-2' }];
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'cannot_cancel_complete' });
+    const linkedChildReport = { skipped: [] };
+    await run(voidedWithCredit(['inv-1'], 1), { linkedChildren, linkedChildReport });
+    expect(linkedChildReport.skipped).toEqual([{ id: 'child-1', reason: 'cascade_not_run' }, { id: 'child-2', reason: 'cascade_not_run' }]);
+    tracker.mockRejectedValueOnce(new Error('tracker down'));
+    const second = { skipped: [] };
+    await run(voidedWithCredit(['inv-1'], 1), { linkedChildren, linkedChildReport: second });
+    expect(second.skipped).toHaveLength(2);
+  });
+
+  it('no pinnedEffects: the unpinned path is unchanged (voids everything, runs the card rail, reports nothing)', async () => {
+    mockHoldCancel.mockResolvedValue({ reason: 'no_hold' });
+    const moneyReport = { skipped: [] };
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], moneyReport });
+    expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenLastCalledWith('svc-1');
+    expect(mockHoldCancel).toHaveBeenCalled();
+    expect(moneyReport.skipped).toEqual([]);
+  });
+});

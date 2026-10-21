@@ -591,6 +591,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, {
     credit_applied: inv.credit_applied,
     deposit_credit: inv.deposit_credit,
     payment_intent: inv.payment_intent === true,
+    ...(inv.payment_intent_id ? { payment_intent_id: inv.payment_intent_id } : {}),
   }));
 
   // Tech-facing cancel notice (tech-visit-notifications.js#notifyVisitCancelled,
