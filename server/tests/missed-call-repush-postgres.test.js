@@ -17,7 +17,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 // The called-back retire runs first (pre-push audit); its own suites cover it.
-jest.mock('../services/missed-call-bell', () => ({ retireCalledBackMissedCalls: jest.fn(async () => 0) }));
+jest.mock('../services/missed-call-bell', () => ({ ...jest.requireActual('../services/missed-call-bell'), retireCalledBackMissedCalls: jest.fn(async () => 0) }));
 jest.mock('../services/notification-bell-policy', () => ({
   isBellPolicyEnabled: jest.fn(() => false),
   bellAllowed: jest.fn(async () => true),
@@ -97,6 +97,24 @@ jest.setTimeout(30000);
     retireCalledBackMissedCalls.mockClear();
     await run();
     expect(retireCalledBackMissedCalls).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller who got through after the retire ran is never re-pushed (Codex #6383 r3)', async () => {
+    const row = await bell(45);
+    const missedAt = minutesBefore(50);
+    await database('call_log').insert([
+      { id: row.callLogId, twilio_call_sid: 'CA_missed_sample', direction: 'inbound', from_phone: '+19415550100', to_phone: '+19412975749', status: 'no-answer', answered_by: 'missed', duration_seconds: 20, metadata: {}, created_at: missedAt, updated_at: missedAt },
+      { id: randomUUID(), twilio_call_sid: 'CA_later_sample', direction: 'inbound', from_phone: '+19415550100', to_phone: '+19412975749', status: 'completed', answered_by: 'human', duration_seconds: 90, metadata: {}, created_at: minutesBefore(5), updated_at: minutesBefore(5) },
+    ]);
+    expect(await run()).toBe(0);
+    expect((await stored(row)).metadata.repushed_at).toBeUndefined();
+  });
+
+  test('a still-missed call (row present, nobody got through) is re-pushed', async () => {
+    const row = await bell(45);
+    const missedAt = minutesBefore(50);
+    await database('call_log').insert({ id: row.callLogId, twilio_call_sid: 'CA_missed_sample2', direction: 'inbound', from_phone: '+19415550100', to_phone: '+19412975749', status: 'no-answer', answered_by: 'missed', duration_seconds: 20, metadata: {}, created_at: missedAt, updated_at: missedAt });
+    expect(await run()).toBe(1);
   });
 
   test('re-pushes once after 30 minutes in office hours: same tag, renotify, no new bell row', async () => {

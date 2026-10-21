@@ -96,11 +96,24 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
   const payload = row.metadata?.payload || {};
   const stillOpen = async () => Boolean(await db('notifications').where({ id: row.id })
     .whereRaw(OPEN_UNREAD).first('id'));
+  // The call itself is still unreturned: no later answered call-back or
+  // call-in (the answered-proof called-back SQL), so a caller who got through
+  // after this tick's retire never buzzes again (Codex #6383 r3).
+  const callStillMissed = async () => {
+    if (!payload.callLogId) return true;
+    const { calledBackSql } = require('./missed-call-bell');
+    const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+    const call = await db('call_log').where('id', payload.callLogId)
+      .modify((qb) => whereNotSandboxCall(qb))
+      .first('id', db.raw(`(${calledBackSql({ retire: true })}) AS still_missed`));
+    // No call row proves nothing either way: the bell stays eligible.
+    return !call || call.still_missed === true;
+  };
   let claimed = false;
   // Runs after the subscription lookup, right before the first handoff. The
   // atomic stamp re-checks that nobody opened, closed or re-pushed the bell.
   const claim = async () => {
-    if (!(await canRepushNow(hours, clock))) return false;
+    if (!(await canRepushNow(hours, clock)) || !(await callStillMissed())) return false;
     const stamped = await db('notifications')
       .where({ id: row.id })
       .whereRaw(OPEN_UNREAD)
@@ -112,7 +125,7 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
   // Before every device: still open, and still office hours.
   // canRepushNow re-reads the closed-day list strictly, so a closure that lands
   // mid-fan-out (or an unreadable list) stops the remaining devices too.
-  const beforeHandoff = async () => (await canRepushNow(hours, clock)) && (await stillOpen());
+  const beforeHandoff = async () => (await canRepushNow(hours, clock)) && (await stillOpen()) && (await callStillMissed());
   let stats = null;
   try {
     stats = await PushService.sendToAdminUsers(
