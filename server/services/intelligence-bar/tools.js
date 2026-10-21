@@ -5107,4 +5107,6 @@ module.exports = {
   CARD_CANCEL_REFUSED_MESSAGE,
   // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
   _ibBookingPricing: ibBookingPricing,
+  // Shared with services/customer-name-search.js (picker sound-alikes): one loader and cap for the shared name index.
+  nameCandidates, NAME_INDEX_BOOK_CAP,
 };

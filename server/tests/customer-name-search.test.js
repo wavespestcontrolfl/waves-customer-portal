@@ -1,5 +1,13 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+// The shared loader and cap live in tools.js (one export line); stand in for it
+// so this unit test does not load the whole Intelligence Bar.
+const mockCaps = [];
+jest.mock('../services/intelligence-bar/tools', () => ({
+  NAME_INDEX_BOOK_CAP: 200000,
+  nameCandidates: (query, cap) => { mockCaps.push(cap); return query.limit(cap); },
+}));
+
 const { shouldSearchSoundAlike, findSoundAlikeCustomers, EXACT_ROWS_BELOW, MAX_APPROXIMATE_ROWS } = require('../services/customer-name-search');
 const { resetNameIndexCache } = require('../services/intelligence-bar/name-match');
 
@@ -75,6 +83,22 @@ describe('findSoundAlikeCustomers', () => {
     expect(found.map((r) => r.id)).toEqual(['b']);
     expect(scoped.length).toBe(1);
     expect(scoped[0]).not.toContain('c');
+  });
+
+  test('loads the index with the Intelligence Bar loader and its 200,000 cap', async () => {
+    mockCaps.length = 0;
+    await findSoundAlikeCustomers(fakeKnex(book), 'Orlan damp');
+    expect(mockCaps).toEqual([200000]);
+  });
+
+  test('501 matching names: a scope allowing only the last still finds it', async () => {
+    const many = Array.from({ length: 501 }, (_, n) => ({ id: `c${String(n).padStart(3, '0')}`, first_name: 'Zara', last_name: 'Quillfern' }));
+    const scopeQuery = {
+      clone: () => scopeQuery, clearSelect: () => scopeQuery, clearOrder: () => scopeQuery, select: () => scopeQuery,
+      whereIn: (_c, list) => Promise.resolve(list.filter((id) => id === 'c500').map((id) => ({ id }))),
+    };
+    const found = await findSoundAlikeCustomers(fakeKnex(many), 'Zara Quilfern', { scopeQuery });
+    expect(found.map((r) => r.id)).toEqual(['c500']);
   });
 
   test('a database failure returns no rows instead of throwing', async () => {

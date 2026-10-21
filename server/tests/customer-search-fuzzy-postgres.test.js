@@ -269,6 +269,60 @@ jest.setTimeout(120000);
     });
   });
 
+  describe('candidate budget and the shared name index', () => {
+    const BUDGET_TAG = `${tag}-budget`;
+    const lastId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+
+    beforeAll(async () => {
+      // 501 customers with the same sound-alike name; only the last one by id is Platinum.
+      const rows = Array.from({ length: 500 }, (_, n) => ({
+        first_name: 'Zara', last_name: 'Quillfern', phone: `+1555${String(8000000 + n)}`, company_name: BUDGET_TAG, active: true,
+      }));
+      rows.push({ id: lastId, first_name: 'Zara', last_name: 'Quillfern', phone: '+15558009999', company_name: BUDGET_TAG, active: true, waveguard_tier: 'Platinum' });
+      await db('customers').insert(rows);
+    });
+    afterAll(async () => { await db('customers').where({ company_name: BUDGET_TAG }).del(); });
+    beforeEach(() => { process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true'; });
+
+    test('filters apply before the candidate budget is used up: 501 matching names, a filter allowing only the last', async () => {
+      const { body } = await get('/admin/customers?search=Zara%20Quilfern&tier=Platinum');
+      expect(body.customers.map((row) => row.id)).toEqual([lastId]);
+      expect(body.customers[0].approximate).toBe(true);
+    });
+
+    const liveCount = async () => Number((await db('customers').whereNull('deleted_at').count('* as n').first()).n);
+    const cachedEntries = async () => (await require('../services/intelligence-bar/name-match').cachedNameIndex('customers:live', () => { throw new Error('index should be cached'); })).entries.length;
+    const warmLikeTheBar = () => {
+      const { nameCandidates, NAME_INDEX_BOOK_CAP } = require('../services/intelligence-bar/tools');
+      return require('../services/intelligence-bar/name-match')
+        .cachedNameIndex('customers:live', () => nameCandidates(db('customers').whereNull('customers.deleted_at'), NAME_INDEX_BOOK_CAP));
+    };
+
+    test('either caller warms the same whole-book index: picker first, then the Bar', async () => {
+      const fillers = Array.from({ length: 20100 }, (_, n) => ({
+        first_name: `Filler${n}`, last_name: 'Cap', phone: `+1556${String(n).padStart(7, '0')}`, company_name: BUDGET_TAG, active: true,
+      })); // more than the old 20,000 picker cap
+      for (let at = 0; at < fillers.length; at += 2000) await db('customers').insert(fillers.slice(at, at + 2000));
+      const total = await liveCount();
+      expect(total).toBeGreaterThan(20000);
+      resetNameIndexCache();
+      await get('/admin/customers?search=Orlan%20damp');
+      expect(await cachedEntries()).toBe(total);
+      await warmLikeTheBar(); // already cached: the Bar reads the picker's index
+      expect(await cachedEntries()).toBe(total);
+    });
+
+    test('either caller warms the same whole-book index: the Bar first, then the picker', async () => {
+      const total = await liveCount();
+      resetNameIndexCache();
+      await warmLikeTheBar();
+      expect(await cachedEntries()).toBe(total);
+      const { body } = await get('/admin/customers?search=Orlan%20damp');
+      expect(names(body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf']));
+      expect(await cachedEntries()).toBe(total);
+    });
+  });
+
   describe('performance on 20,000 customers', () => {
     const PERF_TAG = `${tag}-perf`;
     const syllables = ['ba', 'ke', 'ri', 'mon', 'tal', 'dor', 'fen', 'lu', 'sha', 'vin', 'co', 'pe', 'gar', 'hen', 'jo', 'wil', 'nor', 'sti', 'tre', 'qua'];

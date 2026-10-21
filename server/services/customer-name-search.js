@@ -17,14 +17,14 @@
 
 const logger = require('./logger');
 const {
-  isNameLikeSearch, rankNameMatches, prefilterNameIndex, cachedNameIndex, MAX_RESULTS_V2,
+  isNameLikeSearch, rankNameMatches, prefilterNameIndex, cachedNameIndex, MAX_RESULTS_V2, MAX_SURVIVORS,
 } = require('./intelligence-bar/name-match');
 
 // The fuzzy pass runs only when the exact search found fewer rows than this.
 const EXACT_ROWS_BELOW = 3;
 const MAX_APPROXIMATE_ROWS = MAX_RESULTS_V2; // 8
-// Same cap and key as the Intelligence Bar, so one index serves both.
-const INDEX_CAP = 20000;
+// Same key, loader and cap as the Intelligence Bar (tools.js exports them), so
+// whichever caller warms the 5-minute cache, both get the same whole-book index.
 const INDEX_KEY = 'customers:live';
 
 // Words that make a text search an address, not a name: street suffixes, unit
@@ -61,10 +61,11 @@ function shouldSearchSoundAlike(search, exactTotal, exactRows = []) {
     && !matchedOnAddress(search, exactRows);
 }
 
+// The shared loader: name columns of every live customer, capped like the
+// Intelligence Bar's. Required when the cache is cold, not at load time.
 function loadNameCandidates(knex) {
-  return knex('customers').whereNull('customers.deleted_at')
-    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
-    .orderBy('customers.id').limit(INDEX_CAP);
+  const { nameCandidates, NAME_INDEX_BOOK_CAP } = require('./intelligence-bar/tools');
+  return nameCandidates(knex('customers').whereNull('customers.deleted_at'), NAME_INDEX_BOOK_CAP);
 }
 
 // Which of the survivors the caller's scoped query allows: one id-only read of
@@ -79,6 +80,20 @@ async function allowedByScope(knex, scopeQuery, survivors) {
   return survivors.filter((entry) => allowed.has(entry.id));
 }
 
+// The global index is ranked before the caller's filters and scope apply, so
+// excluded customers must not use up the candidate slots: walk the ranked list
+// in MAX_SURVIVORS chunks (at most ten id-only reads) until MAX_SURVIVORS
+// allowed customers are found.
+const ALLOWED_SCAN_CHUNKS = 10;
+async function allowedSurvivors(knex, scopeQuery, search, index) {
+  const ranked = prefilterNameIndex(search, index, { cap: MAX_SURVIVORS * ALLOWED_SCAN_CHUNKS });
+  const allowed = [];
+  for (let at = 0; at < ranked.length && allowed.length < MAX_SURVIVORS; at += MAX_SURVIVORS) {
+    allowed.push(...await allowedByScope(knex, scopeQuery, ranked.slice(at, at + MAX_SURVIVORS)));
+  }
+  return allowed.slice(0, MAX_SURVIVORS);
+}
+
 // Returns [{ id, score, reasons? }] best first, at most `limit` (8), never one
 // of `exactIds`. Any failure returns [] (the exact rows must still show).
 async function findSoundAlikeCustomers(knex, search, {
@@ -88,8 +103,7 @@ async function findSoundAlikeCustomers(knex, search, {
   try {
     const cap = Math.min(Math.max(1, Number(limit) || MAX_APPROXIMATE_ROWS), MAX_APPROXIMATE_ROWS);
     const index = await cachedNameIndex(INDEX_KEY, () => loadNameCandidates(knex));
-    const found = prefilterNameIndex(search, index);
-    const survivors = await allowedByScope(knex, scopeQuery, found);
+    const survivors = await allowedSurvivors(knex, scopeQuery, search, index);
     if (!survivors.length) return [];
     const skip = new Set(exactIds);
     // Extra slots: an exact row may rank among the matches and is dropped.
