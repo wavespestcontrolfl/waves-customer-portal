@@ -26,18 +26,19 @@ const REPUSH_AFTER_MS = 30 * 60 * 1000;
 // A bell older than this is the office's to close by hand; the window also
 // bounds the first sweep after the gate is turned on.
 const WINDOW_MS = 48 * 60 * 60 * 1000;
-const DEFAULT_HOURS = { startMin: 8 * 60, endMin: 18 * 60 };
 
 /**
  * Pure-ish: is the office open at `now`? Mon-Sat only, inside the window,
- * and not a closed day. `hours` is a loadOfficeHours() result; null falls
- * back to the 8:00-18:00 default. Unknown closure state counts as closed.
+ * and not a closed day. `hours` is a loadOfficeHours() result; null (an
+ * unreadable config) counts as closed, like an unknown closure state.
  */
 function officeOpenAt(hours, now = new Date()) {
   const { etParts } = require('../utils/datetime-et');
   if (etParts(now).dayOfWeek === 0) return false;
   const { isOfficeOpenAt } = require('./voice-agent/relay-context');
-  return isOfficeOpenAt(hours || DEFAULT_HOURS, now) === true;
+  // Unreadable hours = closed: no re-push on a day we cannot prove is open (pre-push audit).
+  if (!hours) return false;
+  return isOfficeOpenAt(hours, now) === true;
 }
 
 const OPEN_UNREAD = "notifications.read_at IS NULL AND notifications.done_at IS NULL";

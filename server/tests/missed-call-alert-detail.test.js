@@ -116,3 +116,11 @@ describe('payload', () => {
       .toEqual({ line: 'Venice' });
   });
 });
+
+describe('missed-call re-push office hours', () => {
+  test('an unreadable hours config counts as closed (pre-push audit)', () => {
+    const { officeOpenAt } = require('../services/missed-call-repush');
+    // A Tuesday at 11:00 ET: open under the default window, but null hours prove nothing.
+    expect(officeOpenAt(null, new Date('2026-10-20T15:00:00Z'))).toBe(false);
+  });
+});
