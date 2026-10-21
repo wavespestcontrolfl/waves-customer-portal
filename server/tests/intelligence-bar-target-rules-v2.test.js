@@ -437,6 +437,24 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect((await ask('Bartholomew F., Fort Myers Beach')).typedCustomerIds).toEqual([]);
   });
 
+  test('gate on: a city word that is part of the typed name is not a city (Codex #6369 r8)', async () => {
+    process.env[ON] = 'true';
+    // Two customers named Brandon Smith, one of them living in the city of Brandon.
+    const smith = (n, city) => ({ ...sameName(1)[0], id: id(800 + n), first_name: 'Brandon', last_name: 'Smith', city, phone: `94155505${String(n).padStart(2, '0')}` });
+    customers = [smith(0, 'Venice'), smith(1, 'Brandon')];
+    const named = { matches: customers, complete: true };
+    // "Brandon" here is the first name: nothing says which Smith, so nobody is grounded and the edit keeps its card.
+    expect([...await Context.typedCustomerIds('update Brandon Smith notes', named)]).toEqual([]);
+    const resolved = await ask('update Brandon Smith notes');
+    expect(resolved.typedCustomerIds).toEqual([]);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(801), updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved)))).toBe(false);
+    // A real city after the name still picks the customer, including a city that repeats the first name.
+    expect(await Context.typedCustomerIds('update Brandon Smith in Venice notes', named)).toEqual([id(800)]);
+    expect(await Context.typedCustomerIds('update Brandon Smith in Brandon notes', named)).toEqual([id(801)]);
+    // A bare first name typed alone does not read as its own city either.
+    expect([...await Context.typedCustomerIds('update Brandon notes', named)]).toEqual([]);
+  });
+
   test('gate on: 25 long-name rows vet their short labels in ONE query, not one scan per row (Codex #6369 r7)', async () => {
     process.env[ON] = 'true';
     customers = Array.from({ length: 25 }, (_, i) => ({ ...sameName(1)[0], id: id(700 + i), first_name: 'Bartholomew', last_name: 'Featherstonehaugh', city: `Fort Myers Beach ${String.fromCharCode(65 + i)}`, phone: `94155504${String(i).padStart(2, '0')}` }));
@@ -536,7 +554,11 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
     expect(limits(full)).toMatchObject({ old: false, v2: true });
     // The only "three or more" left is the lead-edit exception.
     expect(full.match(/three or more/gi)).toEqual(['three or more']);
-    expect(full).toMatch(/Lead edits \(update_lead_contact, update_lead_status\) and create_customer keep the stricter limit/);
+    // The list is derived from the cap, so every tool that keeps the three-edit cap is named (Codex #6369 r8).
+    const sentence = full.match(/These tools keep the stricter limit[^:]*: ([^.]*)\./)[1].split(', ');
+    for (const tool of ['update_lead_contact', 'update_lead_status', 'create_customer', 'create_restock_request', 'toggle_estimate_v2_view']) expect(sentence).toContain(tool);
+    for (const tool of ['update_customer', 'update_customer_property', 'set_primary_property', 'update_property_access', 'reschedule_appointment', 'assign_technician']) expect(sentence).not.toContain(tool);
+    expect(sentence.length).toBe(OwnerDirect.OWNER_DIRECT_TOOL_NAMES.size - 6);
     expect(full).toMatch(/Up to 5 edits with the same tool/);
     expect(full).toMatch(/for more than 5 records use the bulk tool/);
   });

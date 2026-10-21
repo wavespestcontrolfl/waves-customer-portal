@@ -423,17 +423,29 @@ async function withLastVisit(candidates) {
 // none of them, unless a city or phone/email in the message narrows it to one.
 const MAX_CONTACT_LITERALS = 5;
 
+// Is this customer's city typed in the message, apart from the name? The words of
+// the matched name are taken out first (one occurrence: the longest of the full name,
+// the first name, the last name), so "Brandon Smith" never reads "Brandon" as a city
+// (Codex #6369 r8). "Brandon Smith in Brandon" still names the Brandon customer.
+function cityIsTyped(customer, normalized) {
+  const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+  const phrase = [`${first} ${last}`.trim(), first, last].find(name => name && ` ${normalized} `.includes(` ${name} `));
+  const rest = phrase ? ` ${normalized} `.replace(` ${phrase} `, ' ') : ` ${normalized} `;
+  return Boolean(customer.city) && rest.includes(` ${normalizeName(customer.city)} `);
+}
+
 async function typedCustomerIds(prompt, namedResult) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
   const ids = new Set();
+  const matches = namedResult.matches || [];
   const contactIds = new Set();
   // Fail closed: a name lookup that hit its limit has rows we never saw, so the
   // rows we did see cannot show that a name or a city picks out one customer.
   // Incomplete name evidence names nobody (a card, never a direct edit).
   if (namedResult.complete !== false) {
     const groups = new Map();
-    for (const customer of namedResult.matches || []) {
+    for (const customer of matches) {
       const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
       // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
       const full = `${first} ${last}`.trim();
@@ -441,9 +453,9 @@ async function typedCustomerIds(prompt, namedResult) {
       groups.set(key, [...(groups.get(key) || []), customer]);
     }
     for (const group of groups.values()) {
-      const inCity = group.filter(customer => customer.city && ` ${normalized} `.includes(` ${normalizeName(customer.city)} `));
-      if (group.length === 1) ids.add(String(group[0].id));
-      else if (inCity.length === 1) ids.add(String(inCity[0].id));
+      const inCity = group.filter(customer => cityIsTyped(customer, normalized));
+      const only = group.length === 1 ? group : inCity;
+      if (only.length === 1) ids.add(String(only[0].id));
     }
   }
   const literals = [...clause.matchAll(CONTACT_LITERAL_RE)].map(match => match[0]);
@@ -476,15 +488,15 @@ async function typedCustomerIds(prompt, namedResult) {
   // phone or email that belongs to someone else is unresolved: it names nobody,
   // so the edit keeps its card (a phone beside a name may only pick among the
   // customers that name matched).
-  const nameMatched = new Set((namedResult.matches || []).map(customer => String(customer.id)));
+  const nameMatched = new Set(matches.map(customer => String(customer.id)));
   // The name list is capped (26 rows): past the cap, a contact owner agrees
   // with the name when the typed name names that owner (Codex #6369 r2).
   const agreesWithName = (id) => nameMatched.has(id)
-    || (namedResult.complete === false && namesTargetCustomer(normalizeName(withoutContacts(targetClause(prompt))), contactOwners.get(id) || {}));
+    || (namedResult.complete === false && namesTargetCustomer(normalized, contactOwners.get(id)));
   if (nameMatched.size && [...contactIds].some(id => !agreesWithName(id))) return Object.assign([], { identityConflict: true });
   // A name narrowed by city (or a unique name) and a typed phone or email must
   // name the same customer; two different customers is a conflict too.
-  if (ids.size && contactIds.size && [...contactIds].some(id => !ids.has(id))) return Object.assign([], { identityConflict: true });
+  if (ids.size && [...contactIds].some(id => !ids.has(id))) return Object.assign([], { identityConflict: true });
   for (const id of contactIds) ids.add(id);
   for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];

@@ -550,9 +550,14 @@ You are talking to the owner. Do what they ask.
 // The owner prompt states exactly one direct-edit limit: today's (three or more
 // refused) while GATE_IB_TARGET_RULES_V2 is off, the new one (more than 5) while on.
 const LIMIT_SENTENCE_OFF = 'Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.';
-const LIMIT_SENTENCE_ON = `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card. Lead edits (update_lead_contact, update_lead_status) and create_customer keep the stricter limit: three or more in one request are refused.`;
+// The tools that keep the three-edit cap with the gate on are derived from
+// directCapThreshold, so the sentence cannot drift from the cap (Codex #6369 r8).
+const limitSentenceOn = () => {
+  const stricter = [...OWNER_DIRECT_TOOL_NAMES].filter(name => directCapThreshold(name) === DIRECT_CAP);
+  return `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card. These tools keep the stricter limit, three or more in one request are refused: ${stricter.join(', ')}.`;
+};
 function ownerDirectPrompt() {
-  return ibTargetRulesV2Live() ? OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_OFF, LIMIT_SENTENCE_ON) : OWNER_DIRECT_PROMPT;
+  return ibTargetRulesV2Live() ? OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_OFF, limitSentenceOn()) : OWNER_DIRECT_PROMPT;
 }
 
 // The owner login with the gate on but GATE_IB_PLATFORM off: nothing commits
