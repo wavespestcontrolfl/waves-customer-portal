@@ -58,6 +58,7 @@ const UNIT_AFTER = /^\s*(?:cents?|oz|ounces?|fl|gal|gals|gallons?|lbs?|pounds?|s
 const STREET_AFTER = /^\s+(?:[A-Za-z'.]+\s+){0,2}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
 const CLOCK_AFTER = /^\s*(?:a\.?\s?m\b|p\.?\s?m\b|o'?clock|in\s+the\s+(?:morning|afternoon|evening)|tomorrow|today|tonight)/i;
 const CLOCK_BEFORE = /\b(?:at|by|around|before|after|until|till|from|between)\s+$/i;
+const DATE_BEFORE = /\b(?:dated|since|year|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:\w+\s+)?$/i;
 const PRICE_AFTER = /^\s*(?:dollars?|bucks?|a\s+month|per\b|each\b|\/\s?mo|monthly|every\b)/i;
 
 const fmtDollars = (n) => `$${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
@@ -101,6 +102,7 @@ function moneyHere(text, start, end, { clock = null, consumedMoney = false } = {
   const w = windows(text, start, end);
   if (IDENTIFIER_BEFORE.test(w.beforeRaw)) return false;
   if (UNIT_AFTER.test(w.afterRaw)) return false;
+  if (!consumedMoney && DATE_BEFORE.test(w.beforeRaw)) return false;
   if (STREET_AFTER.test(w.afterRaw)) return false;
   const cued = consumedMoney || MONEY_WORD.test(w.cue) || /\$\s*$/.test(w.beforeRaw);
   if (!cued) return false;
@@ -151,6 +153,7 @@ function normalizeSpokenMoney(input) {
     const d = wordsToNumber(m[1]);
     const c = wordsToNumber(m[2]);
     if (d == null || c == null || c < 10 || c > 99) return null;
+    if ((d === 19 || d === 20) && !m[3]) return null; // "twenty twenty-six" is a year
     if (!moneyHere(text, s, e, { clock: [d, c], consumedMoney: Boolean(m[3]) })) return null;
     return { to: fmtDollarsCents(d, c), kind: 'words-pair' };
   });
@@ -164,6 +167,7 @@ function normalizeSpokenMoney(input) {
     if (n == null || n < 1) return null;
     const consumed = Boolean(m[2]);
     if (!consumed && !/\b(?:hundred|thousand)\b/i.test(m[1])) return null;
+    if (!consumed && n >= 1900 && n <= 2100) return null; // "two thousand twenty six" is a year
     const afterStart = s + m[1].length; // the unit check runs after the number, past a consumed "dollars"
     if (!moneyHere(text, s, consumed ? afterStart : e, { consumedMoney: consumed })) return null;
     return { to: fmtDollars(n), kind: 'words' };
@@ -173,7 +177,7 @@ function normalizeSpokenMoney(input) {
   apply(/(?<![\w$.,:/#-])(?<!\d\s)(\d{1,3})[ ]+(\d{2})(?!\w)(?![.,:/-]\d)(?!\s+\d)(\s+dollars?\b)?/i, (m, s, e) => {
     const d = Number(m[1]);
     const c = Number(m[2]);
-    if (d < 1) return null;
+    if (d < 1 || ((d === 19 || d === 20) && !m[3])) return null; // "20 26" is a year
     if (!moneyHere(text, s, e, { clock: [d, c], consumedMoney: Boolean(m[3]) })) return null;
     return { to: fmtDollarsCents(d, c), kind: 'digits-pair' };
   });

@@ -52,6 +52,12 @@ const REWRITES = [
   // a dictated list is not one amount
   ['the prices are sixty, seventy, eighty dollars', 'the prices are sixty, seventy, $80'],
   ['price sixty, seventy-five', SAME],
+  // spoken years and dates
+  ['invoice dated twenty twenty six', SAME],
+  ['paid in two thousand twenty six', SAME],
+  ['price list from 20 26', SAME],
+  ['total as of October twenty first', SAME],
+  ['charge twenty twenty-six dollars', 'charge $20.26'],
   // cents are not dollars
   ['charge one hundred fifty five cents', SAME],
   ['charge 61 33 cents', SAME],
