@@ -19,7 +19,9 @@ jest.mock('../services/portal-service-history', () => ({
   listPortalServiceHistory: jest.fn(),
   parseJsonObject: () => ({}),
   suppressesCustomerArtifacts: () => false,
+  scopeRecordsToProperty: jest.fn((q) => q),
 }));
+jest.mock('../services/celsius-application-count', () => ({ celsiusApplicationsThisYear: jest.fn(async () => 1) }));
 jest.mock('../services/context-aggregator', () => ({ customerSafeVisitNotes: () => 'Treated the lanai perimeter.' }));
 jest.mock('../services/photos', () => ({ getViewUrl: jest.fn(async () => 'https://cdn/photo'), CUSTOMER_DWELL_TTL_SECONDS: 3600 }));
 jest.mock('../services/account-properties', () => ({
@@ -40,15 +42,19 @@ jest.mock('../middleware/auth', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const { listPortalServiceHistory } = require('../services/portal-service-history');
+const { listPortalServiceHistory, scopeRecordsToProperty } = require('../services/portal-service-history');
+const { resolveSessionScope } = require('../services/account-properties');
 const projection = require('../services/contact-session-projection');
+
+// A multi-property profile's resolved PRIMARY scope (GATE_APP_PROPERTY_SCOPE on).
+const PRIMARY_SCOPE = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: true } };
 
 const OCCUPANT = { slot: 'service_contact', name: 'Sam', phone: '+19415550202', contactRole: '', phoneKey: '9415550202' };
 const TENANT = { ...OCCUPANT, contactRole: 'tenant' };
 
 function chain(rows) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'leftJoin', 'select', 'orderBy']) c[m] = jest.fn(() => c);
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'leftJoin', 'select', 'orderBy', 'count']) c[m] = jest.fn(() => c);
   c.first = jest.fn(async () => rows[0] || null);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
@@ -92,11 +98,25 @@ describe('pure projections', () => {
     };
     expect(projection.withholdReportArtifacts(row)).toEqual({
       ...row, notes: null, products: [], hasPhotos: false, photoCount: 0, reportUrl: null, reportPdfUrl: null, reportToken: null,
-      reportGeneratedAt: null, reportViewedAt: null, reportAvailable: false, projectReportPortalAttached: false,
+      reportGeneratedAt: null, reportViewedAt: null, reportAvailable: false, projectReportPortalAttached: false, soilTemp: null,
     });
-    // The detail shape has photos; the list shape has none — neither gains a key.
-    expect(projection.withholdReportArtifacts({ id: 'd', notes: 'x', photos: [{ url: 'u' }] })).toEqual({ id: 'd', notes: null, photos: [] });
-    expect(JSON.stringify(projection.withholdReportArtifacts(row))).not.toContain('tok');
+    // The detail shape has photos and a measurements object; the list shape
+    // has neither — neither gains a key (codex r16: the measurements go too).
+    expect(projection.withholdReportArtifacts({ id: 'd', notes: 'x', photos: [{ url: 'u' }], measurements: { soilTemp: 71, thatchMeasurement: 0.5, soilPh: 6.5, soilMoisture: 'dry' } }))
+      .toEqual({ id: 'd', notes: null, photos: [], measurements: { soilTemp: null, thatchMeasurement: null, soilPh: null, soilMoisture: null } });
+    expect(JSON.stringify(projection.withholdReportArtifacts(row))).not.toMatch(/tok|71/);
+  });
+
+  test('contactRecordScope / scopeContactRecords: a contact\'s record reads carry the resolved (primary) saved-property scope; a holder\'s carry none (codex r16)', async () => {
+    resolveSessionScope.mockResolvedValueOnce(PRIMARY_SCOPE);
+    expect(await projection.contactRecordScope({ customer: { id: 'c' }, contactSession: OCCUPANT })).toEqual(PRIMARY_SCOPE);
+    expect(await projection.contactRecordScope({ customer: { id: 'c' } })).toBeNull();
+    const q = { marker: true };
+    expect(projection.scopeContactRecords(q, PRIMARY_SCOPE)).toBe(q);
+    expect(scopeRecordsToProperty).toHaveBeenCalledWith(q, PRIMARY_SCOPE);
+    scopeRecordsToProperty.mockClear();
+    expect(projection.scopeContactRecords(q, null)).toBe(q);
+    expect(scopeRecordsToProperty).not.toHaveBeenCalled();
   });
 
   test('contactSafeReportLinks: the public /report and /api/reports bearers go, the authed PDF route stays; a project completion offers no report', () => {
@@ -237,8 +257,12 @@ describe('GET /services for a contact session', () => {
     id: 'svc-1', date: '2026-10-01', type: 'Pest Control', technician: 'Adam', notes: 'Treated the lanai perimeter.',
     products: [{ product_name: 'Alpine' }], hasPhotos: true, photoCount: 1, reportUrl: '/report/rpt-1', reportPdfUrl: '/api/reports/rpt-1',
     reportToken: 'rpt-1', reportGeneratedAt: '2026-10-01', reportViewedAt: null, reportAvailable: true,
+    soilTemp: 71, thatchMeasurement: 0.5, soilPh: 6.5, soilMoisture: 'dry',
   }];
-  const record = { id: 'svc-1', service_date: '2026-10-01', service_type: 'Pest Control', technician_name: 'Adam', structured_notes: null };
+  const record = {
+    id: 'svc-1', service_date: '2026-10-01', service_type: 'Pest Control', technician_name: 'Adam', structured_notes: null,
+    soil_temp: '71', thatch_measurement: '0.5', soil_ph: '6.5', soil_moisture: 'dry',
+  };
 
   function wireDetail() {
     db.mockImplementation((table) => {
@@ -260,9 +284,41 @@ describe('GET /services for a contact session', () => {
       });
       expect(JSON.stringify(list.body)).not.toMatch(/rpt-1/);
       const detail = await get('/services/svc-1');
-      expect(detail.body).toMatchObject({ id: 'svc-1', notes: 'Treated the lanai perimeter.' });
+      expect(detail.body).toMatchObject({ id: 'svc-1', notes: 'Treated the lanai perimeter.', measurements: { soilTemp: 71, thatchMeasurement: 0.5 } });
       expect(detail.body.products).toHaveLength(1);
       expect(detail.body.photos).toHaveLength(1);
+    });
+  });
+
+  test('a contact\'s list, detail, documents-style record reads and stats are scoped to the primary property; the holder\'s list stays customer-wide unless asked (codex r16 P1)', async () => {
+    mockSession.contact = OCCUPANT;
+    resolveSessionScope.mockResolvedValue(PRIMARY_SCOPE);
+    listPortalServiceHistory.mockResolvedValue({ services: listed, total: 1 });
+    wireDetail();
+    await withServer(async (get) => {
+      const list = await get('/services');
+      expect(list.status).toBe(200);
+      expect(listPortalServiceHistory).toHaveBeenCalledWith('cust-1', expect.objectContaining({ scope: PRIMARY_SCOPE }));
+      // The echo stays an opt-in of the propertyScoped read.
+      expect(list.body.propertyScope).toBeUndefined();
+      scopeRecordsToProperty.mockClear();
+      const detail = await get('/services/svc-1');
+      expect(detail.status).toBe(200);
+      expect(scopeRecordsToProperty).toHaveBeenCalledWith(expect.anything(), PRIMARY_SCOPE);
+      scopeRecordsToProperty.mockClear();
+      const stats = await get('/services/stats/summary');
+      expect(stats.status).toBe(200);
+      expect(scopeRecordsToProperty).toHaveBeenCalledTimes(3);
+    });
+    delete mockSession.contact;
+    listPortalServiceHistory.mockClear();
+    scopeRecordsToProperty.mockClear();
+    await withServer(async (get) => {
+      await get('/services');
+      expect(listPortalServiceHistory).toHaveBeenCalledWith('cust-1', expect.objectContaining({ scope: null }));
+      await get('/services/svc-1');
+      await get('/services/stats/summary');
+      expect(scopeRecordsToProperty).not.toHaveBeenCalled();
     });
   });
 
@@ -277,11 +333,23 @@ describe('GET /services for a contact session', () => {
       expect(list.body.services[0]).toMatchObject({
         id: 'svc-1', type: 'Pest Control', technician: 'Adam', notes: null, products: [], hasPhotos: false, photoCount: 0,
         reportUrl: null, reportPdfUrl: null, reportToken: null, reportAvailable: false,
+        soilTemp: null, thatchMeasurement: null, soilPh: null, soilMoisture: null,
       });
-      expect(JSON.stringify(list.body)).not.toMatch(/rpt-1|lanai/);
+      expect(JSON.stringify(list.body)).not.toMatch(/rpt-1|lanai|71|dry/);
       const detail = await get('/services/svc-1');
       expect(detail.status).toBe(200);
-      expect(detail.body).toMatchObject({ id: 'svc-1', technician: 'Adam', notes: null, products: [], photos: [] });
+      expect(detail.body).toMatchObject({
+        id: 'svc-1', technician: 'Adam', notes: null, products: [], photos: [],
+        measurements: { soilTemp: null, thatchMeasurement: null, soilPh: null, soilMoisture: null },
+      });
+      expect(JSON.stringify(detail.body)).not.toMatch(/71|dry/);
+      // The lawn-stats endpoint carries the same findings: withheld, every figure null (codex r16).
+      const stats = await get('/services/stats/summary');
+      expect(stats.status).toBe(200);
+      expect(stats.body).toEqual({
+        servicesYTD: null, celsiusApplicationsThisYear: null, celsiusWindow: expect.any(String), celsiusMaxPerYear: null,
+        thatch: { current: null, initial: null, currentDate: null, initialDate: null }, withheld: true,
+      });
     });
   });
 

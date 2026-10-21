@@ -35,6 +35,10 @@ async function contactSessionReportsWithheld(req) {
 // A service-history row (portal-service-history.js) or service detail
 // (routes/services.js) with every report artifact withheld. Only keys the
 // payload already carries are rewritten, so the two shapes share one rule.
+// The visit's measurements (soil temperature, thatch, pH, moisture) are
+// findings the same verdict covers (codex #6363 r16 P2): the list carries
+// them flat, the detail under `measurements`.
+const WITHHELD_MEASUREMENTS = { soilTemp: null, thatchMeasurement: null, soilPh: null, soilMoisture: null };
 const WITHHELD_REPORT_ARTIFACTS = {
   notes: null,
   products: [],
@@ -48,14 +52,37 @@ const WITHHELD_REPORT_ARTIFACTS = {
   reportViewedAt: null,
   reportAvailable: false,
   projectReportPortalAttached: false,
+  ...WITHHELD_MEASUREMENTS,
+  measurements: WITHHELD_MEASUREMENTS,
 };
 function withholdReportArtifacts(service) {
   if (!service) return service;
   const out = { ...service };
   for (const [key, value] of Object.entries(WITHHELD_REPORT_ARTIFACTS)) {
-    if (key in out) out[key] = value;
+    if (!(key in out)) continue;
+    out[key] = Array.isArray(value) ? [] : (value && typeof value === 'object' ? { ...value } : value);
   }
   return out;
+}
+
+// A contact's visit and report reads are scoped to the holder's PRIMARY
+// property (codex #6363 r16 P1): the contact token carries no property
+// claim and the app shows a contact one house, so the visits and reports
+// stamped to the holder's OTHER saved properties are not theirs to list or
+// open. The saved-property resolver with no claim resolves the primary; its
+// predicate applies only to a profile with 2+ properties or a retired one,
+// so a single home is byte-identical. null for a holder session: the routes
+// keep their own opt-in scoping.
+async function contactRecordScope(req) {
+  if (!req.contactSession) return null;
+  return require('./account-properties').resolveSessionScope(req);
+}
+
+// That scope on a service_records query that LEFT JOINs scheduled_services
+// (the detail, the documents list, the report PDF) — the same rule the
+// history list applies through listPortalServiceHistory.
+function scopeContactRecords(query, scope) {
+  return scope ? require('./portal-service-history').scopeRecordsToProperty(query, scope) : query;
 }
 
 // A service-history row for a contact the report rule ALLOWS: the visit's
@@ -141,11 +168,13 @@ function contactNextPayload(payload) {
 
 module.exports = {
   contactSessionReportsWithheld,
+  contactRecordScope,
+  scopeContactRecords,
   withholdReportArtifacts,
   contactSafeReportLinks,
   contactSafeReportCustomer,
   withoutTrackBearers,
   contactSchedulePayload,
   contactNextPayload,
-  _test: { WITHHELD_REPORT_ARTIFACTS, PLAN_SIGNAL_KEYS },
+  _test: { WITHHELD_REPORT_ARTIFACTS, WITHHELD_MEASUREMENTS, PLAN_SIGNAL_KEYS },
 };

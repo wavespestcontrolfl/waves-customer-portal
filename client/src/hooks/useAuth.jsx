@@ -25,6 +25,23 @@ export function tokenCustomerId(token) {
   }
 }
 
+// Who the token acts as on that customer row (contact login,
+// GATE_CONTACT_LOGIN): the `contactKey` claim names an on-location contact's
+// session, absent for the account holder's. A holder tab adopting a contact
+// token for the SAME row (or the reverse) is an identity change — the
+// holder's loaded customer and its surface must not stay rendered under the
+// contact's token while /auth/me loads the contact projection, or at all
+// when that load fails and retries (codex #6363 r16 P1).
+export function tokenContactKey(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    return payload.contactKey == null ? null : String(payload.contactKey);
+  } catch {
+    return null;
+  }
+}
+
 // Session-family identity: a fresh code login mints a NEW sessionId even for
 // the same customer (server generateToken), and responses in flight under
 // the OLD family must not act on the new one — in particular a stale
@@ -357,7 +374,10 @@ export function AuthProvider({ children }) {
         return;
       }
       const nextId = tokenCustomerId(token);
-      const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
+      // A different customer row, OR a different actor on the same row (a
+      // contact token replacing the holder's, or the reverse).
+      const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token)
+        || tokenContactKey(token) !== tokenContactKey(api.token);
       // Bump the epoch on any SESSION-FAMILY change — a different customer
       // OR a fresh login's new sessionId for the same customer — so
       // in-flight responses from the old family are discarded (a stale

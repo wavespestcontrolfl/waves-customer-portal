@@ -352,6 +352,20 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
     expect(rows[1].email_enabled).toBe(false);
   });
 
+  test('a phone stored in two slots keeps its email choices when EITHER slot carries an address (codex r16)', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false, en_route_channel: 'email' }];
+    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+      { phone: '+19415550202', email: '' },
+      { phone: '(941) 555-0202', email: 'sam@example.com' },
+    ]);
+    expect(rows[0]).toEqual(expect.objectContaining({ email_enabled: false, en_route_channel: 'email' }));
+    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+      { phone: '+19415550202', email: '' },
+      { phone: '(941) 555-0202', email: '' },
+    ]);
+    expect(rows[0]).toEqual(expect.objectContaining({ email_enabled: null, en_route_channel: null }));
+  });
+
   test('an empty slot list clears every row of that customer only', async () => {
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202' }, { customer_id: 'cust-2', phone_key: '9415550202' }];
     await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', []);

@@ -375,8 +375,16 @@ async function rerouteForContactEmailOptOut(customerId, email, { dbh = db, recip
 // save's transaction; a missing table is the absent state.
 async function pruneContactNotificationPrefs(trx, customerId, contacts = []) {
   const slots = contacts.map((c) => (typeof c === 'string' ? { phone: c } : c || {}));
-  const keep = [...new Set(slots.map((c) => phoneKey(c.phone)).filter(Boolean))];
-  const emailLess = [...new Set(slots.filter((c) => !String(c.email || '').trim()).map((c) => phoneKey(c.phone)).filter(Boolean))];
+  // Email availability is per NUMBER, across every slot that carries it
+  // (codex #6363 r16 P2): the same phone stored twice, once with an address,
+  // still has one — its email-only choices and "email off" stay.
+  const emailByKey = new Map();
+  for (const slot of slots) {
+    const key = phoneKey(slot.phone);
+    if (key) emailByKey.set(key, emailByKey.get(key) === true || !!String(slot.email || '').trim());
+  }
+  const keep = [...emailByKey.keys()];
+  const emailLess = keep.filter((key) => !emailByKey.get(key));
   try {
     const q = trx(TABLE).where({ customer_id: customerId });
     if (keep.length) q.whereNotIn('phone_key', keep);

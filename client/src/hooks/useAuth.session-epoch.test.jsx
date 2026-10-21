@@ -336,6 +336,35 @@ describe('session epoch guards', () => {
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-a');
   });
 
+  it('a CONTACT token for the same row adopted from another tab clears the holder\'s rendered state before the contact projection loads (codex #6363 r16 P1)', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const tokenFor = (payload) => `${b64u({ alg: 'none' })}.${b64u(payload)}.x`;
+    const holderTok = tokenFor({ customerId: 'cust-a', sessionId: 'sess-1' });
+    const contactTok = tokenFor({ customerId: 'cust-a', sessionId: 'sess-2', contactKey: '9415550202' });
+    const store = { waves_token: holderTok, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a', firstName: 'Pat', monthlyRate: 120 });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-a');
+
+    // Another tab signs the on-location contact in on the same customer row;
+    // its /auth/me is slow. The holder's customer must not stay on screen.
+    const slowMe = deferred();
+    api.getMe.mockReturnValueOnce(slowMe.promise);
+    await act(async () => {
+      store.waves_token = contactTok;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: contactTok }));
+    });
+    expect(api.adoptTokens).toHaveBeenLastCalledWith(contactTok, 'ref-a');
+    expect(screen.getByTestId('customer-id').textContent).toBe('');
+    expect(screen.getByTestId('authed').textContent).toBe('false');
+
+    await act(async () => { slowMe.resolve({ id: 'cust-a', actor: { kind: 'contact', slot: 1 }, firstName: 'Sam' }); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-a');
+    expect(authApi.customer.actor.kind).toBe('contact');
+    expect(authApi.customer.monthlyRate).toBeUndefined();
+  });
+
   it('discards a stale properties-fetch FAILURE from before a property switch', async () => {
     stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
     const slowProps = deferred();

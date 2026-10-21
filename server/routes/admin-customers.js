@@ -4365,6 +4365,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             await require('../services/contact-notification-prefs').pruneContactNotificationPrefs(trx, req.params.id, slotsAfter);
             await require('../middleware/auth').revokeRemovedContactRefreshSessions(trx, req.params.id, slotsAfter.map((slot) => slot.phone));
           }
+          // Deactivating the account from the editor (active true → false)
+          // ends every contact family on the row (codex #6363 r16 P2) — the
+          // same revocation the cancellation processor's disarm makes — so a
+          // dormant contact device's refresh token cannot come back valid on
+          // a later reactivation without a new code.
+          if (updates.active === false && lockedBefore.active !== false) {
+            await require('../middleware/auth').revokeContactRefreshFamilies(trx, req.params.id);
+          }
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
           // account. Only an ACTUAL change (the editor posts the whole form).

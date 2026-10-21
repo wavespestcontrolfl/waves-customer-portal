@@ -578,7 +578,9 @@ async function redirectToStoredDocument(doc, res) {
 // Contact session (GATE_CONTACT_LOGIN): the report rule decides what the
 // contact's OWN session may read (services/contact-session-projection.js —
 // the same verdict GET /api/services applies).
-const { contactSessionReportsWithheld: contactReportsWithheld, contactSafeReportCustomer } = require('../services/contact-session-projection');
+const {
+  contactSessionReportsWithheld: contactReportsWithheld, contactSafeReportCustomer, contactRecordScope, scopeContactRecords,
+} = require('../services/contact-session-projection');
 
 // =========================================================================
 // GET /api/documents — all documents for authenticated customer
@@ -613,8 +615,16 @@ router.get('/', authenticate, async (req, res, next) => {
     // completions use the Project report itself as the customer artifact, so
     // do not create a second generic service-report document for the same work.
     let servicesQuery = db('service_records')
-      .where({ customer_id: req.customerId, status: 'completed' })
+      .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id');
+    // A contact lists the primary property's reports only (codex #6363 r16
+    // P1): the holder's other saved homes are not theirs to read.
+    if (contactOnly) {
+      servicesQuery = scopeContactRecords(
+        servicesQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
+        await contactRecordScope(req),
+      );
+    }
     if (serviceRecordCols.completion_source) {
       servicesQuery = servicesQuery.where(function visibleServiceReports() {
         this.whereNull('service_records.completion_source')
@@ -890,9 +900,18 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
   try {
     // 404 (not 403) for a withheld contact so the record isn't signposted.
     if (await contactReportsWithheld(req)) return res.status(404).json({ error: 'Service record not found' });
-    const service = await db('service_records')
+    // A contact opens the primary property's reports only (codex #6363 r16
+    // P1): a record of the holder's other home is a 404 here too.
+    let serviceQuery = db('service_records')
       .where({ 'service_records.id': req.params.serviceRecordId, 'service_records.customer_id': req.customerId })
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id');
+    if (req.contactSession) {
+      serviceQuery = scopeContactRecords(
+        serviceQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
+        await contactRecordScope(req),
+      );
+    }
+    const service = await serviceQuery
       .select(
         'service_records.*',
         'technicians.name as technician_name',
