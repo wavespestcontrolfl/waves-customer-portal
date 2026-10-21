@@ -455,6 +455,29 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect([...await Context.typedCustomerIds('update Brandon notes', named)]).toEqual([]);
   });
 
+  test('gate on: only the first 4,000 characters are scanned; a 5 MB prompt is fast and grounds nothing past the cap (Codex #6369 r9)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(1);
+    const named = { matches: customers, complete: true };
+    const phones = Array.from({ length: 410000 }, (_, i) => `941-777-${String(1000 + (i % 9000))}`).join(' ');
+    const big = `update Pat Example notes ${phones}`;
+    expect(big.length).toBeGreaterThan(5 * 1024 * 1024 - 1);
+    const started = Date.now();
+    const over = await Context.typedCustomerIds(big, named);
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect([...over]).toEqual([]);
+    expect(over.identityConflict).toBe(true);
+    // The whole parse is bounded, not just the contact scan.
+    const startedClause = Date.now();
+    Context.targetClause(`${'x '.repeat(2500000)} update Pat Example`);
+    expect(Date.now() - startedClause).toBeLessThan(1500);
+    // Stuffing after the scan window is never read: the name at the start still grounds.
+    expect(await Context.typedCustomerIds(`update Pat Example notes ${'a'.repeat(4000)} ${phones}`, named)).toEqual([id(100)]);
+    // Gate off: the whole prompt is read, as today.
+    delete process.env[ON];
+    expect(Context.targetClause(`${'a'.repeat(5000)} tail`)).toContain('tail');
+  });
+
   test('gate on: 25 long-name rows vet their short labels in ONE query, not one scan per row (Codex #6369 r7)', async () => {
     process.env[ON] = 'true';
     customers = Array.from({ length: 25 }, (_, i) => ({ ...sameName(1)[0], id: id(700 + i), first_name: 'Bartholomew', last_name: 'Featherstonehaugh', city: `Fort Myers Beach ${String.fromCharCode(65 + i)}`, phone: `94155504${String(i).padStart(2, '0')}` }));
@@ -631,24 +654,42 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     expect(OwnerDirect.mayExecuteWithoutCard('reschedule_appointment', reschedule, taint, grounding())).toBe(false);
   });
 
-  test('gate on: the other lead text reads taint too; an error or refusal does not; a non-lead read does not', () => {
+  test('gate on: message, email, lead and review reads taint; a trusted office-data read does not (Codex #6369 r9)', () => {
     process.env[ON] = 'true';
-    for (const tool of ['get_stale_leads', 'get_lost_analysis']) {
+    for (const tool of ['search_messages', 'get_unanswered_threads', 'get_conversation_thread', 'get_call_log', 'search_emails', 'get_email_thread', 'search_reviews', 'get_stale_leads', 'get_lost_analysis', 'query_customers', 'get_customer_detail']) {
       const taint = OwnerDirect.newRequestTaint([]);
       OwnerDirect.noteUntrustedRead(taint, tool, leadRows);
-      expect(taint.untrustedRead).toBe(true);
+      expect([tool, taint.untrustedRead]).toEqual([tool, true]);
     }
-    const quiet = OwnerDirect.newRequestTaint([]);
-    OwnerDirect.noteUntrustedRead(quiet, 'query_leads', { error: 'boom' });
-    OwnerDirect.noteUntrustedRead(quiet, 'query_leads', { code: 'blocked' });
-    OwnerDirect.noteUntrustedRead(quiet, 'get_lead_funnel', leadRows);
-    OwnerDirect.noteUntrustedRead(quiet, 'query_customers', leadRows);
-    expect(quiet.untrustedRead).toBe(false);
+    for (const tool of OwnerDirect.TRUSTED_READS) {
+      const taint = OwnerDirect.newRequestTaint([]);
+      OwnerDirect.noteUntrustedRead(taint, tool, leadRows);
+      expect([tool, taint.untrustedRead]).toEqual([tool, false]);
+    }
+    expect(OwnerDirect.TRUSTED_READS.has('search_messages')).toBe(false);
+    expect(OwnerDirect.TRUSTED_READS.has('get_unanswered_threads')).toBe(false);
+    expect(OwnerDirect.TRUSTED_READS.has('query_leads')).toBe(false);
+  });
+
+  test('every TRUSTED_READS tool is a known read in the action policy', () => {
+    const policy = require('../services/intelligence-bar/action-policy.json');
+    for (const tool of OwnerDirect.TRUSTED_READS) expect([tool, policy[tool]?.kind]).toEqual([tool, 'read']);
+  });
+
+  test('gate on: an unknown or new read tool taints by default; a write result, an error and a refusal do not', () => {
+    process.env[ON] = 'true';
+    const taints = (tool, result) => { const taint = OwnerDirect.newRequestTaint([]); OwnerDirect.noteUntrustedRead(taint, tool, result); return taint.untrustedRead; };
+    expect(taints('brand_new_reader', leadRows)).toBe(true);
+    expect(taints('update_customer', { success: true, note: 'done' })).toBe(false);
+    expect(taints('search_messages', { error: 'boom' })).toBe(false);
+    expect(taints('search_messages', { code: 'blocked' })).toBe(false);
+    expect(taints('get_revenue_overview', leadRows)).toBe(false);
   });
 
   test('gate off: lead reads do not taint (today)', () => {
     const taint = OwnerDirect.newRequestTaint([]);
     OwnerDirect.noteUntrustedRead(taint, 'query_leads', leadRows);
+    OwnerDirect.noteUntrustedRead(taint, 'search_messages', leadRows);
     expect(taint.untrustedRead).toBe(false);
   });
 
@@ -660,6 +701,8 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     expect(OwnerDirect.untrustedReadInHistory(history)).toBe(false);
     process.env[ON] = 'true';
     expect(OwnerDirect.untrustedReadInHistory(history)).toBe(true);
+    const trusted = [{ role: 'assistant', content: [{ type: 'tool_use', id: 'tu_2', name: 'get_revenue_overview', input: {} }] }];
+    expect(OwnerDirect.untrustedReadInHistory(trusted)).toBe(false);
     // A lead read with no saved result fails closed; one that errored does not taint.
     expect(OwnerDirect.untrustedReadInHistory([history[0]])).toBe(true);
     expect(OwnerDirect.untrustedReadInHistory([history[0], { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: JSON.stringify({ error: 'x' }) }] }])).toBe(false);

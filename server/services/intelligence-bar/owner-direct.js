@@ -227,8 +227,7 @@ function directEditAllowedBase(toolName, input = {}, preview = null) {
 // object the route creates once per request (seeded from the saved history, so
 // a resumed task keeps it) and passes to the three decision functions. Scope:
 // this covers the general read, because its catalog is broad and grows by
-// review, and (GATE_IB_TARGET_RULES_V2) the lead text reads below; other read
-// tools are unchanged by this rule.
+// review, and (GATE_IB_TARGET_RULES_V2) every read outside TRUSTED_READS below.
 const GENERAL_READ_TOOL = 'read_admin_data';
 
 // A general-read result that carries data: a 2xx answer with a `data` field.
@@ -238,36 +237,63 @@ function isDataAnswer(result) {
     && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
 }
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r7): lead reads return text a public form
-// visitor typed (name, address, message, lost reason). With the gate on they taint
-// the request exactly as the general read does, so every later write in it keeps
-// its card. Gate off, only the general read taints (today's behavior).
-const LEAD_TEXT_READ_TOOLS = new Set(['query_leads', 'get_stale_leads', 'get_lost_analysis']);
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): the rule is inverted. With the gate on,
+// ANY successful read result taints the request, except the tools in TRUSTED_READS.
+// Message bodies, lead and web-form text, call transcripts, emails, reviews and
+// outside notes are all reads that can carry a stranger's instructions, and a new
+// read tool is untrusted until someone reads its result shape and lists it here.
+// A write tool's result is not a read, so it never taints (known write kinds only;
+// a tool the policy does not know taints). Gate off: only `read_admin_data` taints.
+//
+// TRUSTED_READS lists tools whose results are structured office data (counts, money,
+// schedule slots, pricing config, invoice lines with free text already stripped) or
+// control replies. When unsure a tool stays OUT. Left OUT on purpose: get_customer_detail,
+// get_stop_details, get_service_history, get_schedule_view and get_estimate_detail
+// (notes fields), get_today_briefing (new leads), the lead aggregates (lead source text),
+// get_expenses and banking reads (bank feed descriptions), vendor and product reads
+// (scraped names), and every comms, email, review, call and SEO read.
+const TRUSTED_READS = new Set([
+  // schedule
+  'get_day_summary', 'find_available_slots', 'find_schedule_gaps', 'get_zone_density',
+  // invoices (the readers strip free text)
+  'get_customer_invoices', 'get_invoice_detail',
+  // pricing config
+  'get_waveguard_tiers', 'read_pricing_config',
+  // dashboard and revenue aggregates
+  'get_kpi_snapshot', 'get_mrr_trend', 'compare_periods', 'get_revenue_breakdown', 'get_service_mix',
+  'get_revenue_overview', 'compare_revenue_periods', 'get_service_line_pnl', 'get_tech_revenue_performance',
+  // technician roster stats
+  'compare_technicians',
+  // control replies
+  'offer_choices', 'find_admin_reads',
+]);
 
-// A lead read that returned rows: an object without an error or a refusal code.
-const isLeadAnswer = result => Boolean(result) && typeof result === 'object' && !result.error && !result.code;
+const actionPolicy = require('./action-policy.json');
+// A read the policy knows as a read, or a tool it does not know at all.
+const isReadTool = toolName => !actionPolicy[toolName] || actionPolicy[toolName].kind === 'read';
+const readTaints = toolName => (toolName === GENERAL_READ_TOOL
+  || (ibTargetRulesV2Live() && isReadTool(toolName) && !TRUSTED_READS.has(toolName)));
+
+// A read that returned rows: an object without an error or a refusal code.
+const isReadAnswer = result => Boolean(result) && typeof result === 'object' && !result.error && !result.code;
 
 function noteUntrustedRead(taint, toolName, result) {
-  if (!taint) return;
-  if (toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
-  else if (LEAD_TEXT_READ_TOOLS.has(toolName) && ibTargetRulesV2Live() && isLeadAnswer(result)) taint.untrustedRead = true;
+  if (!taint || !readTaints(toolName)) return;
+  if (toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result)) taint.untrustedRead = true;
 }
 
-// Pure: does a saved message history hold a general read that returned data?
+// Pure: does a saved message history hold a tainting read that returned data?
 // A read with no saved result (the runner stopped between the call and its
-// result) counts as returned, so a resume fails closed. With the gate on, a lead
-// text read counts the same way.
+// result) counts as returned, so a resume fails closed.
 function untrustedReadInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
-  const leadReads = ibTargetRulesV2Live();
-  const isRead = block => block?.type === 'tool_use' && (block.name === GENERAL_READ_TOOL || (leadReads && LEAD_TEXT_READ_TOOLS.has(block.name)));
-  const reads = blocks.filter(isRead);
+  const reads = blocks.filter(block => block?.type === 'tool_use' && readTaints(block.name));
   if (!reads.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
   return reads.some((read) => {
     const answer = answers.get(read.id);
     if (!answer) return true;
-    try { return (read.name === GENERAL_READ_TOOL ? isDataAnswer : isLeadAnswer)(JSON.parse(answer.content)); } catch { return true; }
+    try { return (read.name === GENERAL_READ_TOOL ? isDataAnswer : isReadAnswer)(JSON.parse(answer.content)); } catch { return true; }
   });
 }
 
@@ -574,4 +600,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

@@ -100,10 +100,17 @@ const CUSTOMER_LOOKUP_LIMIT = 10;
 const CUSTOMER_LOOKUP_LISTED_V2 = 25;
 const customerLookupLimit = () => (ibTargetRulesV2Live() ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
 
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): every typed-target parse (names, cities,
+// phones, emails, the "First L., City" reply) reads only the first characters of the
+// message. A multi-megabyte prompt cannot make the parse materialize every match; the
+// owner's target is named at the start of a request. Gate off: the whole message.
+const TYPED_TARGET_SCAN_CHARS = 4000;
+const typedTargetText = prompt => (ibTargetRulesV2Live() ? String(prompt ?? '').slice(0, TYPED_TARGET_SCAN_CHARS) : String(prompt));
+
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select a recipient/account.
-  let clause = String(prompt).split(/[:;\n“”"]|\bwith\s+(?:(?:the|a|this|following)\s+)*(?:text|body|message|content|notes?|instructions|comments)\b|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing|containing|with|reading)\b|\b(?:saying|regarding|about)\b/i)[0];
+  let clause = typedTargetText(prompt).split(/[:;\n“”"]|\bwith\s+(?:(?:the|a|this|following)\s+)*(?:text|body|message|content|notes?|instructions|comments)\b|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing|containing|with|reading)\b|\b(?:saying|regarding|about)\b/i)[0];
   for (const replacement of clause.matchAll(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/gi)) {
     const action = [...clause.slice(0, replacement.index).matchAll(new RegExp(`\\b(?:${PERSON_ACTIONS}|change|set|rename|relabel|add|save|draft|write|post|submit)\\b`, 'gi'))].at(-1)?.[0];
     if (/^(?:change|update|set|rename|relabel|add|save)$/i.test(action || '')) {
@@ -434,6 +441,20 @@ function cityIsTyped(customer, normalized) {
   return Boolean(customer.city) && rest.includes(` ${normalizeName(customer.city)} `);
 }
 
+// The distinct phones and emails a clause types, as lookup literals. Collection stops
+// at MAX_CONTACT_LITERALS + 1: the caller only needs to know the budget is exceeded
+// (Codex #6369 r9), so a clause stuffed with literals is never fully materialized.
+function contactLiteralsOf(clause) {
+  const found = new Map();
+  for (const match of clause.matchAll(CONTACT_LITERAL_RE)) {
+    const email = match[0].includes('@');
+    const value = email ? normalizeEmail(match[0]) : match[0].replace(/\D/g, '').slice(-10);
+    if (value && (email || value.length === 10)) found.set(`${email ? 'e' : 'p'}${value}`, email ? { email: value } : { phone: value });
+    if (found.size > MAX_CONTACT_LITERALS) break;
+  }
+  return [...found.values()];
+}
+
 async function typedCustomerIds(prompt, namedResult) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
@@ -458,9 +479,6 @@ async function typedCustomerIds(prompt, namedResult) {
       if (only.length === 1) ids.add(String(only[0].id));
     }
   }
-  const literals = [...clause.matchAll(CONTACT_LITERAL_RE)].map(match => match[0]);
-  const phones = [...new Set(literals.filter(value => !value.includes('@')).map(value => value.replace(/\D/g, '').slice(-10)).filter(value => value.length === 10))];
-  const emails = [...new Set(literals.filter(value => value.includes('@')).map(value => normalizeEmail(value)).filter(Boolean))];
   const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
   // One lookup per literal, bounded at two rows: a second row proves the phone
   // or email is shared, so it names neither account. No combined limit can hide
@@ -475,7 +493,7 @@ async function typedCustomerIds(prompt, namedResult) {
   // Work budget (Codex #6369 security P2): a message that types more than
   // MAX_CONTACT_LITERALS phones or emails names nobody by contact (the edit
   // keeps its card), and runs no lookup at all.
-  const contactLiterals = [...phones.map(value => ({ phone: value })), ...emails.map(value => ({ email: value }))];
+  const contactLiterals = contactLiteralsOf(clause);
   // Fail closed (Codex #6369 r3): the contact check never ran, so the name-derived
   // ids cannot be shown to agree with the typed contacts. Ground nobody.
   if (contactLiterals.length > MAX_CONTACT_LITERALS) return Object.assign([], { identityConflict: true });
@@ -534,7 +552,7 @@ async function initialFormMatches(triples) {
 }
 
 async function initialFormIds(prompt) {
-  const match = String(prompt || '').match(INITIAL_FORM_RE);
+  const match = typedTargetText(prompt || '').match(INITIAL_FORM_RE);
   if (!match) return [];
   const [, first, initial, city] = match.map(part => normalizeName(part));
   if (!first || !initial || !city) return [];
