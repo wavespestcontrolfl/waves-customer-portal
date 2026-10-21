@@ -371,7 +371,7 @@ describe('the standing bell closes when the model answers again', () => {
   test('closeFailureBellOnRecovery marks open ib:model-failure rows done once, then is a no-op', async () => {
     const db = require('../models/db');
     const select = jest.fn(async () => [{ id: 11 }, { id: 12 }]);
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select };
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), select };
     db.mockImplementation(() => chain);
     mockMarkAdminDone.mockImplementation(async (ids) => ids.length);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
@@ -438,7 +438,7 @@ describe('round 3 fixes (#6368)', () => {
   test('lanes are separate: a technician recovery does not close the admin bell', async () => {
     const db = require('../models/db');
     const select = jest.fn(async () => []);
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select };
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), select };
     db.mockImplementation(() => chain);
     const ModelFailure = require('../services/intelligence-bar/model-failure');
     try {
@@ -447,5 +447,35 @@ describe('round 3 fixes (#6368)', () => {
     } finally {
       db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
     }
+  });
+});
+
+describe('round 4 fixes (#6368)', () => {
+  test('a recovery closes only bells whose last failure came before the answered request began', async () => {
+    const db = require('../models/db');
+    const select = jest.fn(async () => []);
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), select };
+    db.mockImplementation(() => chain);
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    const since = new Date('2026-10-21T00:00:00Z');
+    try {
+      await ModelFailure.closeFailureBellOnRecovery({ lane: 'admin', now: Date.now() + 20 * 60000, answeredSince: since });
+      expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining("metadata->>'lastFailureAt'"), [since]);
+    } finally {
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
+  });
+
+  test('the too-many-steps fallback does not count as a model answer', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
+    expect(src).toMatch(/ibModelFailureNoticeLive\(\) && !noReply\)/);
+  });
+
+  test('a failed request with photos says to attach them again', async () => {
+    mockMessagesCreate.mockRejectedValueOnce(limitError());
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'what bug is this', context: 'customers', images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=' }] });
+      expect(body.response).toMatch(/attach the photos again\.$/);
+    });
   });
 });

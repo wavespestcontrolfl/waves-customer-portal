@@ -4228,7 +4228,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     // The request finished on a model answer: a standing "model not answering"
     // bell is cleared here, never after a middle round a later round may still fail.
-    if (ibModelFailureNoticeLive()) ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin' }).catch(() => {});
+    // Only a real model answer (not the too-many-steps or empty-reply fallback) clears it.
+    if (ibModelFailureNoticeLive() && !noReply) {
+      ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: requestStartedAt }).catch(() => {});
+    }
     if (activeTask) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
         state: payload.taskState, response: payload, messages: currentMessages,
@@ -4262,7 +4265,8 @@ async function answerModelFailure(req, res, { err, activeTask, pendingProposals 
   try {
     const actorId = getAdminActorId(req);
     const lane = req.techRole !== 'admin' || req.body?.context === 'tech' ? 'tech' : 'admin';
-    const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId, lane });
+    const hadImages = Array.isArray(req.body?.images) && req.body.images.length > 0;
+    const handled = await ModelFailure.handleModelFailure({ err, activeTask, actorId, lane, hadImages });
     logger.error(`[intelligence-bar] Query failed, model call (code=${handled.code})`);
     const priorHistory = Array.isArray(req.body?.conversationHistory) ? req.body.conversationHistory.slice(-8) : [];
     const payload = {

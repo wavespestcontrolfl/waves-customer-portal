@@ -104,7 +104,7 @@ function taskStateFor(status) {
 }
 
 /** The plain answer for the operator. */
-function buildAnswer({ code, status }) {
+function buildAnswer({ code, status, hadImages = false }) {
   const parts = [`${failureSentence(code)} (error ${code}).`];
   if (!status.known) {
     parts.push('I could not check whether any change was saved. Look at the customer record or recent activity before you repeat the request.');
@@ -119,7 +119,8 @@ function buildAnswer({ code, status }) {
     // only ever waits on a card, so this stays true there too.
     parts.push('Nothing was changed.');
   }
-  parts.push('Try again in a few minutes.');
+  // The palette clears attachments on any answered request, so say it plainly.
+  parts.push(hadImages ? 'Try again in a few minutes, and attach the photos again.' : 'Try again in a few minutes.');
   return parts.join(' ');
 }
 
@@ -163,6 +164,20 @@ async function recordFailureGap(code) {
 // different models, so one lane's recovery must not close the other's alert.
 const laneKey = (lane) => `${BELL_DEDUPE_KEY}:${lane === 'tech' ? 'tech' : 'admin'}`;
 
+// Every failure stamps the open lane bell with its time (a deduped failure
+// does not touch the row otherwise), so a recovery that started before this
+// failure cannot close it (Codex #6368 r4).
+async function stampLastFailure(lane, now = new Date()) {
+  try {
+    const db = require('../../models/db');
+    await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
+      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('lastFailureAt', ?::text)", [now.toISOString()]) });
+  } catch (err) {
+    logger.warn(`[intelligence-bar] model failure time not stamped (code=${err?.code || err?.name || 'error'})`);
+  }
+}
+
 async function ringFailureBell({ code, gap, lane }) {
   try {
     const { raiseAdminAlert } = require('../admin-alert-compose');
@@ -188,6 +203,7 @@ async function ringFailureBell({ code, gap, lane }) {
       dedupeOpenOnly: true,
       metadata: { source: 'ib-model-failure', lane: lane === 'tech' ? 'tech' : 'admin', code, ...(gap?.id ? { gapId: gap.id } : {}) },
     });
+    await stampLastFailure(lane);
     return Boolean(result) && !result.suppressed;
   } catch (err) {
     logger.warn(`[intelligence-bar] model failure bell not written (code=${err?.code || err?.name || 'error'})`);
@@ -199,7 +215,7 @@ async function ringFailureBell({ code, gap, lane }) {
  * Everything the route needs after a model call failed. Never throws.
  * Returns { answer, taskState, code } (taskState null without a saved task).
  */
-async function handleModelFailure({ err, activeTask, actorId, lane = 'admin' }) {
+async function handleModelFailure({ err, activeTask, actorId, lane = 'admin', hadImages = false }) {
   const code = modelFailureCode(err);
   const receipts = activeTask ? await readReceipts(activeTask.id, actorId) : [];
   const status = classifyReceipts(receipts);
@@ -208,7 +224,7 @@ async function handleModelFailure({ err, activeTask, actorId, lane = 'admin' }) 
   laneState(lane).mayBeOpen = true;
   return {
     code,
-    answer: buildAnswer({ code, status }),
+    answer: buildAnswer({ code, status, hadImages }),
     taskState: activeTask ? taskStateFor(status) : null,
     receiptsKnown: status.known,
   };
@@ -225,7 +241,7 @@ function laneState(lane) {
   if (!lanes.has(key)) lanes.set(key, { mayBeOpen: true, lastCheckAt: 0 });
   return lanes.get(key);
 }
-async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin' } = {}) {
+async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin', answeredSince = null } = {}) {
   const state = laneState(lane);
   if (!state.mayBeOpen && now - state.lastCheckAt < RECOVERY_CHECK_MS) return 0;
   state.mayBeOpen = false;
@@ -233,7 +249,10 @@ async function closeFailureBellOnRecovery({ now = Date.now(), lane = 'admin' } =
   try {
     const db = require('../../models/db');
     const rows = await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-      .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)]).select('id');
+      .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
+      // Only a bell whose last failure came before this answer's request began.
+      .modify((q) => { if (answeredSince) q.whereRaw("COALESCE((metadata->>'lastFailureAt')::timestamptz, created_at) < ?", [new Date(answeredSince)]); })
+      .select('id');
     if (!rows.length) return 0;
     const NotificationService = require('../notification-service');
     return await NotificationService.markAdminDone(rows.map((r) => r.id), {
