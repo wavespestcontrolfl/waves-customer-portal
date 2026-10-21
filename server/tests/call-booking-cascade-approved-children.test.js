@@ -6,8 +6,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue(undefined) }));
-const mockAnyInvoice = jest.fn();
-jest.mock('../services/invoice', () => ({ anyInvoiceLinkedToVisit: (...a) => mockAnyInvoice(...a) }));
+const mockChildMoney = jest.fn();
+jest.mock('../services/appointment-cancel-impact', () => ({ linkedChildMoneyReason: (...a) => mockChildMoney(...a) }));
 const { transitionJobStatus } = require('../services/job-status');
 const { cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 
@@ -42,7 +42,7 @@ const APPROVED = { id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-
 beforeEach(() => {
   jest.clearAllMocks();
   transitionJobStatus.mockResolvedValue(undefined);
-  mockAnyInvoice.mockReturnValue({ first: async () => null });
+  mockChildMoney.mockResolvedValue(null);
 });
 
 const run = ({ children = [CHILD], locked = { 'child-1': { ...CHILD } }, approvedChildren = [APPROVED] } = {}) => {
@@ -102,12 +102,27 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     expect(report.skipped).toEqual([]);
   });
 
-  test('an approved child that gained an invoice since the card is NOT cancelled', async () => {
-    mockAnyInvoice.mockReturnValue({ first: async () => ({ id: 'inv-new' }) });
-    const { cancelled, report } = await run();
+  test.each([
+    ['an invoice', 'invoice'],
+    ['prepaid coverage', 'prepaid_or_coverage'],
+    ['a card hold or request', 'card_rail'],
+    ['an inspection-credit offer', 'inspection_credit'],
+    ['estimate money', 'estimate_money'],
+  ])('an approved child that gained %s since the card is NOT cancelled, reaches no money seam, and is reported with the reason', async (_label, reason) => {
+    mockChildMoney.mockResolvedValue(reason);
+    const { cancelled, report, log } = await run();
     expect(cancelled).toBe(0);
-    expect(report.skipped).toEqual([{ id: 'child-1', reason: 'invoice_added' }]);
+    expect(report.skipped).toEqual([{ id: 'child-1', reason: `money_added_${reason}` }]);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the full money check runs on the child\'s own transaction (not the shared connection) for that child only', async () => {
+    await run();
+    expect(mockChildMoney).toHaveBeenCalledTimes(1);
+    const [conn, kids] = mockChildMoney.mock.calls[0];
+    expect(typeof conn).toBe('function');
+    expect(kids).toEqual([{ id: 'child-1' }]);
   });
 
   test('an approved child that is no longer a live linked follow-up (gone under the lock) is reported', async () => {
@@ -145,6 +160,6 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     const cancelled = await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
     expect(cancelled).toBe(1);
     expect(log.forUpdate).toBe(0);
-    expect(mockAnyInvoice).not.toHaveBeenCalled();
+    expect(mockChildMoney).not.toHaveBeenCalled();
   });
 });

@@ -711,6 +711,7 @@ module.exports = {
   cancelWithEffectsRefusal,
   linkedFollowUpRows,
   lockLinkedFollowUps,
+  linkedChildMoneyReason,
   cancelImpactsMatch,
   previewCancelFee,
   feeRailClear,

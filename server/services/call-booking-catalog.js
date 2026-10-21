@@ -903,7 +903,11 @@ async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want)
   if ((locked.service_type || null) !== (want.service_type || null)) throw changed('service_changed');
   // The child's own tech cancel notice goes to whoever is assigned NOW: a reassigned child is not the one the card showed.
   if (Object.prototype.hasOwnProperty.call(want, 'technician_id') && (locked.technician_id || null) !== (want.technician_id || null)) throw changed('technician_changed');
-  if (await require('./invoice').anyInvoiceLinkedToVisit(trx, childId).first('id')) throw changed('invoice_added');
+  // The same money-rail checks the card ran on every linked visit (prepaid or coverage, estimate deposit or annual
+  // prepay, card request or hold, inspection-credit offer, any invoice), repeated on this child's own transaction and
+  // lock. A child that has money now is not cancelled by the bar's replay and never reaches the shared money seam.
+  const money = await require('./appointment-cancel-impact').linkedChildMoneyReason(trx, [{ id: childId }]);
+  if (money) throw changed(`money_added_${money}`);
 }
 
 // actorId: the staff row cancelling the parent (a technicians.id, or null)
