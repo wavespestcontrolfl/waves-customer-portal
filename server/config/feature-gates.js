@@ -6887,6 +6887,16 @@ function reportCleanup1020Live() {
 // GATE_REPORT_CLEANUP_1020 reader, on its own line so gate PRs never conflict.
 module.exports.reportCleanup1020Live = reportCleanup1020Live;
 
+// GATE_NAME_MATCH_V2 read at CALL time, strict `=== 'true'`, dark in every environment.
+// On, the Intelligence Bar's dictated-name search (query_customers) ranks with the v2 matcher: Double Metaphone and
+// sound-alike tolerances, run-together words ("Mac Donald"), possessives, up to 8 results, a ranking bonus for the
+// customer on screen, with a visit today or tomorrow, or contacted in the last 7 days, and sound-alike alternatives
+// beside a single exact hit. Read only; it sends nothing. Off = today's behavior, byte for byte.
+function nameMatchV2Live() {
+  return process.env.GATE_NAME_MATCH_V2 === 'true';
+}
+// GATE_NAME_MATCH_V2 reader, on its own line so gate PRs never conflict.
+module.exports.nameMatchV2Live = nameMatchV2Live;
 // GATE_DICTATION_CUSTOMER_NAMES read at CALL time, strict `=== 'true'`, dark in every environment. The one reader
 // for the customer-name section of the staff dictation word list (services/dictation-word-list.js) and the
 // surname keyword hints (routes/tech-dictation.js). Off = today's word list byte for byte.
