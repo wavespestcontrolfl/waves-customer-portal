@@ -353,3 +353,18 @@ describe('a coded refusal is a gap only under a gap code (Codex #6371 r10)', () 
     expect(recordableRefusalCode({ success: false, refused: "Use the Billing Recovery page for this." })).toBe('other_screen');
   });
 });
+
+describe('every code main recorded is classified once (pre-push audit on Codex #6371 r10)', () => {
+  const decline = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
+  test.each([
+    'commercial_proposal', 'commercial_recurring', 'existing_service_extension', 'grouped_estimate', 'termite_program',
+    'termite_annual_requires_prepay', 'booked_from_estimate', 'recurring_unnamed', 'side_effect', 'side_effect_outside_plan',
+    'annual_prepay_lane', 'bill_to_payer', 'billing_visits_payer_owned', 'billing_visits_priced', 'too_many_visits',
+    'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
+  ])('%s stays a gap', (code) => { expect(recordableRefusalCode(decline(code))).toBe(code); });
+  test.each([
+    'billing_visits_held', 'billing_completion_pending', 'live_annual_prepay_term', 'property_not_linked', 'per_application_unresolved',
+    'dues_retry_armed', 'invoice_send_queued', 'invoice_channel', 'invoice_no_channel', 'verifier_reject', 'prefs_unavailable',
+    'post_commit', 'address_conflict', 'already_accepted', 'invalid_target', 'invalid_value', 'no_change', 'payer_owned',
+  ])('%s is the bar working as built', (code) => { expect(recordableRefusalCode(decline(code))).toBeNull(); });
+});

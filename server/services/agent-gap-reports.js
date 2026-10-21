@@ -62,8 +62,18 @@ const GATE_OFF_CODE_RE = /(?:^|_)(?:not_enabled|gate_off)$/;
 // bar working as built, whatever its wording says (Codex #6371 r10: wording
 // alone kept turning ordinary refusals into build work).
 const UNSUPPORTED_CODE_RE = /_unsupported$/;
+// Every coded refusal main recorded through its "use the X screen" text was
+// classified once here (10-21): a case the bar could be built to handle is a
+// gap; a wait, a fence, an outage, a safety check, data the operator must fix
+// first, or an owner ruling is not.
 const CAPABILITY_GAP_CODES = new Set([
-  'annual_plan_invoice', 'annual_prepay_customer', 'grouped_estimate', 'package_visit_two_linked', 'nothing_repairable',
+  // Estimate accept cases the card cannot show yet.
+  'commercial_proposal', 'commercial_recurring', 'existing_service_extension', 'grouped_estimate', 'termite_program',
+  'termite_annual_requires_prepay', 'booked_from_estimate', 'recurring_unnamed', 'side_effect', 'side_effect_outside_plan',
+  // Billing-type changes the card cannot confirm yet.
+  'annual_prepay_lane', 'bill_to_payer', 'billing_visits_payer_owned', 'billing_visits_priced', 'too_many_visits',
+  // Visit, invoice and closeout cases.
+  'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
 ]);
 const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
