@@ -320,9 +320,11 @@ function wordKeys(word, memo) {
   if (word.length >= 3) keys.push(`f:${word.slice(0, 3)}`, `l:${word.slice(-3)}`);
   // Typos: the word and each single-letter deletion of it. A word and its
   // one-slip variant (a wrong, missing or extra letter anywhere) share a key.
-  if (word.length >= 4) {
+  // A three-letter word keeps only itself, so it still meets the one-letter
+  // deletion of a four-letter word (joe / Jose, mak / Mark) from either side.
+  if (word.length >= 3) {
     const deletes = new Set([word]);
-    for (let i = 0; i < word.length; i += 1) deletes.add(word.slice(0, i) + word.slice(i + 1));
+    if (word.length >= 4) for (let i = 0; i < word.length; i += 1) deletes.add(word.slice(0, i) + word.slice(i + 1));
     for (const variant of deletes) keys.push(`d:${variant}`);
   }
   const phonetic = phoneticKey(word);

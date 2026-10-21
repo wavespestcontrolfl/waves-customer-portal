@@ -534,6 +534,15 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
     expect(ids(rankNameMatches('Pat Jomes', prefilterNameIndex('Pat Jomes', typos), { v2: true, prefiltered: true }))).toContain('j');
   });
 
+  test('a one-letter deletion retrieves from either side, short words included', () => {
+    const only = (list, search) => prefilterNameIndex(search, buildNameIndex(list)).map((e) => e.id);
+    expect(only([named('a', 'Zed', 'Jose')], 'joe')).toEqual(['a']);
+    expect(only([named('a', 'Zed', 'Joe')], 'jose')).toEqual(['a']);
+    expect(only([named('a', 'Zed', 'Mark')], 'mak')).toEqual(['a']);
+    expect(only([named('a', 'Zed', 'Mak')], 'mark')).toEqual(['a']);
+    expect(only([named('a', 'Zed', 'Quill')], 'joe')).toEqual([]);
+  });
+
   test('survivors are capped and need a shared key; an unrelated book yields none', () => {
     const index = buildNameIndex(everyone);
     expect(prefilterNameIndex('richard', index)).toHaveLength(MAX_SURVIVORS);
@@ -651,5 +660,85 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
       expect(reads.length).toBeGreaterThan(0);
       for (const q of reads) expect(q.bindings).not.toContain('other');
     });
+  });
+});
+
+describe('name match v2: review round 5', () => {
+  const prev = process.env.GATE_NAME_MATCH_V2;
+  beforeEach(() => { process.env.GATE_NAME_MATCH_V2 = 'true'; resetNameIndexCache(); db.__queries = []; db.__rows = () => []; });
+  afterAll(() => { if (prev === undefined) delete process.env.GATE_NAME_MATCH_V2; else process.env.GATE_NAME_MATCH_V2 = prev; });
+  const book = [named('dumas', 'Richard', 'Dumas'), named('stompf', 'Richard', 'Stompf'), named('quill', 'Zed', 'Quill')];
+  const row = (id, first, last) => ({ id, first_name: first, last_name: last, active: true });
+
+  test('several exact hits keep the same rows, ordered by name fit and context', async () => {
+    db.__rows = (q) => {
+      if (q.sql.includes('from "scheduled_services"')) return [{ customer_id: 'stompf' }];
+      if (/from "(sms_log|call_log)"/.test(q.sql)) return [];
+      if (q.sql.includes('count(*)')) return [{ count: '2' }];
+      return [row('dumas', 'Richard', 'Dumas'), row('stompf', 'Richard', 'Stompf')];
+    };
+    const ordered = await executeTool('query_customers', { search: 'richard dump' });
+    expect(ordered.customers.map((c) => c.id)).toEqual(['stompf', 'dumas']);
+    expect(ordered.customers[0].match).toEqual({ score: 1, reasons: ['visit_soon'] });
+    expect(ordered).toMatchObject({ total_matching: 2, returned_count: 2 });
+    expect(ordered.note).toMatch(/offer_choices/);
+    // An explicit sort keeps its order; the set never changes.
+    const sorted = await executeTool('query_customers', { search: 'richard dump', sort_by: 'name' });
+    expect(sorted.customers.map((c) => c.id)).toEqual(['dumas', 'stompf']);
+    expect(sorted.customers[1].match.reasons).toEqual(['visit_soon']);
+    // Gate off: the old result, untouched.
+    delete process.env.GATE_NAME_MATCH_V2;
+    const off = await executeTool('query_customers', { search: 'richard dump' });
+    expect(off.customers.map((c) => c.id)).toEqual(['dumas', 'stompf']);
+    expect(off.customers[0].match).toBeUndefined();
+    expect(off.note).toBeUndefined();
+  });
+
+  test('the call bonus counts only calls that reached someone', async () => {
+    db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '2' }] : [row('dumas', 'Richard', 'Dumas'), row('stompf', 'Richard', 'Stompf')]);
+    await executeTool('query_customers', { search: 'richard dump' });
+    const calls = db.__queries.find((q) => q.sql.includes('from "call_log"'));
+    expect(calls.sql).toContain('"bridged_at" is not null'); // outbound: the customer leg was dialed
+    expect(calls.sql).toMatch(/"answered_by" in/); // inbound: answered by a person or Sandy
+    expect(calls.sql).toContain('"recording_sid" is not null');
+    expect(calls.sql).toMatch(/"direction" = \$\d+/);
+  });
+
+  test('a customer renamed since the index was built is scored by the current name', async () => {
+    const fetched = { renamed: row('stompf', 'Zed', 'Quill') }; // now someone else
+    db.__rows = (q) => {
+      if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return [];
+      if (q.sql.includes('count(*)')) return [{ count: '1' }];
+      if (q.sql.startsWith('select "customers"."id" from "customers"')) return book.map((b) => ({ id: b.id }));
+      if (q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')) return book; // cached index: old names
+      if (q.sql.includes('"customers"."id" in')) return [fetched.renamed, row('dumas', 'Richard', 'Dumas')].filter((r) => q.bindings.includes(r.id));
+      return [row('dumas', 'Richard', 'Dumas')];
+    };
+    const result = await executeTool('query_customers', { search: 'richard dump' });
+    expect(result.alternatives).toBeUndefined(); // the renamed row no longer qualifies
+    // Still qualifying after a rename: shown with its current score.
+    fetched.renamed = row('stompf', 'Richard', 'Stompf');
+    resetNameIndexCache();
+    const kept = await executeTool('query_customers', { search: 'richard dump' });
+    expect(kept.alternatives[0]).toMatchObject({ id: 'stompf', match: { score: 0.9 } });
+  });
+
+  test('creating or updating a customer drops the cached name index', async () => {
+    db.__rows = (q) => {
+      if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return [];
+      if (q.sql.includes('count(*)')) return [{ count: '1' }];
+      if (q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')) return book;
+      return [row('dumas', 'Richard', 'Dumas')];
+    };
+    const reads = () => db.__queries.filter((q) => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')).length;
+    await executeTool('query_customers', { search: 'richard dump' });
+    await executeTool('query_customers', { search: 'richard dump' });
+    expect(reads()).toBe(1);
+    await executeTool('update_customer', { customer_id: 'dumas', updates: { first_name: 'Rick' } }); // the write's own result does not matter
+    await executeTool('query_customers', { search: 'richard dump' });
+    expect(reads()).toBe(2);
+    await executeTool('create_customer', { first_name: 'Pat' });
+    await executeTool('query_customers', { search: 'richard dump' });
+    expect(reads()).toBe(3);
   });
 });
