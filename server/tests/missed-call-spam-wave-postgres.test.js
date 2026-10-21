@@ -136,6 +136,17 @@ jest.setTimeout(30000);
     expect(await isRobodialerWave(stored)).toBe(true);
   });
 
+  test('a number on a customer secondary_phone, and a non-North-American caller, are never a wave (Codex #6379 r1)', async () => {
+    const row = call('+19415550303', 10);
+    await database('call_log').insert([row, call('+19415550101', 60), call('+19415550202', 60)]);
+    expect(await isRobodialerWave(row)).toBe(true);
+    const intl = call('+449415550303', 10);
+    await database('call_log').insert([intl, call('+449415550404', 60)]);
+    expect(await isRobodialerWave(intl)).toBe(false);
+    await database('customers').insert({ id: randomUUID(), first_name: 'Sample', last_name: 'Person', phone: '+19415559999', secondary_phone: '941-555-0303' });
+    expect(await isRobodialerWave(row)).toBe(false);
+  });
+
   test('block calls older than 14 days do not count', async () => {
     const row = call('+19415550303', 10);
     await database('call_log').insert([row, call('+19415550101', 60 * 24 * 15), call('+19415550202', 60 * 24 * 16)]);
