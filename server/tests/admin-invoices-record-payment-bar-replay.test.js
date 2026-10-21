@@ -104,7 +104,8 @@ describe('the bar shim runs the same handler', () => {
   test('same settlement, same body, same answer, plus the card pins', async () => {
     const page = await viaPage(BODY);
     const bar = await viaBar();
-    expect(bar).toEqual({ status: page.status, json: page.json });
+    expect(bar).toEqual({ status: page.status, json: { ...page.json, closeout: null } });
+    expect(page.json).not.toHaveProperty('closeout');
     expect(recordManualPayment).toHaveBeenCalledTimes(2);
     const [pageCall, barCall] = recordManualPayment.mock.calls;
     expect(barCall[0]).toBe(pageCall[0]);

@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { recordAuditEvent } = require('../services/audit-log');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
-const { closeOutVisitForIssuedInvoice, retryIssuedInvoiceCloseouts, recordApprovedCloseoutTarget, recordApprovedCloseoutDelivery, pinDecisionFor } = require('../services/invoice-issued-closeout');
+const { closeOutVisitForIssuedInvoice, retryIssuedInvoiceCloseouts, recordApprovedCloseoutTarget, recordApprovedCloseoutDelivery, pinDecisionFor, approvedVisitChanged } = require('../services/invoice-issued-closeout');
 
 const rows = {
   invoices: { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: 'paid', scheduled_service_id: 'visit-live', paid_at: '2021-03-01T15:00:00Z' },
@@ -325,5 +325,79 @@ describe('a payment recorded from the bar pins the closeout target it showed (re
   test('a payment pin is not mistaken for an unbound send pin by the send lookup', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice-issued-closeout.js'), 'utf8');
     expect(source).toMatch(/COALESCE\(metadata->>'claimToken', ''\) NOT LIKE 'paid:%'/);
+  });
+});
+
+describe('the carded visit\'s facts travel with the approved target (record_payment, Codex r9)', () => {
+  const CARDED = { serviceType: null, date: '2020-01-01', status: 'pending', updatedAtMs: null };
+
+  test('approvedVisitChanged compares service type, scheduled date, status and edit time; an unset fact is not compared', () => {
+    const svc = { service_type: 'Pest Control', scheduled_date: new Date('2099-02-03T00:00:00Z'), status: 'confirmed', updated_at: new Date('2099-02-01T10:00:00.123Z') };
+    const carded = { serviceType: 'Pest Control', date: '2099-02-03', status: 'confirmed', updatedAtMs: new Date('2099-02-01T10:00:00.123Z').getTime() };
+    expect(approvedVisitChanged(svc, carded)).toBe(false);
+    expect(approvedVisitChanged(svc, null)).toBe(false);
+    for (const patch of [{ serviceType: 'Lawn Care' }, { date: '2099-02-04' }, { status: 'cancelled' }, { updatedAtMs: carded.updatedAtMs + 1 }]) {
+      expect(approvedVisitChanged(svc, { ...carded, ...patch })).toBe(true);
+    }
+    expect(approvedVisitChanged(svc, { serviceType: 'Pest Control' })).toBe(false);
+  });
+
+  test('unchanged since the card: the approved visit closes, and the completion is handed the facts to re-assert under its lock', async () => {
+    await expect(run({ approvedTarget: 'visit-live', approvedVisit: CARDED })).resolves.toMatchObject({ closed: true, visitId: 'visit-live' });
+    expect(completeScheduledService).toHaveBeenCalledWith(expect.objectContaining({ issuedInvoiceCloseout: { invoiceId: 'inv-1', trigger: 'paid', expectedVisit: CARDED } }));
+  });
+
+  test.each([
+    ['rescheduled to another date', { date: '2020-01-02' }],
+    ['reclassified to another service', { serviceType: 'Lawn Care' }],
+    ['status changed (cancelled)', { status: 'cancelled' }],
+    ['edited since (edit time)', { updatedAtMs: 5 }],
+  ])('a visit %s after the card is left open: approved_visit_changed, audited, nothing completed', async (_label, patch) => {
+    const out = await run({ approvedTarget: 'visit-live', approvedVisit: { ...CARDED, ...patch } });
+    expect(out).toMatchObject({ closed: false, reason: 'approved_visit_changed', visitId: 'visit-live', audited: true });
+    expect(completeScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ code: 'approved_visit_changed' }) }));
+  });
+
+  test('no approved visit (the Invoices page, a send): nothing is compared and the completion gets no expected facts', async () => {
+    await expect(run({ approvedTarget: 'visit-live' })).resolves.toMatchObject({ closed: true });
+    expect(completeScheduledService.mock.calls[0][0].issuedInvoiceCloseout).toEqual({ invoiceId: 'inv-1', trigger: 'paid' });
+  });
+
+  test('approved_visit_changed is a refusal a person decides: neither sweep treats it as transient', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice-issued-closeout.js'), 'utf8');
+    const transient = source.slice(source.indexOf('function isTransientRefusal'), source.indexOf('}', source.indexOf('function isTransientRefusal')));
+    expect(transient).not.toMatch(/approved_visit/);
+    expect(source).not.toMatch(/SEND_ONLY_REFUSAL_CODES = \[[^\]]*approved_visit_changed/);
+  });
+
+  test('the completion re-asserts the facts on the LOCKED visit row, first in the issued-closeout block, and answers 409 approved_visit_changed', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const lock = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const check = src.indexOf('approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)', lock);
+    const firstRefusal = src.indexOf('const lockedRefusal =', lock);
+    const fromStatus = src.indexOf('fromStatus = lockedSvcRow.status;', lock);
+    expect(lock).toBeGreaterThan(0);
+    expect(check).toBeGreaterThan(lock);
+    expect(check).toBeLessThan(firstRefusal);
+    expect(check).toBeLessThan(fromStatus);
+    expect(src).toMatch(/err\.code === 'approved_visit_changed'\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);\s*return \(\{ status: 409, body: \{[^}]*code: 'approved_visit_changed'/);
+  });
+
+  test('the payment pin keeps the facts beside the target, and the sweep honors both', async () => {
+    const { recordApprovedPaidCloseoutTarget } = require('../services/invoice-issued-closeout');
+    const trx = () => ({ where: () => ({ first: async () => ({ paid_at: PAID_AT }) }) });
+    await recordApprovedPaidCloseoutTarget('inv-1', 'visit-live', { conn: trx, approvedVisit: CARDED });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ approvedTarget: 'visit-live', approvedVisit: CARDED, claimToken: PAID_TOKEN }) }));
+    const row = { invoice_id: 'inv-1', visit_id: 'visit-live' };
+    await expect(pinDecisionFor(sweepConn({ pins: [{ claimToken: PAID_TOKEN, approvedTarget: 'visit-live', approvedVisit: CARDED }] }), row, 'paid'))
+      .resolves.toEqual({ action: 'honor', target: 'visit-live', visit: CARDED });
+  });
+
+  test('the retry sweep: a visit changed since the card is not closed on a later pass', async () => {
+    const changed = { ...CARDED, date: '2020-01-09' };
+    const out = await sweep({ candidateStatus: 'paid', liveStatus: 'paid', pins: [{ claimToken: PAID_TOKEN, approvedTarget: 'visit-live', approvedVisit: changed }] });
+    expect(out).toMatchObject({ retried: 1, closed: 0 });
+    expect(completeScheduledService).not.toHaveBeenCalled();
   });
 });

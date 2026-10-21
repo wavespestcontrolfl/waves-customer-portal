@@ -2659,6 +2659,9 @@ const cardPinsOf = (req) => (req.ibApprovedPayment
   }
   : {});
 
+// The card is told what the post-payment closeout did (the Invoices page's answer is unchanged).
+const cardResultOf = (req, closeout) => (req.ibApprovedPayment ? { closeout: closeout || null } : {});
+
 // Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.
 const recordPaymentHandler = async (req, res, next) => {
   try {
@@ -2685,11 +2688,11 @@ const recordPaymentHandler = async (req, res, next) => {
     // effects and the receipt all live in services/invoice-manual-payment.js
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
-    const { invoice, receipt } = await recordManualPayment(id, {
+    const { invoice, receipt, closeout } = await recordManualPayment(id, {
       method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
       ...cardPinsOf(req),
     });
-    res.json({ ok: true, invoice, receipt });
+    res.json({ ok: true, invoice, receipt, ...cardResultOf(req, closeout) });
   } catch (err) {
     // 400 / 404 refusals and the 409-shaped conflicts (combined-session
     // reservation, PI in flight, lost race — the latter carries the

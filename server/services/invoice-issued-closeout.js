@@ -405,7 +405,7 @@ const parseMeta = (meta) => {
   if (typeof meta !== 'string') return meta || {};
   try { return JSON.parse(meta); } catch { return {}; }
 };
-async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = db, claimToken = null, actorTechnicianId = null } = {}) {
+async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = db, claimToken = null, actorTechnicianId = null, approvedVisit = null } = {}) {
   const { recordAuditEvent } = require('./audit-log');
   await recordAuditEvent({
     actor_type: actorTechnicianId ? 'admin' : 'system',
@@ -413,7 +413,7 @@ async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = 
     action: CLOSEOUT_PIN_ACTION,
     resource_type: 'invoices',
     resource_id: invoiceId,
-    metadata: { invoiceId: String(invoiceId), approvedTarget, claimToken: claimToken ? String(claimToken) : null },
+    metadata: { invoiceId: String(invoiceId), approvedTarget, ...(approvedVisit ? { approvedVisit } : {}), claimToken: claimToken ? String(claimToken) : null },
     critical: true,
     trx: conn,
   });
@@ -424,19 +424,21 @@ async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = 
 // (a settled invoice has no send claim). The retry sweep honors it for that payment only (approvedPaidCloseoutTargetFor), so a later
 // payment of a reopened invoice is judged as always. No target (the Invoices page) writes nothing.
 const paidPinToken = (paidAt) => `paid:${new Date(paidAt).getTime()}`;
-async function recordApprovedPaidCloseoutTarget(invoiceId, approvedTarget, { conn = db, actorTechnicianId = null } = {}) {
+// approvedVisit (optional): the facts of the carded visit { serviceType, date, status, updatedAtMs }, kept in the same pin so the retry
+// sweep re-asserts them too (see approvedVisitChanged).
+async function recordApprovedPaidCloseoutTarget(invoiceId, approvedTarget, { conn = db, actorTechnicianId = null, approvedVisit = null } = {}) {
   if (!approvedTarget) return;
   const invoice = await conn('invoices').where({ id: invoiceId }).first('paid_at');
   if (!invoice?.paid_at) throw new Error('the paid invoice has no paid_at to bind the closeout pin to');
-  await recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn, claimToken: paidPinToken(invoice.paid_at), actorTechnicianId });
+  await recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn, claimToken: paidPinToken(invoice.paid_at), actorTechnicianId, approvedVisit });
 }
 async function approvedPaidCloseoutTargetFor(conn, invoiceId) {
   const invoice = await conn('invoices').where({ id: invoiceId }).first('paid_at');
   if (!invoice?.paid_at) return null;
   const pin = await conn('audit_log').where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_ACTION })
     .whereRaw("metadata->>'claimToken' = ?", [paidPinToken(invoice.paid_at)]).orderBy('created_at', 'desc').first('metadata');
-  const target = pin ? parseMeta(pin.metadata).approvedTarget : null;
-  return target ? { target } : null;
+  const meta = pin ? parseMeta(pin.metadata) : {};
+  return meta.approvedTarget ? { target: meta.approvedTarget, ...(meta.approvedVisit ? { visit: meta.approvedVisit } : {}) } : null;
 }
 
 // The claim's delivery finalized: the pin written under this claim token is now the invoice's delivery episode.
@@ -638,7 +640,7 @@ async function pinDecisionFor(conn, row, trigger) {
     return { action: 'skip', reason: 'pin_lookup_failed' };
   }
   if (pinned?.unbound) return { action: 'skip', reason: 'pin_unbound' };
-  return pinned?.target ? { action: 'honor', target: pinned.target } : { action: 'unpinned' };
+  return pinned?.target ? { action: 'honor', target: pinned.target, ...(pinned.visit ? { visit: pinned.visit } : {}) } : { action: 'unpinned' };
 }
 
 // An unbound pin is audited once per sweep that meets it.
@@ -666,7 +668,7 @@ async function retryOneIssuedInvoice(row, { conn, today }) {
     return skipped;
   }
   const out = await closeOutVisitForIssuedInvoice({
-    invoiceId: row.invoice_id, trigger, conn, today, ...(decision.action === 'honor' ? { approvedTarget: decision.target } : {}),
+    invoiceId: row.invoice_id, trigger, conn, today, ...(decision.action === 'honor' ? { approvedTarget: decision.target, approvedVisit: decision.visit } : {}),
   });
   return { retried: 1, closed: out?.closed ? 1 : 0 };
 }
@@ -808,7 +810,23 @@ async function resolveCloseoutTarget(run) {
 // An approved target (the Intelligence Bar's send card: the visit id it said would be closed, or 'none'):
 // the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
 // the retry sweeps do not reconsider (a person decides). A send with no approved target is unchanged.
+// The carded visit's facts (a record_payment card pins them): the closeout also runs only for that visit AS THE CARD SHOWED IT, compared
+// here on the resolved row and again by the completion under the visit lock (approvedVisit). A visit edited, rescheduled, reclassified
+// or cancelled since is left open: `approved_visit_changed`, not retried by the sweeps (a person decides; the payment stays recorded).
+const visitFactsOf = (svc) => ({
+  serviceType: svc.service_type || null, date: dateOnly(svc.scheduled_date), status: svc.status ?? null, updatedAtMs: svc.updated_at ? new Date(svc.updated_at).getTime() : null,
+});
+function approvedVisitChanged(svc, approved) {
+  if (!approved) return false;
+  const live = visitFactsOf(svc);
+  return ['serviceType', 'date', 'status', 'updatedAtMs'].some((key) => (approved[key] === undefined ? false : (approved[key] ?? null) !== live[key]));
+}
 async function refuseUnapprovedTarget(run) {
+  if (run.approvedVisit && run.svc.id === run.approvedTarget && approvedVisitChanged(run.svc, run.approvedVisit)) {
+    logger.warn(`[invoice-issued-closeout] ${run.label} → approved_visit_changed: visit ${run.svc.id} changed since the card; left open`);
+    const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_visit_changed' });
+    return { closed: false, reason: 'approved_visit_changed', visitId: run.svc.id, audited };
+  }
   if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
   logger.warn(`[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
   const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_target_mismatch' });
@@ -842,7 +860,7 @@ async function runQuietCloseout(run) {
     },
     actor: { techRole: 'admin', technicianId: run.actorTechnicianId || null, technician: null },
     idempotencyKey: run.idempotencyKey,
-    issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger },
+    issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger, ...(run.approvedVisit ? { expectedVisit: run.approvedVisit } : {}) },
   });
   const outcome = completionOutcome(result);
   const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
@@ -875,7 +893,7 @@ async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, toda
     visit = resolved.visit;
     resuming = true;
   }
-  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), updatedAt: visit.updated_at || null, resuming } : null;
+  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), updatedAt: visit.updated_at || null, status: visit.status ?? null, resuming } : null;
 }
 
 async function loadCloseoutInvoice(run) {
@@ -915,10 +933,10 @@ async function auditCloseoutFailure(run, err) {
 // auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
 // the quiet canonical completion.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null } = {}) {
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
     const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run));
@@ -940,6 +958,7 @@ module.exports = {
   isLiveVisitStatus,
   isArrivedVisitStatus,
   issuedCloseoutVisitRefusal,
+  approvedVisitChanged,
   invoiceIssuedDay,
   issuedDayForInvoice,
   resolveVisitForIssuedInvoice,

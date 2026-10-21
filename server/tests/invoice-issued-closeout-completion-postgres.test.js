@@ -659,6 +659,51 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'issued_visit_rescheduled' }) });
   });
 
+  // The record_payment card pins the visit as it showed it (service type, scheduled date, status, edit time). The completion re-asserts
+  // those facts on the LOCKED visit row, so an edit that lands between the closeout's unlocked read and its lock leaves the visit open.
+  describe('an approved visit\'s facts are re-asserted under the visit lock (record_payment, Codex r9)', () => {
+    const factsOfVisit = async () => {
+      const row = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      return {
+        serviceType: row.service_type || null,
+        date: (await mockPg.raw("SELECT to_char(scheduled_date, 'YYYY-MM-DD') AS d FROM scheduled_services WHERE id = ?", [f.serviceId])).rows[0].d,
+        status: row.status ?? null,
+        updatedAtMs: row.updated_at ? new Date(row.updated_at).getTime() : null,
+      };
+    };
+    const close = (approvedVisit) => closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg, approvedTarget: f.serviceId, approvedVisit });
+
+    test('unchanged since the card: the visit closes', async () => {
+      await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+      await expectQuietCompletion(await close(await factsOfVisit()));
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('completed');
+    });
+
+    test.each([
+      ['rescheduled to another past day', (id) => mockPg.raw("UPDATE scheduled_services SET scheduled_date = scheduled_date - 1 WHERE id = ?", [id])],
+      ['reclassified to another service', (id) => mockPg('scheduled_services').where({ id }).update({ service_type: 'Fixture Other Service' })],
+      ['moved to another status', (id) => mockPg('scheduled_services').where({ id }).update({ status: 'pending' })],
+    ])('a visit %s between the unlocked read and the lock stays open: approved_visit_changed, no service record, the invoice untouched', async (_label, change) => {
+      await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+      const carded = await factsOfVisit();
+      mockRace.beforeClaim = () => change(f.serviceId);
+      const out = await close(carded);
+      expect(out).toMatchObject({ closed: false, reason: 'approved_visit_changed', visitId: f.serviceId });
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).not.toBe('completed');
+      expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+      expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBeNull();
+      expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'approved_visit_changed' }) });
+    });
+
+    test('an edit that landed before the closeout\'s read is caught by the early comparison, before any completion attempt', async () => {
+      await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+      const carded = await factsOfVisit();
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ service_type: 'Fixture Other Service' });
+      expect(await close(carded)).toMatchObject({ closed: false, reason: 'approved_visit_changed' });
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).not.toBe('completed');
+    });
+  });
+
   test('a closeout that loads the visit after it moved to today is refused on a send, and on a payment until the technician has arrived', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     await mockPg('scheduled_services').where({ id: f.serviceId }).update({ scheduled_date: etDateString() });

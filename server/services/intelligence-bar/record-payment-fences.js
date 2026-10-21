@@ -21,7 +21,8 @@
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
- *       The function also carries `closeoutTarget`: the visit the card said the payment would complete, or 'none'.
+ *       The function also carries `closeoutTarget` (the visit the card said the payment would complete, or 'none') and `closeoutVisit`
+ *       (that visit's facts as the card showed them): the settlement pins both and the closeout re-asserts the facts under the visit's lock.
  */
 const { etDateString } = require('../../utils/datetime-et');
 
@@ -56,11 +57,12 @@ const dateOnly = (value) => {
 // A visit edited (or gone) since refuses, rather than completing a changed visit. Read on the settlement's own handle: under the lock
 // that is the transaction, which by then holds the linked visit's lock (visitRefusesSettlement runs before the fence).
 async function closeoutVisitUnchanged(database, visit) {
-  const row = await database('scheduled_services').where({ id: visit.visitId }).first('id', 'updated_at', 'scheduled_date', 'service_type');
+  const row = await database('scheduled_services').where({ id: visit.visitId }).first('id', 'updated_at', 'scheduled_date', 'service_type', 'status');
   return Boolean(row)
     && (row.updated_at ? new Date(row.updated_at).getTime() : null) === visit.updatedAtMs
     && dateOnly(row.scheduled_date) === visit.date
-    && (row.service_type || null) === (visit.serviceType || null);
+    && (row.service_type || null) === (visit.serviceType || null)
+    && (visit.status === undefined || (row.status ?? null) === (visit.status ?? null));
 }
 
 async function heldReportExists(database, invoiceId, { lock }) {
@@ -94,6 +96,8 @@ function settlementFenceFor(pin) {
     return true;
   };
   fence.closeoutTarget = pin.closeoutTarget;
+  // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock.
+  fence.closeoutVisit = pin.closeout ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, updatedAtMs: pin.closeout.updatedAtMs } : null;
   return fence;
 }
 

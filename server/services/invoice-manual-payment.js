@@ -20,8 +20,10 @@
  * record a different sum than the money that arrived.
  *
  * The card also supplies a settlementFence (below), carrying `closeoutTarget` (the visit id its card said the payment's closeout would
- * complete, or 'none'): written as a pin inside the settlement transaction and handed to the closeout as its approved target, so a visit
- * that became closable after the card is left open, on the first run and on every retry. It throws its own 409 refusals (`drift: true`); the fence is handed the LOCKED
+ * complete, or 'none') and `closeoutVisit` (that visit's facts as the card showed them: service type, scheduled date, status, edit time):
+ * written as a pin inside the settlement transaction and handed to the closeout as its approved target and visit, so a visit that became
+ * closable after the card, or was edited, rescheduled, reclassified or cancelled since, is left open (the closeout re-asserts the facts
+ * under the visit's lock), on the first run and on every retry. The payment stays recorded; the result carries `closeout`. It throws its own 409 refusals (`drift: true`); the fence is handed the LOCKED
  * invoice row as its second argument when it runs under the lock.
  *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
@@ -137,6 +139,7 @@ async function recordManualPayment(id, {
   }
   // The visit the Intelligence Bar card said this payment would close out ('none' = none); undefined for the Invoices page.
   const approvedCloseoutTarget = settlementFence?.closeoutTarget;
+  const approvedCloseoutVisit = settlementFence?.closeoutVisit;
   const trimmedReference = typeof reference === 'string' ? reference.trim().slice(0, 200) : '';
   const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
 
@@ -329,7 +332,7 @@ async function recordManualPayment(id, {
       .returning('*');
     if (!row) return null;
     // The card's closeout target as a pin, in this transaction: it commits with the payment or not at all.
-    await require('./invoice-issued-closeout').recordApprovedPaidCloseoutTarget(id, approvedCloseoutTarget, { conn: trx, actorTechnicianId: recordedByTechnicianId });
+    await require('./invoice-issued-closeout').recordApprovedPaidCloseoutTarget(id, approvedCloseoutTarget, { conn: trx, actorTechnicianId: recordedByTechnicianId, approvedVisit: approvedCloseoutVisit });
 
     // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
     // reports) sum manual cash/check/Zelle alongside Stripe collections.
@@ -554,12 +557,14 @@ async function recordManualPayment(id, {
   // visit happened — close it out quietly. Best-effort after the payment
   // is recorded.
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-  await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget });
+  const closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget, approvedVisit: approvedCloseoutVisit });
 
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
     receipt: !sendReceipt ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
+    // What the post-payment closeout did (the Intelligence Bar card reports it; the Invoices page route does not forward it).
+    closeout,
   };
 }
 

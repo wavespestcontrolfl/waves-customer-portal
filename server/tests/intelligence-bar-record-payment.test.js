@@ -404,6 +404,40 @@ describe('confirm', () => {
       delete db.schema;
     });
 
+    test('the fence carries the carded visit\'s facts (type, date, status, edit time) for the closeout to re-assert', async () => {
+      issuedCloseoutTarget.mockResolvedValue({ ...closeout, status: 'confirmed' });
+      state.scheduled_services.push(visitRow({ status: 'confirmed' }));
+      const fence = await fenceOf();
+      expect(fence.closeoutTarget).toBe('visit-77');
+      expect(fence.closeoutVisit).toEqual({ serviceType: 'Pest Control', date: '2099-01-01', status: 'confirmed', updatedAtMs: VISIT_EDITED.getTime() });
+      await expect(fence(db)).resolves.toBe(true);
+      state.scheduled_services[0].status = 'cancelled';
+      await expect(fence(db)).rejects.toMatchObject({ statusCode: 409, drift: true });
+      delete db.schema;
+    });
+
+    test.each([
+      ['closed', { closed: true }, 'completed', /The linked visit was closed\./],
+      ['changed since the card', { closed: false, reason: 'approved_visit_changed' }, 'skipped_visit_changed', /The visit changed since the card; the payment is recorded, close the visit from its page\./],
+      ['another visit became the target', { closed: false, reason: 'approved_target_mismatch' }, 'skipped_visit_changed', /visit changed since the card/],
+      ['refused for another reason', { closed: false, reason: 'visit_timer_running' }, 'not_completed', /not closed \(visit_timer_running\); the payment is recorded, close the visit from its page/],
+    ])('the result says what became of the promised closeout: %s (the payment is recorded either way)', async (_name, closeoutAnswer, state_, note) => {
+      issuedCloseoutTarget.mockResolvedValue(closeout);
+      const card = await preview();
+      Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, closeout: closeoutAnswer } });
+      const res = await confirm(card);
+      expect(res).toMatchObject({ success: true, status: 'paid', visit_closeout: state_ });
+      expect(res.note).toMatch(note);
+    });
+
+    test('no closeout promised: the result says nothing about a visit', async () => {
+      const card = await preview();
+      Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, closeout: { closed: false, reason: 'gate_off' } } });
+      const res = await confirm(card);
+      expect(res.visit_closeout).toBeUndefined();
+      expect(res.note).not.toMatch(/visit/i);
+    });
+
     test('a job timer started on the carded visit after the card refuses with the timer wording; the fence asks the closeout\'s own predicate about the carded visit', async () => {
       issuedCloseoutTarget.mockResolvedValue(closeout);
       state.scheduled_services.push(visitRow());

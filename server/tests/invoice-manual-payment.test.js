@@ -729,10 +729,21 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       settle();
       const pinned = jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
       const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
-      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: target });
+      const closeoutVisit = target === 'none' ? null : { serviceType: 'Pest Control', date: '2099-01-01', status: 'confirmed', updatedAtMs: 7 };
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: target, closeoutVisit });
       await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence, recordedByTechnicianId: 'staff-1' });
-      expect(pinned).toHaveBeenCalledWith('inv-1', target, { conn: expect.any(Function), actorTechnicianId: 'staff-1' });
-      expect(closed).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'paid', actorTechnicianId: 'staff-1', approvedTarget: target });
+      expect(pinned).toHaveBeenCalledWith('inv-1', target, { conn: expect.any(Function), actorTechnicianId: 'staff-1', approvedVisit: closeoutVisit });
+      expect(closed).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'paid', actorTechnicianId: 'staff-1', approvedTarget: target, approvedVisit: closeoutVisit });
+    });
+
+    test('the closeout\'s answer is returned beside the payment (the card reports a skipped closeout; the payment stays recorded)', async () => {
+      settle();
+      jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false, reason: 'approved_visit_changed', visitId: 'sv-1' });
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: 'sv-1', closeoutVisit: { date: '2099-01-01' } });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence });
+      expect(out.invoice).toBeTruthy();
+      expect(out.closeout).toEqual({ closed: false, reason: 'approved_visit_changed', visitId: 'sv-1' });
     });
 
     test('a pin that cannot be written rolls the payment back: nothing is recorded', async () => {
@@ -751,7 +762,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
       await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
       await recordManualPayment('inv-1', { method: 'zelle', sendReceipt: false, settlementFence: async () => true });
-      for (const [args] of closed.mock.calls) expect(args.approvedTarget).toBeUndefined();
+      for (const [args] of closed.mock.calls) { expect(args.approvedTarget).toBeUndefined(); expect(args.approvedVisit).toBeUndefined(); }
     });
   });
 });

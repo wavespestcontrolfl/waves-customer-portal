@@ -264,7 +264,7 @@ function planEffects({ invoice, dueCents, method, reference, note, closeout }) {
 // Everything the card approves: a change in any of it is drift.
 // The visit the closeout would complete, as the card read it (null = none).
 const closeoutPin = (closeout) => (closeout
-  ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true }
+  ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, status: closeout.status ?? null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true }
   : null);
 
 function versionOf({ invoice, dueCents, input, closeout, paymentDate, body }) {
@@ -358,6 +358,17 @@ async function actorOf(actionContext) {
   return { technicianId, name: tech?.name || null, email: tech?.email || null };
 }
 
+// What happened to the linked-visit closeout the card promised (null = none was promised). The payment is recorded either way.
+function closeoutReport(promisedVisitId, closeout) {
+  if (!promisedVisitId) return null;
+  if (closeout?.closed) return { state: 'completed', note: 'The linked visit was closed.' };
+  const reason = closeout?.reason || 'not_completed';
+  if (['approved_visit_changed', 'approved_target_mismatch'].includes(reason)) {
+    return { state: 'skipped_visit_changed', note: 'The visit changed since the card; the payment is recorded, close the visit from its page.' };
+  }
+  return { state: 'not_completed', note: `The linked visit was not closed (${reason}); the payment is recorded, close the visit from its page.` };
+}
+
 async function commitRecord(input, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_record_payment_version);
   if (refused) return refused;
@@ -375,10 +386,12 @@ async function commitRecord(input, actionContext) {
     return { ...base, outcome_unknown: true, code: 'record_unverified',
       error: 'The Invoices page answered, but the invoice does not read as paid. Check the invoice before trying again.' };
   }
+  const visitCloseout = closeoutReport(plan._version.closeout_visit, json.closeout);
   logger.info(`[intelligence-bar:record-payment] recorded ${plan.method} payment on invoice ${plan.invoice_id}`);
   return {
     ...base, success: true, status: 'paid', method: plan.method, amount: plan.balance_due, sent_to_customer: false,
-    note: `${plan.invoice_number} is marked paid (${money(plan.balance_due * 100)} by ${plan.method}). No receipt was sent. To send one, ask the bar to resend the receipt, or use the Invoices page.`,
+    ...(visitCloseout ? { visit_closeout: visitCloseout.state } : {}),
+    note: `${plan.invoice_number} is marked paid (${money(plan.balance_due * 100)} by ${plan.method}). No receipt was sent. To send one, ask the bar to resend the receipt, or use the Invoices page.${visitCloseout ? ` ${visitCloseout.note}` : ''}`,
   };
 }
 
