@@ -878,6 +878,22 @@ describe('the save is read back', () => {
     expect(world.sms_templates[0].name).toBe(FIXTURES['PUT /admin/sms-templates/:id'].body.name);
   });
 
+  test('a note that starts like a date-time is still text', async () => {
+    const note = catalog.entries.find(e => e.endpoint === '/admin/dispatch/:serviceId/note');
+    for (const text of ['2026-10-20T14:30:00Z: corrected visit note', '2026-13-45T99:99: not a date at all']) {
+      world = seedWorld();
+      const input = inputFor(note, { body: { notes: text } });
+      const preview = await propose(input);
+      expect(await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ success: true });
+    }
+    // …and it is still caught when the save did not land.
+    world = seedWorld();
+    const input = inputFor(note, { body: { notes: '2026-10-20T14:30:00Z: corrected visit note' } });
+    const preview = await propose(input);
+    global.fetch = savingFetch(undefined, { save: false });
+    expect(await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'edit_not_verified' });
+  });
+
   test('text is compared as the screen stores it (trimmed), and a date-time by instant', async () => {
     const timesheet = catalog.entries.find(e => e.endpoint === '/admin/timetracking/entries/:id');
     const result = await confirmWith(savingFetch((url, options) => {

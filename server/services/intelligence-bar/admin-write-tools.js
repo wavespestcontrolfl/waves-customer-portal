@@ -381,7 +381,7 @@ async function verifySaved(plan) {
     return unverified('could not be read, so the fields');
   }
   if (!after || after.unsupported) return unverified('the record was not found, so the fields');
-  const wrong = Object.keys(plan.body).filter(field => !Snapshots.sameValue(plan.body[field], after.current[field]));
+  const wrong = Object.keys(plan.body).filter(field => !Snapshots.sameValue(plan.body[field], after.current[field], plan.row.body[field]));
   return wrong.length ? unverified(wrong.join(', ')) : null;
 }
 

@@ -174,8 +174,9 @@ function stable(value) {
   return JSON.stringify(value === undefined ? null : value);
 }
 
-function sameValue(expected, actual) {
-  if (typeof expected === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(expected) && (actual instanceof Date || typeof actual === 'string')) {
+function sameValue(expected, actual, spec = {}) {
+  // The catalog field type decides: only a datetime field is compared as an instant; text is always text.
+  if (spec.type === 'datetime' && (actual instanceof Date || typeof actual === 'string')) {
     return new Date(expected).getTime() === new Date(actual).getTime();
   }
   if (typeof expected === 'string' || expected === null) return text(expected).trim() === text(actual).trim();
